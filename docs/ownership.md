@@ -444,6 +444,21 @@ func pid() -> i32 { return getpid() }                // UNSAFE_OP_OUTSIDE_UNSAFE
 func pid2() -> i32 { unsafe { return getpid() } }    // UNSAFE_MISSING_CONTRACT: no contract block on a function containing unsafe
 ```
 
+### Rule 6.5 — Thread-local storage
+A module-level `thread_local name: T = init` declares one instance of `name` per thread, including the main thread, initialized to `init` when the thread starts. `T` must be `Copy` and `init` a literal of type `T` or `zero()`; the variable is a mutable place in every function of its module and is never moved or destroyed. Hosted builds lower it to the target's TLS; freestanding TLS is decided by ADR-011.
+Diagnostics: `TLS_INVALID_DECL`
+Accepted:
+```kern
+module m
+thread_local depth: u32 = 0u32
+func enter() -> u32 { depth = depth + 1u32; return depth }
+```
+Rejected:
+```kern
+module m
+thread_local buf: Vec[u64] = Vec[u64].new()   // TLS_INVALID_DECL: not Copy, not a literal
+```
+
 ### Rule 7.2 — FFI: C ABI subset
 A function declared `extern "C"` (exported or imported) uses the target's C calling convention and an unmangled symbol equal to its name. Its parameter and return types must be integer types, `f32`, `f64`, `bool`, raw pointers, or `Copy` structs whose fields are recursively of these types (laid out per Rule 4.1.5); any other type, including `own`/`view`/`edit`/`out` parameters, slices, unions and generics, is an error. Variadic functions are not supported. Calling an imported `extern "C"` function is an unsafe operation (Rule 6.4); exporting one is safe, and a trap inside it terminates per §6.
 Diagnostics: `FFI_UNSUPPORTED_TYPE`
@@ -459,6 +474,6 @@ extern "C" func write(fd: i32, buf: view[]u8) -> isize    // FFI_UNSUPPORTED_TYP
 ```
 
 ## Trap handlers
-A trap (§6) runs no destructors and no release functions, unwinds no frames, and must not be caught or resumed. `trap.set_handler(f: func(view TrapInfo)) -> func(view TrapInfo)` installs `f` process-wide as a single atomic `seq_cst` exchange and returns the previously installed handler; a trapping thread selects the handler by one `seq_cst` load at the moment of the trap, runs it at most once, and then terminates (halt in freestanding mode, process abort in hosted mode). A trap inside the handler terminates immediately.
+A trap (§6) runs no destructors and no release functions, unwinds no frames, and must not be caught or resumed. `trap.set_handler(f: func(view TrapInfo)) -> func(view TrapInfo)` installs `f` process-wide as a single atomic `seq_cst` exchange and returns the previously installed handler; a trapping thread selects the handler by one `seq_cst` load at the moment of the trap, runs it at most once, and then terminates (halt in freestanding mode, process abort in hosted mode). A trap inside the handler terminates immediately. **Handler obligation (ADR-012):** a custom handler is a trusted boundary. It may run in signal context on an interrupted thread (a hosted stack trap is a guard-page fault), so it must not allocate, take a lock, spawn, perform buffered I/O, or call FFI or a custom allocator that does any of these; the guaranteed-safe operations are the runtime's unbuffered `print_*` output, atomics, and computation on `TrapInfo` and pre-existing data. The obligation applies to every trap kind and the runtime performs no checks for it: a violation may deadlock the process or trap a second time, in which case the nested-trap path terminates it by `SIGABRT`; memory safety is unaffected.
 
 **Obligation on custom handlers (ADR-012).** A custom trap handler is a documented trusted-boundary obligation, not a runtime-enforced restriction. The handler is permitted to run in signal context on an interrupted thread (for example after a stack trap taken while the thread holds a `Mutex` or is in the middle of buffered output), so it must not allocate, take a lock, spawn, perform buffered I/O, or call FFI or a custom allocator that does any of these. The only guaranteed-safe operations are `write(2)`-based unbuffered output, atomics, and computation on `TrapInfo` and pre-existing data. The obligation applies uniformly to every trap kind (`bounds`, `overflow`, `div_zero`, `shift`, `conversion`, `generation`, `vacant`, `identity`, `disjoint`, `oom`, `stack`, `explicit`, `unreachable`), and the runtime performs no checks for it. Violating it is permitted to deadlock the process or trap a second time, in which case the nested-trap path terminates the process; memory safety is unaffected. The default handler and `std/testing.console_trap_handler` satisfy the obligation by construction. The trap handler is the only cleanup hook: programs that must flush or release external resources on failure do so there, within this obligation, without relying on destructors.

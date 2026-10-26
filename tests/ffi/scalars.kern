@@ -1,0 +1,33 @@
+//! phase: 2
+//! expect: output scalars
+//! c: scalars.c
+// C ABI subset (spec §7): scalar imports and an exported function the C
+// side calls back, both under the unmangled symbol names.
+module ffi
+extern "C" func c_add(a: i64, b: i64) -> i64
+extern "C" func c_scale(x: f64, k: u32) -> f64
+extern "C" func c_flag(b: bool) -> bool
+extern "C" func c_call_twice(x: u64) -> u64
+extern "C" func kern_double(x: u64) -> u64 { return x * 2u64 }
+contract { requires "the C counterpart scalars.c is linked" }
+func main() -> i32 {
+    var s: i64
+    var f: f64
+    var b: bool
+    var d: u64
+    unsafe {
+        s = c_add(40i64, 2i64)
+        f = c_scale(1.5f64, 4u32)
+        b = c_flag(false)
+        d = c_call_twice(21u64)
+    }
+    print_i64(s)
+    println()
+    print_u64(u64(f))
+    println()
+    print_bool(b)
+    println()
+    print_u64(d)
+    println()
+    return 0i32
+}

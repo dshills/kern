@@ -21,6 +21,13 @@ func (r *resolver) checkBodies(m *Module) {
 	for _, f := range m.Files {
 		for _, d := range f.Decls {
 			switch d := d.(type) {
+			case *ast.ConstDecl:
+				// a constant's initializer is typed against its declared type
+				// once, so every use (and the lowering) sees a typed literal
+				if k := m.Consts[d.Name]; k != nil && k.Value == d.Value {
+					c := &fnCtx{r: r, m: m, file: f.Name}
+					c.exprExpect(r.typeScope(m, nil), d.Value, k.Type)
+				}
 			case *ast.FuncDecl:
 				if fd := r.prog.Info.Funcs[d]; fd != nil && d.Body != nil {
 					r.checkFunc(m, f.Name, fd, nil)
@@ -429,7 +436,7 @@ func (c *fnCtx) placeIsMutable(sc *scope, e ast.Expr) bool {
 		return false
 	}
 	switch sym.Kind {
-	case SymLocal:
+	case SymLocal, SymGlobal:
 		return true
 	case SymParam:
 		return sym.Conv == ast.ConvEdit || sym.Conv == ast.ConvOwn || sym.Conv == ast.ConvOut
@@ -446,6 +453,11 @@ func (c *fnCtx) placeRoot(sc *scope, e ast.Expr) *Symbol {
 		sym := sc.lookup(x.Name)
 		if sym != nil && (sym.Kind == SymLocal || sym.Kind == SymParam || sym.Kind == SymAccess) {
 			return sym
+		}
+		if sym == nil {
+			if g, ok := c.m.Globals[x.Name]; ok {
+				return c.globalSym(g)
+			}
 		}
 	case *ast.FieldExpr:
 		return c.placeRoot(sc, x.X)

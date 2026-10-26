@@ -1,0 +1,20 @@
+//! phase: 2
+//! expect: output consts
+// Module-level constants are typed once against their declared type and
+// read as literals in every function (regression: the interpreter trapped
+// on an untyped constant initializer).
+module run
+const K: u64 = 5u64
+const MASK: u32 = 255
+const HALF: f64 = 0.5f64
+func main() -> i32 {
+    x := 1u64 & K
+    y := 300u32 & MASK
+    print_u64(x + K)
+    println()
+    print_u64(u64(y))
+    println()
+    print_bool(HALF + HALF == 1.0f64)
+    println()
+    return 0i32
+}

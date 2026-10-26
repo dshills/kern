@@ -55,6 +55,7 @@ Rule identifiers are `section.bullet` into the specification (`T.n` = spec/types
 | `SEND_NOT_SEND` | 5.5.2 | lang | 0 | value moved to another thread is not Send |
 | `SHARE_NOT_SHARE` | 5.5.3 | lang | 0 | value viewed from another thread is not Share |
 | `SYNTAX` | 4.0 | lang | 0 | syntax error |
+| `TLS_INVALID_DECL` | 6.5 | lang | 2 | thread_local requires a Copy type and a literal or zero() initializer |
 | `TYPE_ARITY` | T.4 | lang | 0 | wrong number of type arguments |
 | `TYPE_INFER_FAILED` | T.4 | lang | 0 | type arguments could not be inferred |
 | `TYPE_MISMATCH` | T.5 | lang | 0 | expression type does not match the required type |

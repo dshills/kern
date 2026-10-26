@@ -142,6 +142,16 @@ type ConstDecl struct {
 	Value Expr
 }
 
+// GlobalDecl is a module-level `thread_local name: T = init` declaration
+// (spec §6 TLS): one instance per thread, a Copy type, a literal or zero()
+// initializer.
+type GlobalDecl struct {
+	Pos
+	Name  string
+	Type  TypeExpr
+	Value Expr
+}
+
 // AssertDecl is `unsafe assert Marker for T`.
 type AssertDecl struct {
 	Pos

@@ -197,6 +197,8 @@ func (p *parser) parseDecl() ast.Decl {
 		return p.parseExtern()
 	case lexer.KwConst:
 		return p.parseConst()
+	case lexer.KwThreadLocal:
+		return p.parseGlobal()
 	case lexer.KwUnsafe:
 		if p.peekKind(1) == lexer.KwAssert {
 			return p.parseAssert()
@@ -486,6 +488,12 @@ func (p *parser) parseExtern() ast.Decl {
 	d.Params = p.parseParams()
 	d.Ret = p.parseRet()
 	d.End = p.toks[p.pos-1].End
+	if p.at(lexer.LBrace) {
+		// an exported function: defined here under its C symbol
+		d.Body = p.parseBlock()
+		d.End = p.toks[p.pos-1].End
+		return d
+	}
 	p.stmtEnd()
 	return d
 }
@@ -493,6 +501,19 @@ func (p *parser) parseExtern() ast.Decl {
 func (p *parser) parseConst() ast.Decl {
 	t := p.expect(lexer.KwConst)
 	d := &ast.ConstDecl{Pos: tokPos(t)}
+	d.Name = p.expect(lexer.Ident).Text
+	p.expect(lexer.Colon)
+	d.Type = p.parseType()
+	p.expect(lexer.Assign)
+	d.Value = p.parseExpr()
+	d.End = d.Value.Span().End
+	p.stmtEnd()
+	return d
+}
+
+func (p *parser) parseGlobal() ast.Decl {
+	t := p.expect(lexer.KwThreadLocal)
+	d := &ast.GlobalDecl{Pos: tokPos(t)}
 	d.Name = p.expect(lexer.Ident).Text
 	p.expect(lexer.Colon)
 	d.Type = p.parseType()

@@ -32,7 +32,7 @@ func (f *fn) placeOf(st *flow, e ast.Expr, read bool) *place {
 			return nil
 		}
 		switch sym.Kind {
-		case resolve.SymLocal, resolve.SymParam, resolve.SymAccess:
+		case resolve.SymLocal, resolve.SymParam, resolve.SymAccess, resolve.SymGlobal:
 		default:
 			return nil
 		}

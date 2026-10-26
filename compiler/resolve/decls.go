@@ -104,6 +104,16 @@ type ConstDecl struct {
 	Pos    ast.Pos
 }
 
+// GlobalDecl is a resolved thread_local declaration. Init is the constant
+// initializer: an integer, a float, a bool, or nil for zero().
+type GlobalDecl struct {
+	Name   string
+	Module string
+	Type   Type
+	Init   any
+	Pos    ast.Pos
+}
+
 // Module is a resolved module.
 type Module struct {
 	Name    string
@@ -111,6 +121,7 @@ type Module struct {
 	Ifaces  map[string]*InterfaceDecl
 	Funcs   map[string]*FuncDecl
 	Consts  map[string]*ConstDecl
+	Globals map[string]*GlobalDecl
 	Files   []*ast.File
 	Imports map[string]*Module // alias -> module
 }
@@ -122,6 +133,7 @@ func newModule(name string) *Module {
 		Ifaces:  map[string]*InterfaceDecl{},
 		Funcs:   map[string]*FuncDecl{},
 		Consts:  map[string]*ConstDecl{},
+		Globals: map[string]*GlobalDecl{},
 		Imports: map[string]*Module{},
 	}
 }
@@ -195,6 +207,7 @@ const (
 	SymFunc
 	SymType
 	SymConst
+	SymGlobal
 	SymModule
 	SymTypeParam
 )
@@ -210,6 +223,7 @@ type Symbol struct {
 	TDecl  *TypeDecl
 	Iface  *InterfaceDecl
 	Const  *ConstDecl
+	Global *GlobalDecl
 	Module *Module
 	TParam *TypeParamType
 	ID     int
@@ -305,6 +319,7 @@ func Resolve(files []*source.File) *Program {
 }
 
 type resolver struct {
+	globalSyms       map[*GlobalDecl]*Symbol
 	prog             *Program
 	core             *Module
 	deferConstraints bool
@@ -367,6 +382,7 @@ func (r *resolver) collect(m *Module) {
 		decl ast.Decl
 	}
 	var impls, funcs, consts, asserts []pending
+	var globals []pending
 	for _, f := range m.Files {
 		for _, d := range f.Decls {
 			switch d := d.(type) {
@@ -391,6 +407,8 @@ func (r *resolver) collect(m *Module) {
 				funcs = append(funcs, pending{f.Name, d})
 			case *ast.ConstDecl:
 				consts = append(consts, pending{f.Name, d})
+			case *ast.GlobalDecl:
+				globals = append(globals, pending{f.Name, d})
 			case *ast.AssertDecl:
 				asserts = append(asserts, pending{f.Name, d})
 			}
@@ -489,6 +507,20 @@ func (r *resolver) collect(m *Module) {
 		m.Funcs[d.Name] = fd
 		r.prog.Info.Funcs[d] = fd
 	}
+	for _, p := range globals {
+		d := p.decl.(*ast.GlobalDecl)
+		if r.dup(m, p.file, d.Name, d.Pos) {
+			continue
+		}
+		g := &GlobalDecl{Name: d.Name, Module: m.Name, Type: r.resolveType(m, p.file, r.typeScope(m, nil), d.Type), Pos: d.Pos}
+		init, ok := globalInit(g.Type, d.Value)
+		if !IsCopy(g.Type) || !ok {
+			r.errorf("TLS_INVALID_DECL", p.file, d.Pos, "thread_local %s requires a Copy type and a literal or zero() initializer", d.Name)
+			continue
+		}
+		g.Init = init
+		m.Globals[d.Name] = g
+	}
 	for _, p := range consts {
 		d := p.decl.(*ast.ConstDecl)
 		if r.dup(m, p.file, d.Name, d.Pos) {
@@ -526,6 +558,37 @@ func (r *resolver) collect(m *Module) {
 		r.checkFFI(pf.file, pf.fd)
 	}
 	r.pendingFFI = nil
+}
+
+// globalInit validates a thread_local initializer: an integer, float or bool
+// literal of the declared type, or zero().
+func globalInit(t Type, e ast.Expr) (any, bool) {
+	switch x := e.(type) {
+	case *ast.IntLit:
+		if p, ok := t.(*Prim); ok && IsInteger(t) && (x.Suffix == "" || x.Suffix == p.Name) {
+			lim := intLimits[p.Name]
+			if (!x.Neg && x.Value > lim[0]) || (x.Neg && x.Value > lim[1]) {
+				return nil, false // out of the declared type's range
+			}
+			if x.Neg {
+				return -int64(x.Value), true
+			}
+			return int64(x.Value), true // fits: at most the signed maximum, or an unsigned value whose bits are kept
+		}
+	case *ast.FloatLit:
+		if p, ok := t.(*Prim); ok && IsFloat(t) && (x.Suffix == "" || x.Suffix == p.Name) {
+			return x.Value, true
+		}
+	case *ast.BoolLit:
+		if IsBool(t) {
+			return x.Value, true
+		}
+	case *ast.CallExpr:
+		if id, ok := x.Fn.(*ast.Ident); ok && id.Name == "zero" && len(x.Args) == 0 && IsZeroable(t) {
+			return nil, true
+		}
+	}
+	return nil, false
 }
 
 func (r *resolver) dup(m *Module, file, name string, pos ast.Pos) bool {

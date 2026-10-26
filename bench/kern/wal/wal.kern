@@ -1,0 +1,217 @@
+// wal: N = 2,000,000 records appended to an in-memory log (a Vec[u8] that
+// grows by doubling). Record = 16-byte header + 64-byte payload. Header:
+// lsn u64 LE, len u32 LE (= 64), crc u32 LE = CRC-32/IEEE (poly 0xEDB88320,
+// reflected, init and final xor 0xFFFFFFFF, table driven) of the payload.
+// Payload = 8 LE u64 words, word j = (lsn+1)*0x9E3779B97F4A7C15 + j
+// (wrapping). lsn starts at 0. Then replay: walk the log, parse each header,
+// verify the payload CRC (fail on mismatch or short record), and chain
+//   cs = (cs XOR ((lsn << 32) | crc)) * 0x100000001b3 (wrapping), from 0.
+// ops = N appends; sampled operation: one append; replay is timed but not
+// counted.
+// checksum = cs after replaying exactly N records   (matches bench/c/wal)
+module wal_bench
+
+struct Crc { table: [256]u32 }
+
+func crc_init() -> Crc {
+    var c: Crc = zero()
+    for i in 0usize..256usize {
+        v := u32(i)
+        for k in 0usize..8usize {
+            if (v & 1u32) == 1u32 { v = 3_988_292_384u32 ^ (v >> 1u32) } else { v = v >> 1u32 }
+        }
+        c.table[i] = v
+    }
+    return c
+}
+
+func crc32(c: view[Crc], data: view[]u8) -> u32 {
+    acc := 4_294_967_295u32
+    for b in data { acc = c.table[usize((acc ^ u32(b)) & 255u32)] ^ (acc >> 8u32) }
+    return acc ^ 4_294_967_295u32
+}
+
+// Wal owns the staging buffer; records are bytes in it, and no access into
+// the buffer is ever live across an append.
+struct Wal { log: Vec[u8]; next_lsn: u64 }
+
+func put_u64(log: edit[Vec[u8]], v: u64) {
+    x := v
+    for i in 0usize..8usize {
+        log.push(truncate[u8](x))
+        x = x >> 8u32
+    }
+}
+
+func put_u32(log: edit[Vec[u8]], v: u32) {
+    x := v
+    for i in 0usize..4usize {
+        log.push(truncate[u8](x))
+        x = x >> 8u32
+    }
+}
+
+func get_u64(d: view[]u8, off: usize) -> u64 {
+    v := 0u64
+    i := 8usize
+    while i > 0usize {
+        i = i - 1usize
+        v = (v << 8u32) | u64(d[off + i])
+    }
+    return v
+}
+
+func get_u32(d: view[]u8, off: usize) -> u32 {
+    v := 0u32
+    i := 4usize
+    while i > 0usize {
+        i = i - 1usize
+        v = (v << 8u32) | u32(d[off + i])
+    }
+    return v
+}
+
+// append writes one record and returns its lsn. w and payload are different
+// roots, so the edit of the log and the view of the payload never conflict.
+func append(w: edit[Wal], c: view[Crc], payload: view[]u8) -> u64 {
+    lsn := w.next_lsn
+    put_u64(w.log, lsn)
+    put_u32(w.log, u32(len(payload)))
+    put_u32(w.log, crc32(c, payload))
+    for b in payload { w.log.push(b) }
+    w.next_lsn = lsn + 1u64
+    return lsn
+}
+
+union WalErr { Short(u64); BadCrc(u64) }
+struct Replay { checksum: u64; count: u64 }
+
+// replay walks the log from the start, verifying every record; each payload
+// is handed to crc32 as a sub-slice projection consumed in that statement.
+func replay(d: view[]u8, c: view[Crc]) -> Result[Replay, WalErr] {
+    r := Replay { checksum: 0u64, count: 0u64 }
+    off := 0usize
+    while off + 16usize <= len(d) {
+        lsn := get_u64(d, off)
+        n := usize(get_u32(d, off + 8usize))
+        crc := get_u32(d, off + 12usize)
+        end := off + 16usize + n
+        if end > len(d) { return Err(Short(lsn)) }
+        if crc32(c, d[off + 16usize : end]) != crc { return Err(BadCrc(lsn)) }
+        r.checksum = wrapping_mul(r.checksum ^ ((lsn << 32u32) | u64(crc)), 1_099_511_628_211u64)
+        r.count = r.count + 1u64
+        off = end
+    }
+    return Ok(r)
+}
+
+func main() -> i32 {
+    n := 2_000_000u64
+    c := crc_init()
+    w := Wal { log: Vec[u8].new(), next_lsn: 0u64 }
+    s := new_sampler(n)
+    var payload: [64]u8 = zero()
+
+    start := now_ns()
+    for i in 0u64..n {
+        for j in 0u64..8u64 {
+            word := wrapping_add(wrapping_mul(i + 1u64, 11_400_714_819_323_198_485u64), j)
+            for k in 0usize..8usize {
+                payload[usize(j) * 8usize + k] = truncate[u8](word)
+                word = word >> 8u32
+            }
+        }
+        sampled := s.start()
+        lsn := append(w, c, payload)
+        s.stop(sampled)
+        if lsn != i { return 1i32 }
+    }
+    var checksum: u64
+    with d := w.log.as_view() {
+        match replay(d, c) {
+            Ok(r) => {
+                if r.count != n { return 1i32 }
+                checksum = r.checksum
+            }
+            Err(e) => return 1i32
+        }
+    }
+    ns := now_ns() - start
+
+    report(n, ns, s, checksum)
+    return 0i32
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark plumbing (bench/PROTOCOL.md), duplicated in every bench/kern
+// program so that each benchmark is one self-contained file: wrapping u64
+// arithmetic, the shared LCG, per-operation latency sampling and the report.
+// ---------------------------------------------------------------------------
+
+func lcg(x: u64) -> u64 {
+    return wrapping_add(wrapping_mul(x, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// Sampler times one operation every ops/4096 operations (operation i is
+// sampled iff i % stride == 0) and keeps at most 4096 latencies.
+struct Sampler { lat: Vec[u64]; stride: u64; until: u64; t0: u64 }
+
+func new_sampler(ops: u64) -> Sampler {
+    stride := ops / 4096u64
+    if stride == 0u64 { stride = 1u64 }
+    return Sampler { lat: Vec[u64].with_capacity(4096usize), stride: stride, until: 0u64, t0: 0u64 }
+}
+
+impl Sampler {
+    // start reports whether the next operation is sampled and, if so, reads the clock.
+    func start(edit self) -> bool {
+        if self.until > 0u64 || self.lat.len() >= 4096usize { return false }
+        self.t0 = now_ns()
+        return true
+    }
+    // stop records the latency of a sampled operation and counts down to the next one.
+    func stop(edit self, sampled: bool) {
+        if sampled {
+            self.lat.push(now_ns() - self.t0)
+            self.until = self.stride
+        }
+        if self.until > 0u64 { self.until = self.until - 1u64 }
+    }
+}
+
+// shell_sort orders the samples in place (at most 4096 values).
+func shell_sort(s: edit[Vec[u64]]) {
+    n := s.len()
+    gap := n / 2usize
+    while gap > 0usize {
+        for i in gap..n {
+            x := s.get(i)
+            j := i
+            while j >= gap && s.get(j - gap) > x {
+                prev := s.get(j - gap)
+                with e := s.at(j) { e = prev }
+                j = j - gap
+            }
+            with e := s.at(j) { e = x }
+        }
+        gap = gap / 2usize
+    }
+}
+
+// report prints the protocol line; p50 = sorted[n/2], p99 = sorted[n*99/100].
+func report(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    shell_sort(s.lat)
+    n := s.lat.len()
+    p50 := 0u64
+    p99 := 0u64
+    if n > 0usize {
+        p50 = s.lat.get(n / 2usize)
+        p99 = s.lat.get(n * 99usize / 100usize)
+    }
+    print_str("ops="); print_u64(ops)
+    print_str(" ns="); print_u64(ns)
+    print_str(" p50="); print_u64(p50)
+    print_str(" p99="); print_u64(p99)
+    print_str(" checksum="); print_u64(checksum)
+    println()
+}

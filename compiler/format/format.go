@@ -315,6 +315,15 @@ func (p *printer) decl(d ast.Decl) {
 		p.w(" = ")
 		p.expr(d.Value)
 		p.afterItem(d.End)
+	case *ast.GlobalDecl:
+		p.beforeItem(d.Start, d.End)
+		p.w("thread_local ")
+		p.w(d.Name)
+		p.w(": ")
+		p.typ(d.Type)
+		p.w(" = ")
+		p.expr(d.Value)
+		p.afterItem(d.End)
 	case *ast.AssertDecl:
 		p.beforeItem(d.Start, d.End)
 		p.w("unsafe assert ")

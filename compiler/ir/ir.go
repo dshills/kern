@@ -12,10 +12,11 @@ import (
 
 // Module is a lowered program.
 type Module struct {
-	Name   string
-	Funcs  []*Func
-	Entry  string // name of the entry function ("main") or ""
-	byName map[string]*Func
+	Name    string
+	Globals []*Global
+	Funcs   []*Func
+	Entry   string // name of the entry function ("main") or ""
+	byName  map[string]*Func
 }
 
 // Func looks up a function by name.
@@ -49,6 +50,7 @@ type Func struct {
 	Extern    string // C ABI symbol when an extern declaration
 	Contract  *ast.Contract
 	Pos       ast.Pos
+	File      string // declaring file (machine-API locations)
 	Entry     *Block
 	NumValues int
 }
@@ -88,9 +90,19 @@ var RuntimeChecked = Provenance{Label: "runtime-checked"}
 
 // Place denotes a sub-place of a local or of an access value.
 type Place struct {
-	Local  *Local // root local, or nil when Access is set
-	Access *Value // root access value (a projection), or nil
+	Local  *Local  // root local, or nil when Access or Global is set
+	Access *Value  // root access value (a projection), or nil
+	Global *Global // root thread_local global, or nil
 	Path   []PathElem
+}
+
+// Global is a thread_local module variable (spec §6 TLS): a Copy type with
+// a constant initializer (an integer, a float, a bool, or nil for zero).
+type Global struct {
+	ID   int
+	Name string
+	Type resolve.Type
+	Init any
 }
 
 // PathKind classifies a path element.
@@ -133,6 +145,7 @@ type Const struct {
 type Load struct {
 	Dst   *Value
 	Place Place
+	Pos   ast.Pos // the source expression, for show-copies
 }
 
 // Store writes a value into a place; the previous contents are not destroyed

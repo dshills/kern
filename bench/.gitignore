@@ -1,0 +1,3 @@
+# harness build outputs (binaries, cargo target dirs, emitted LLVM)
+.build/
+rust/*/target/

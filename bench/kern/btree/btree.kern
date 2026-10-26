@@ -1,0 +1,242 @@
+// btree: N = 2,000,000 distinct u64 keys from the LCG (seed 42), value =
+// insert index i, inserted into an order-16 B-tree (15 keys, 16 children per
+// node, minimum degree 8) whose nodes live in a Pool[Node] and refer to each
+// other by PoolId handles. Insert is the CLRS preemptive algorithm: a full
+// root is split before the descent and a full child is split (median key
+// index 7 moves up, the right node takes keys 8..14) before stepping into it.
+// Then an in-order traversal.
+// ops = N; sampled operation: one insert; the traversal is timed but not
+// counted.
+// checksum = (wrapping sum over in-order position p of (key XOR p) + value)
+//            XOR number of pool nodes   (matches bench/c/btree)
+module btree_bench
+
+struct Node { keys: [15]u64; vals: [15]u64; children: [16]PoolId[Node]; count: u32; leaf: bool }
+struct BTree { nodes: Pool[Node]; root: PoolId[Node] }
+
+func new_node(leaf: bool) -> Node {
+    var n: Node = zero()
+    n.leaf = leaf
+    return n
+}
+
+// slot returns the number of keys in n that are below key.
+func slot(n: view[Node], key: u64) -> usize {
+    i := usize(n.count)
+    while i > 0usize && key < n.keys[i - 1usize] { i = i - 1usize }
+    return i
+}
+
+// split_child splits the full child i of parent p (which is not full): the
+// median moves up into p and a fresh right sibling takes the upper half.
+// Both children are edited at once through Pool.get2, whose disjointness is
+// checked at runtime; the parent is opened only after that block closes.
+func split_child(t: edit[BTree], p: PoolId[Node], i: usize) -> Result[(), AllocErr] {
+    l := t.nodes.get(p).children[i]
+    leaf := t.nodes.get(l).leaf
+    median_key := t.nodes.get(l).keys[7]
+    median_val := t.nodes.get(l).vals[7]
+    r := t.nodes.alloc(new_node(leaf))?
+    with left, right := t.nodes.get2(l, r) {
+        for k in 0usize..7usize {
+            right.keys[k] = left.keys[k + 8usize]
+            right.vals[k] = left.vals[k + 8usize]
+        }
+        if !left.leaf {
+            for k in 0usize..8usize { right.children[k] = left.children[k + 8usize] }
+        }
+        right.count = 7u32
+        left.count = 7u32
+    }
+    with par := t.nodes.at(p) {
+        k := usize(par.count)
+        while k > i {
+            par.children[k + 1usize] = par.children[k]
+            par.keys[k] = par.keys[k - 1usize]
+            par.vals[k] = par.vals[k - 1usize]
+            k = k - 1usize
+        }
+        par.children[i + 1usize] = r
+        par.keys[i] = median_key
+        par.vals[i] = median_val
+        par.count = par.count + 1u32
+    }
+    return Ok(())
+}
+
+// insert adds key -> val, replacing the value of a present key.
+func insert(t: edit[BTree], key: u64, val: u64) -> Result[(), AllocErr] {
+    root := t.root
+    if t.nodes.get(root).count == 15u32 {
+        fresh := t.nodes.alloc(new_node(false))?
+        with n := t.nodes.at(fresh) { n.children[0] = root }
+        t.root = fresh
+        split_child(t, fresh, 0usize)?
+        root = fresh
+    }
+    x := root
+    while true {
+        i := slot(t.nodes.get(x), key)
+        if i > 0usize && t.nodes.get(x).keys[i - 1usize] == key {
+            with n := t.nodes.at(x) { n.vals[i - 1usize] = val }
+            return Ok(())
+        }
+        if t.nodes.get(x).leaf {
+            with n := t.nodes.at(x) {
+                k := usize(n.count)
+                while k > i {
+                    n.keys[k] = n.keys[k - 1usize]
+                    n.vals[k] = n.vals[k - 1usize]
+                    k = k - 1usize
+                }
+                n.keys[i] = key
+                n.vals[i] = val
+                n.count = n.count + 1u32
+            }
+            return Ok(())
+        }
+        child := t.nodes.get(x).children[i]
+        if t.nodes.get(child).count == 15u32 {
+            split_child(t, x, i)?
+            sep := t.nodes.get(x).keys[i]
+            if key == sep {
+                with n := t.nodes.at(x) { n.vals[i] = val }
+                return Ok(())
+            }
+            if key > sep { i = i + 1usize }
+            child = t.nodes.get(x).children[i]
+        }
+        x = child
+    }
+}
+
+struct Walk { checksum: u64; pos: u64 }
+
+// traverse visits the keys in order. Every read of the node is a projection
+// consumed in its own statement, so no access into the pool is live across
+// the recursive call (the handle re-fetch the C version also performs).
+func traverse(t: view[BTree], id: PoolId[Node], w: edit[Walk]) {
+    count := usize(t.nodes.get(id).count)
+    leaf := t.nodes.get(id).leaf
+    for i in 0usize..count {
+        if !leaf {
+            child := t.nodes.get(id).children[i]
+            traverse(t, child, w)
+        }
+        key := t.nodes.get(id).keys[i]
+        val := t.nodes.get(id).vals[i]
+        w.checksum = wrapping_add(w.checksum, wrapping_add(key ^ w.pos, val))
+        w.pos = w.pos + 1u64
+    }
+    if !leaf {
+        last := t.nodes.get(id).children[count]
+        traverse(t, last, w)
+    }
+}
+
+func run() -> Result[i32, AllocErr] {
+    n := 2_000_000u64
+    pool := Pool[Node].new()
+    root := pool.alloc(new_node(true))?
+    t := BTree { nodes: move pool, root: root }
+    s := new_sampler(n)
+
+    start := now_ns()
+    x := 42u64
+    for i in 0u64..n {
+        x = lcg(x)
+        sampled := s.start()
+        insert(t, x, i)?
+        s.stop(sampled)
+    }
+    w := Walk { checksum: 0u64, pos: 0u64 }
+    top := t.root
+    traverse(t, top, w)
+    checksum := w.checksum ^ u64(t.nodes.len())
+    ns := now_ns() - start
+
+    if w.pos != n { return Ok(1i32) }
+    report(n, ns, s, checksum)
+    return Ok(0i32)
+}
+
+func main() -> i32 {
+    match run() {
+        Ok(code) => return code
+        Err(e) => return 2i32
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark plumbing (bench/PROTOCOL.md), duplicated in every bench/kern
+// program so that each benchmark is one self-contained file: wrapping u64
+// arithmetic, the shared LCG, per-operation latency sampling and the report.
+// ---------------------------------------------------------------------------
+
+func lcg(x: u64) -> u64 {
+    return wrapping_add(wrapping_mul(x, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// Sampler times one operation every ops/4096 operations (operation i is
+// sampled iff i % stride == 0) and keeps at most 4096 latencies.
+struct Sampler { lat: Vec[u64]; stride: u64; until: u64; t0: u64 }
+
+func new_sampler(ops: u64) -> Sampler {
+    stride := ops / 4096u64
+    if stride == 0u64 { stride = 1u64 }
+    return Sampler { lat: Vec[u64].with_capacity(4096usize), stride: stride, until: 0u64, t0: 0u64 }
+}
+
+impl Sampler {
+    // start reports whether the next operation is sampled and, if so, reads the clock.
+    func start(edit self) -> bool {
+        if self.until > 0u64 || self.lat.len() >= 4096usize { return false }
+        self.t0 = now_ns()
+        return true
+    }
+    // stop records the latency of a sampled operation and counts down to the next one.
+    func stop(edit self, sampled: bool) {
+        if sampled {
+            self.lat.push(now_ns() - self.t0)
+            self.until = self.stride
+        }
+        if self.until > 0u64 { self.until = self.until - 1u64 }
+    }
+}
+
+// shell_sort orders the samples in place (at most 4096 values).
+func shell_sort(s: edit[Vec[u64]]) {
+    n := s.len()
+    gap := n / 2usize
+    while gap > 0usize {
+        for i in gap..n {
+            x := s.get(i)
+            j := i
+            while j >= gap && s.get(j - gap) > x {
+                prev := s.get(j - gap)
+                with e := s.at(j) { e = prev }
+                j = j - gap
+            }
+            with e := s.at(j) { e = x }
+        }
+        gap = gap / 2usize
+    }
+}
+
+// report prints the protocol line; p50 = sorted[n/2], p99 = sorted[n*99/100].
+func report(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    shell_sort(s.lat)
+    n := s.lat.len()
+    p50 := 0u64
+    p99 := 0u64
+    if n > 0usize {
+        p50 = s.lat.get(n / 2usize)
+        p99 = s.lat.get(n * 99usize / 100usize)
+    }
+    print_str("ops="); print_u64(ops)
+    print_str(" ns="); print_u64(ns)
+    print_str(" p50="); print_u64(p50)
+    print_str(" p99="); print_u64(p99)
+    print_str(" checksum="); print_u64(checksum)
+    println()
+}

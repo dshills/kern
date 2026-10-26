@@ -1,0 +1,29 @@
+//! phase: 2
+//! expect: output tls
+// Thread-local storage (spec §6): every thread, including the main thread,
+// has its own instance of a thread_local, initialized to the declared
+// constant. The spawned thread's writes do not reach the parent's copy.
+module run
+thread_local counter: u64 = 10u64
+thread_local flag: bool = false
+func bump(n: u64) -> u64 {
+    counter = counter + n
+    flag = true
+    return counter
+}
+func in_thread() -> Result[u64, SpawnErr] {
+    t := thread.spawn(bump, 5u64)?
+    return Ok(t.join())
+}
+func main() -> i32 {
+    counter = counter + 1u64
+    match in_thread() {
+        Ok(v) => { print_u64(v); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    print_u64(counter)
+    println()
+    print_bool(flag)
+    println()
+    return 0i32
+}

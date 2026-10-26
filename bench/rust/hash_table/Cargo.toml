@@ -1,0 +1,9 @@
+[package]
+name = "bench_hash_table"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[profile.release]
+debug = false

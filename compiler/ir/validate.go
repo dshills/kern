@@ -205,6 +205,9 @@ func (v *validator) rootOf(p Place, st *vstate) (*Local, []PathElem, bool) {
 	if p.Local != nil {
 		return p.Local, p.Path, true
 	}
+	if p.Global != nil {
+		return nil, nil, false // a thread_local: Copy, always initialized, no ownership
+	}
 	oa, ok := st.open[p.Access]
 	if !ok {
 		return nil, nil, false

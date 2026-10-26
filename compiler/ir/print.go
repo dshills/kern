@@ -110,9 +110,12 @@ func vs(xs []*Value) string {
 // PlaceString renders a place.
 func PlaceString(p Place) string {
 	var sb strings.Builder
-	if p.Local != nil {
+	switch {
+	case p.Local != nil:
 		sb.WriteString(localName(p.Local))
-	} else {
+	case p.Global != nil:
+		sb.WriteString("@" + p.Global.Name)
+	default:
 		sb.WriteString("*" + v(p.Access))
 	}
 	for _, e := range p.Path {

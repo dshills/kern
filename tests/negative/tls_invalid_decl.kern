@@ -1,0 +1,5 @@
+//! expect: reject TLS_INVALID_DECL rule=6.5
+//! twin: tls_invalid_decl_ok
+module t
+thread_local buf: Vec[u64] = Vec[u64].new()
+func main() -> i32 { return 0i32 }

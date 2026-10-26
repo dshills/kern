@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,12 +48,13 @@ func TestAPIFixtures(t *testing.T) {
 		// the command under test is the request's own; malformed requests go to check
 		cmd := "check"
 		var probe struct {
-			Command string `json:"command"`
+			Command string   `json:"command"`
+			CLI     []string `json:"_cli"` // extra command-line flags for the fixture
 		}
 		if json.Unmarshal(b, &probe) == nil && probe.Command != "" && probe.Command != "frobnicate" {
 			cmd = probe.Command
 		}
-		code, resp, _ := runWith(t, []string{cmd}, string(b))
+		code, resp, _ := runWith(t, append([]string{cmd}, probe.CLI...), string(b))
 		if code != 2 || resp.OK || len(resp.Diagnostics) != 1 || string(resp.Diagnostics[0].Code) != want {
 			t.Errorf("%s: exit %d, resp %+v", f, code, resp)
 		}
@@ -231,5 +233,97 @@ func TestRunEmitExplain(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected an owned place with a drop point: %v", places)
+	}
+}
+
+// TestPhase2Commands runs the §16 analysis commands of PLAN.md 2.5 on the
+// vector example and checks their result shapes, labels and target handling.
+func TestPhase2Commands(t *testing.T) {
+	vec := filepath.Join("..", "..", "examples", "vector", "vector.kern")
+	pool := filepath.Join("..", "..", "tests", "run", "pool_handles.kern")
+	code, resp, _ := runWith(t, []string{"show-layout", vec}, "")
+	if code != 0 || !resp.OK {
+		t.Fatalf("show-layout: exit %d resp %+v", code, resp)
+	}
+	res := resp.Result.(map[string]any)
+	if res["target"] == "" || res["target"] == nil {
+		t.Fatalf("show-layout result lacks target: %v", res)
+	}
+	types, _ := res["types"].([]any)
+	if len(types) == 0 {
+		t.Fatalf("show-layout returned no types: %v", res)
+	}
+	for _, ty := range types {
+		tm := ty.(map[string]any)
+		if tm["size"].(float64) < 0 || tm["align"].(float64) < 1 {
+			t.Fatalf("bad layout %v", tm)
+		}
+	}
+	code, resp, _ = runWith(t, []string{"show-copies", "--target=x86_64-unknown-linux-gnu", vec}, "")
+	if code != 0 || !resp.OK || resp.Result.(map[string]any)["target"] != "x86_64-unknown-linux-gnu" {
+		t.Fatalf("show-copies: exit %d resp %+v", code, resp)
+	}
+	for _, c := range resp.Result.(map[string]any)["copies"].([]any) {
+		cm := c.(map[string]any)
+		if cm["label"] != "proven" || (cm["kind"] != "bitwise" && cm["kind"] != "explicit-deep") {
+			t.Fatalf("bad copy %v", cm)
+		}
+	}
+	code, resp, _ = runWith(t, []string{"show-allocations", vec}, "")
+	if code != 0 || !resp.OK {
+		t.Fatalf("show-allocations: exit %d resp %+v", code, resp)
+	}
+	sites, _ := resp.Result.(map[string]any)["sites"].([]any)
+	if len(sites) == 0 {
+		t.Fatalf("show-allocations found no sites in the vector example")
+	}
+	for _, s := range sites {
+		sm := s.(map[string]any)
+		if sm["allocator"] != "system" || (sm["label"] == "proven") != (sm["size"] != nil) {
+			t.Fatalf("bad site %v", sm)
+		}
+	}
+	code, resp, _ = runWith(t, []string{"show-bounds-checks", pool}, "")
+	if code != 0 || !resp.OK {
+		t.Fatalf("show-bounds-checks: exit %d resp %+v", code, resp)
+	}
+	kinds := map[string]bool{}
+	for _, c := range resp.Result.(map[string]any)["checks"].([]any) {
+		cm := c.(map[string]any)
+		kinds[cm["kind"].(string)] = true
+		if (cm["label"] == "proven") != (cm["proven_by"] != nil) {
+			t.Fatalf("proven_by must be set iff proven: %v", cm)
+		}
+	}
+	if !kinds["generation"] || !kinds["disjoint"] {
+		t.Fatalf("expected generation and disjoint checks, got %v", kinds)
+	}
+	code, resp, _ = runWith(t, []string{"show-bounds-checks", vec}, "")
+	if code != 0 || !resp.OK {
+		t.Fatalf("show-bounds-checks: exit %d resp %+v", code, resp)
+	}
+	kinds = map[string]bool{}
+	for _, c := range resp.Result.(map[string]any)["checks"].([]any) {
+		kinds[c.(map[string]any)["kind"].(string)] = true
+	}
+	if !kinds["overflow"] || !kinds["bounds"] {
+		t.Fatalf("expected overflow and bounds checks in the vector example, got %v", kinds)
+	}
+	req := fmt.Sprintf(`{"schema_version":"0.2","command":"show-layout","files":[%q],"target":"aarch64-apple-macosx"}`, vec)
+	if code, resp, _ := runWith(t, []string{"show-layout", "--target=x86_64-unknown-linux-gnu"}, req); code != 2 || resp.Diagnostics[0].Code != "API_TARGET_CONFLICT" {
+		t.Fatalf("target conflict: exit %d resp %+v", code, resp)
+	}
+	if code, resp, _ := runWith(t, []string{"show-layout", "--target=aarch64-apple-macosx"}, req); code != 0 || !resp.OK {
+		t.Fatalf("agreeing targets: exit %d resp %+v", code, resp)
+	}
+	if _, err := exec.LookPath("clang"); err == nil {
+		hello := filepath.Join("..", "..", "tests", "run", "hello.kern")
+		code, resp, _ := runWith(t, []string{"emit-asm", hello}, "")
+		if code != 0 || !resp.OK {
+			t.Fatalf("emit-asm: exit %d resp %+v", code, resp)
+		}
+		if asm, _ := resp.Result.(map[string]any)["asm"].(string); !strings.Contains(asm, "run.main") {
+			t.Fatalf("emit-asm result lacks the entry symbol")
+		}
 	}
 }

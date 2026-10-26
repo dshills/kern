@@ -123,6 +123,7 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 	}
 	it := interp.New(mod, files[0], stdout, stderr)
 	it.TestHooks = opts.TestHooks
+	it.SetIdentityTags(opts.Opt != "release")
 	it.SetStackLimit(opts.StackBytes)
 	return it.Run()
 }

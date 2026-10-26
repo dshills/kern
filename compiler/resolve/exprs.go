@@ -195,6 +195,20 @@ func (c *fnCtx) intLit(x *ast.IntLit, want Type) Type {
 	return &Prim{Name: name}
 }
 
+// globalSym is the one symbol of a thread_local in this resolver (places are
+// keyed by symbol identity).
+func (c *fnCtx) globalSym(g *GlobalDecl) *Symbol {
+	if c.r.globalSyms == nil {
+		c.r.globalSyms = map[*GlobalDecl]*Symbol{}
+	}
+	if s, ok := c.r.globalSyms[g]; ok {
+		return s
+	}
+	s := &Symbol{Kind: SymGlobal, Name: g.Name, Type: g.Type, Conv: ast.ConvEdit, Pos: g.Pos, Global: g, ID: c.newID()}
+	c.r.globalSyms[g] = s
+	return s
+}
+
 func (c *fnCtx) ident(sc *scope, x *ast.Ident, want Type) Type {
 	sym := sc.lookup(x.Name)
 	if sym == nil {
@@ -203,6 +217,8 @@ func (c *fnCtx) ident(sc *scope, x *ast.Ident, want Type) Type {
 		} else if k, ok := c.m.Consts[x.Name]; ok {
 			sym = &Symbol{Kind: SymConst, Name: x.Name, Const: k, Type: k.Type}
 			c.r.prog.Info.Consts[x] = true
+		} else if g, ok := c.m.Globals[x.Name]; ok {
+			sym = c.globalSym(g)
 		} else if td, ok := c.m.Types[x.Name]; ok {
 			sym = &Symbol{Kind: SymType, Name: x.Name, TDecl: td}
 		} else if mod, ok := c.m.Imports[x.Name]; ok {
@@ -218,7 +234,7 @@ func (c *fnCtx) ident(sc *scope, x *ast.Ident, want Type) Type {
 	switch sym.Kind {
 	case SymLocal, SymParam, SymAccess:
 		return sym.Type
-	case SymConst:
+	case SymConst, SymGlobal:
 		return sym.Type
 	case SymFunc:
 		if len(sym.Func.TypeParams) > 0 {

@@ -65,6 +65,8 @@ var Registry = map[Code]Info{
 	"UNSAFE_MISSING_CONTRACT":  {"6.4", CatLang, 0, "function containing unsafe has no contract block"},
 	// §7 FFI
 	"FFI_UNSUPPORTED_TYPE": {"7.2", CatLang, 0, "type not permitted in an extern \"C\" signature"},
+	// §6 thread-local storage
+	"TLS_INVALID_DECL": {"6.5", CatLang, 2, "thread_local requires a Copy type and a literal or zero() initializer"},
 	// general language errors (spec §4, types.md)
 	"SYNTAX":                  {"4.0", CatLang, 0, "syntax error"},
 	"MODULE_MISMATCH":         {"T.1", CatLang, 0, "files of one directory declare different module names"},

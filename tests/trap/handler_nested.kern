@@ -1,0 +1,23 @@
+//! phase: 2
+//! expect: trap bounds
+//! trap-record: none
+//! twin: handler_nested_ok
+// A trap inside a custom handler terminates immediately: the handler's
+// output before its own trap appears, nothing after it, and no default
+// record is written because a custom handler was selected.
+module t
+func report(info: view[TrapInfo]) {
+    print_str("in handler")
+    println()
+    var a: [3]u64 = zero()
+    i := info.start
+    print_u64(a[i])
+    print_str("unreachable")
+    println()
+}
+func main() -> i32 {
+    prev := trap.set_handler(report)
+    var a: [2]u64 = zero()
+    n := 7usize
+    return i32(a[n])
+}

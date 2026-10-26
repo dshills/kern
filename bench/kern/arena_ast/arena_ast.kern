@@ -1,0 +1,150 @@
+// arena_ast: an Arena[Expr] of exactly N = 1,000,000 nodes. Slot 0 is a
+// Num(0) sentinel (never referenced); slots 1..N-1 hold a balanced binary
+// tree built post-order by build(n) for odd n: n == 1 -> Num(lcg >> 40);
+// otherwise m = n-1, l = m/2 (l -= 1 if l is even), r = m-l, build(l),
+// build(r), then x = lcg: Add if x >> 63 != 0 else Mul. LCG seed 42, one
+// draw per node in allocation order. Evaluation is a recursive walk modulo
+// the prime M = 4294967291 (2^32 - 5): Num -> v, Add -> (l + r) % M,
+// Mul -> (l * r) % M; operands stay below 2^32, so nothing overflows.
+// ops = N allocations; sampled operation: one allocation; the evaluation is
+// timed but not counted.
+// checksum = eval(root) + N   (bench/CHECKSUMS.md, expected 3969867084)
+module arena_ast_bench
+
+// Every edge is a Copy ArenaId handle stored inside the node (Rule 5.6.1).
+union Expr { Num(u64); Add(lhs: ArenaId[Expr], rhs: ArenaId[Expr]); Mul(lhs: ArenaId[Expr], rhs: ArenaId[Expr]) }
+
+// Builder owns the arena, the generator state and the sampler, so the
+// recursive build threads a single edit access.
+struct Builder { nodes: Arena[Expr]; x: u64; s: Sampler }
+
+// alloc is the sampled operation: one arena allocation.
+func alloc(b: edit[Builder], e: Expr) -> Result[ArenaId[Expr], AllocErr] {
+    sampled := b.s.start()
+    id := b.nodes.alloc(e)?
+    b.s.stop(sampled)
+    return Ok(id)
+}
+
+func build(b: edit[Builder], n: u64) -> Result[ArenaId[Expr], AllocErr] {
+    if n == 1u64 {
+        b.x = lcg(b.x)
+        v := b.x >> 40u32
+        return alloc(b, Num(v))
+    }
+    m := n - 1u64
+    l := m / 2u64
+    if l % 2u64 == 0u64 { l = l - 1u64 }
+    left := build(b, l)?
+    right := build(b, m - l)?
+    b.x = lcg(b.x)
+    if (b.x >> 63u32) != 0u64 { return alloc(b, Add(left, right)) }
+    return alloc(b, Mul(left, right))
+}
+
+// eval matches a projection of the arena: the arm bindings are views for the
+// arm and the child handles read out of them are Copy. Every intermediate is
+// below 2^32 * 2^32, so the trapping operators never overflow.
+func eval(a: view[Arena[Expr]], id: ArenaId[Expr]) -> u64 {
+    match a.get(id) {
+        Num(v) => return v
+        Add(l, r) => return (eval(a, l) + eval(a, r)) % 4_294_967_291u64
+        Mul(l, r) => return (eval(a, l) * eval(a, r)) % 4_294_967_291u64
+    }
+}
+
+func run() -> Result[i32, AllocErr] {
+    n := 1_000_000u64
+    b := Builder { nodes: Arena[Expr].new(), x: 42u64, s: new_sampler(n) }
+
+    start := now_ns()
+    sentinel := alloc(b, Num(0u64))?
+    root := build(b, n - 1u64)?
+    checksum := eval(b.nodes, root) + n
+    ns := now_ns() - start
+
+    if sentinel.index != 0u32 || u64(b.nodes.len()) != n { return Ok(1i32) }
+    report(n, ns, b.s, checksum)
+    return Ok(0i32)
+}
+
+func main() -> i32 {
+    match run() {
+        Ok(code) => return code
+        Err(e) => return 2i32
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark plumbing (bench/PROTOCOL.md), duplicated in every bench/kern
+// program so that each benchmark is one self-contained file: wrapping u64
+// arithmetic, the shared LCG, per-operation latency sampling and the report.
+// ---------------------------------------------------------------------------
+
+func lcg(x: u64) -> u64 {
+    return wrapping_add(wrapping_mul(x, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// Sampler times one operation every ops/4096 operations (operation i is
+// sampled iff i % stride == 0) and keeps at most 4096 latencies.
+struct Sampler { lat: Vec[u64]; stride: u64; until: u64; t0: u64 }
+
+func new_sampler(ops: u64) -> Sampler {
+    stride := ops / 4096u64
+    if stride == 0u64 { stride = 1u64 }
+    return Sampler { lat: Vec[u64].with_capacity(4096usize), stride: stride, until: 0u64, t0: 0u64 }
+}
+
+impl Sampler {
+    // start reports whether the next operation is sampled and, if so, reads the clock.
+    func start(edit self) -> bool {
+        if self.until > 0u64 || self.lat.len() >= 4096usize { return false }
+        self.t0 = now_ns()
+        return true
+    }
+    // stop records the latency of a sampled operation and counts down to the next one.
+    func stop(edit self, sampled: bool) {
+        if sampled {
+            self.lat.push(now_ns() - self.t0)
+            self.until = self.stride
+        }
+        if self.until > 0u64 { self.until = self.until - 1u64 }
+    }
+}
+
+// shell_sort orders the samples in place (at most 4096 values).
+func shell_sort(s: edit[Vec[u64]]) {
+    n := s.len()
+    gap := n / 2usize
+    while gap > 0usize {
+        for i in gap..n {
+            x := s.get(i)
+            j := i
+            while j >= gap && s.get(j - gap) > x {
+                prev := s.get(j - gap)
+                with e := s.at(j) { e = prev }
+                j = j - gap
+            }
+            with e := s.at(j) { e = x }
+        }
+        gap = gap / 2usize
+    }
+}
+
+// report prints the protocol line; p50 = sorted[n/2], p99 = sorted[n*99/100].
+func report(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    shell_sort(s.lat)
+    n := s.lat.len()
+    p50 := 0u64
+    p99 := 0u64
+    if n > 0usize {
+        p50 = s.lat.get(n / 2usize)
+        p99 = s.lat.get(n * 99usize / 100usize)
+    }
+    print_str("ops="); print_u64(ops)
+    print_str(" ns="); print_u64(ns)
+    print_str(" p50="); print_u64(p50)
+    print_str(" p99="); print_u64(p99)
+    print_str(" checksum="); print_u64(checksum)
+    println()
+}

@@ -1,0 +1,7 @@
+# Pinned toolchain versions for bench/ (PLAN.md 2.6). The harness warns when
+# the installed major version differs. Regenerate with:
+#   clang --version; rustc --version; cargo --version; go version
+clang=23.1.4
+rustc=1.99.0
+cargo=1.99.0
+go=1.27.3

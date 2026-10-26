@@ -1,0 +1,14 @@
+//! phase: 2
+//! expect: output stack_big_frame_ok
+module t
+func once(n: u64) -> u64 {
+    var buf: [1048576]u8 = zero()
+    buf[usize(n)] = 1u8
+    if n == 0u64 { return once(1u64) + u64(buf[0]) }
+    return u64(buf[1])
+}
+func main() -> i32 {
+    print_u64(once(0u64))
+    println()
+    return 0i32
+}

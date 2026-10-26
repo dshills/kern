@@ -6,6 +6,11 @@ module core
 // zero() yields the all-zero value of any Copy type (the only way to
 // initialize an array without naming every element).
 func zero[T: Copy]() -> T
+// wrapping_add, wrapping_sub and wrapping_mul are the §4.1 wrapping forms:
+// two's-complement arithmetic modulo 2^width on any integer type.
+func wrapping_add[T: Copy](a: T, b: T) -> T
+func wrapping_sub[T: Copy](a: T, b: T) -> T
+func wrapping_mul[T: Copy](a: T, b: T) -> T
 
 // Hosted output for the Phase 1 interpreter and fixtures.
 func print_u64(v: u64)
@@ -13,6 +18,8 @@ func print_i64(v: i64)
 func print_bool(v: bool)
 func print_str(s: view[]u8)
 func println()
+// now_ns is a monotonic clock in nanoseconds (hosted; benchmarks).
+func now_ns() -> u64
 
 // Test hooks (PLAN.md 2.3): available only under --test-hooks.
 struct testing { phantom: u8 }

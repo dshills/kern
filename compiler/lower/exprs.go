@@ -21,7 +21,7 @@ type operand struct {
 	release    bool
 }
 
-func (o operand) isPlace() bool { return o.pl.Local != nil || o.pl.Access != nil }
+func (o operand) isPlace() bool { return o.pl.Local != nil || o.pl.Access != nil || o.pl.Global != nil }
 
 // value lowers e in value position: Copy places are loaded, move-only
 // places are moved, projections are read (Copy) and ended.
@@ -42,7 +42,7 @@ func (fl *fnLower) toValue(r operand, e ast.Expr) *ir.Value {
 		// a place, possibly a path through a projection
 		v := fl.newValue(t)
 		if resolve.IsCopy(t) {
-			fl.emit(&ir.Load{Dst: v, Place: r.pl})
+			fl.emit(&ir.Load{Dst: v, Place: r.pl, Pos: e.Span()})
 		} else {
 			fl.emit(&ir.Move{Dst: v, Src: r.pl})
 		}
@@ -52,7 +52,7 @@ func (fl *fnLower) toValue(r operand, e ast.Expr) *ir.Value {
 		return v
 	case r.access != nil:
 		v := fl.newValue(t)
-		fl.emit(&ir.Load{Dst: v, Place: ir.Place{Access: r.access}})
+		fl.emit(&ir.Load{Dst: v, Place: ir.Place{Access: r.access}, Pos: e.Span()})
 		if r.ownsAccess {
 			fl.endAccess(r.access)
 		}
@@ -158,7 +158,7 @@ func (fl *fnLower) expr(e ast.Expr, want resolve.Type) operand {
 			src = ir.Place{Access: r.access}
 		}
 		if resolve.IsCopy(t) {
-			fl.emit(&ir.Load{Dst: v, Place: src})
+			fl.emit(&ir.Load{Dst: v, Place: src, Pos: x.Pos})
 		} else {
 			acc := fl.newValue(&resolve.Access{Elem: t})
 			fl.emit(&ir.AccessBegin{Dst: acc, Place: src, Pos: x.Pos})
@@ -289,6 +289,8 @@ func (fl *fnLower) ident(x *ast.Ident) operand {
 		return operand{pl: ir.Place{Access: acc}, perm: permOf(acc)}
 	case resolve.SymConst:
 		return fl.expr(sym.Const.Value, t)
+	case resolve.SymGlobal:
+		return operand{pl: ir.Place{Global: fl.l.global(sym.Global)}, perm: ast.ConvEdit}
 	case resolve.SymFunc:
 		v := fl.newValue(t)
 		fl.emit(&ir.FuncRef{Dst: v, Name: fl.l.request(sym.Func, nil, fl.file)})
@@ -559,6 +561,16 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 		return operand{val: v}
 	case "thread.spawn", "scope.spawn":
 		return fl.spawn(x, info, t)
+	}
+	// the §4.1 wrapping forms are binary operations in wrapping mode
+	if info.Fn != nil && info.Fn.Module == "core" && info.Fn.Receiver == nil {
+		if op, ok := map[string]string{"wrapping_add": "+", "wrapping_sub": "-", "wrapping_mul": "*"}[info.Fn.Name]; ok {
+			l := fl.value(x.Args[0].X, t)
+			r := fl.value(x.Args[1].X, t)
+			v := fl.newValue(t)
+			fl.emit(&ir.Binary{Dst: v, Op: op, L: l, R: r, Mode: "wrapping"})
+			return operand{val: v}
+		}
 	}
 	// zero[T]() is the Zero instruction
 	if info.Fn != nil && info.Fn.Module == "core" && info.Fn.Name == "zero" && info.Fn.Receiver == nil {

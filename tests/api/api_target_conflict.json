@@ -1,0 +1,1 @@
+{"schema_version": "0.2", "command": "show-layout", "files": ["../../examples/vector/vector.kern"], "target": "aarch64-apple-macosx", "_cli": ["--target=x86_64-unknown-linux-gnu"]}

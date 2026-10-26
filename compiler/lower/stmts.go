@@ -104,7 +104,7 @@ func (fl *fnLower) assign(s *ast.Assign) {
 		fl.dropSym(sym)
 	}
 	fl.outFieldDrops(s)
-	if target.pl.Local == nil && target.pl.Access == nil {
+	if !target.isPlace() {
 		fl.fail(s.Pos, "assignment target is not a place")
 	}
 	fl.emit(&ir.Store{Place: target.pl, Src: v})
@@ -125,7 +125,7 @@ func (fl *fnLower) with(s *ast.With) {
 		bindVals = r.tuple
 	case r.access != nil:
 		bindVals = []*ir.Value{r.access}
-	case r.pl.Local != nil || r.pl.Access != nil:
+	case r.isPlace():
 		// a place used as a with subject: open an access on it
 		v := fl.newValue(&resolve.Access{Edit: r.perm == ast.ConvEdit, Elem: fl.typeOf(s.Subject)})
 		fl.emit(&ir.AccessBegin{Dst: v, Edit: r.perm == ast.ConvEdit, Place: r.pl, Pos: s.Subject.Span()})
@@ -183,7 +183,7 @@ func (fl *fnLower) match(s *ast.Match) {
 	switch {
 	case r.access != nil:
 		subj = ir.Place{Access: r.access}
-	case r.pl.Local != nil || r.pl.Access != nil:
+	case r.isPlace():
 		if owned && r.pl.Local != nil && len(r.pl.Path) == 0 {
 			tmp = fl.newTemp(r.pl.Local.Type)
 			mv := fl.newValue(r.pl.Local.Type)
@@ -255,7 +255,7 @@ func (fl *fnLower) match(s *ast.Match) {
 					fl.bindSym(sym)
 					v := fl.newValue(ft)
 					if resolve.IsCopy(ft) {
-						fl.emit(&ir.Load{Dst: v, Place: fieldPlace})
+						fl.emit(&ir.Load{Dst: v, Place: fieldPlace, Pos: arm.BindPos[i]})
 					} else {
 						fl.emit(&ir.Move{Dst: v, Src: fieldPlace})
 					}
@@ -396,7 +396,7 @@ func (fl *fnLower) forStmt(s *ast.For) {
 		if a, ok := r.access.Type.(*resolve.Access); ok {
 			edit = a.Edit
 		}
-	case r.pl.Local != nil || r.pl.Access != nil:
+	case r.isPlace():
 		v := fl.newValue(&resolve.Access{Edit: r.perm == ast.ConvEdit, Seq: true, Elem: elemTypeOf(fl.typeOf(s.Iter))})
 		fl.emit(&ir.AccessBegin{Dst: v, Edit: r.perm == ast.ConvEdit, Place: r.pl, Pos: s.Iter.Span()})
 		seqAccess = v
@@ -444,7 +444,7 @@ func (fl *fnLower) forStmt(s *ast.For) {
 		if sym.Kind == resolve.SymLocal {
 			loc := fl.local(sym)
 			v := fl.newValue(et)
-			fl.emit(&ir.Load{Dst: v, Place: elemPlace})
+			fl.emit(&ir.Load{Dst: v, Place: elemPlace, Pos: s.VarPos})
 			fl.emit(&ir.Store{Place: ir.Place{Local: loc}, Src: v})
 			fl.emit(&ir.Init{Place: ir.Place{Local: loc}})
 		} else {

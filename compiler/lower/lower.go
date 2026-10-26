@@ -70,12 +70,13 @@ type lowerError struct {
 }
 
 type lowerer struct {
-	prog  *resolve.Program
-	info  *resolve.Info
-	mod   *ir.Module
-	done  map[string]*ir.Func
-	queue []*pending
-	diags []diag.Diagnostic
+	globals map[*resolve.GlobalDecl]*ir.Global
+	prog    *resolve.Program
+	info    *resolve.Info
+	mod     *ir.Module
+	done    map[string]*ir.Func
+	queue   []*pending
+	diags   []diag.Diagnostic
 }
 
 type pending struct {
@@ -113,13 +114,27 @@ func (l *lowerer) mangle(fd *resolve.FuncDecl, subst map[string]resolve.Type) st
 	return sb.String()
 }
 
+// global returns the IR global of a thread_local declaration, creating it once.
+func (l *lowerer) global(g *resolve.GlobalDecl) *ir.Global {
+	if l.globals == nil {
+		l.globals = map[*resolve.GlobalDecl]*ir.Global{}
+	}
+	if x, ok := l.globals[g]; ok {
+		return x
+	}
+	x := &ir.Global{ID: len(l.mod.Globals), Name: g.Module + "." + g.Name, Type: g.Type, Init: g.Init}
+	l.globals[g] = x
+	l.mod.Globals = append(l.mod.Globals, x)
+	return x
+}
+
 // request schedules an instantiation and returns its IR name.
 func (l *lowerer) request(fd *resolve.FuncDecl, subst map[string]resolve.Type, file string) string {
 	name := l.mangle(fd, subst)
 	if _, ok := l.done[name]; ok {
 		return name
 	}
-	f := &ir.Func{Name: name, Release: fd.Release, Contract: fd.Contract, Pos: fd.Pos, Extern: fd.Extern, Intrinsic: fd.Intrinsic}
+	f := &ir.Func{Name: name, Release: fd.Release, Contract: fd.Contract, Pos: fd.Pos, File: file, Extern: fd.Extern, Intrinsic: fd.Intrinsic}
 	l.done[name] = f
 	l.mod.Add(f)
 	for _, p := range fd.Params {

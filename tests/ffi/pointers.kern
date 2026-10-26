@@ -1,0 +1,27 @@
+//! phase: 2
+//! expect: output pointers
+//! c: pointers.c
+// Pointer arguments cross as raw addresses; the pointee stays owned by the
+// side that allocated it (contract block). The C side fills a buffer the
+// kern side owns and never frees it.
+module ffi
+extern "C" func c_fill(p: RawPtr[u8], n: usize, v: u8) -> usize
+extern "C" func c_sum(p: RawPtr[u8], n: usize) -> u64
+contract { requires "p addresses n writable bytes owned by the caller" }
+func fill(p: RawPtr[u8], n: usize, v: u8) -> usize { unsafe { return c_fill(p, n, v) } }
+contract { requires "p addresses n readable bytes owned by the caller" }
+func sum(p: RawPtr[u8], n: usize) -> u64 { unsafe { return c_sum(p, n) } }
+func main() -> i32 {
+    alloc := SystemAllocator.new()
+    match alloc.alloc(16usize, 8usize) {
+        Ok(p) => {
+            print_u64(u64(fill(p, 16usize, 3u8)))
+            println()
+            print_u64(sum(p, 16usize))
+            println()
+            alloc.free(p, 16usize, 8usize)
+        }
+        Err(e) => { print_str("alloc failed"); println() }
+    }
+    return 0i32
+}

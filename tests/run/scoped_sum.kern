@@ -1,0 +1,30 @@
+//! phase: 2
+//! expect: output scoped_sum
+// Scoped spawn over views of a Vec: two threads sum halves of the data and
+// the parent joins them before the scope ends (spec §5.5). The output is
+// deterministic because results are observed only through join.
+module run
+func sum(xs: view[[]u64]) -> u64 {
+    total := 0u64
+    for x in xs { total = total + x }
+    return total
+}
+func halves(v: view[Vec[u64]]) -> Result[u64, SpawnErr] {
+    with xs := v.as_view() {
+        with s := thread.scope() {
+            j1 := s.spawn(sum, xs[0usize:50usize])?
+            j2 := s.spawn(sum, xs[50usize:100usize])?
+            return Ok(j1.get() + j2.get())
+        }
+    }
+}
+func main() -> i32 {
+    v := Vec[u64].new()
+    i := 0u64
+    while i < 100u64 { v.push(i); i = i + 1u64 }
+    match halves(v) {
+        Ok(total) => { print_u64(total); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}

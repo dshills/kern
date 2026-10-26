@@ -1,0 +1,223 @@
+// packet_parser: P = 4096 packets are generated (untimed, LCG seed 42) back
+// to back into one byte buffer. Packet = 32-byte big-endian header + payload:
+//   0 magic u32 (0xCAFEF00D) | 4 version u8 (1) | 5 flags u8 | 6 hdr_len u16 (32)
+//   8 src u32 | 12 dst u32 | 16 src_port u16 | 18 dst_port u16 | 20 seq u32
+//   24 payload_len u16 | 26 csum u16 | 28 ts u32
+// Per packet three LCG draws x1,x2,x3: src = x1>>32, dst = x1 (low 32),
+// src_port = x2>>48, dst_port = x2>>32 (low 16), seq = x2 (low 32),
+// payload_len = 16+(x3>>57), ts = x3 (low 32), flags = x3>>32 (low 8);
+// payload byte j = (seq + j) (low 8 bits). csum is the Internet checksum
+// (ones'-complement sum of the 16 header words with csum = 0, complemented).
+// Then N = 10,000,000 operations: operation i parses packet i mod P from the
+// buffer into a Header struct (length, magic, hdr_len, header checksum and
+// payload bound are checked; a failure ends the run) and computes the folded
+// ones'-complement 16-bit sum of the payload view (an odd trailing byte is
+// the high byte of a final word).
+// ops = N; sampled operation: parse + payload sum.
+// checksum = wrapping sum over operations of (seq XOR (psum << 32))
+// (matches bench/c/packet_parser).
+module packet_parser_bench
+
+// Header is a Copy struct decoded by value from bounds-checked byte reads;
+// the parser owns nothing and stores no view (the cursor-handle rewrite).
+struct Header {
+    magic: u32; src: u32; dst: u32; seq: u32; ts: u32
+    hdr_len: u16; src_port: u16; dst_port: u16; payload_len: u16; csum: u16
+    version: u8; flags: u8
+}
+
+union ParseErr { Short; BadMagic; BadHeaderLen; BadCsum; BadPayload }
+
+func rd16(p: view[]u8, at: usize) -> u16 {
+    return (u16(p[at]) << 8u32) | u16(p[at + 1usize])
+}
+
+func rd32(p: view[]u8, at: usize) -> u32 {
+    return (u32(p[at]) << 24u32) | (u32(p[at + 1usize]) << 16u32) | (u32(p[at + 2usize]) << 8u32) | u32(p[at + 3usize])
+}
+
+func wr16(h: edit[]u8, at: usize, v: u16) {
+    h[at] = truncate[u8](v >> 8u32)
+    h[at + 1usize] = truncate[u8](v)
+}
+
+func wr32(h: edit[]u8, at: usize, v: u32) {
+    wr16(h, at, truncate[u16](v >> 16u32))
+    wr16(h, at + 2usize, truncate[u16](v))
+}
+
+// sum16 is the folded ones'-complement sum of big-endian 16-bit words.
+func sum16(p: view[]u8) -> u16 {
+    s := 0u32
+    n := len(p)
+    i := 0usize
+    while i + 1usize < n {
+        s = s + u32(rd16(p, i))
+        i = i + 2usize
+    }
+    if i < n { s = s + (u32(p[i]) << 8u32) }
+    while (s >> 16u32) != 0u32 { s = (s & 65535u32) + (s >> 16u32) }
+    return u16(s)
+}
+
+// parse decodes the header at the start of pkt, which extends to the end of
+// the receive buffer; every read is guarded by a length test first.
+func parse(pkt: view[]u8) -> Result[Header, ParseErr] {
+    if len(pkt) < 32usize { return Err(Short) }
+    h := Header { magic: rd32(pkt, 0usize), src: rd32(pkt, 8usize), dst: rd32(pkt, 12usize), seq: rd32(pkt, 20usize), ts: rd32(pkt, 28usize), hdr_len: rd16(pkt, 6usize), src_port: rd16(pkt, 16usize), dst_port: rd16(pkt, 18usize), payload_len: rd16(pkt, 24usize), csum: rd16(pkt, 26usize), version: pkt[4usize], flags: pkt[5usize] }
+    if h.magic != 3_405_705_229u32 { return Err(BadMagic) }
+    if h.hdr_len != 32u16 { return Err(BadHeaderLen) }
+    if sum16(pkt[0usize : 32usize]) != 65535u16 { return Err(BadCsum) }
+    if 32usize + usize(h.payload_len) > len(pkt) { return Err(BadPayload) }
+    return Ok(h)
+}
+
+// payload is the zero-copy body: a sub-slice projection of the single view
+// parameter, returned under the elision rule (Rule 5.3.4).
+func payload(pkt: view[]u8, h: Header) -> view[]u8 {
+    return pkt[32usize : 32usize + usize(h.payload_len)]
+}
+
+// handle is the sampled operation: parse the header, then fold the payload
+// through a view bound for exactly one block.
+func handle(pkt: view[]u8) -> Result[u64, ParseErr] {
+    h := parse(pkt)?
+    with body := payload(pkt, h) {
+        psum := sum16(body)
+        return Ok(u64(h.seq) ^ (u64(psum) << 32u32))
+    }
+}
+
+// gen appends one packet to buf and returns the advanced generator state.
+func gen(buf: edit[Vec[u8]], x: u64) -> u64 {
+    x1 := lcg(x)
+    x2 := lcg(x1)
+    x3 := lcg(x2)
+    plen := u16(16u64 + (x3 >> 57u32))
+    seq := truncate[u32](x2)
+    var h: [32]u8 = zero()
+    wr32(h, 0usize, 3_405_705_229u32)
+    h[4usize] = 1u8
+    h[5usize] = truncate[u8](x3 >> 32u32)
+    wr16(h, 6usize, 32u16)
+    wr32(h, 8usize, truncate[u32](x1 >> 32u32))
+    wr32(h, 12usize, truncate[u32](x1))
+    wr16(h, 16usize, truncate[u16](x2 >> 48u32))
+    wr16(h, 18usize, truncate[u16](x2 >> 32u32))
+    wr32(h, 20usize, seq)
+    wr16(h, 24usize, plen)
+    wr16(h, 26usize, 0u16)
+    wr32(h, 28usize, truncate[u32](x3))
+    csum := sum16(h) ^ 65535u16
+    wr16(h, 26usize, csum)
+    for b in h { buf.push(b) }
+    for j in 0u64..u64(plen) { buf.push(truncate[u8](u64(seq) + j)) }
+    return x3
+}
+
+func main() -> i32 {
+    n := 10_000_000u64
+    buf := Vec[u8].new()
+    var offsets: [4096]usize = zero()
+    x := 42u64
+    for i in 0usize..4096usize {
+        offsets[i] = buf.len()
+        x = gen(buf, x)
+    }
+    total := buf.len()
+    s := new_sampler(n)
+    checksum := 0u64
+
+    start := now_ns()
+    with data := buf.as_view() {
+        for i in 0u64..n {
+            off := offsets[usize(i & 4095u64)]
+            sampled := s.start()
+            match handle(data[off : total]) {
+                Ok(v) => {
+                    s.stop(sampled)
+                    checksum = wrapping_add(checksum, v)
+                }
+                Err(e) => return 1i32
+            }
+        }
+    }
+    ns := now_ns() - start
+
+    report(n, ns, s, checksum)
+    return 0i32
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark plumbing (bench/PROTOCOL.md), duplicated in every bench/kern
+// program so that each benchmark is one self-contained file: wrapping u64
+// arithmetic, the shared LCG, per-operation latency sampling and the report.
+// ---------------------------------------------------------------------------
+
+func lcg(x: u64) -> u64 {
+    return wrapping_add(wrapping_mul(x, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// Sampler times one operation every ops/4096 operations (operation i is
+// sampled iff i % stride == 0) and keeps at most 4096 latencies.
+struct Sampler { lat: Vec[u64]; stride: u64; until: u64; t0: u64 }
+
+func new_sampler(ops: u64) -> Sampler {
+    stride := ops / 4096u64
+    if stride == 0u64 { stride = 1u64 }
+    return Sampler { lat: Vec[u64].with_capacity(4096usize), stride: stride, until: 0u64, t0: 0u64 }
+}
+
+impl Sampler {
+    // start reports whether the next operation is sampled and, if so, reads the clock.
+    func start(edit self) -> bool {
+        if self.until > 0u64 || self.lat.len() >= 4096usize { return false }
+        self.t0 = now_ns()
+        return true
+    }
+    // stop records the latency of a sampled operation and counts down to the next one.
+    func stop(edit self, sampled: bool) {
+        if sampled {
+            self.lat.push(now_ns() - self.t0)
+            self.until = self.stride
+        }
+        if self.until > 0u64 { self.until = self.until - 1u64 }
+    }
+}
+
+// shell_sort orders the samples in place (at most 4096 values).
+func shell_sort(s: edit[Vec[u64]]) {
+    n := s.len()
+    gap := n / 2usize
+    while gap > 0usize {
+        for i in gap..n {
+            x := s.get(i)
+            j := i
+            while j >= gap && s.get(j - gap) > x {
+                prev := s.get(j - gap)
+                with e := s.at(j) { e = prev }
+                j = j - gap
+            }
+            with e := s.at(j) { e = x }
+        }
+        gap = gap / 2usize
+    }
+}
+
+// report prints the protocol line; p50 = sorted[n/2], p99 = sorted[n*99/100].
+func report(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    shell_sort(s.lat)
+    n := s.lat.len()
+    p50 := 0u64
+    p99 := 0u64
+    if n > 0usize {
+        p50 = s.lat.get(n / 2usize)
+        p99 = s.lat.get(n * 99usize / 100usize)
+    }
+    print_str("ops="); print_u64(ops)
+    print_str(" ns="); print_u64(ns)
+    print_str(" p50="); print_u64(p50)
+    print_str(" p99="); print_u64(p99)
+    print_str(" checksum="); print_u64(checksum)
+    println()
+}

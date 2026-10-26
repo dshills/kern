@@ -1,0 +1,16 @@
+//! phase: 2
+//! expect: trap stack
+//! twin: stack_big_frame_ok
+// A frame larger than one page (a 1 MiB local array) recursing without
+// bound: stack probes touch every page of the frame so the guard page cannot
+// be skipped and the fault is classified as a stack trap.
+module t
+func down(n: u64) -> u64 {
+    var buf: [1048576]u8 = zero()
+    buf[usize(n)] = 1u8
+    return down(n + 1u64) + u64(buf[0])
+}
+func main() -> i32 {
+    x := down(0u64)
+    return 0i32
+}

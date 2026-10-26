@@ -6,6 +6,9 @@ import (
 
 // call types a call expression: plain, generic, method, static, variant
 // constructor, intrinsic (thread.spawn / Scope.spawn) or function value.
+// wrappingIntrinsics are the prelude's wrapping arithmetic forms (§4.1).
+var wrappingIntrinsics = map[string]bool{"wrapping_add": true, "wrapping_sub": true, "wrapping_mul": true}
+
 func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 	info := &CallInfo{}
 	c.r.prog.Info.Calls[x] = info
@@ -229,6 +232,11 @@ func (c *fnCtx) callFunc(sc *scope, x *ast.CallExpr, info *CallInfo, f *FuncDecl
 		fps[i] = FuncParam{Conv: p.Conv, Type: p.Type}
 	}
 	c.checkArgs(sc, x, info, fps, args, params, m)
+	if wrappingIntrinsics[f.Name] && f.Module == "core" {
+		if t, ok := m["T"]; ok && !IsInteger(t) {
+			c.errorf("TYPE_MISMATCH", x.Pos, "%s requires an integer type, found %s", f.Name, typeString(t))
+		}
+	}
 	// constraints on inferred parameters (the function's own, and the owner's
 	// when they were not bound by the receiver or explicit arguments)
 	for _, tp := range f.TypeParams {
@@ -271,7 +279,7 @@ func (c *fnCtx) callFunc(sc *scope, x *ast.CallExpr, info *CallInfo, f *FuncDecl
 	for _, r := range f.Ret {
 		info.Ret = append(info.Ret, Subst(r, m))
 	}
-	if f.Extern != "" && c.unsafe == 0 {
+	if f.Extern != "" && (f.AST == nil || f.AST.Body == nil) && c.unsafe == 0 {
 		c.errorf("UNSAFE_OP_OUTSIDE_UNSAFE", x.Pos, "calling extern function %s requires unsafe", f.Name)
 	}
 	return retType(info.Ret)

@@ -1,0 +1,16 @@
+//! phase: 2
+//! expect: output handler_nested_ok
+module t
+func report(info: view[TrapInfo]) {
+    print_str("in handler")
+    println()
+}
+func main() -> i32 {
+    prev := trap.set_handler(report)
+    var a: [2]u64 = zero()
+    a[1] = 2u64
+    n := 1usize
+    print_u64(a[n])
+    println()
+    return 0i32
+}

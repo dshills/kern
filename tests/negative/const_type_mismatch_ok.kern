@@ -1,0 +1,5 @@
+//! phase: 2
+//! expect: accept
+module t
+const K: u64 = 300u64
+func main() -> i32 { return i32(K & 1u64) }

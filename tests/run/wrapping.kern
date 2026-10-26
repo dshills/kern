@@ -1,0 +1,18 @@
+//! phase: 2
+//! expect: output wrapping
+// The §4.1 wrapping forms never trap: arithmetic modulo 2^width on every
+// integer type, including the LCG step benchmarks use.
+module run
+func main() -> i32 {
+    x := wrapping_mul(6364136223846793005u64, 42u64)
+    x = wrapping_add(x, 1442695040888963407u64)
+    print_u64(x)
+    println()
+    print_u64(u64(wrapping_add(250u8, 10u8)))
+    println()
+    print_i64(i64(wrapping_sub(-128i8, 1i8)))
+    println()
+    print_i64(wrapping_mul(-9223372036854775807i64, 3i64))
+    println()
+    return 0i32
+}

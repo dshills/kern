@@ -1,0 +1,15 @@
+//! phase: 2
+//! expect: output handler_overflow_ok
+module t
+func report(info: view[TrapInfo]) {
+    print_str("handler")
+    println()
+}
+func main() -> i32 {
+    prev := trap.set_handler(report)
+    x := 254u8
+    y := x + 1u8
+    print_u64(u64(y))
+    println()
+    return 0i32
+}

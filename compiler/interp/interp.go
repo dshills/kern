@@ -9,6 +9,7 @@ import (
 
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/ir"
+	"github.com/dshills/kern/compiler/layout"
 	"github.com/dshills/kern/compiler/resolve"
 )
 
@@ -33,12 +34,21 @@ type Interp struct {
 	stackBytes    int
 	stackUsed     int
 	nextIdent     uint32
+	globals       []Value // this thread's instances of the module's thread_locals
 }
 
 // New creates an interpreter for a module. out receives program output,
 // errOut the trap record.
 func New(mod *ir.Module, file string, out, errOut io.Writer) *Interp {
 	return &Interp{mod: mod, file: file, out: out, errOut: errOut, stackBytes: 8 << 20, nextIdent: 1}
+}
+
+// SetIdentityTags disables identity tags (a debug-build feature, PLAN.md
+// 2.2) when off: containers get identity 0 and the check is skipped.
+func (it *Interp) SetIdentityTags(on bool) {
+	if !on {
+		it.nextIdent = 0
+	}
 }
 
 // SetStackLimit sets the interpreter's stack budget in bytes; each activation
@@ -51,7 +61,29 @@ func (it *Interp) SetStackLimit(bytes int) {
 
 // Run executes the entry function and returns the process exit status: the
 // program's result when it returns an integer, 0 otherwise, 134 on a trap.
+// freshGlobals is a new thread's instances of the thread_locals.
+func (it *Interp) freshGlobals() []Value {
+	gs := make([]Value, len(it.mod.Globals))
+	for i, g := range it.mod.Globals {
+		gs[i] = globalInit(g)
+	}
+	return gs
+}
+
+func globalInit(g *ir.Global) Value {
+	switch v := g.Init.(type) {
+	case int64:
+		return mkInt(g.Type.(*resolve.Prim).Name, uint64(v))
+	case float64:
+		return mkFloat(g.Type.(*resolve.Prim).Name, v)
+	case bool:
+		return Bool(v)
+	}
+	return zeroOf(g.Type)
+}
+
 func (it *Interp) Run() (status int) {
+	it.globals = it.freshGlobals()
 	entry := it.mod.Func(it.mod.Entry)
 	if entry == nil {
 		_, _ = fmt.Fprintf(it.errOut, "no entry function\n")
@@ -135,6 +167,21 @@ func (it *Interp) callNamed(name string, args []Value) []Value {
 	return it.call(f, args)
 }
 
+// frameSize is the activation's stack budget: the §4.1 size of every local
+// plus a fixed cost per value and per frame, so that stack traps are
+// differential with native builds for frames dominated by their locals.
+func frameSize(f *ir.Func) int {
+	n := 64 + 16*f.NumValues
+	for _, l := range f.Locals {
+		if l.Conv == ast.ConvView || l.Conv == ast.ConvEdit || l.Conv == ast.ConvOut {
+			n += layout.Of(&resolve.Access{Elem: l.Type}).Size // an access descriptor, not the referent
+			continue
+		}
+		n += layout.Of(l.Type).Size
+	}
+	return n
+}
+
 func (it *Interp) call(f *ir.Func, args []Value) []Value {
 	if f.Intrinsic {
 		name := intrinsicOf(f.Name)
@@ -143,7 +190,7 @@ func (it *Interp) call(f *ir.Func, args []Value) []Value {
 		}
 		panic(fmt.Sprintf("interp: no intrinsic for %s", f.Name))
 	}
-	frameBytes := 512 + 16*(len(f.Locals)+f.NumValues)
+	frameBytes := frameSize(f)
 	if it.stackUsed+frameBytes > it.stackBytes {
 		it.trap("stack", f.Pos)
 	}
@@ -206,7 +253,9 @@ func intrinsicOf(name string) string {
 func (it *Interp) resolve(fr *frame, p ir.Place) (ref, *seqRef) {
 	var cur ref
 	var seq *seqRef
-	if p.Local != nil {
+	if p.Global != nil {
+		cur = slotRef{&it.globals[p.Global.ID]}
+	} else if p.Local != nil {
 		cur = slotRef{&fr.locals[p.Local.ID]}
 		if a, ok := fr.locals[p.Local.ID].(*Access); ok && (p.Local.Conv == ast.ConvView || p.Local.Conv == ast.ConvEdit) {
 			cur, seq = a.Ref, a.Seq

@@ -12,6 +12,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+
+	"github.com/dshills/kern/compiler/backend/native"
 
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
@@ -29,18 +32,26 @@ func main() {
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: kern <check|format|emit-ir|explain-ownership|run> [files...]")
+		_, _ = fmt.Fprintln(stderr, "usage: kern <check|format|emit-ir|explain-ownership|run|build> [files...]")
 		return 2
 	}
 	cmd := args[0]
 	if cmd == "run" {
 		return runProgram(args[1:], stdout, stderr)
 	}
+	if cmd == "build" {
+		return buildCommand(args[1:], stdout, stderr)
+	}
 	human := false
+	cliTarget := ""
 	var files []string
 	for _, a := range args[1:] {
 		if a == "--human" {
 			human = true
+			continue
+		}
+		if strings.HasPrefix(a, "--target=") {
+			cliTarget = strings.TrimPrefix(a, "--target=")
 			continue
 		}
 		if len(a) > 1 && a[0] == '-' {
@@ -48,7 +59,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		files = append(files, a)
 	}
-	if cmd != "check" && cmd != "format" && cmd != "emit-ir" && cmd != "explain-ownership" {
+	if !phase2Commands[cmd] {
 		return fail(stdout, "API_UNKNOWN_COMMAND", "unknown command %q", cmd)
 	}
 	var req Request
@@ -75,6 +86,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(req.Files) == 0 {
 		return fail(stdout, "API_NO_FILES", "request names no files")
 	}
+	if cliTarget != "" && req.Target != "" && cliTarget != req.Target {
+		return fail(stdout, "API_TARGET_CONFLICT", "CLI --target %s differs from the request target %s", cliTarget, req.Target)
+	}
+	if cliTarget != "" {
+		req.Target = cliTarget
+	}
+	if req.Target == "" {
+		req.Target = native.HostTriple()
+	}
 	var srcs []*source.File
 	for _, name := range req.Files {
 		f, err := source.Load(name)
@@ -91,6 +111,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if cmd == "explain-ownership" {
 		return explainOwnership(req, srcs, stdout, stderr)
+	}
+	if fn, ok := analysisCommands[cmd]; ok {
+		return fn(req, srcs, stdout, stderr)
 	}
 	ds, err := checkHook(srcs)
 	if err != nil {
@@ -206,6 +229,8 @@ func FormatFiles(srcs []*source.File) (files []FormattedFile, ds []diag.Diagnost
 	}
 	return files, nil, nil
 }
+
+func errorf(format string, args ...any) error { return fmt.Errorf(format, args...) }
 
 // InternalError wraps a compiler panic.
 type InternalError struct{ Err error }

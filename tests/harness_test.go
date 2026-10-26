@@ -4,14 +4,20 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
+	"github.com/dshills/kern/compiler/backend/native"
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/interp"
@@ -23,7 +29,7 @@ import (
 
 // Phase is the current implementation phase; fixtures whose executable phase
 // is later are check-only.
-const Phase = 1
+const Phase = 2
 
 type header struct {
 	phase     int
@@ -32,6 +38,8 @@ type header struct {
 	rule      string
 	twin      string
 	testHooks bool
+	noRecord  bool   // trap-record: none — a custom handler writes no default record
+	cfile     string // c: the C counterpart of an FFI fixture (native-only execution)
 }
 
 func parseHeader(t *testing.T, f *source.File) header {
@@ -64,6 +72,10 @@ func parseHeader(t *testing.T, f *source.File) header {
 			h.twin = val
 		case "test-hooks":
 			h.testHooks = val == "true"
+		case "trap-record":
+			h.noRecord = val == "none"
+		case "c":
+			h.cfile = val
 		}
 	}
 	return h
@@ -82,7 +94,7 @@ func checkFiles(fs []*source.File) []diag.Diagnostic {
 func fixtures(t *testing.T) []string {
 	t.Helper()
 	var out []string
-	for _, dir := range []string{"positive", "negative", "adversarial", "trap", "run"} {
+	for _, dir := range []string{"positive", "negative", "adversarial", "trap", "run", "ffi"} {
 		m, _ := filepath.Glob(filepath.Join(dir, "*.kern"))
 		out = append(out, m...)
 		ds, _ := filepath.Glob(filepath.Join(dir, "*"))
@@ -314,6 +326,12 @@ func execute(t *testing.T, path string, files []*source.File, h header) {
 		}
 		return
 	}
+	if h.cfile != "" {
+		// FFI fixtures execute natively with their C counterpart; the
+		// interpreter bridge is deferred (docs/reports/phase-2.md)
+		nativeOnly(t, path, files, h)
+		return
+	}
 	var out, errb bytes.Buffer
 	it := interp.New(mod, path, &out, &errb)
 	it.TestHooks = h.testHooks
@@ -322,6 +340,12 @@ func execute(t *testing.T, path string, files []*source.File, h header) {
 	case "trap":
 		if status != 134 {
 			t.Fatalf("expected trap %s (status 134), got status %d, stderr %q", h.code, status, errb.String())
+		}
+		if h.noRecord {
+			if errb.Len() != 0 {
+				t.Fatalf("expected no trap record (custom handler), got %q", errb.String())
+			}
+			break
 		}
 		var rec struct {
 			Trap struct {
@@ -344,14 +368,141 @@ func execute(t *testing.T, path string, files []*source.File, h header) {
 			name = strings.TrimSuffix(filepath.Base(path), ".kern")
 		}
 		want, err := os.ReadFile(filepath.Join(filepath.Dir(path), name+".out"))
-		if err != nil {
-			if h.expect == "output" {
-				t.Fatalf("missing expected-output file for %s", name)
-			}
-			return
+		if err != nil && h.expect == "output" {
+			t.Fatalf("missing expected-output file for %s", name)
 		}
-		if !bytes.Equal(out.Bytes(), want) {
+		if err == nil && !bytes.Equal(out.Bytes(), want) {
 			t.Fatalf("output mismatch:\n--- want\n%s\n--- got\n%s", want, out.String())
 		}
+	}
+	if h.phase <= 2 {
+		// every executable fixture also runs natively, with or without an
+		// expected-output file
+		nativeRun(t, files, h, out.Bytes(), errb.Bytes(), status)
+	}
+}
+
+// nativeOnly runs an FFI fixture natively against its expected output.
+func nativeOnly(t *testing.T, path string, files []*source.File, h header) {
+	t.Helper()
+	if !native.Available() {
+		t.Skip("clang not available")
+	}
+	exe := filepath.Join(t.TempDir(), "prog")
+	cf := filepath.Join(filepath.Dir(path), h.cfile)
+	ds, err := native.Build(files, exe, native.Options{ExtraSources: []string{cf}})
+	if err != nil {
+		t.Fatalf("native build: %v", err)
+	}
+	if len(ds) > 0 {
+		t.Fatalf("native build diagnostics: %s", render(ds))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("native run: %v, stderr %q", err, errb.String())
+	}
+	name := h.code
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(path), ".kern")
+	}
+	want, err := os.ReadFile(filepath.Join(filepath.Dir(path), name+".out"))
+	if err != nil {
+		t.Fatalf("missing expected-output file for %s", name)
+	}
+	if !bytes.Equal(out.Bytes(), want) {
+		t.Fatalf("output mismatch:\n--- want\n%s\n--- got\n%s", want, out.String())
+	}
+}
+
+// nativeRun builds the fixture natively and compares the run with the
+// interpreter's: exit status, standard output byte for byte, and the trap
+// record's kind and span (PLAN.md 2.1 differential testing). Stack traps
+// compare by kind only: the native fault handler has no source span
+// (ADR-012). Without clang the native half is skipped and logged.
+func nativeRun(t *testing.T, files []*source.File, h header, wantOut, wantErr []byte, wantStatus int) {
+	t.Helper()
+	if !native.Available() {
+		t.Log("clang not available: native differential run skipped")
+		return
+	}
+	exe := filepath.Join(t.TempDir(), "prog")
+	ds, err := native.Build(files, exe, native.Options{TestHooks: h.testHooks})
+	if err != nil {
+		t.Fatalf("native build: %v", err)
+	}
+	if len(ds) > 0 {
+		t.Fatalf("native build diagnostics: %s", render(ds))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	status := 0
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("native run: %v", err)
+		}
+		ws, ok := ee.Sys().(syscall.WaitStatus)
+		if !ok {
+			t.Fatalf("native run: %v", err)
+		}
+		switch {
+		case ws.Signaled() && ws.Signal() == syscall.SIGABRT:
+			status = 134
+		case ws.Signaled():
+			t.Fatalf("native program died by signal %v, stderr %q", ws.Signal(), errb.String())
+		default:
+			status = ws.ExitStatus()
+		}
+	}
+	if status != wantStatus {
+		t.Fatalf("native status %d, interpreter status %d; native stderr %q", status, wantStatus, errb.String())
+	}
+	if !bytes.Equal(out.Bytes(), wantOut) {
+		t.Fatalf("native output differs from the interpreter's:\n--- interpreter\n%s\n--- native\n%s", wantOut, out.String())
+	}
+	compareTrapRecords(t, wantErr, errb.Bytes())
+}
+
+type trapRecord struct {
+	Trap struct {
+		Kind string `json:"kind"`
+		Span struct {
+			Start int `json:"start"`
+			End   int `json:"end"`
+		} `json:"span"`
+	} `json:"trap"`
+}
+
+func compareTrapRecords(t *testing.T, want, got []byte) {
+	t.Helper()
+	want = bytes.TrimSpace(want)
+	got = bytes.TrimSpace(got)
+	if len(want) == 0 || len(got) == 0 {
+		if len(want) != len(got) {
+			t.Fatalf("trap records differ:\n--- interpreter\n%s\n--- native\n%s", want, got)
+		}
+		return
+	}
+	var w, g trapRecord
+	if err := json.Unmarshal(want, &w); err != nil {
+		t.Fatalf("interpreter record is not JSON: %q", want)
+	}
+	if err := json.Unmarshal(got, &g); err != nil {
+		t.Fatalf("native record is not JSON: %q", got)
+	}
+	if w.Trap.Kind != g.Trap.Kind {
+		t.Fatalf("trap kind: interpreter %s, native %s", w.Trap.Kind, g.Trap.Kind)
+	}
+	if w.Trap.Kind != "stack" && w.Trap.Span != g.Trap.Span {
+		t.Fatalf("trap span: interpreter %v, native %v", w.Trap.Span, g.Trap.Span)
 	}
 }

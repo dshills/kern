@@ -3,6 +3,7 @@ package interp
 import (
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/resolve"
@@ -51,7 +52,10 @@ func init() {
 			return nil
 		},
 		"println": func(it *Interp, a []Value, _ callCtx) []Value { _, _ = fmt.Fprintln(it.out); return nil },
-		"zero":    func(it *Interp, a []Value, _ callCtx) []Value { return []Value{Unit{}} },
+		"now_ns": func(it *Interp, a []Value, _ callCtx) []Value {
+			return []Value{mkInt("u64", uint64(time.Now().UnixNano()))}
+		},
+		"zero": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{Unit{}} },
 		"clone": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{deepClone(it, acc(a[0]).Ref.get(), c.pos)}
 		},
@@ -168,7 +172,9 @@ func init() {
 		// Arena
 		"Arena.new": func(it *Interp, a []Value, _ callCtx) []Value {
 			ar := &Arena{Identity: it.nextIdent}
-			it.nextIdent++
+			if it.nextIdent != 0 {
+				it.nextIdent++
+			}
 			return []Value{ar}
 		},
 		"Arena.alloc": func(it *Interp, a []Value, _ callCtx) []Value {
@@ -244,7 +250,7 @@ func init() {
 		// threads (Phase 1: run eagerly on the calling thread)
 		"thread.scope": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Scope{}} },
 		"thread.spawn": func(it *Interp, a []Value, _ callCtx) []Value {
-			rets := it.callNamed(a[0].(FuncVal).Name, a[1:])
+			rets := it.spawned(a[0].(FuncVal).Name, a[1:])
 			t := &Thread{Done: true}
 			if len(rets) > 0 {
 				t.Result = rets[0]
@@ -255,7 +261,7 @@ func init() {
 		},
 		"scope.spawn": func(it *Interp, a []Value, _ callCtx) []Value {
 			sc := acc(a[1]).Ref.get().(*Scope)
-			rets := it.callNamed(a[0].(FuncVal).Name, a[2:])
+			rets := it.spawned(a[0].(FuncVal).Name, a[2:])
 			j := &Join{Done: true}
 			if len(rets) > 0 {
 				j.Result = rets[0]
@@ -469,6 +475,15 @@ func arenaRef(it *Interp, arena, h Value, edit bool, pos ast.Pos) Value {
 		it.trap("identity", pos)
 	}
 	return &Access{Ref: idxRef{elems: func() []Value { return ar.Slots }, i: idx}, Edit: edit}
+}
+
+// spawned runs a thread's function to completion on fresh thread_local
+// instances (the interpreter executes spawned threads eagerly).
+func (it *Interp) spawned(name string, args []Value) []Value {
+	saved := it.globals
+	it.globals = it.freshGlobals()
+	defer func() { it.globals = saved }()
+	return it.callNamed(name, args)
 }
 
 // allocOrTrap models allocation failure for convenience constructors: with

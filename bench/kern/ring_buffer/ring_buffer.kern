@@ -1,0 +1,134 @@
+// ring_buffer: a 1024-slot ring of u64 (inline array, head/tail/len, index
+// masked with 1023). Untimed prefill pushes the values 0..511. Then
+// N = 50,000,000 operations; operation i pushes 512+i and pops one value
+// (which is i).
+// ops = N; sampled operation: one push+pop pair.
+// checksum = FNV-style chain over popped values p:
+//   cs = (cs XOR p) * 0x100000001b3 (wrapping), starting from 0
+// (matches bench/c/ring_buffer).
+module ring_buffer_bench
+
+// Ring owns its slots inline; positions are indices, never pointers.
+struct Ring { slots: [1024]u64; head: usize; tail: usize; len: usize }
+
+impl Ring {
+    // push stores v at the tail; it returns false when the ring is full.
+    func push(edit self, v: u64) -> bool {
+        if self.len == 1024usize { return false }
+        self.slots[self.tail] = v
+        self.tail = (self.tail + 1usize) & 1023usize
+        self.len = self.len + 1usize
+        return true
+    }
+
+    // pop removes and returns the head value; None when the ring is empty.
+    func pop(edit self) -> Option[u64] {
+        if self.len == 0usize { return None }
+        v := self.slots[self.head]
+        self.head = (self.head + 1usize) & 1023usize
+        self.len = self.len - 1usize
+        return Some(v)
+    }
+}
+
+func main() -> i32 {
+    n := 50_000_000u64
+    var r: Ring = zero()
+    for i in 0u64..512u64 {
+        if !r.push(i) { return 1i32 }
+    }
+    s := new_sampler(n)
+    checksum := 0u64
+
+    start := now_ns()
+    for i in 0u64..n {
+        sampled := s.start()
+        if !r.push(512u64 + i) { return 1i32 }
+        match r.pop() {
+            Some(p) => {
+                s.stop(sampled)
+                checksum = wrapping_mul(checksum ^ p, 1_099_511_628_211u64)
+            }
+            None => return 1i32
+        }
+    }
+    ns := now_ns() - start
+
+    if r.len != 512usize { return 1i32 }
+    report(n, ns, s, checksum)
+    return 0i32
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark plumbing (bench/PROTOCOL.md), duplicated in every bench/kern
+// program so that each benchmark is one self-contained file: wrapping u64
+// arithmetic, the shared LCG, per-operation latency sampling and the report.
+// ---------------------------------------------------------------------------
+
+func lcg(x: u64) -> u64 {
+    return wrapping_add(wrapping_mul(x, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// Sampler times one operation every ops/4096 operations (operation i is
+// sampled iff i % stride == 0) and keeps at most 4096 latencies.
+struct Sampler { lat: Vec[u64]; stride: u64; until: u64; t0: u64 }
+
+func new_sampler(ops: u64) -> Sampler {
+    stride := ops / 4096u64
+    if stride == 0u64 { stride = 1u64 }
+    return Sampler { lat: Vec[u64].with_capacity(4096usize), stride: stride, until: 0u64, t0: 0u64 }
+}
+
+impl Sampler {
+    // start reports whether the next operation is sampled and, if so, reads the clock.
+    func start(edit self) -> bool {
+        if self.until > 0u64 || self.lat.len() >= 4096usize { return false }
+        self.t0 = now_ns()
+        return true
+    }
+    // stop records the latency of a sampled operation and counts down to the next one.
+    func stop(edit self, sampled: bool) {
+        if sampled {
+            self.lat.push(now_ns() - self.t0)
+            self.until = self.stride
+        }
+        if self.until > 0u64 { self.until = self.until - 1u64 }
+    }
+}
+
+// shell_sort orders the samples in place (at most 4096 values).
+func shell_sort(s: edit[Vec[u64]]) {
+    n := s.len()
+    gap := n / 2usize
+    while gap > 0usize {
+        for i in gap..n {
+            x := s.get(i)
+            j := i
+            while j >= gap && s.get(j - gap) > x {
+                prev := s.get(j - gap)
+                with e := s.at(j) { e = prev }
+                j = j - gap
+            }
+            with e := s.at(j) { e = x }
+        }
+        gap = gap / 2usize
+    }
+}
+
+// report prints the protocol line; p50 = sorted[n/2], p99 = sorted[n*99/100].
+func report(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    shell_sort(s.lat)
+    n := s.lat.len()
+    p50 := 0u64
+    p99 := 0u64
+    if n > 0usize {
+        p50 = s.lat.get(n / 2usize)
+        p99 = s.lat.get(n * 99usize / 100usize)
+    }
+    print_str("ops="); print_u64(ops)
+    print_str(" ns="); print_u64(ns)
+    print_str(" p50="); print_u64(p50)
+    print_str(" p99="); print_u64(p99)
+    print_str(" checksum="); print_u64(checksum)
+    println()
+}

@@ -8,7 +8,7 @@ file          = "module" ident newline , { import } , { decl } ;
 import        = "import" string_lit newline ;
 
 decl          = struct_decl | union_decl | interface_decl | impl_decl | func_decl
-              | extern_decl | const_decl | assert_decl ;
+              | extern_decl | const_decl | tls_decl | assert_decl ;
 assert_decl   = "unsafe" "assert" ( "Send" | "Share" | "Interior" ) "for" ident newline ;
 
 type_params   = "[" type_param { "," type_param } "]" ;
@@ -25,7 +25,9 @@ impl_decl     = "impl" [ type_params ] ( type_name "for" type | type ) "{" { imp
 impl_item     = func_decl | destructor_decl ;
 destructor_decl = "destructor" "(" "edit" "self" ")" block ;
 const_decl    = "const" ident ":" type "=" expr newline ;
-extern_decl   = "extern" string_lit "func" ident "(" [ params ] ")" [ "->" type ] newline ;
+extern_decl   = "extern" string_lit "func" ident "(" [ params ] ")" [ "->" type ] ( newline | block ) ;
+                                                  (* with a block: an exported function under its C symbol *)
+tls_decl      = "thread_local" ident ":" type "=" expr newline ;   (* Copy type; literal or zero() *)
 
 func_decl     = [ contract ] "func" ident [ type_params ] "(" [ params ] ")" [ "->" ret_type ]
                 [ "release" ident ] block ;

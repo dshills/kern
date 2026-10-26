@@ -1,0 +1,23 @@
+//! phase: 2
+//! expect: trap overflow
+//! trap-record: none
+//! twin: handler_overflow_ok
+// A conforming custom trap handler runs once on an overflow trap: it prints
+// the kind and span with the runtime's unbuffered output (ADR-012), then the
+// process dies by SIGABRT with no default record.
+module t
+func report(info: view[TrapInfo]) {
+    match info.kind {
+        overflow => print_str("handler: overflow")
+        _ => print_str("handler: other")
+    }
+    println()
+    print_u64(u64(info.start))
+    println()
+}
+func main() -> i32 {
+    prev := trap.set_handler(report)
+    x := 255u8
+    y := x + 1u8
+    return i32(y)
+}
