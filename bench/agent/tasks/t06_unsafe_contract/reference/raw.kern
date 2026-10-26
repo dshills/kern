@@ -1,0 +1,34 @@
+module r
+contract { requires "p addresses n writable u64 slots owned by the caller" }
+func store_all(p: RawPtr[u64], n: usize) {
+    i := 0usize
+    unsafe {
+        while i < n { ptr_store(ptr_offset(p, isize(i)), u64(i) + 1u64); i = i + 1usize }
+    }
+}
+contract { requires "p addresses n initialized u64 slots owned by the caller" }
+func sum_all(p: RawPtr[u64], n: usize) -> u64 {
+    t := 0u64
+    i := 0usize
+    unsafe {
+        while i < n { t = t + ptr_load(ptr_offset(p, isize(i))); i = i + 1usize }
+    }
+    return t
+}
+contract { requires "the allocator obligations of §6 hold" }
+func main() -> i32 {
+    a := SystemAllocator.new()
+    unsafe {
+        match a.alloc(40usize, 8usize) {
+            Ok(raw) => {
+                p := ptr_cast[u64, u8](raw)
+                store_all(p, 5usize)
+                print_u64(sum_all(p, 5usize))
+                println()
+                a.free(raw, 40usize, 8usize)
+            }
+            Err(e) => { print_str("alloc failed"); println() }
+        }
+    }
+    return 0i32
+}

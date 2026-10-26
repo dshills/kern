@@ -1,0 +1,5 @@
+{
+ "main": "raw.kern",
+ "expected_output": "15\n",
+ "must_check_clean": true
+}

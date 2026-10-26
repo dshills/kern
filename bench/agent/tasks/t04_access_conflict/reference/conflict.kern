@@ -1,0 +1,13 @@
+module c
+func total(xs: view[[]u64]) -> u64 { t := 0u64; for x in xs { t = t + x }; return t }
+func main() -> i32 {
+    v := Vec[u64].new()
+    v.push(10u64)
+    v.push(20u64)
+    print_u64(total(v.as_view()))
+    println()
+    v.push(0u64)
+    print_u64(total(v.as_view()))
+    println()
+    return 0i32
+}

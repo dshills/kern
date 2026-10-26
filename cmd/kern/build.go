@@ -37,6 +37,7 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 	opts.TestHooks = bo.TestHooks
 	opts.Freestanding = bo.Env == "freestanding"
 	opts.NoStackCheck = bo.NoStackCheck
+	opts.ElideChecks = bo.ElideChecks
 	if out == "" {
 		return fail(stdout, "CLI_INVALID_FLAGS", "build requires -o <out>")
 	}

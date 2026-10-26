@@ -1,0 +1,16 @@
+module g
+func square(x: u64) -> Box[u64] { return Box.new(x * x) }
+func main() -> i32 {
+    total := 0u64
+    i := 0u64
+    while i < 100u64 {
+        v := Vec[u64].new()
+        v.push(i)
+        b := square(1u64)
+        for x in v.as_view() { total = total + x * copy(b.get()) }
+        i = i + 1u64
+    }
+    print_u64(total)
+    println()
+    return 0i32
+}

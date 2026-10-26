@@ -1,0 +1,5 @@
+{
+ "main": "packet.kern",
+ "expected_output": "7\n4660\nbad\nshort\n",
+ "must_check_clean": true
+}

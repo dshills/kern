@@ -1,0 +1,5 @@
+{
+ "main": "conflict.kern",
+ "expected_output": "30\n30\n",
+ "must_check_clean": true
+}

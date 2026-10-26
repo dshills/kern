@@ -1,0 +1,35 @@
+module ring
+struct Ring { slots: [4]u64; head: usize; len: usize }
+impl Ring {
+    func new() -> Ring { return Ring { slots: zero(), head: 0usize, len: 0usize } }
+    func push(edit self, v: u64) -> bool {
+        // TODO
+        return false
+    }
+    func pop(edit self) -> Option[u64] {
+        // TODO
+        return None
+    }
+}
+func show(o: Option[u64]) {
+    match o {
+        Some(v) => { print_u64(v); println() }
+        None => { print_str("empty"); println() }
+    }
+}
+func main() -> i32 {
+    r := Ring.new()
+    print_bool(r.push(1u64)); println()
+    print_bool(r.push(2u64)); println()
+    print_bool(r.push(3u64)); println()
+    print_bool(r.push(4u64)); println()
+    print_bool(r.push(9u64)); println()
+    show(r.pop())
+    show(r.pop())
+    print_bool(r.push(5u64)); println()
+    show(r.pop())
+    show(r.pop())
+    show(r.pop())
+    show(r.pop())
+    return 0i32
+}

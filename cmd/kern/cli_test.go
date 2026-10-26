@@ -329,3 +329,79 @@ func TestPhase2Commands(t *testing.T) {
 		}
 	}
 }
+
+// TestStructuredEdit covers §16 application semantics: rename expansion of
+// a local, a function and a type, insert placement relative to replacements,
+// the formatted flag, and the precedence of EDIT_INVALID_SPAN over
+// EDIT_OVERLAP on the lowest failing op index.
+func TestStructuredEdit(t *testing.T) {
+	dir := t.TempDir()
+	src := "module m\nstruct Cell { v: u64 }\nfunc twice(c: Cell) -> u64 { return c.v + c.v }\nfunc main() -> i32 {\n    total := 1u64\n    total = twice(Cell { v: total })\n    return i32(total)\n}\n"
+	path := filepath.Join(dir, "m.kern")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	apply := func(ops string) (int, diag.Response) {
+		req := fmt.Sprintf(`{"schema_version":"0.2","command":"apply-structured-edit","files":[%q],"edit":{"ops":[%s]}}`, path, ops)
+		code, resp, _ := runWith(t, []string{"apply-structured-edit"}, req)
+		return code, resp
+	}
+	span := func(s string) string {
+		i := strings.Index(src, s)
+		return fmt.Sprintf(`{"start":%d,"end":%d}`, i, i+len(s))
+	}
+	// rename the local `total` (declaration at its first occurrence), the function and the type in one request
+	code, resp := apply(fmt.Sprintf(`{"op":"rename_symbol","file":%q,"span":%s,"new_name":"sum"},{"op":"rename_symbol","file":%q,"span":%s,"new_name":"double"},{"op":"rename_symbol","file":%q,"span":%s,"new_name":"Box2"}`, path, span("total"), path, span("twice"), path, span("Cell")))
+	if code != 0 || !resp.OK {
+		t.Fatalf("rename: exit %d resp %+v", code, resp)
+	}
+	res := resp.Result.(map[string]any)
+	files := res["files"].([]any)
+	got := files[0].(map[string]any)["source"].(string)
+	want := "module m\nstruct Box2 { v: u64 }\nfunc double(c: Box2) -> u64 { return c.v + c.v }\nfunc main() -> i32 {\n    sum := 1u64\n    sum = double(Box2 { v: sum })\n    return i32(sum)\n}\n"
+	if got != want {
+		t.Fatalf("rename result:\n%s\n--- want\n%s", got, want)
+	}
+	if res["applied"].(float64) != 3 || len(resp.Diagnostics) != 0 || files[0].(map[string]any)["formatted"] != true {
+		t.Fatalf("rename metadata: %+v diags %v", res, resp.Diagnostics)
+	}
+	// insert placement: an insert at k goes before a replacement starting at k and after one ending at k
+	k := strings.Index(src, "1u64")
+	code, resp = apply(fmt.Sprintf(`{"op":"replace_span","file":%q,"span":{"start":%d,"end":%d},"text":"2u64"},{"op":"insert","file":%q,"at":%d,"text":"/*a*/"},{"op":"insert","file":%q,"at":%d,"text":"/*b*/"},{"op":"delete_span","file":%q,"span":{"start":%d,"end":%d}}`, path, k, k+4, path, k, path, k, path, k-3, k))
+	if code != 0 || !resp.OK {
+		t.Fatalf("insert placement: exit %d resp %+v", code, resp)
+	}
+	got = resp.Result.(map[string]any)["files"].([]any)[0].(map[string]any)["source"].(string)
+	if !strings.Contains(got, "total /*a*//*b*/2u64") {
+		t.Fatalf("insert placement result: %q", got)
+	}
+	// precedence: op 2 is invalid and op 1 overlaps op 0; the invalid op has the higher index, so overlap at index 0 wins
+	code, resp = apply(fmt.Sprintf(`{"op":"replace_span","file":%q,"span":{"start":0,"end":10},"text":"x"},{"op":"delete_span","file":%q,"span":{"start":5,"end":12}},{"op":"insert","file":%q,"at":9999,"text":"y"}`, path, path, path))
+	if code != 2 || resp.Diagnostics[0].Code != "EDIT_OVERLAP" || *resp.Diagnostics[0].OpIndex != 0 {
+		t.Fatalf("overlap precedence: exit %d resp %+v", code, resp)
+	}
+	// the same op both invalid and overlapping: EDIT_INVALID_SPAN wins
+	code, resp = apply(fmt.Sprintf(`{"op":"replace_span","file":%q,"span":{"start":3,"end":3},"text":"x"},{"op":"delete_span","file":%q,"span":{"start":0,"end":12}}`, path, path))
+	if code != 2 || resp.Diagnostics[0].Code != "EDIT_INVALID_SPAN" || *resp.Diagnostics[0].OpIndex != 0 {
+		t.Fatalf("invalid precedence: exit %d resp %+v", code, resp)
+	}
+	// diagnostics of the subsequent check are returned with ok=true
+	code, resp = apply(fmt.Sprintf(`{"op":"replace_span","file":%q,"span":%s,"text":"1u8"}`, path, span("1u64")))
+	if code != 0 || !resp.OK || len(resp.Diagnostics) == 0 || resp.Diagnostics[0].Code != "TYPE_MISMATCH" {
+		t.Fatalf("check after edit: exit %d resp %+v", code, resp)
+	}
+	// show-effects
+	code, resp, _ = runWith(t, []string{"show-effects", path}, "")
+	if code != 0 || !resp.OK {
+		t.Fatalf("show-effects: exit %d resp %+v", code, resp)
+	}
+	fns := resp.Result.(map[string]any)["functions"].([]any)
+	seen := map[string]map[string]any{}
+	for _, f := range fns {
+		fm := f.(map[string]any)
+		seen[fm["name"].(string)] = fm
+	}
+	if seen["m.twice"]["traps"] != true || seen["m.twice"]["allocates"] != false || seen["m.twice"]["label"] != "proven" {
+		t.Fatalf("effects of twice: %v", seen["m.twice"])
+	}
+}

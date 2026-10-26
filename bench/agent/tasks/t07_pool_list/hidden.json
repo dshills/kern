@@ -1,0 +1,5 @@
+{
+ "main": "list.kern",
+ "expected_output": "3\n60\n",
+ "must_check_clean": true
+}

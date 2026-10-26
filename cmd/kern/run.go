@@ -21,9 +21,11 @@ type BuildOptions struct {
 	// NoStackCheck drops the freestanding prologue stack check (an unsafe
 	// build option: stack overflow becomes a trusted-boundary obligation).
 	NoStackCheck bool
-	Env          string // hosted | freestanding
-	TestHooks    bool
-	StackBytes   int
+	// ElideChecks drops runtime checks: measurement only (PLAN.md 4.4).
+	ElideChecks bool
+	Env         string // hosted | freestanding
+	TestHooks   bool
+	StackBytes  int
 }
 
 // Build resolves, checks, lowers and validates a program. Diagnostics are
@@ -60,6 +62,8 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 			opts.TestHooks = true
 		case a == "--unsafe-no-stack-check":
 			opts.NoStackCheck = true
+		case a == "--unsafe-elide-checks":
+			opts.ElideChecks = true
 		case strings.HasPrefix(a, "--opt="), strings.HasPrefix(a, "--env="), strings.HasPrefix(a, "--stack-bytes="):
 			k, v, _ := strings.Cut(a, "=")
 			switch k {

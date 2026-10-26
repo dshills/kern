@@ -151,14 +151,17 @@ type Program struct {
 
 // Info records per-node resolution results.
 type Info struct {
-	Types    map[ast.Expr]Type      // type of every typed expression
-	Idents   map[*ast.Ident]*Symbol // resolved identifiers
-	Calls    map[*ast.CallExpr]*CallInfo
-	Funcs    map[*ast.FuncDecl]*FuncDecl
-	Decls    map[any]*Symbol   // declaring nodes (ShortDecl, VarDecl, *ParamDecl, *ast.Destructor, name positions) -> symbol
-	Consts   map[ast.Expr]bool // expressions that are compile-time constants
-	Fields   map[*ast.FieldExpr]*FieldDecl
-	Variants map[*ast.Arm]*VariantDecl
+	Types map[ast.Expr]Type // type of every typed expression
+	// ImportedConsts records `mod.Name` field expressions that denote an
+	// imported constant, for the lowering.
+	ImportedConsts map[*ast.FieldExpr]*ConstDecl
+	Idents         map[*ast.Ident]*Symbol // resolved identifiers
+	Calls          map[*ast.CallExpr]*CallInfo
+	Funcs          map[*ast.FuncDecl]*FuncDecl
+	Decls          map[any]*Symbol   // declaring nodes (ShortDecl, VarDecl, *ParamDecl, *ast.Destructor, name positions) -> symbol
+	Consts         map[ast.Expr]bool // expressions that are compile-time constants
+	Fields         map[*ast.FieldExpr]*FieldDecl
+	Variants       map[*ast.Arm]*VariantDecl
 	// Drops records, per exit point, the symbols whose scope ends there in
 	// destruction order: access bindings (AccessEnd, with release) and
 	// owned locals/parameters that are initialized at that point (Drop).
@@ -179,7 +182,7 @@ type Info struct {
 func newInfo() *Info {
 	return &Info{
 		Types: map[ast.Expr]Type{}, Idents: map[*ast.Ident]*Symbol{}, Calls: map[*ast.CallExpr]*CallInfo{},
-		Funcs: map[*ast.FuncDecl]*FuncDecl{}, Decls: map[any]*Symbol{}, Consts: map[ast.Expr]bool{},
+		Funcs: map[*ast.FuncDecl]*FuncDecl{}, Decls: map[any]*Symbol{}, Consts: map[ast.Expr]bool{}, ImportedConsts: map[*ast.FieldExpr]*ConstDecl{},
 		Fields: map[*ast.FieldExpr]*FieldDecl{}, Variants: map[*ast.Arm]*VariantDecl{},
 		Drops: map[any][]*Symbol{}, OutFieldDrops: map[any]map[*Symbol][]string{}, OwnedSubject: map[any]bool{},
 	}

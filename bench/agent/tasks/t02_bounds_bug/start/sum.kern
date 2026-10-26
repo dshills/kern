@@ -1,0 +1,22 @@
+module s
+func largest(xs: view[[]u64]) -> u64 {
+    best := 0u64
+    i := 0usize
+    while i <= len(xs) {
+        if xs[i] > best { best = xs[i] }
+        i = i + 1usize
+    }
+    return best
+}
+func main() -> i32 {
+    v := Vec[u64].new()
+    i := 0u64
+    while i < 10u64 { v.push(i); i = i + 1u64 }
+    total := 0u64
+    for x in v.as_view() { total = total + x }
+    print_u64(total)
+    println()
+    print_u64(largest(v.as_view()))
+    println()
+    return 0i32
+}

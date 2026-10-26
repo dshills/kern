@@ -19,6 +19,7 @@ import (
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/format"
+	"github.com/dshills/kern/compiler/incremental"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
@@ -44,6 +45,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	human := false
 	cliTarget := ""
+	cacheDir := ""
+	cfg := incremental.Config{Opt: "debug", Env: "hosted"}
 	var files []string
 	for _, a := range args[1:] {
 		if a == "--human" {
@@ -52,6 +55,22 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		if strings.HasPrefix(a, "--target=") {
 			cliTarget = strings.TrimPrefix(a, "--target=")
+			continue
+		}
+		if strings.HasPrefix(a, "--cache=") {
+			cacheDir = strings.TrimPrefix(a, "--cache=")
+			continue
+		}
+		if strings.HasPrefix(a, "--opt=") || strings.HasPrefix(a, "--env=") {
+			k, v, _ := strings.Cut(a, "=")
+			if (k == "--opt" && v != "debug" && v != "release") || (k == "--env" && v != "hosted" && v != "freestanding") {
+				return fail(stdout, "CLI_INVALID_FLAGS", "%s must be %s", k, map[string]string{"--opt": "debug or release", "--env": "hosted or freestanding"}[k])
+			}
+			if k == "--opt" {
+				cfg.Opt = v
+			} else {
+				cfg.Env = v
+			}
 			continue
 		}
 		if len(a) > 1 && a[0] == '-' {
@@ -115,7 +134,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if fn, ok := analysisCommands[cmd]; ok {
 		return fn(req, srcs, stdout, stderr)
 	}
-	ds, err := checkHook(srcs)
+	var ds []diag.Diagnostic
+	var err error
+	if cacheDir != "" {
+		// incremental checking through the per-module cache (PLAN.md 4.1)
+		cfg.Target = req.Target
+		ds, _, err = incremental.Check(cacheDir, srcs, cfg)
+		if err != nil {
+			err = &InternalError{Err: err}
+		}
+	} else {
+		ds, err = checkHook(srcs)
+	}
 	if err != nil {
 		if code := internal(req, err, stdout, stderr); code != 0 {
 			return code

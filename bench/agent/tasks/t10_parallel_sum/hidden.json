@@ -1,0 +1,5 @@
+{
+ "main": "par.kern",
+ "expected_output": "499500\n",
+ "must_check_clean": true
+}

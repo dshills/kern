@@ -1,0 +1,33 @@
+module p
+struct Header { length: u16; seq: u32 }
+func parse(buf: view[[]u8]) -> Option[Header] {
+    if len(buf) < 8usize { return None }
+    magic := u16(buf[0usize]) << 8u32 | u16(buf[1usize])
+    if magic != 51966u16 { return None }
+    length := u16(buf[2usize]) << 8u32 | u16(buf[3usize])
+    seq := u32(buf[4usize]) << 24u32 | u32(buf[5usize]) << 16u32 | u32(buf[6usize]) << 8u32 | u32(buf[7usize])
+    return Some(Header { length: length, seq: seq })
+}
+func show(o: Option[Header]) {
+    match o {
+        Some(h) => { print_u64(u64(h.length)); println(); print_u64(u64(h.seq)); println() }
+        None => { }
+    }
+}
+func main() -> i32 {
+    var good: [10]u8 = zero()
+    good[0] = 202u8
+    good[1] = 254u8
+    good[2] = 0u8
+    good[3] = 7u8
+    good[4] = 0u8
+    good[5] = 0u8
+    good[6] = 18u8
+    good[7] = 52u8
+    show(parse(good[0usize:10usize]))
+    var bad: [8]u8 = zero()
+    bad[0] = 1u8
+    if parse(bad[0usize:8usize]) == None { print_str("bad"); println() }
+    if parse(good[0usize:5usize]) == None { print_str("short"); println() }
+    return 0i32
+}

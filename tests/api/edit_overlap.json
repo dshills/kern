@@ -1,0 +1,1 @@
+{"schema_version": "0.2", "command": "apply-structured-edit", "files": ["../../tests/run/hello.kern"], "edit": {"ops": [{"op": "replace_span", "file": "../../tests/run/hello.kern", "span": {"start": 40, "end": 60}, "text": "x"}, {"op": "delete_span", "file": "../../tests/run/hello.kern", "span": {"start": 50, "end": 70}}]}}

@@ -1,0 +1,25 @@
+module l
+struct Node { value: u64; next: Option[PoolId[Node]] }
+struct List { nodes: Pool[Node]; head: Option[PoolId[Node]]; count: u64 }
+impl List {
+    func new() -> List { return List { nodes: Pool[Node].new(), head: None, count: 0u64 } }
+    func push_front(edit self, v: u64) -> bool {
+        // TODO: allocate a node in self.nodes whose next is the old head; return false if allocation fails
+        return false
+    }
+    func sum(view self) -> u64 {
+        // TODO: walk from head following next
+        return 0u64
+    }
+}
+func main() -> i32 {
+    l := List.new()
+    ok1 := l.push_front(10u64)
+    ok2 := l.push_front(20u64)
+    ok3 := l.push_front(30u64)
+    print_u64(l.count)
+    println()
+    print_u64(l.sum())
+    println()
+    return 0i32
+}

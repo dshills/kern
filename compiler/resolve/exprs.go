@@ -404,6 +404,16 @@ func (c *fnCtx) fieldWant1(sc *scope, x *ast.FieldExpr, want Type) Type {
 				}
 				return f.Type
 			}
+			if k, ok := mod.Consts[x.Name]; ok {
+				// an imported constant: a value of its declared type
+				c.r.prog.Info.Idents[id] = &Symbol{Kind: SymModule, Name: id.Name, Module: mod}
+				c.r.prog.Info.Consts[x] = true
+				c.r.prog.Info.ImportedConsts[x] = k
+				if !isExported(x.Name) && mod.Name != "core" {
+					c.errorf("NAME_PRIVATE", x.Pos, "%s.%s is private to module %s", id.Name, x.Name, mod.Name)
+				}
+				return k.Type
+			}
 			c.errorf("NAME_UNRESOLVED", x.Pos, "module %s has no %s", id.Name, x.Name)
 			return &Bad{}
 		}
@@ -431,6 +441,9 @@ func (c *fnCtx) fieldWant1(sc *scope, x *ast.FieldExpr, want Type) Type {
 }
 
 func isExported(name string) bool { return len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' }
+
+// IsExported reports whether a declaration name is exported (capitalized).
+func IsExported(name string) bool { return isExported(name) }
 
 // typeExprOf recognises an expression that denotes a type: `Name` or
 // `Name[Args]` where Name is a struct or union, or pkg.Name. It returns the

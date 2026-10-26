@@ -1,0 +1,19 @@
+module st
+struct Record { bytes: [4096]u8; tag: u64 }
+func summarize(r: Record) -> u64 {
+    t := 0u64
+    for b in r.bytes { t = t + u64(b) }
+    return t
+}
+func tag_of(r: Record) -> u64 { return r.tag }
+func main() -> i32 {
+    var r: Record = zero()
+    i := 0usize
+    while i < 4096usize { r.bytes[i] = 1u8; i = i + 1usize }
+    r.tag = 8u64
+    print_u64(summarize(r))
+    println()
+    print_u64(tag_of(r))
+    println()
+    return 0i32
+}

@@ -40,6 +40,9 @@ type Options struct {
 	// TSan instruments the program and runtime with ThreadSanitizer
 	// (concurrency fixtures, PLAN.md 3.3).
 	TSan bool
+	// ElideChecks is the measurement-only option that drops runtime checks
+	// (PLAN.md 4.4); it is not a build configuration of the language.
+	ElideChecks bool
 	// NoStackCheck is the unsafe build option that drops the freestanding
 	// prologue check (stack overflow becomes a trusted-boundary obligation).
 	NoStackCheck bool
@@ -110,7 +113,7 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 			triple = FreestandingTriple
 		}
 	}
-	text, errs := llvm.EmitWith(mod, llvm.Options{Triple: triple, Freestanding: opts.Freestanding, StackCheck: opts.Freestanding && !opts.NoStackCheck, TSan: opts.TSan})
+	text, errs := llvm.EmitWith(mod, llvm.Options{Triple: triple, Freestanding: opts.Freestanding, StackCheck: opts.Freestanding && !opts.NoStackCheck, TSan: opts.TSan, ElideChecks: opts.ElideChecks})
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("backend: %v", errs[0])
 	}

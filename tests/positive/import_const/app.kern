@@ -1,0 +1,11 @@
+//! phase: 3
+//! expect: output import_const
+// Imported constants are read through the module path and typed by their
+// declaration; the lowering inlines the constant's value.
+module app
+import "lib"
+func main() -> i32 {
+    print_u64(lib.Scale * 2u64 + lib.Offset)
+    println()
+    return 0i32
+}

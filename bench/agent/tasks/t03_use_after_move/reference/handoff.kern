@@ -1,0 +1,16 @@
+module h
+func consume(v: own Vec[u64]) -> u64 { return u64(v.len()) }
+func main() -> i32 {
+    v := Vec[u64].new()
+    v.push(1u64)
+    v.push(2u64)
+    v.push(3u64)
+    total := 0u64
+    for x in v.as_view() { total = total + x }
+    n := consume(v)
+    print_u64(n)
+    println()
+    print_u64(total)
+    println()
+    return 0i32
+}

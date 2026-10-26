@@ -1,0 +1,12 @@
+module g
+func main() -> i32 {
+    total := 0u64
+    i := 0u64
+    while i < 100u64 {
+        total = total + i
+        i = i + 1u64
+    }
+    print_u64(total)
+    println()
+    return 0i32
+}

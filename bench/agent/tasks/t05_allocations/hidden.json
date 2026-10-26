@@ -1,0 +1,6 @@
+{
+ "main": "grow.kern",
+ "expected_output": "4950\n",
+ "must_check_clean": true,
+ "max_allocations": 2
+}

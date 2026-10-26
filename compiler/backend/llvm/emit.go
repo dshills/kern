@@ -28,6 +28,10 @@ type Options struct {
 	StackCheck bool
 	// TSan marks every function for ThreadSanitizer instrumentation.
 	TSan bool
+	// ElideChecks drops every bounds, overflow and conversion check: a
+	// measurement-only option (PLAN.md 4.4, the intrinsic-overhead
+	// separation), never a build configuration of the language.
+	ElideChecks bool
 }
 
 // EmitWith renders a module for the given options.
@@ -698,8 +702,14 @@ func (fe *fnEmit) instr(in ir.Instr) {
 	case *ir.Conv:
 		fe.conv(i)
 	case *ir.CheckOverflow:
+		if e.opts.ElideChecks {
+			return
+		}
 		fe.checkOverflow(i)
 	case *ir.CheckBounds:
+		if e.opts.ElideChecks {
+			return
+		}
 		if i.Index != nil {
 			c := fe.next("t")
 			fe.emit("%s = icmp uge i64 %s, %s", c, fe.v(i.Index), fe.v(i.Len))
@@ -714,6 +724,9 @@ func (fe *fnEmit) instr(in ir.Instr) {
 		fe.emit("%s = or i1 %s, %s", c, c1, c2)
 		fe.check(c, "bounds", i.Pos)
 	case *ir.CheckConv:
+		if e.opts.ElideChecks {
+			return
+		}
 		fe.checkConv(i)
 	case *ir.Len:
 		p := fe.place(i.Place)

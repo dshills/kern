@@ -1,0 +1,5 @@
+{
+ "main": "ring.kern",
+ "expected_output": "true\ntrue\ntrue\ntrue\nfalse\n1\n2\ntrue\n3\n4\n5\nempty\n",
+ "must_check_clean": true
+}

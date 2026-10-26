@@ -1,0 +1,22 @@
+module par
+func sum(xs: view[[]u64]) -> u64 { t := 0u64; for x in xs { t = t + x }; return t }
+func parallel_total(v: view[Vec[u64]]) -> Result[u64, SpawnErr] {
+    with xs := v.as_view() {
+        half := len(xs) / 2usize
+        with s := thread.scope() {
+            j1 := s.spawn(sum, xs[0usize:half])?
+            j2 := s.spawn(sum, xs[half:len(xs)])?
+            return Ok(j1.get() + j2.get())
+        }
+    }
+}
+func main() -> i32 {
+    v := Vec[u64].new()
+    i := 0u64
+    while i < 1000u64 { v.push(i); i = i + 1u64 }
+    match parallel_total(v) {
+        Ok(t) => { print_u64(t); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}

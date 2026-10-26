@@ -1,0 +1,3 @@
+module lib
+const Scale: u64 = 21u64
+const Offset: u64 = 0

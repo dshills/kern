@@ -120,6 +120,9 @@ func (fl *fnLower) expr(e ast.Expr, want resolve.Type) operand {
 	case *ast.Ident:
 		return fl.ident(x)
 	case *ast.FieldExpr:
+		if k := fl.l.info.ImportedConsts[x]; k != nil {
+			return fl.expr(k.Value, t) // an imported constant
+		}
 		return fl.field(x)
 	case *ast.IndexExpr:
 		return fl.index(x)

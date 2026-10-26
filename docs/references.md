@@ -92,6 +92,13 @@ confidence it is omitted and the URL stands alone.
 
 ## Secondary (spec §14)
 
+### Go (syntax and tooling baseline)
+
+- **[go-spec]** *The Go Programming Language Specification.*
+  The Go Authors. Online, tracks the current Go release.
+  https://go.dev/ref/spec .
+  Syntax conventions, packages, the `go` tool as the single workflow (the tooling model kern's machine API follows).
+
 ### Zig
 
 - **[zig-ref]** *Zig Language Reference.*

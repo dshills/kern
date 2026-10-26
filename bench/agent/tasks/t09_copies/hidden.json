@@ -1,0 +1,6 @@
+{
+ "main": "stats.kern",
+ "expected_output": "4096\n8\n",
+ "must_check_clean": true,
+ "max_copies": 1
+}
