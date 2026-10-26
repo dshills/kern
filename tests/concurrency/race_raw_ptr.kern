@@ -1,0 +1,42 @@
+//! phase: 3
+//! expect: output race_raw_ptr
+//! tsan: race
+// The deliberate-race twin: two threads store through the same raw pointer
+// without synchronization. Safe kern cannot express this; the raw pointer
+// (Copy, Send) is the unsafe hole, and ThreadSanitizer must report it.
+module cc
+// a raw pointer is not Send; the assertion is the audited unsafe boundary
+struct Slot { p: RawPtr[u64] }
+unsafe assert Send for Slot
+contract { requires "s.p addresses a live u64; the data race is intentional" }
+func hammer(s: Slot, n: u64) -> u64 {
+    i := 0u64
+    unsafe { while i < n { ptr_store(s.p, i); i = i + 1u64 } }
+    return n
+}
+func run(p: RawPtr[u64]) -> Result[u64, SpawnErr] {
+    with s := thread.scope() {
+        j1 := s.spawn(hammer, Slot { p: p }, 100000u64)?
+        j2 := s.spawn(hammer, Slot { p: p }, 100000u64)?
+        return Ok(j1.get() + j2.get())
+    }
+}
+contract { requires "the allocator obligations of §6 hold" }
+func main() -> i32 {
+    alloc := SystemAllocator.new()
+    unsafe {
+        match alloc.alloc(8usize, 8usize) {
+            Ok(raw) => {
+                p := ptr_cast[u64, u8](raw)
+                ptr_store(p, 0u64)
+                match run(p) {
+                    Ok(n) => { print_u64(n); println() }
+                    Err(e) => { print_str("spawn failed"); println() }
+                }
+                alloc.free(raw, 8usize, 8usize)
+            }
+            Err(e) => { print_str("alloc failed"); println() }
+        }
+    }
+    return 0i32
+}

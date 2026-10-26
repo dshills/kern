@@ -1,0 +1,12 @@
+//! phase: 3
+//! expect: output stack
+//! env: freestanding
+// Unbounded recursion: natively the compiler-inserted prologue check traps
+// with kind stack before the frame is used; the interpreter's budget traps
+// the same way.
+module fs
+func down(n: u64) -> u64 { return down(n + 1u64) + 1u64 }
+func main() -> i32 {
+    x := down(0u64)
+    return 0i32
+}

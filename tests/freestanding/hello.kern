@@ -1,0 +1,12 @@
+//! phase: 3
+//! expect: output hello
+//! env: freestanding
+// Console output in freestanding mode, then the halt line with main's result.
+module fs
+func main() -> i32 {
+    print_str("hello from bare metal")
+    println()
+    print_u64(42u64)
+    println()
+    return 7i32
+}

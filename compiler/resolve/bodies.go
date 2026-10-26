@@ -218,6 +218,21 @@ func (c *fnCtx) ret(sc *scope, s *ast.Return) {
 		return
 	}
 	if len(ret) == 1 {
+		if a, ok := ret[0].(*Access); ok {
+			// returning a place as an access (Rule 5.3.4 elision): the
+			// place's type must be the access's element type
+			t := c.expr(sc, s.Value, nil)
+			if _, isAcc := t.(*Access); !isAcc && c.isPlace(sc, s.Value) && Identical(valueOf(t), accessElem(a)) {
+				if a.Edit && !c.placeIsMutable(sc, s.Value) {
+					c.errorf("ACC_PERMISSION_ESCALATION", s.Value.Span(), "returning an edit of a read-only place")
+				}
+				return
+			}
+			if !c.assignable(t, ret[0], s.Value) {
+				c.errorf("TYPE_MISMATCH", s.Value.Span(), "expected %s, found %s", typeString(ret[0]), typeString(t))
+			}
+			return
+		}
 		c.exprExpect(sc, s.Value, ret[0])
 		return
 	}
@@ -430,20 +445,57 @@ func (c *fnCtx) forStmt(sc *scope, s *ast.For) {
 
 // placeIsMutable reports whether a place is reachable for writing: rooted in
 // an owned local, an own/out parameter, or an edit binding.
+// projectionBase returns the access type of the call projection a place
+// path is rooted at (e.g. `p.get().words`), or nil.
+func (c *fnCtx) projectionBase(e ast.Expr) *Access {
+	switch x := e.(type) {
+	case *ast.FieldExpr:
+		return c.projectionBase(x.X)
+	case *ast.IndexExpr:
+		return c.projectionBase(x.X)
+	case *ast.SliceExpr:
+		return c.projectionBase(x.X)
+	case *ast.Paren:
+		return c.projectionBase(x.X)
+	case *ast.CallExpr:
+		acc, _ := c.r.prog.Info.Types[e].(*Access)
+		return acc
+	}
+	return nil
+}
+
 func (c *fnCtx) placeIsMutable(sc *scope, e ast.Expr) bool {
 	sym := c.placeRoot(sc, e)
 	if sym == nil {
+		// a path through a returned projection: its permission is the access's
+		if acc := c.projectionBase(e); acc != nil {
+			return acc.Edit
+		}
 		return false
 	}
 	switch sym.Kind {
 	case SymLocal, SymGlobal:
 		return true
 	case SymParam:
-		return sym.Conv == ast.ConvEdit || sym.Conv == ast.ConvOwn || sym.Conv == ast.ConvOut
+		if sym.Conv == ast.ConvEdit || sym.Conv == ast.ConvOwn || sym.Conv == ast.ConvOut {
+			return true
+		}
+		return sym.Conv == ast.ConvView && c.interiorWrite(sym.Type)
 	case SymAccess:
-		return sym.Conv == ast.ConvEdit
+		return sym.Conv == ast.ConvEdit || (sym.Conv == ast.ConvView && c.interiorWrite(sym.Type))
 	}
 	return false
+}
+
+// interiorWrite reports whether a write through a view of t is permitted
+// here: t is an Interior type declared in this module and the write is
+// inside unsafe (spec §6, the declaring module's internal synchronization).
+func (c *fnCtx) interiorWrite(t Type) bool {
+	n, ok := valueOf(t).(*Named)
+	if !ok || n.Decl.Module != c.m.Name || !IsInterior(n) {
+		return false
+	}
+	return c.unsafe > 0
 }
 
 // placeRoot returns the root symbol of a place expression, or nil.
@@ -473,8 +525,14 @@ func (c *fnCtx) placeRoot(sc *scope, e ast.Expr) *Symbol {
 
 func (c *fnCtx) isPlace(sc *scope, e ast.Expr) bool {
 	switch x := e.(type) {
-	case *ast.Ident, *ast.FieldExpr, *ast.IndexExpr, *ast.SliceExpr:
+	case *ast.Ident:
 		return c.placeRoot(sc, e) != nil
+	case *ast.FieldExpr:
+		return c.placeRoot(sc, e) != nil || c.isPlace(sc, x.X)
+	case *ast.IndexExpr:
+		return c.placeRoot(sc, e) != nil || c.isPlace(sc, x.X)
+	case *ast.SliceExpr:
+		return c.placeRoot(sc, e) != nil || c.isPlace(sc, x.X)
 	case *ast.Paren:
 		return c.isPlace(sc, x.X)
 	case *ast.CallExpr:

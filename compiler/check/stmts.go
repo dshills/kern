@@ -252,7 +252,7 @@ func (f *fn) assign(st *flow, s *ast.Assign) *flow {
 		st.vars[root] = &varState{st: stInit} // recover: suppress cascading reads
 		return st
 	}
-	if target.perm != ast.ConvEdit {
+	if target.perm != ast.ConvEdit && !f.interiorEscalation(target) {
 		f.errorf("ACC_PERMISSION_ESCALATION", s.Target.Span(), "assignment through a view binding")
 	}
 	t := f.tick()

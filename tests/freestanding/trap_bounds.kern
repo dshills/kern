@@ -1,0 +1,13 @@
+//! phase: 3
+//! expect: output trap_bounds
+//! env: freestanding
+// A trap in freestanding mode: the record goes to the console (there is no
+// standard error), then the machine halts with code 134.
+module fs
+func main() -> i32 {
+    var a: [4]u64 = zero()
+    i := 9usize
+    print_str("before")
+    println()
+    return i32(a[i])
+}

@@ -1,0 +1,33 @@
+//! phase: 3
+//! expect: output mutex_counter
+//! tsan: clean
+// Real threads (PLAN.md 3.3): four scoped threads each add to a counter
+// under a Mutex shared through Shared; the parent joins them at the scope's
+// end and reads the total.
+module cc
+func bump(c: view[Mutex[u64]], n: u64) -> u64 {
+    i := 0u64
+    while i < n {
+        with v := c.lock() { v = v + 1u64 }
+        i = i + 1u64
+    }
+    return n
+}
+func run(m: view[Mutex[u64]]) -> Result[u64, SpawnErr] {
+    with s := thread.scope() {
+        j1 := s.spawn(bump, m, 1000u64)?
+        j2 := s.spawn(bump, m, 1000u64)?
+        j3 := s.spawn(bump, m, 1000u64)?
+        j4 := s.spawn(bump, m, 1000u64)?
+        return Ok(j1.get() + j2.get() + j3.get() + j4.get())
+    }
+}
+func main() -> i32 {
+    m := Mutex[u64].new(0u64)
+    match run(m) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    with v := m.lock() { print_u64(copy(v)); println() }
+    return 0i32
+}

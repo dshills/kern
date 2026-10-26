@@ -14,6 +14,7 @@ import (
 // emitter holds module-level state.
 type emitter struct {
 	mod      *ir.Module
+	opts     Options
 	sb       strings.Builder // function bodies
 	decls    strings.Builder // type and global declarations
 	types    map[string]bool // emitted named types
@@ -110,7 +111,11 @@ func (e *emitter) namedType(n *resolve.Named) string {
 		if len(fields) == 0 {
 			fields = []string{"i8"}
 		}
-		fmt.Fprintf(&e.decls, "%s = type { %s }\n", name, strings.Join(fields, ", "))
+		if n.Decl.Packed {
+			fmt.Fprintf(&e.decls, "%s = type <{ %s }>\n", name, strings.Join(fields, ", "))
+		} else {
+			fmt.Fprintf(&e.decls, "%s = type { %s }\n", name, strings.Join(fields, ", "))
+		}
 	case resolve.KindUnion:
 		li := layout.Of(n)
 		tag := "i8"

@@ -128,6 +128,9 @@ func named(n *resolve.Named) Info {
 		for _, f := range n.Decl.Fields {
 			fields = append(fields, resolve.Subst(f.Type, args))
 		}
+		if n.Decl.Packed {
+			return packedOf(fields)
+		}
 		return structOf(fields)
 	case resolve.KindUnion:
 		tagSize := 1
@@ -171,6 +174,17 @@ func structOf(fields []resolve.Type) Info {
 		}
 	}
 	return Info{Size: alignUp(off, align), Align: align, Fields: offs}
+}
+
+// packedOf lays fields out without padding (a `packed` struct): alignment 1.
+func packedOf(fields []resolve.Type) Info {
+	off := 0
+	var offs []int
+	for _, f := range fields {
+		offs = append(offs, off)
+		off = addSat(off, Of(f).Size)
+	}
+	return Info{Size: off, Align: 1, Fields: offs}
 }
 
 // VariantLayout returns the field offsets of a union variant's payload,

@@ -49,6 +49,7 @@ type TypeDecl struct {
 	Fields                                  []*FieldDecl   // struct
 	Variants                                []*VariantDecl // union
 	NoCopy                                  bool
+	Packed                                  bool
 	View                                    bool
 	Destructor                              *ast.Destructor
 	Methods                                 map[string]*FuncDecl    // inherent and interface methods by name
@@ -390,7 +391,7 @@ func (r *resolver) collect(m *Module) {
 				if r.dup(m, f.Name, d.Name, d.Pos) {
 					continue
 				}
-				m.Types[d.Name] = &TypeDecl{Kind: KindStruct, Name: d.Name, Module: m.Name, Pos: d.Pos, NoCopy: d.NoCopy, View: d.View, Methods: map[string]*FuncDecl{}, Impls: map[*InterfaceDecl]bool{}, AST: d}
+				m.Types[d.Name] = &TypeDecl{Kind: KindStruct, Name: d.Name, Module: m.Name, Pos: d.Pos, NoCopy: d.NoCopy, Packed: d.Packed, View: d.View, Methods: map[string]*FuncDecl{}, Impls: map[*InterfaceDecl]bool{}, AST: d}
 			case *ast.UnionDecl:
 				if r.dup(m, f.Name, d.Name, d.Pos) {
 					continue

@@ -1,0 +1,11 @@
+//! phase: 3
+//! expect: output simd_shuffle
+// SIMD intrinsic simd_shuffle over fixed-width vectors (PLAN.md 3.2); lanes wrap.
+module run
+func main() -> i32 {
+    a := [1u32, 2u32, 3u32, 4u32]
+    b := [5u32, 6u32, 7u32, 8u32]
+    r := simd_shuffle(a, b, [3u32, 0u32, 7u32, 4u32])
+    print_u64(u64(r[0])); println(); print_u64(u64(r[1])); println(); print_u64(u64(r[2])); println(); print_u64(u64(r[3])); println()
+    return 0i32
+}

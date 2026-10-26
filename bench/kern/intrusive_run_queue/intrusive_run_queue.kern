@@ -1,0 +1,228 @@
+// intrusive_run_queue: 1024 tasks live in one raw array; each Task embeds
+// its next/prev links (RawPtr[Task]), a u64 priority and a u32 id, and the
+// run queue is the doubly linked list through those links, non-decreasing
+// in priority from head to tail. At the start task i has id i and priority
+// i and the tasks are linked in index order (head = task 0). Then
+// N = 10,000,000 operations: operation i pops the head, adds
+// 1024 + (x >> 58) to its priority (x from the LCG, seed 42) and re-inserts
+// it by walking prev from the tail while the node's priority is greater
+// than the new one, inserting after the node found (at the head when
+// none). Per op cs += id XOR new priority (wrapping). After the loop the
+// queue is walked from the head with position k = 0, 1, ...:
+// cs += (k + 1) * (id + 1).
+// ops = N; sampled operation: pop + bump + re-insert.
+// checksum as above   (bench/CHECKSUMS.md; matches bench/c/intrusive_run_queue)
+module intrusive_run_queue_bench
+
+// Task is Copy: the links are raw addresses into the task array, read and
+// written only through the field helpers below (§4.1 layout: next at 0,
+// prev at 8, prio at 16, id at 24; 32 bytes like the C struct).
+struct Task { next: RawPtr[Task]; prev: RawPtr[Task]; prio: u64; id: u32 }
+struct RunQueue { head: RawPtr[Task]; tail: RawPtr[Task]; len: usize }
+struct Walk { cs: u64; k: u64 }
+
+contract { requires "p addresses a live Task in the task array" }
+func next_of(p: RawPtr[Task]) -> RawPtr[RawPtr[Task]] { unsafe { return ptr_cast[RawPtr[Task], Task](p) } }
+
+contract { requires "p addresses a live Task in the task array" }
+func prev_of(p: RawPtr[Task]) -> RawPtr[RawPtr[Task]] { unsafe { return ptr_cast[RawPtr[Task], u8](ptr_offset(ptr_cast[u8, Task](p), 8isize)) } }
+
+contract { requires "p addresses a live Task in the task array" }
+func prio_of(p: RawPtr[Task]) -> RawPtr[u64] { unsafe { return ptr_cast[u64, u8](ptr_offset(ptr_cast[u8, Task](p), 16isize)) } }
+
+contract { requires "p addresses a live Task in the task array" }
+func id_of(p: RawPtr[Task]) -> RawPtr[u32] { unsafe { return ptr_cast[u32, u8](ptr_offset(ptr_cast[u8, Task](p), 24isize)) } }
+
+contract { requires "base addresses an array of at least i + 1 Tasks" }
+func task_at(base: RawPtr[Task], i: u64) -> RawPtr[Task] { unsafe { return ptr_offset(base, isize(i)) } }
+
+contract { requires "t addresses writable storage for one Task that is not linked" }
+func init_task(t: RawPtr[Task], prio: u64, id: u32) {
+    unsafe { ptr_store(t, Task { next: ptr_null[Task](), prev: ptr_null[Task](), prio: prio, id: id }) }
+}
+
+contract { requires "t addresses a live Task" }
+func task_id(t: RawPtr[Task]) -> u64 { unsafe { return u64(ptr_load(id_of(t))) } }
+
+contract { requires "t addresses a live Task"; ensures "returns the new priority" }
+func bump_prio(t: RawPtr[Task], by: u64) -> u64 {
+    unsafe {
+        p := ptr_load(prio_of(t)) + by
+        ptr_store(prio_of(t), p)
+        return p
+    }
+}
+
+contract {
+    invariant "every Task reachable from q.head is in the task array, linked exactly once, prev/next mutually consistent, priorities non-decreasing from head to tail"
+    requires "t addresses a live Task that is not linked"
+    ensures "t is linked after the last task whose priority is not greater than t's; q.len grew by one"
+}
+func insert_sorted(q: edit[RunQueue], t: RawPtr[Task]) {
+    unsafe {
+        prio := ptr_load(prio_of(t))
+        p := q.tail
+        while ptr_addr(p) != 0usize && ptr_load(prio_of(p)) > prio { p = ptr_load(prev_of(p)) }
+        ptr_store(prev_of(t), p)
+        var nx: RawPtr[Task]
+        if ptr_addr(p) != 0usize {
+            nx = ptr_load(next_of(p))
+            ptr_store(next_of(p), t)
+        } else {
+            nx = q.head
+            q.head = t
+        }
+        ptr_store(next_of(t), nx)
+        if ptr_addr(nx) != 0usize { ptr_store(prev_of(nx), t) } else { q.tail = t }
+    }
+    q.len = q.len + 1usize
+}
+
+contract {
+    invariant "as insert_sorted"
+    ensures "the former head is unlinked and returned (null when the queue was empty); q.len shrank by one"
+}
+func pop_head(q: edit[RunQueue]) -> RawPtr[Task] {
+    unsafe {
+        t := q.head
+        if ptr_addr(t) == 0usize { return t }
+        nx := ptr_load(next_of(t))
+        q.head = nx
+        if ptr_addr(nx) != 0usize { ptr_store(prev_of(nx), ptr_null[Task]()) } else { q.tail = ptr_null[Task]() }
+        ptr_store(next_of(t), ptr_null[Task]())
+        ptr_store(prev_of(t), ptr_null[Task]())
+        q.len = q.len - 1usize
+        return t
+    }
+}
+
+contract { invariant "as insert_sorted"; ensures "w.k is the number of linked tasks" }
+func walk(q: view[RunQueue], cs: u64) -> Walk {
+    unsafe {
+        w := Walk { cs: cs, k: 0u64 }
+        t := q.head
+        while ptr_addr(t) != 0usize {
+            w.cs = wrapping_add(w.cs, wrapping_mul(w.k + 1u64, u64(ptr_load(id_of(t))) + 1u64))
+            w.k = w.k + 1u64
+            t = ptr_load(next_of(t))
+        }
+        return w
+    }
+}
+
+contract { requires "the allocator obligations of §6 hold; the task array outlives every link into it" }
+func main() -> i32 {
+    n := 10_000_000u64
+    alloc := SystemAllocator.new()
+    var base: RawPtr[Task]
+    var q: RunQueue
+    unsafe {
+        match alloc.alloc(32768usize, 8usize) {
+            Ok(raw) => base = ptr_cast[Task, u8](raw)
+            Err(e) => return 2i32
+        }
+        q = RunQueue { head: ptr_null[Task](), tail: ptr_null[Task](), len: 0usize }
+    }
+    for i in 0u64..1024u64 {
+        t := task_at(base, i)
+        init_task(t, i, u32(i))
+        insert_sorted(q, t)
+    }
+    s := new_sampler(n)
+    checksum := 0u64
+
+    start := now_ns()
+    x := 42u64
+    for i in 0u64..n {
+        x = lcg(x)
+        delta := 1024u64 + (x >> 58u32)
+        sampled := s.start()
+        t := pop_head(q)
+        prio := bump_prio(t, delta)
+        insert_sorted(q, t)
+        s.stop(sampled)
+        checksum = wrapping_add(checksum, task_id(t) ^ prio)
+    }
+    ns := now_ns() - start
+
+    if q.len != 1024usize { return 1i32 }
+    w := walk(q, checksum)
+    if w.k != 1024u64 { return 1i32 }
+    unsafe { alloc.free(ptr_cast[u8, Task](base), 32768usize, 8usize) }
+    report(n, ns, s, w.cs)
+    return 0i32
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark plumbing (bench/PROTOCOL.md), duplicated in every bench/kern
+// program so that each benchmark is one self-contained file: wrapping u64
+// arithmetic, the shared LCG, per-operation latency sampling and the report.
+// ---------------------------------------------------------------------------
+
+func lcg(x: u64) -> u64 {
+    return wrapping_add(wrapping_mul(x, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// Sampler times one operation every ops/4096 operations (operation i is
+// sampled iff i % stride == 0) and keeps at most 4096 latencies.
+struct Sampler { lat: Vec[u64]; stride: u64; until: u64; t0: u64 }
+
+func new_sampler(ops: u64) -> Sampler {
+    stride := ops / 4096u64
+    if stride == 0u64 { stride = 1u64 }
+    return Sampler { lat: Vec[u64].with_capacity(4096usize), stride: stride, until: 0u64, t0: 0u64 }
+}
+
+impl Sampler {
+    // start reports whether the next operation is sampled and, if so, reads the clock.
+    func start(edit self) -> bool {
+        if self.until > 0u64 || self.lat.len() >= 4096usize { return false }
+        self.t0 = now_ns()
+        return true
+    }
+    // stop records the latency of a sampled operation and counts down to the next one.
+    func stop(edit self, sampled: bool) {
+        if sampled {
+            self.lat.push(now_ns() - self.t0)
+            self.until = self.stride
+        }
+        if self.until > 0u64 { self.until = self.until - 1u64 }
+    }
+}
+
+// shell_sort orders the samples in place (at most 4096 values).
+func shell_sort(s: edit[Vec[u64]]) {
+    n := s.len()
+    gap := n / 2usize
+    while gap > 0usize {
+        for i in gap..n {
+            x := s.get(i)
+            j := i
+            while j >= gap && s.get(j - gap) > x {
+                prev := s.get(j - gap)
+                with e := s.at(j) { e = prev }
+                j = j - gap
+            }
+            with e := s.at(j) { e = x }
+        }
+        gap = gap / 2usize
+    }
+}
+
+// report prints the protocol line; p50 = sorted[n/2], p99 = sorted[n*99/100].
+func report(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    shell_sort(s.lat)
+    n := s.lat.len()
+    p50 := 0u64
+    p99 := 0u64
+    if n > 0usize {
+        p50 = s.lat.get(n / 2usize)
+        p99 = s.lat.get(n * 99usize / 100usize)
+    }
+    print_str("ops="); print_u64(ops)
+    print_str(" ns="); print_u64(ns)
+    print_str(" p50="); print_u64(p50)
+    print_str(" p99="); print_u64(p99)
+    print_str(" checksum="); print_u64(checksum)
+    println()
+}

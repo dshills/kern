@@ -66,6 +66,20 @@ type checker struct {
 	diags []diag.Diagnostic
 }
 
+// interiorEscalation reports whether an edit through a view place is the
+// runtime-exclusive escalation of spec §6: inside unsafe, on a place whose
+// root is an Interior type declared in the function's own module (rule 6.7).
+func (f *fn) interiorEscalation(p *place) bool {
+	if f.unsafe == 0 || p == nil || p.root == nil {
+		return false
+	}
+	n, ok := valueType(p.root.Type).(*resolve.Named)
+	if !ok || !resolve.IsInterior(n) {
+		return false
+	}
+	return n.Decl.Module == f.fd.Module
+}
+
 func (c *checker) errorf(code diag.Code, file string, pos ast.Pos, format string, args ...any) {
 	c.diags = append(c.diags, diag.New(code, file, diag.Span{Start: pos.Start, End: pos.End}, format, args...))
 }

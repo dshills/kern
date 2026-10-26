@@ -1,0 +1,39 @@
+//! phase: 3
+//! expect: output store_buffering
+//! tsan: clean
+// Litmus SB (store buffering) with seq_cst: each thread stores its flag then
+// loads the other's; with sequential consistency both loads cannot read 0.
+module litmus
+struct Pair { x: Atomic[u64]; y: Atomic[u64] }
+func left(p: view[Pair]) -> u64 {
+    p.x.store(1u64, seq_cst)
+    return p.y.load(seq_cst)
+}
+func right(p: view[Pair]) -> u64 {
+    p.y.store(1u64, seq_cst)
+    return p.x.load(seq_cst)
+}
+func once(p: view[Pair]) -> Result[bool, SpawnErr] {
+    with s := thread.scope() {
+        a := s.spawn(left, p)?
+        b := s.spawn(right, p)?
+        ra := a.get()
+        rb := b.get()
+        return Ok(ra + rb >= 1u64)
+    }
+}
+func main() -> i32 {
+    i := 0u64
+    ok := true
+    while i < 200u64 {
+        p := Pair { x: Atomic[u64].new(0u64), y: Atomic[u64].new(0u64) }
+        match once(p) {
+            Ok(b) => { if !b { ok = false } }
+            Err(e) => { ok = false }
+        }
+        i = i + 1u64
+    }
+    print_bool(ok)
+    println()
+    return 0i32
+}

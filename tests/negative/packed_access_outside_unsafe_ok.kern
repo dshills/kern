@@ -1,0 +1,6 @@
+//! phase: 3
+//! expect: accept
+module t
+struct Hdr packed { tag: u8; len: u32 }
+contract { requires "unaligned access is supported by the target" }
+func f(h: view[Hdr]) -> u32 { unsafe { return h.len } }

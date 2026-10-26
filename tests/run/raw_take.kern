@@ -1,0 +1,28 @@
+//! phase: 3
+//! expect: output raw_take
+// Move-only values in raw memory: a Vec stored with ptr_store is owned by the
+// raw memory until ptr_take moves it back out; the taken value is destroyed
+// normally.
+module run
+contract { requires "the slot holds a stored Vec before ptr_take" }
+func main() -> i32 {
+    alloc := SystemAllocator.new()
+    v := Vec[u64].new()
+    v.push(5u64)
+    v.push(6u64)
+    unsafe {
+        match alloc.alloc(8usize, 8usize) {
+            Ok(raw) => {
+                slot := ptr_cast[Vec[u64], u8](raw)
+                ptr_store(slot, v)
+                w := ptr_take(slot)
+                w.push(7u64)
+                print_u64(u64(w.len()))
+                println()
+                alloc.free(raw, 8usize, 8usize)
+            }
+            Err(e) => { drop(v); print_str("alloc failed"); println() }
+        }
+    }
+    return 0i32
+}

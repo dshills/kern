@@ -1,0 +1,14 @@
+//! phase: 3
+//! expect: output asm_nop
+//! native-only: true
+// Inline assembly (spec §6): an operand-free template executed for its side
+// effects; the interpreter cannot execute it (trap kind explicit), so the
+// fixture is native-only.
+module run
+contract { requires "the template is valid for the build target" }
+func main() -> i32 {
+    unsafe { asm("nop") }
+    print_str("after nop")
+    println()
+    return 0i32
+}

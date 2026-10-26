@@ -14,7 +14,7 @@ func TestHostTriple(t *testing.T) {
 
 func TestWithProgramName(t *testing.T) {
 	in := "declare void @kern_start()\ndefine i32 @main() {\nentry:\n  ret i32 0\n}\n"
-	out := withProgramName(in, `a"b\c.kern`)
+	out := withProgramName(in, `a"b\c.kern`, false)
 	for _, want := range []string{
 		`@kern.progname = private constant [11 x i8] c"a\22b\5Cc.kern\00"`,
 		"declare void @kern_set_file(ptr)",

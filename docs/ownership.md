@@ -39,6 +39,9 @@ module m
 union Huge { V0; V1; V2 }        // TYPE_TOO_MANY_VARIANTS: sketch stands for a union declaring 65,537 variants
 ```
 
+### Rule 4.1.6 — SIMD vectors
+A fixed array `[N]E` with `N` in 2, 4, 8, 16 and a numeric `E` is a SIMD vector for the intrinsics `simd_add`, `simd_sub`, `simd_mul` (integer lanes wrap), `simd_and`, `simd_or`, `simd_xor` (integer lanes only), `simd_shuffle(a, b, idx: [N]u32)` (lane `i` of the result is lane `idx[i]` of the concatenation of `a` and `b`; an index of `2N` or more traps with kind `bounds`), and `simd_reduce_add(v) -> E` (the wrapping sum of the lanes; floats are summed in lane order). Any other type is `TYPE_MISMATCH`. Array literals `[e1, e2, ...]` build vectors and arrays alike.
+
 ## 5.1 Unique ownership and moves
 ### Rule 5.1.1 — One owner, one destruction
 Every value has exactly one owner: a variable, a field, an array element, or a slot in a library container. Destruction occurs exactly once, at scope exit of the owner, unless ownership is transferred.
@@ -458,6 +461,17 @@ Rejected:
 module m
 thread_local buf: Vec[u64] = Vec[u64].new()   // TLS_INVALID_DECL: not Copy, not a literal
 ```
+
+### Rule 6.6 — Raw pointers
+`RawPtr[T]` is a `Copy` address with no ownership and no `Send`/`Share`. Its operations are unsafe and require an `unsafe` block: `ptr_null[T]()`, `ptr_from_addr[T](a: usize)`, `ptr_addr(p)`, `ptr_cast[U, T](p)`, `ptr_offset(p, n: isize)` (`n` elements of `T`), `ptr_load(p) -> T` for `Copy` `T`, `ptr_store(p, own T)` (the pointee owns the stored value until it is taken), `ptr_take(p) -> T` (moves the value out), `ptr_load_volatile`/`ptr_store_volatile` for `Copy` `T` (device access; never reordered or elided), and `ptr_copy(dst, src, n)` (overlapping ranges permitted). `SystemAllocator.alloc`/`free` are unsafe operations with the §6 obligations (alignment a power of two at most 4096, size a multiple of it; `free` with exactly the values of one prior `alloc`), trapping with kind `explicit` when violated. The pointee's representation is the §4.1 layout. The interpreter addresses a byte heap of its own; natively a raw pointer is the machine address.
+Diagnostics: `UNSAFE_OP_OUTSIDE_UNSAFE`
+
+### Rule 6.7 — Packed layout, volatile access and inline assembly
+`struct S packed { ... }` lays its fields out without padding (alignment 1); every field access is an unaligned access and an unsafe operation. `ptr_load_volatile`/`ptr_store_volatile` (Rule 6.6) are the volatile MMIO operations. `asm("template")` executes an operand-free inline assembly template that may clobber memory; it is unsafe, target-specific, and traps with kind `explicit` in the interpreter. A write through a `view` of an `Interior` type is permitted only inside its declaring module and inside `unsafe` (the module's own synchronization). Each of these is enumerated by Rule 6.4.
+Diagnostics: `UNSAFE_OP_OUTSIDE_UNSAFE`, `ASSIGN_IMMUTABLE`
+
+### Rule 6.8 — Freestanding mode
+`--env freestanding` builds for a bare-metal target: no operating system, no default allocator (`SystemAllocator.new` is unavailable; the interpreter's emulation traps with kind `explicit`), no threads, no library containers natively, output through the console device at the target's address (the PL011 at `0x0900_0000` on AArch64 `virt`, port `0x3F8` on x86-64 `q35`), a compiler-inserted stack-limit check in every function prologue trapping with kind `stack` (disabled only by `--unsafe-no-stack-check`, which makes stack overflow a trusted-boundary obligation), traps that write their record to the console and halt, and `exit(code)`/the end of `main` writing `{"halt": {"code": n}}` before powering the machine off. The mandatory runtime symbol set is recorded in ADR-011.
 
 ### Rule 7.2 — FFI: C ABI subset
 A function declared `extern "C"` (exported or imported) uses the target's C calling convention and an unmangled symbol equal to its name. Its parameter and return types must be integer types, `f32`, `f64`, `bool`, raw pointers, or `Copy` structs whose fields are recursively of these types (laid out per Rule 4.1.5); any other type, including `own`/`view`/`edit`/`out` parameters, slices, unions and generics, is an error. Variadic functions are not supported. Calling an imported `extern "C"` function is an unsafe operation (Rule 6.4); exporting one is safe, and a trap inside it terminates per §6.

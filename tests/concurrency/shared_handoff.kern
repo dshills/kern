@@ -1,0 +1,31 @@
+//! phase: 3
+//! expect: output shared_handoff
+//! tsan: clean
+// Ownership transfer to a detached thread (thread.spawn with own arguments)
+// and a Shared[Mutex] clone handed to it; the parent joins and reads back.
+module cc
+struct Job { id: u64; payload: Vec[u64] }
+func work(j: own Job, total: own Shared[Mutex[u64]]) -> u64 {
+    sum := j.id
+    for x in j.payload.as_view() { sum = sum + x }
+    with t := total.get().lock() { t = t + sum }
+    return sum
+}
+func run(j: own Job, total: own Shared[Mutex[u64]]) -> Result[u64, SpawnErr] {
+    t := thread.spawn(work, j, total)?
+    return Ok(t.join())
+}
+func main() -> i32 {
+    v := Vec[u64].new()
+    v.push(1u64)
+    v.push(2u64)
+    v.push(3u64)
+    total := Shared[Mutex[u64]].new(Mutex[u64].new(100u64))
+    mine := total.clone()
+    match run(Job { id: 10u64, payload: v }, mine) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    with t := total.get().lock() { print_u64(copy(t)); println() }
+    return 0i32
+}

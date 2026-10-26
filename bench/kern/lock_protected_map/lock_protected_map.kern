@@ -1,0 +1,216 @@
+// lock_protected_map: the hash_table workload's map (open addressing,
+// linear probing, Fibonacci hash, states/keys/vals, initial capacity 16,
+// doubling at 3/4 load) behind one Mutex, shared by view with 4 scoped
+// threads. Untimed setup inserts keys 0..K-1 (K = 262,144) with value
+// key * 0x9E3779B97F4A7C15 (wrapping). Thread t (0..3) runs its own LCG
+// with seed 42 + t for 1,000,000 operations: x = next(); when x >> 62 == 0
+// (25%) it inserts key K + (x >> 46) with the same value rule and
+// cs += key; otherwise it looks up key x >> 46 (always present) and
+// cs += value XOR key. Each operation holds the lock once. Timed: spawning
+// through joining; threads = 4.
+// ops = 4,000,000; sampled operation: thread 0's i-th operation (lock, op,
+// unlock), i being its own counter.
+// checksum = wrapping sum of the four per-thread cs, plus the final count
+// (bench/CHECKSUMS.md; matches bench/c/lock_protected_map)
+module lock_protected_map_bench
+
+const K: u64 = 262144u64
+const GOLD: u64 = 11_400_714_819_323_198_485u64
+
+// Map is a structure-of-arrays table: state 0 is empty, 2 is full. Values are
+// reached only by index through a projection, so no access ever escapes.
+struct Map { states: Vec[u8]; keys: Vec[u64]; vals: Vec[u64]; cap: usize; count: usize; bits: u32 }
+
+// new_map builds an empty table of 2^bits slots.
+func new_map(bits: u32) -> Map {
+    cap := 1usize << bits
+    states := Vec[u8].with_capacity(cap)
+    keys := Vec[u64].with_capacity(cap)
+    vals := Vec[u64].with_capacity(cap)
+    for i in 0usize..cap {
+        states.push(0u8)
+        keys.push(0u64)
+        vals.push(0u64)
+    }
+    return Map { states: move states, keys: move keys, vals: move vals, cap: cap, count: 0usize, bits: bits }
+}
+
+impl Map {
+    // probe returns the slot holding key, or the empty slot where it would go.
+    func probe(view self, key: u64) -> usize {
+        mask := self.cap - 1usize
+        i := usize(wrapping_mul(key, 11_400_714_819_323_198_485u64) >> (64u32 - self.bits))
+        while self.states.get(i) == 2u8 && self.keys.get(i) != key { i = (i + 1usize) & mask }
+        return i
+    }
+
+    // insert stores key -> val, replacing the value of a present key.
+    func insert(edit self, key: u64, val: u64) {
+        if self.count * 4usize >= self.cap * 3usize { self.grow() }
+        i := self.probe(key)
+        if self.states.get(i) == 2u8 {
+            with v := self.vals.at(i) { v = val }
+            return
+        }
+        with st := self.states.at(i) { st = 2u8 }
+        with k := self.keys.at(i) { k = key }
+        with v := self.vals.at(i) { v = val }
+        self.count = self.count + 1usize
+    }
+
+    // grow rebuilds the table at twice the capacity; the old table is
+    // destroyed by the reassignment (Rule 5.1.9).
+    func grow(edit self) {
+        bigger := new_map(self.bits + 1u32)
+        for i in 0usize..self.cap {
+            if self.states.get(i) == 2u8 { bigger.insert(self.keys.get(i), self.vals.get(i)) }
+        }
+        self = bigger
+    }
+
+    // find returns the value stored under key, if any.
+    func find(view self, key: u64) -> Option[u64] {
+        i := self.probe(key)
+        if self.states.get(i) != 2u8 { return None }
+        return Some(self.vals.get(i))
+    }
+}
+
+
+struct WOut { cs: u64; s: Sampler }
+
+func worker(m: view[Mutex[Map]], t: u64, per: u64, ops: u64) -> WOut {
+    s := new_sampler(ops)
+    cs := 0u64
+    x := 42u64 + t
+    for i in 0u64..per {
+        x = lcg(x)
+        sampled := false
+        if t == 0u64 { sampled = s.start() }
+        if (x >> 62u32) == 0u64 {
+            key := K + (x >> 46u32)
+            with g := m.lock() { g.insert(key, wrapping_mul(key, GOLD)) }
+            cs = wrapping_add(cs, key)
+        } else {
+            key := x >> 46u32
+            var found: Option[u64] = None
+            with g := m.lock() { found = g.find(key) }
+            match found {
+                Some(v) => cs = wrapping_add(cs, v ^ key)
+                None => trap()
+            }
+        }
+        if t == 0u64 { s.stop(sampled) }
+    }
+    return WOut { cs: cs, s: move s }
+}
+
+// run spawns the four workers on a scope (their views of m are live until
+// the block ends, so the mutex is locked again only after it) and reports.
+func run(m: view[Mutex[Map]], ops: u64) -> Result[i32, SpawnErr] {
+    per := ops / 4u64
+    var r0: WOut
+    checksum := 0u64
+    ns := 0u64
+    start := now_ns()
+    with s := thread.scope() {
+        j0 := s.spawn(worker, m, 0u64, per, ops)?
+        j1 := s.spawn(worker, m, 1u64, per, ops)?
+        j2 := s.spawn(worker, m, 2u64, per, ops)?
+        j3 := s.spawn(worker, m, 3u64, per, ops)?
+        r0 = j0.get()
+        r1 := j1.get()
+        r2 := j2.get()
+        r3 := j3.get()
+        ns = now_ns() - start
+        checksum = wrapping_add(wrapping_add(r0.cs, r1.cs), wrapping_add(r2.cs, r3.cs))
+    }
+    with g := m.lock() { checksum = wrapping_add(checksum, u64(g.count)) }
+    report(ops, ns, r0.s, checksum)
+    return Ok(0i32)
+}
+
+func main() -> i32 {
+    ops := 4_000_000u64
+    mp := new_map(4u32)
+    for k in 0u64..K { mp.insert(k, wrapping_mul(k, GOLD)) }
+    m := Mutex[Map].new(move mp)
+    match run(m, ops) {
+        Ok(code) => return code
+        Err(e) => return 2i32
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark plumbing (bench/PROTOCOL.md), duplicated in every bench/kern
+// program so that each benchmark is one self-contained file: wrapping u64
+// arithmetic, the shared LCG, per-operation latency sampling and the report.
+// ---------------------------------------------------------------------------
+
+func lcg(x: u64) -> u64 {
+    return wrapping_add(wrapping_mul(x, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// Sampler times one operation every ops/4096 operations (operation i is
+// sampled iff i % stride == 0) and keeps at most 4096 latencies.
+struct Sampler { lat: Vec[u64]; stride: u64; until: u64; t0: u64 }
+
+func new_sampler(ops: u64) -> Sampler {
+    stride := ops / 4096u64
+    if stride == 0u64 { stride = 1u64 }
+    return Sampler { lat: Vec[u64].with_capacity(4096usize), stride: stride, until: 0u64, t0: 0u64 }
+}
+
+impl Sampler {
+    // start reports whether the next operation is sampled and, if so, reads the clock.
+    func start(edit self) -> bool {
+        if self.until > 0u64 || self.lat.len() >= 4096usize { return false }
+        self.t0 = now_ns()
+        return true
+    }
+    // stop records the latency of a sampled operation and counts down to the next one.
+    func stop(edit self, sampled: bool) {
+        if sampled {
+            self.lat.push(now_ns() - self.t0)
+            self.until = self.stride
+        }
+        if self.until > 0u64 { self.until = self.until - 1u64 }
+    }
+}
+
+// shell_sort orders the samples in place (at most 4096 values).
+func shell_sort(s: edit[Vec[u64]]) {
+    n := s.len()
+    gap := n / 2usize
+    while gap > 0usize {
+        for i in gap..n {
+            x := s.get(i)
+            j := i
+            while j >= gap && s.get(j - gap) > x {
+                prev := s.get(j - gap)
+                with e := s.at(j) { e = prev }
+                j = j - gap
+            }
+            with e := s.at(j) { e = x }
+        }
+        gap = gap / 2usize
+    }
+}
+
+// report prints the protocol line; p50 = sorted[n/2], p99 = sorted[n*99/100].
+func report(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    shell_sort(s.lat)
+    n := s.lat.len()
+    p50 := 0u64
+    p99 := 0u64
+    if n > 0usize {
+        p50 = s.lat.get(n / 2usize)
+        p99 = s.lat.get(n * 99usize / 100usize)
+    }
+    print_str("ops="); print_u64(ops)
+    print_str(" ns="); print_u64(ns)
+    print_str(" p50="); print_u64(p50)
+    print_str(" p99="); print_u64(p99)
+    print_str(" checksum="); print_u64(checksum)
+    println()
+}

@@ -61,15 +61,35 @@ static int bench_cmp_u64(const void *a, const void *b) {
     return x < y ? -1 : x > y;
 }
 
-static inline void bench_report(uint64_t ops, uint64_t ns, sampler *s, uint64_t checksum) {
+static inline void bench_report_line(uint64_t ops, uint64_t ns, sampler *s, uint64_t checksum) {
     uint64_t p50 = 0, p99 = 0;
     if (s->n > 0) {
         qsort(s->samples, s->n, sizeof(uint64_t), bench_cmp_u64);
         p50 = s->samples[s->n / 2];
         p99 = s->samples[s->n * 99 / 100];
     }
-    printf("ops=%" PRIu64 " ns=%" PRIu64 " p50=%" PRIu64 " p99=%" PRIu64 " checksum=%" PRIu64 "\n",
+    printf("ops=%" PRIu64 " ns=%" PRIu64 " p50=%" PRIu64 " p99=%" PRIu64 " checksum=%" PRIu64 "",
            ops, ns, p50, p99, checksum);
+}
+
+static inline void bench_report(uint64_t ops, uint64_t ns, sampler *s, uint64_t checksum) {
+    bench_report_line(ops, ns, s, checksum);
+    printf("\n");
+}
+
+/* bench_report_failures prints the protocol line with the ` failures=<N>`
+ * field that failure-path runs (KERN_BENCH_FAIL=1) add. */
+static inline void bench_report_failures(uint64_t ops, uint64_t ns, sampler *s, uint64_t checksum,
+                                         uint64_t failures) {
+    bench_report_line(ops, ns, s, checksum);
+    printf(" failures=%" PRIu64 "\n", failures);
+}
+
+/* bench_fail_mode reports whether KERN_BENCH_FAIL=1 is set (PROTOCOL.md
+ * failure-path run). */
+static inline int bench_fail_mode(void) {
+    const char *env = getenv("KERN_BENCH_FAIL");
+    return env != NULL && strcmp(env, "1") == 0;
 }
 
 static inline void *xmalloc(size_t n) {

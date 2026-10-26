@@ -150,6 +150,8 @@ func (c *fnCtx) expr(sc *scope, e ast.Expr, want Type) Type {
 		return c.record(e, to)
 	case *ast.StructLit:
 		return c.record(e, c.structLit(sc, x))
+	case *ast.ArrayLit:
+		return c.record(e, c.arrayLit(sc, x, want))
 	case *ast.RangeExpr:
 		c.errorf("TYPE_MISMATCH", x.Pos, "range is only valid in for")
 		return c.record(e, &Bad{})
@@ -239,6 +241,9 @@ func (c *fnCtx) ident(sc *scope, x *ast.Ident, want Type) Type {
 	case SymFunc:
 		if len(sym.Func.TypeParams) > 0 {
 			c.errorf("TYPE_INFER_FAILED", x.Pos, "generic function %s used as a value needs explicit type arguments", x.Name)
+		}
+		if isUnsafeOp(sym.Func) {
+			c.errorf("UNSAFE_OP_OUTSIDE_UNSAFE", x.Pos, "%s is an unsafe operation and cannot be used as a function value", x.Name)
 		}
 		return sym.Func.Type
 	case SymType, SymModule, SymTypeParam:
@@ -361,7 +366,17 @@ func mentionsUnbound(t Type, params map[string]bool, m map[string]Type) bool {
 
 func (c *fnCtx) field(sc *scope, x *ast.FieldExpr) Type { return c.fieldWant(sc, x, nil) }
 
+// fieldWant types a field selection; a field of a packed struct is an
+// unaligned access and requires unsafe (rule 6.7), on every path.
 func (c *fnCtx) fieldWant(sc *scope, x *ast.FieldExpr, want Type) Type {
+	t := c.fieldWant1(sc, x, want)
+	if n, ok := valueOf(c.r.prog.Info.Types[x.X]).(*Named); ok && n.Decl.Packed && c.unsafe == 0 {
+		c.errorf("UNSAFE_OP_OUTSIDE_UNSAFE", x.Pos, "field access on packed struct %s requires unsafe", n.Decl.Name)
+	}
+	return t
+}
+
+func (c *fnCtx) fieldWant1(sc *scope, x *ast.FieldExpr, want Type) Type {
 	// Static member of a type or module: handled by call(); as a bare
 	// expression a type's variant without arguments, e.g. Option[u64].None.
 	if td, explicit, ok := c.typeExprOf(sc, x.X); ok {
@@ -611,6 +626,34 @@ func (c *fnCtx) binary(sc *scope, x *ast.Binary, want Type) Type {
 		c.r.prog.Info.Consts[x] = true
 	}
 	return lt
+}
+
+// arrayLit types [e1, e2, ...]: every element has the type of the first (or
+// the wanted element type); an empty literal needs a wanted array type.
+func (c *fnCtx) arrayLit(sc *scope, x *ast.ArrayLit, want Type) Type {
+	var elem Type
+	if wa, ok := valueOf(want).(*Array); ok && want != nil {
+		elem = wa.Elem
+		if wa.Len != len(x.Elems) {
+			c.errorf("TYPE_MISMATCH", x.Pos, "array literal has %d elements, expected %d", len(x.Elems), wa.Len)
+		}
+	}
+	if len(x.Elems) == 0 {
+		if elem == nil {
+			c.errorf("TYPE_INFER_FAILED", x.Pos, "empty array literal needs an expected type")
+			return &Bad{}
+		}
+		return &Array{Elem: elem, Len: 0}
+	}
+	for i, e := range x.Elems {
+		t := valueOf(c.exprExpect(sc, e, elem))
+		if elem == nil {
+			elem = t
+		} else if i > 0 && !Identical(t, elem) {
+			c.errorf("TYPE_MISMATCH", e.Span(), "array element %d has type %s, expected %s", i, typeString(t), typeString(elem))
+		}
+	}
+	return &Array{Elem: elem, Len: len(x.Elems)}
 }
 
 func (c *fnCtx) structLit(sc *scope, x *ast.StructLit) Type {

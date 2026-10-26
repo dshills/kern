@@ -64,6 +64,7 @@ void println(void) { kern_out("\n", 1); }
 #else
 #define KERN_CLOCK CLOCK_MONOTONIC
 #endif
+void kern_exit(int32_t code) { kern_flush(); _exit(code); }
 uint64_t kern_now_ns(void) { struct timespec ts; clock_gettime(KERN_CLOCK, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
 
 // ---- traps (spec §6, PLAN.md 2.2 signal-safety contract) ----

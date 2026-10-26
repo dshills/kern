@@ -1,0 +1,195 @@
+// thread_pool: 4 worker threads pull jobs from a FIFO ring of 2048 job
+// indices behind one Mutex (no condition variables in kern: an empty ring
+// and a full one are spun on). The main thread feeds N = 1,000,000 jobs in
+// batches of 1024 (the last batch has 576): it waits until the ring holds
+// at most 1024 jobs, then pushes the batch under the lock. Job b sums the
+// 64 words of block b & 4095 of a 4096-block input (word k of the whole
+// input = k * 0x9E3779B97F4A7C15, wrapping) and yields sum XOR b. A worker
+// adds its previous job's result to the shared total under the queue's
+// mutex when it takes its next job (or before exiting). Timed: feeding
+// through joining; threads = 4 workers + main.
+// ops = N; sampled operation: worker 0's i-th job (lock, pop, compute),
+// i being its own counter.
+// checksum = total (wrapping sum of the job results) + N
+// (bench/CHECKSUMS.md; matches bench/c/thread_pool)
+module thread_pool_bench
+
+struct Queue { ring: [2048]u64; head: usize; len: usize; total: u64; done_jobs: u64; done: bool }
+// Pool is shared through Shared[Pool]: the queue is behind its Mutex and
+// the input words are only ever viewed.
+struct Pool { q: Mutex[Queue]; words: Vec[u64] }
+
+func run_job(words: view[Vec[u64]], b: u64) -> u64 {
+    blk := usize(b & 4095u64) * 64usize
+    sum := 0u64
+    with w := words.as_view() {
+        for j in 0usize..64usize { sum = wrapping_add(sum, w[blk + j]) }
+    }
+    return sum ^ b
+}
+
+// worker owns one Shared count on the pool. It takes a job index under the
+// lock (first accumulating the previous result), computes with the lock
+// released, and returns its samples once the ring is empty and done.
+func worker(p: own Shared[Pool], sample: bool, ops: u64) -> Sampler {
+    s := new_sampler(ops)
+    pending := 0u64
+    have := false
+    while true {
+        sampled := false
+        if sample { sampled = s.start() }
+        var job: Option[u64] = None
+        finished := false
+        with g := p.get().q.lock() {
+            if have {
+                g.total = wrapping_add(g.total, pending)
+                g.done_jobs = g.done_jobs + 1u64
+                have = false
+            }
+            if g.len == 0usize {
+                finished = g.done
+            } else {
+                job = Some(g.ring[g.head])
+                g.head = (g.head + 1usize) & 2047usize
+                g.len = g.len - 1usize
+            }
+        }
+        match job {
+            Some(b) => {
+                with pl := p.get() { pending = run_job(pl.words, b) }
+                have = true
+                if sample { s.stop(sampled) }
+            }
+            None => { if finished { return s } }
+        }
+    }
+}
+
+func run(sh: view[Shared[Pool]], n: u64) -> Result[i32, SpawnErr] {
+    start := now_ns()
+    t1 := thread.spawn(worker, sh.clone(), true, n)?
+    t2 := thread.spawn(worker, sh.clone(), false, n)?
+    t3 := thread.spawn(worker, sh.clone(), false, n)?
+    t4 := thread.spawn(worker, sh.clone(), false, n)?
+    b := 0u64
+    while b < n {
+        count := n - b
+        if count > 1024u64 { count = 1024u64 }
+        pushed := false
+        while !pushed {
+            with g := sh.get().q.lock() {
+                if g.len <= 1024usize {
+                    for k in 0u64..count {
+                        g.ring[(g.head + g.len) & 2047usize] = b + k
+                        g.len = g.len + 1usize
+                    }
+                    pushed = true
+                }
+            }
+        }
+        b = b + count
+    }
+    with g := sh.get().q.lock() { g.done = true }
+    s := t1.join()
+    s2 := t2.join()
+    s3 := t3.join()
+    s4 := t4.join()
+    ns := now_ns() - start
+
+    done := 0u64
+    total := 0u64
+    with g := sh.get().q.lock() {
+        done = g.done_jobs
+        total = g.total
+    }
+    if done != n { return Ok(1i32) }
+    report(n, ns, s, wrapping_add(total, n))
+    return Ok(0i32)
+}
+
+func main() -> i32 {
+    n := 1_000_000u64
+    words := Vec[u64].with_capacity(262144usize)
+    for k in 0u64..262144u64 { words.push(wrapping_mul(k, 11_400_714_819_323_198_485u64)) }
+    var ring: [2048]u64 = zero()
+    q := Queue { ring: ring, head: 0usize, len: 0usize, total: 0u64, done_jobs: 0u64, done: false }
+    sh := Shared[Pool].new(Pool { q: Mutex[Queue].new(q), words: move words })
+    match run(sh, n) {
+        Ok(code) => return code
+        Err(e) => return 2i32
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark plumbing (bench/PROTOCOL.md), duplicated in every bench/kern
+// program so that each benchmark is one self-contained file: wrapping u64
+// arithmetic, the shared LCG, per-operation latency sampling and the report.
+// ---------------------------------------------------------------------------
+
+func lcg(x: u64) -> u64 {
+    return wrapping_add(wrapping_mul(x, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// Sampler times one operation every ops/4096 operations (operation i is
+// sampled iff i % stride == 0) and keeps at most 4096 latencies.
+struct Sampler { lat: Vec[u64]; stride: u64; until: u64; t0: u64 }
+
+func new_sampler(ops: u64) -> Sampler {
+    stride := ops / 4096u64
+    if stride == 0u64 { stride = 1u64 }
+    return Sampler { lat: Vec[u64].with_capacity(4096usize), stride: stride, until: 0u64, t0: 0u64 }
+}
+
+impl Sampler {
+    // start reports whether the next operation is sampled and, if so, reads the clock.
+    func start(edit self) -> bool {
+        if self.until > 0u64 || self.lat.len() >= 4096usize { return false }
+        self.t0 = now_ns()
+        return true
+    }
+    // stop records the latency of a sampled operation and counts down to the next one.
+    func stop(edit self, sampled: bool) {
+        if sampled {
+            self.lat.push(now_ns() - self.t0)
+            self.until = self.stride
+        }
+        if self.until > 0u64 { self.until = self.until - 1u64 }
+    }
+}
+
+// shell_sort orders the samples in place (at most 4096 values).
+func shell_sort(s: edit[Vec[u64]]) {
+    n := s.len()
+    gap := n / 2usize
+    while gap > 0usize {
+        for i in gap..n {
+            x := s.get(i)
+            j := i
+            while j >= gap && s.get(j - gap) > x {
+                prev := s.get(j - gap)
+                with e := s.at(j) { e = prev }
+                j = j - gap
+            }
+            with e := s.at(j) { e = x }
+        }
+        gap = gap / 2usize
+    }
+}
+
+// report prints the protocol line; p50 = sorted[n/2], p99 = sorted[n*99/100].
+func report(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    shell_sort(s.lat)
+    n := s.lat.len()
+    p50 := 0u64
+    p99 := 0u64
+    if n > 0usize {
+        p50 = s.lat.get(n / 2usize)
+        p99 = s.lat.get(n * 99usize / 100usize)
+    }
+    print_str("ops="); print_u64(ops)
+    print_str(" ns="); print_u64(ns)
+    print_str(" p50="); print_u64(p50)
+    print_str(" p99="); print_u64(p99)
+    print_str(" checksum="); print_u64(checksum)
+    println()
+}

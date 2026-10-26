@@ -1,0 +1,219 @@
+// page_frame_allocator_fail: the failure-path run of page_frame_allocator.kern
+// (kern has no getenv, so KERN_BENCH_FAIL=1 is this twin with FAIL_MODE =
+// true): only frames 0..1023 are free, an alloc with all of them held
+// returns Err(OutOfFrames), and the line ends with ` failures=<N>`.
+// page_frame_allocator: a bitmap over 65,536 4 KiB frames (1024 u64 words,
+// a set bit means the frame is free, all free at the start, hint = 0) and a
+// FIFO ring of at most 4096 held frames. N = 10,000,000 operations driven
+// by the LCG (seed 42): operation i draws x and allocates when nothing is
+// held or (x >> 63 == 0 and fewer than 4096 are held), else frees the
+// oldest held frame. alloc scans words from the hint (wrapping) for the
+// first nonzero word, takes its lowest set bit and sets the hint to that
+// word; free checks the range and that the bit is clear (a double free is
+// an error), sets it, and lowers the hint to the word when smaller.
+// cs = (cs XOR f) * 0x100000001b3 after an alloc of frame f,
+// cs = (cs XOR (f | 1 << 32)) * 0x100000001b3 after a free (wrapping); at
+// the end cs += number of free frames.
+// ops = N; sampled operation: one alloc or one free.
+// FAIL_MODE (page_frame_allocator_fail.kern): frames 1024..65535 are marked
+// allocated in setup and never freed, so an alloc with 1024 frames held
+// returns Err(OutOfFrames) (failures++, no checksum contribution).
+// checksum as above   (bench/CHECKSUMS.md; matches bench/c/page_frame_allocator)
+module page_frame_allocator_bench
+
+const FAIL_MODE: bool = true
+const FNV: u64 = 1_099_511_628_211u64
+
+struct FrameAlloc { bits: [1024]u64; free: usize; hint: usize }
+union PfaErr { OutOfFrames; DoubleFree; OutOfRange }
+
+// new_alloc marks the first nfree frames (a multiple of 64) free and the
+// rest allocated.
+func new_alloc(nfree: usize) -> FrameAlloc {
+    var a: FrameAlloc = zero()
+    for w in 0usize..(nfree / 64usize) { a.bits[w] = 18446744073709551615u64 }
+    a.free = nfree
+    return a
+}
+
+// ctz64 is the index of the lowest set bit of w (w != 0).
+func ctz64(w: u64) -> u32 {
+    x := w
+    n := 0u32
+    if (x & 4294967295u64) == 0u64 { n = n + 32u32; x = x >> 32u32 }
+    if (x & 65535u64) == 0u64 { n = n + 16u32; x = x >> 16u32 }
+    if (x & 255u64) == 0u64 { n = n + 8u32; x = x >> 8u32 }
+    if (x & 15u64) == 0u64 { n = n + 4u32; x = x >> 4u32 }
+    if (x & 3u64) == 0u64 { n = n + 2u32; x = x >> 2u32 }
+    if (x & 1u64) == 0u64 { n = n + 1u32 }
+    return n
+}
+
+impl FrameAlloc {
+    // alloc_frame hands out the lowest free frame of the first nonzero word
+    // at or after the hint; Err(OutOfFrames) when nothing is free.
+    func alloc_frame(edit self) -> Result[u32, PfaErr] {
+        if self.free == 0usize { return Err(OutOfFrames) }
+        w := self.hint
+        for step in 0usize..1024usize {
+            word := self.bits[w]
+            if word != 0u64 {
+                bit := ctz64(word)
+                self.bits[w] = word & (word - 1u64)
+                self.free = self.free - 1usize
+                self.hint = w
+                return Ok(u32(w) * 64u32 + bit)
+            }
+            w = (w + 1usize) & 1023usize
+        }
+        return Err(OutOfFrames)
+    }
+
+    // free_frame returns frame f; an out-of-range or already free frame is
+    // an error.
+    func free_frame(edit self, f: u32) -> Result[(), PfaErr] {
+        if f >= 65536u32 { return Err(OutOfRange) }
+        w := usize(f / 64u32)
+        m := 1u64 << (f % 64u32)
+        if (self.bits[w] & m) != 0u64 { return Err(DoubleFree) }
+        self.bits[w] = self.bits[w] | m
+        self.free = self.free + 1usize
+        if w < self.hint { self.hint = w }
+        return Ok(())
+    }
+}
+
+func main() -> i32 {
+    n := 10_000_000u64
+    nfree := 65536usize
+    if FAIL_MODE { nfree = 1024usize }
+    a := new_alloc(nfree)
+    var held: [4096]u32 = zero()
+    hh := 0usize
+    hn := 0usize
+    s := new_sampler(n)
+    checksum := 0u64
+    failures := 0u64
+
+    start := now_ns()
+    x := 42u64
+    for i in 0u64..n {
+        x = lcg(x)
+        do_alloc := hn == 0usize || ((x >> 63u32) == 0u64 && hn < 4096usize)
+        sampled := s.start()
+        if do_alloc {
+            match a.alloc_frame() {
+                Ok(f) => {
+                    held[(hh + hn) & 4095usize] = f
+                    hn = hn + 1usize
+                    checksum = wrapping_mul(checksum ^ u64(f), FNV)
+                }
+                Err(e) => failures = failures + 1u64
+            }
+        } else {
+            f := held[hh]
+            hh = (hh + 1usize) & 4095usize
+            hn = hn - 1usize
+            match a.free_frame(f) {
+                Ok(u) => checksum = wrapping_mul(checksum ^ (u64(f) | 4294967296u64), FNV)
+                Err(e) => return 1i32
+            }
+        }
+        s.stop(sampled)
+    }
+    ns := now_ns() - start
+
+    checksum = wrapping_add(checksum, u64(a.free))
+    if a.free + hn != nfree { return 1i32 }
+    if !FAIL_MODE && failures != 0u64 { return 1i32 }
+    if FAIL_MODE { report_failures(n, ns, s, checksum, failures) } else { report(n, ns, s, checksum) }
+    return 0i32
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark plumbing (bench/PROTOCOL.md), duplicated in every bench/kern
+// program so that each benchmark is one self-contained file: wrapping u64
+// arithmetic, the shared LCG, per-operation latency sampling and the report.
+// ---------------------------------------------------------------------------
+
+func lcg(x: u64) -> u64 {
+    return wrapping_add(wrapping_mul(x, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// Sampler times one operation every ops/4096 operations (operation i is
+// sampled iff i % stride == 0) and keeps at most 4096 latencies.
+struct Sampler { lat: Vec[u64]; stride: u64; until: u64; t0: u64 }
+
+func new_sampler(ops: u64) -> Sampler {
+    stride := ops / 4096u64
+    if stride == 0u64 { stride = 1u64 }
+    return Sampler { lat: Vec[u64].with_capacity(4096usize), stride: stride, until: 0u64, t0: 0u64 }
+}
+
+impl Sampler {
+    // start reports whether the next operation is sampled and, if so, reads the clock.
+    func start(edit self) -> bool {
+        if self.until > 0u64 || self.lat.len() >= 4096usize { return false }
+        self.t0 = now_ns()
+        return true
+    }
+    // stop records the latency of a sampled operation and counts down to the next one.
+    func stop(edit self, sampled: bool) {
+        if sampled {
+            self.lat.push(now_ns() - self.t0)
+            self.until = self.stride
+        }
+        if self.until > 0u64 { self.until = self.until - 1u64 }
+    }
+}
+
+// shell_sort orders the samples in place (at most 4096 values).
+func shell_sort(s: edit[Vec[u64]]) {
+    n := s.len()
+    gap := n / 2usize
+    while gap > 0usize {
+        for i in gap..n {
+            x := s.get(i)
+            j := i
+            while j >= gap && s.get(j - gap) > x {
+                prev := s.get(j - gap)
+                with e := s.at(j) { e = prev }
+                j = j - gap
+            }
+            with e := s.at(j) { e = x }
+        }
+        gap = gap / 2usize
+    }
+}
+
+// report_line prints the protocol line without its newline;
+// p50 = sorted[n/2], p99 = sorted[n*99/100].
+func report_line(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    shell_sort(s.lat)
+    n := s.lat.len()
+    p50 := 0u64
+    p99 := 0u64
+    if n > 0usize {
+        p50 = s.lat.get(n / 2usize)
+        p99 = s.lat.get(n * 99usize / 100usize)
+    }
+    print_str("ops="); print_u64(ops)
+    print_str(" ns="); print_u64(ns)
+    print_str(" p50="); print_u64(p50)
+    print_str(" p99="); print_u64(p99)
+    print_str(" checksum="); print_u64(checksum)
+}
+
+// report prints the protocol line.
+func report(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    report_line(ops, ns, s, checksum)
+    println()
+}
+
+// report_failures prints the protocol line with the ` failures=<N>` field
+// that the failure-path run (the _fail.kern twin) adds.
+func report_failures(ops: u64, ns: u64, s: edit[Sampler], checksum: u64, failures: u64) {
+    report_line(ops, ns, s, checksum)
+    print_str(" failures="); print_u64(failures)
+    println()
+}

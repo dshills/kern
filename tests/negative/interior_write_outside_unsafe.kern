@@ -1,0 +1,6 @@
+//! expect: reject ASSIGN_IMMUTABLE
+//! twin: interior_write_unsafe
+module m
+struct Counter { hits: u64; lock: Atomic[u64] }
+unsafe assert Interior for Counter
+func record(c: view[Counter]) { c.hits = c.hits + 1u64 }

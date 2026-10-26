@@ -51,6 +51,7 @@ type StructDecl struct {
 	Fields     []*Field
 	View       bool
 	NoCopy     bool
+	Packed     bool // no padding; field access is an unsafe operation
 }
 
 // Variant is one union variant; Fields may be unnamed (Name == "").
@@ -485,6 +486,12 @@ type StructLit struct {
 	Pos
 	Type   *TypeName
 	Fields []*FieldInit
+}
+
+// ArrayLit is `[e1, e2, ...]`: a fixed array of its elements' common type.
+type ArrayLit struct {
+	Pos
+	Elems []Expr
 }
 
 // RangeExpr is `lo..hi`.

@@ -1,6 +1,6 @@
 # ADR-011: Which freestanding runtime facilities are mandatory
 
-**Status:** Open (closes in Phase 3, PLAN.md 3.1)
+**Status:** Decided (Phase 3, PLAN.md 3.1)
 **Date:** 2026-10-26
 **Spec:** §2.1 (freestanding targets), §3 (principle 7), §6 (runtime, stack exhaustion,
 trap semantics, allocator interface, OOM); PLAN.md §0 (`--env freestanding`, trap record
@@ -133,3 +133,27 @@ the undefined-symbol experiment shows a workload needs it. The record closes in 
 the freestanding fixtures and the three freestanding workloads build and run under QEMU with
 only that symbol set provided by the runtime, and `docs/reports/phase-3.md` records the
 final list.
+
+## Decision (Phase 3 closing entry, 2026-10-26)
+
+The mandatory freestanding runtime is the symbol set that `runtime/freestanding/src/rt.c`
+and the startup code provide, and nothing else:
+
+| Symbol | Role |
+|---|---|
+| `_start` (startup code per architecture) | sets the stack, writes `kern_stack_limit`, calls `kern_start`, `kern_main`, `kern_exit` |
+| `kern_stack_limit` (data) | the lowest valid stack address; every function prologue compares the stack pointer against it and traps with kind `stack` (the compiler-inserted check, disabled only by `--unsafe-no-stack-check`) |
+| `kern_trap` | trap entry: builds `TrapInfo`, runs the registered handler at most once, writes the record to the console when no handler is installed, halts with code 134 |
+| `kern_set_handler`, `kern_set_file` | the `trap.set_handler` exchange and the program name for records |
+| `kern_start`, `kern_exit` | startup hook (empty) and the halt protocol: `{"halt": {"code": n}}` on the console, then PSCI `SYSTEM_OFF` (AArch64) or `isa-debug-exit` (x86-64) |
+| `print_u64`, `print_i64`, `print_bool`, `print_str`, `println` | console output through the device (`0x0900_0000` PL011 on `virt`, port `0x3F8` on `q35`) |
+| `kern_fence` | `fence` lowered to a compiler fence |
+| `memcpy`, `memmove`, `memset` | required by LLVM for aggregate moves |
+
+No allocator (`SystemAllocator.new` is absent natively and traps `explicit` in the interpreter's
+emulation), no threads, no TLS (none of the three freestanding workloads needs it), no library
+containers (they live in the hosted runtime; freestanding programs use arrays and raw pointers).
+The interpreter's `--env freestanding` emulation implements exactly this contract. The
+undefined-symbol experiment was run by building `tests/freestanding/*.kern` against the empty
+runtime: the set above is what the images demand. QEMU execution is wired in the harness and
+ran nowhere in this phase (no `ld.lld` or QEMU on the development host, `docs/reports/phase-3.md`).

@@ -3,9 +3,11 @@ package interp
 import (
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/dshills/kern/compiler/ast"
+	"github.com/dshills/kern/compiler/layout"
 	"github.com/dshills/kern/compiler/resolve"
 )
 
@@ -171,10 +173,7 @@ func init() {
 		},
 		// Arena
 		"Arena.new": func(it *Interp, a []Value, _ callCtx) []Value {
-			ar := &Arena{Identity: it.nextIdent}
-			if it.nextIdent != 0 {
-				it.nextIdent++
-			}
+			ar := &Arena{Identity: it.newIdentity()}
 			return []Value{ar}
 		},
 		"Arena.alloc": func(it *Interp, a []Value, _ callCtx) []Value {
@@ -203,36 +202,63 @@ func init() {
 		"Shared.clone": func(it *Interp, a []Value, c callCtx) []Value {
 			pos := c.pos
 			s := acc(a[0]).Ref.get().(*Shared)
+			atomicMu.Lock()
 			if s.Count == math.MaxUint64 {
+				atomicMu.Unlock()
 				it.trap("overflow", pos)
 			}
 			s.Count++
+			atomicMu.Unlock()
 			return []Value{s}
 		},
 		"Mutex.new": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Mutex{Val: a[0]}} },
 		"Mutex.lock": func(it *Interp, a []Value, c callCtx) []Value {
 			pos := c.pos
 			m := acc(a[0]).Ref.get().(*Mutex)
-			if m.Locked {
+			m.state.Lock()
+			recursive := m.Locked && m.owner == it.tid
+			m.state.Unlock()
+			if recursive {
 				it.trap("explicit", pos) // recursive acquisition (spec §13 accepted decision)
 			}
+			m.lock.Lock()
+			m.state.Lock()
 			m.Locked = true
+			m.owner = it.tid
+			m.state.Unlock()
 			return []Value{&Access{Ref: slotRef{&m.Val}, Edit: true}}
 		},
 		"Mutex.unlock": func(it *Interp, a []Value, _ callCtx) []Value {
-			acc(a[0]).Ref.get().(*Mutex).Locked = false
+			m := acc(a[0]).Ref.get().(*Mutex)
+			m.state.Lock()
+			m.Locked = false
+			m.state.Unlock()
+			m.lock.Unlock()
 			return nil
 		},
-		"Atomic.new":   func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Atomic{Val: a[0]}} },
-		"Atomic.load":  func(it *Interp, a []Value, _ callCtx) []Value { return []Value{atomicOf(a[0]).Val} },
-		"Atomic.store": func(it *Interp, a []Value, _ callCtx) []Value { atomicOf(a[0]).Val = a[1]; return nil },
+		"Atomic.new": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Atomic{Val: a[0]}} },
+		"Atomic.load": func(it *Interp, a []Value, _ callCtx) []Value {
+			atomicMu.Lock()
+			defer atomicMu.Unlock()
+			return []Value{atomicOf(a[0]).Val}
+		},
+		"Atomic.store": func(it *Interp, a []Value, _ callCtx) []Value {
+			atomicMu.Lock()
+			defer atomicMu.Unlock()
+			atomicOf(a[0]).Val = a[1]
+			return nil
+		},
 		"Atomic.swap": func(it *Interp, a []Value, _ callCtx) []Value {
+			atomicMu.Lock()
+			defer atomicMu.Unlock()
 			at := atomicOf(a[0])
 			old := at.Val
 			at.Val = a[1]
 			return []Value{old}
 		},
 		"Atomic.compare_exchange": func(it *Interp, a []Value, _ callCtx) []Value {
+			atomicMu.Lock()
+			defer atomicMu.Unlock()
 			at := atomicOf(a[0])
 			if equalValues(at.Val, a[1]) {
 				old := at.Val
@@ -247,58 +273,145 @@ func init() {
 		"Atomic.fetch_or":  atomicRMW("|"),
 		"Atomic.fetch_xor": atomicRMW("^"),
 		"fence":            func(it *Interp, a []Value, _ callCtx) []Value { return nil },
-		// threads (Phase 1: run eagerly on the calling thread)
+		// threads: goroutines with their own interpreter copy (PLAN.md 3.3)
 		"thread.scope": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Scope{}} },
 		"thread.spawn": func(it *Interp, a []Value, _ callCtx) []Value {
-			rets := it.spawned(a[0].(FuncVal).Name, a[1:])
-			t := &Thread{Done: true}
-			if len(rets) > 0 {
-				t.Result = rets[0]
-			} else {
-				t.Result = Unit{}
-			}
+			t := &Thread{done: make(chan struct{})}
+			it.spawned(a[0].(FuncVal).Name, a[1:], func(v Value, tr *Trap) { t.Result, t.trap, t.Done = v, tr, true; close(t.done) })
 			return []Value{&Union{Tag: 0, Fields: []Value{t}}}
 		},
 		"scope.spawn": func(it *Interp, a []Value, _ callCtx) []Value {
 			sc := acc(a[1]).Ref.get().(*Scope)
-			rets := it.spawned(a[0].(FuncVal).Name, a[2:])
-			j := &Join{Done: true}
-			if len(rets) > 0 {
-				j.Result = rets[0]
-			} else {
-				j.Result = Unit{}
-			}
+			j := &Join{done: make(chan struct{})}
 			sc.Joins = append(sc.Joins, j)
+			it.spawned(a[0].(FuncVal).Name, a[2:], func(v Value, tr *Trap) { j.Result, j.trap, j.Done = v, tr, true; close(j.done) })
 			return []Value{&Union{Tag: 0, Fields: []Value{j}}}
 		},
-		"Thread.join": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{a[0].(*Thread).Result} },
+		"Thread.join": func(it *Interp, a []Value, _ callCtx) []Value {
+			t := a[0].(*Thread)
+			it.await(t.done)
+			return []Value{t.Result}
+		},
 		"Join.get": func(it *Interp, a []Value, _ callCtx) []Value {
 			j := a[0].(*Join)
+			it.await(j.done)
 			j.Taken = true
 			return []Value{j.Result}
 		},
-		// trap handler
+		// trap handler: a seq_cst exchange
 		"trap.set_handler": func(it *Interp, a []Value, _ callCtx) []Value {
-			prev := FuncVal{}
-			if it.handler != nil {
-				prev = *it.handler
-			}
 			f := a[0].(FuncVal)
-			it.handler = &f
+			it.sh.mu.Lock()
+			prev := FuncVal{}
+			if it.sh.handler != nil {
+				prev = *it.sh.handler
+			}
+			it.sh.handler = &f
+			it.sh.mu.Unlock()
 			return []Value{prev}
 		},
 		// allocator stand-in
-		"SystemAllocator.new": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&SysAlloc{}} },
+		"SystemAllocator.new": func(it *Interp, a []Value, c callCtx) []Value {
+			if it.Freestanding {
+				it.trap("explicit", c.pos) // the freestanding mode provides no default allocator (spec §6)
+			}
+			return []Value{&SysAlloc{}}
+		},
 		"SystemAllocator.alloc": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
-			it.trap("explicit", pos)
-			return nil
+			size, align := u64(a[1]), u64(a[2])
+			// the §6 obligations: a power-of-two alignment up to 4096 and a size that is a multiple of it
+			if align == 0 || align&(align-1) != 0 || align > 4096 || size%align != 0 {
+				it.trap("explicit", c.pos)
+			}
+			if it.takeFailNextAlloc() {
+				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}}
+			}
+			addr := it.heap.alloc(size, align)
+			if addr == 0 {
+				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}} // Err(OutOfMemory)
+			}
+			return []Value{&Union{Tag: 0, Fields: []Value{mkInt("usize", addr)}}}
 		},
 		"SystemAllocator.free": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
-			it.trap("explicit", pos)
+			if !it.heap.free(u64(a[1])) {
+				it.trap("explicit", c.pos) // not a live allocation of this allocator
+			}
 			return nil
 		},
+		// raw pointers (spec §6) over the byte-addressed heap
+		"ptr_null":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt("usize", 0)} },
+		"ptr_from_addr": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt("usize", u64(a[0]))} },
+		"ptr_addr":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt("usize", u64(a[0]))} },
+		"ptr_cast":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt("usize", u64(a[0]))} },
+		"ptr_offset": func(it *Interp, a []Value, c callCtx) []Value {
+			n := signedOf(a[1].(Int))
+			size := int64(layout.Of(c.targ(0)).Size)
+			return []Value{mkInt("usize", uint64(int64(u64(a[0]))+n*size))}
+		},
+		"ptr_load": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{it.decode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0))}
+		},
+		"ptr_take": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{it.decode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0))}
+		},
+		"ptr_store": func(it *Interp, a []Value, c callCtx) []Value {
+			it.encode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0), a[1])
+			return nil
+		},
+		"ptr_load_volatile": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{it.decode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0))}
+		},
+		"ptr_store_volatile": func(it *Interp, a []Value, c callCtx) []Value {
+			if it.consoleWrite(u64(a[0]), a[1]) {
+				return nil
+			}
+			it.encode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0), a[1])
+			return nil
+		},
+		"ptr_copy": func(it *Interp, a []Value, c callCtx) []Value {
+			n := u64(a[2]) * uint64(layout.Of(c.targ(0)).Size)
+			dst := it.heap.bytes(u64(a[0]), n)
+			src := it.heap.bytes(u64(a[1]), n)
+			if (dst == nil || src == nil) && n > 0 {
+				it.trap("explicit", c.pos)
+			}
+			copy(dst, src)
+			return nil
+		},
+		"asm": func(it *Interp, a []Value, c callCtx) []Value { it.trap("explicit", c.pos); return nil },
+		// SIMD: lane-wise over arrays, wrapping
+		"simd_add": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{it.lanes("+", a[0], a[1])} },
+		"simd_sub": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{it.lanes("-", a[0], a[1])} },
+		"simd_mul": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{it.lanes("*", a[0], a[1])} },
+		"simd_and": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{it.lanes("&", a[0], a[1])} },
+		"simd_or":  func(it *Interp, a []Value, _ callCtx) []Value { return []Value{it.lanes("|", a[0], a[1])} },
+		"simd_xor": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{it.lanes("^", a[0], a[1])} },
+		"simd_shuffle": func(it *Interp, a []Value, c callCtx) []Value {
+			x, y, idx := a[0].(*Array), a[1].(*Array), a[2].(*Array)
+			out := &Array{Elems: make([]Value, len(x.Elems))}
+			n := uint64(len(x.Elems))
+			for i, iv := range idx.Elems {
+				k := u64(iv)
+				switch {
+				case k < n:
+					out.Elems[i] = x.Elems[k]
+				case k < 2*n:
+					out.Elems[i] = y.Elems[k-n]
+				default:
+					it.trap("bounds", c.pos)
+				}
+			}
+			return []Value{out}
+		},
+		"simd_reduce_add": func(it *Interp, a []Value, _ callCtx) []Value {
+			x := a[0].(*Array)
+			acc := x.Elems[0]
+			for _, e := range x.Elems[1:] {
+				acc = it.binary("+", acc, e, "wrapping")
+			}
+			return []Value{acc}
+		},
+		"exit": func(it *Interp, a []Value, _ callCtx) []Value { panic(exitCode(signedOf(a[0].(Int)))) },
 		// test hooks
 		"testing.seed_generation": func(it *Interp, a []Value, c callCtx) []Value {
 			pos := c.pos
@@ -319,7 +432,9 @@ func init() {
 			if !it.TestHooks {
 				it.trap("explicit", pos)
 			}
-			it.failNextAlloc = true
+			it.sh.mu.Lock()
+			it.sh.failNextAlloc = true
+			it.sh.mu.Unlock()
 			return nil
 		},
 		"testing.seed_shared_count": func(it *Interp, a []Value, c callCtx) []Value {
@@ -340,6 +455,8 @@ func atomicOf(v Value) *Atomic { return acc(v).Ref.get().(*Atomic) }
 
 func atomicRMW(op string) intrinsicFn {
 	return func(it *Interp, a []Value, _ callCtx) []Value {
+		atomicMu.Lock()
+		defer atomicMu.Unlock()
 		at := atomicOf(a[0])
 		old := at.Val
 		at.Val = it.binary(op, old, a[1], "wrapping")
@@ -395,10 +512,7 @@ func deepClone(it *Interp, v Value, pos ast.Pos) Value {
 // ---- Pool (spec §5.6) ----
 
 func (it *Interp) newPool() *Pool {
-	p := &Pool{Identity: it.nextIdent}
-	if it.nextIdent != 0 {
-		it.nextIdent++
-	}
+	p := &Pool{Identity: it.newIdentity()}
 	return p
 }
 
@@ -477,21 +591,77 @@ func arenaRef(it *Interp, arena, h Value, edit bool, pos ast.Pos) Value {
 	return &Access{Ref: idxRef{elems: func() []Value { return ar.Slots }, i: idx}, Edit: edit}
 }
 
-// spawned runs a thread's function to completion on fresh thread_local
-// instances (the interpreter executes spawned threads eagerly).
-func (it *Interp) spawned(name string, args []Value) []Value {
-	saved := it.globals
-	it.globals = it.freshGlobals()
-	defer func() { it.globals = saved }()
-	return it.callNamed(name, args)
+// lanes applies a wrapping binary operation lane by lane.
+func (it *Interp) lanes(op string, l, r Value) Value {
+	x, y := l.(*Array), r.(*Array)
+	out := &Array{Elems: make([]Value, len(x.Elems))}
+	for i := range x.Elems {
+		out.Elems[i] = it.binary(op, x.Elems[i], y.Elems[i], "wrapping")
+	}
+	return out
+}
+
+// consoleWrite emulates the freestanding console device (PLAN.md 3.1): in
+// freestanding mode a volatile byte store to the console address writes the
+// byte to standard output. It reports whether the store was the device's.
+func (it *Interp) consoleWrite(addr uint64, v Value) bool {
+	if !it.Freestanding || addr != ConsoleAddr {
+		return false
+	}
+	if b, ok := v.(Int); ok {
+		_, _ = it.out.Write([]byte{byte(b.Bits)})
+	}
+	return true
+}
+
+// ConsoleAddr is the freestanding console device: the PL011 UART of the
+// QEMU virt machine (AArch64), emulated by the interpreter.
+const ConsoleAddr = 0x0900_0000
+
+// atomicMu serializes the interpreter's atomic and reference-count updates.
+var atomicMu sync.Mutex
+
+// spawned starts a thread: a goroutine running the function on a copy of
+// the interpreter with fresh thread-locals. A trap on the thread writes its
+// record there and makes the program terminate at the next join or at its
+// end (natively the process aborts at once).
+func (it *Interp) spawned(name string, args []Value, finish func(Value, *Trap)) {
+	child := it.child()
+	go func() {
+		var result Value = Unit{}
+		var trapped *Trap
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					tr, ok := r.(*Trap)
+					if !ok {
+						if code, isExit := r.(exitCode); isExit {
+							it.fatalExit(code) // exit on any thread ends the program with that status
+							return
+						}
+						panic(r)
+					}
+					child.trapRecord(tr)
+					trapped = tr
+				}
+			}()
+			rets := child.callNamed(name, args)
+			if len(rets) > 0 {
+				result = rets[0]
+			}
+		}()
+		if trapped != nil {
+			it.fatalTrap(trapped)
+		}
+		finish(result, trapped)
+	}()
 }
 
 // allocOrTrap models allocation failure for convenience constructors: with
 // the fail_next_alloc test hook armed, the next allocation traps with kind
 // oom (spec §6).
 func (it *Interp) allocOrTrap(pos ast.Pos) {
-	if it.failNextAlloc {
-		it.failNextAlloc = false
+	if it.takeFailNextAlloc() {
 		it.trap("oom", pos)
 	}
 }

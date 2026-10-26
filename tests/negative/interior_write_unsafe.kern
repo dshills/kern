@@ -1,0 +1,22 @@
+//! phase: 3
+//! expect: accept
+// Writes through a view of an Interior type are permitted inside the
+// declaring module under unsafe (spec §6): the module's own synchronization
+// discipline, here a spin flag over an Atomic.
+module m
+struct Counter { hits: u64; lock: Atomic[u64] }
+unsafe assert Interior for Counter
+contract { invariant "hits is written only while lock is 1" }
+func record(c: view[Counter]) {
+    while c.lock.swap(1u64, acquire) != 0u64 { }
+    unsafe { c.hits = c.hits + 1u64 }
+    c.lock.store(0u64, release)
+}
+func main() -> i32 {
+    c := Counter { hits: 0u64, lock: Atomic[u64].new(0u64) }
+    record(c)
+    record(c)
+    print_u64(c.hits)
+    println()
+    return 0i32
+}

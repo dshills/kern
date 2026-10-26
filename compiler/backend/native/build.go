@@ -19,6 +19,7 @@ import (
 	"github.com/dshills/kern/compiler/lower"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
+	"github.com/dshills/kern/runtime/freestanding"
 	"github.com/dshills/kern/runtime/hosted"
 )
 
@@ -33,6 +34,30 @@ type Options struct {
 	// TestHooks links the test-only runtime symbols (`testing.*`); without
 	// it a program referencing them fails to link (PLAN.md 2.3).
 	TestHooks bool
+	// Freestanding builds for a bare-metal target with the freestanding
+	// runtime (PLAN.md 3.1): no OS, no allocator, prologue stack checks.
+	Freestanding bool
+	// TSan instruments the program and runtime with ThreadSanitizer
+	// (concurrency fixtures, PLAN.md 3.3).
+	TSan bool
+	// NoStackCheck is the unsafe build option that drops the freestanding
+	// prologue check (stack overflow becomes a trusted-boundary obligation).
+	NoStackCheck bool
+}
+
+// FreestandingTriple is the default bare-metal target (QEMU virt).
+const FreestandingTriple = "aarch64-unknown-none-elf"
+
+// Linkable reports whether freestanding images can be linked here (lld).
+func Linkable() bool {
+	_, err := exec.LookPath("ld.lld")
+	return err == nil
+}
+
+// QEMUAvailable reports whether the AArch64 system emulator is installed.
+func QEMUAvailable() bool {
+	_, err := exec.LookPath("qemu-system-aarch64")
+	return err == nil
 }
 
 // HostTriple is the LLVM target triple of the build host.
@@ -81,16 +106,22 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 	triple := opts.Triple
 	if triple == "" {
 		triple = HostTriple()
+		if opts.Freestanding {
+			triple = FreestandingTriple
+		}
 	}
-	text, errs := llvm.Emit(mod, triple)
+	text, errs := llvm.EmitWith(mod, llvm.Options{Triple: triple, Freestanding: opts.Freestanding, StackCheck: opts.Freestanding && !opts.NoStackCheck, TSan: opts.TSan})
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("backend: %v", errs[0])
 	}
-	text = withProgramName(text, srcs[0].Name)
+	text = withProgramName(text, srcs[0].Name, opts.Freestanding)
 	if opts.EmitLLVM != "" {
 		if err := os.WriteFile(opts.EmitLLVM, []byte(text), 0o644); err != nil {
 			return nil, err
 		}
+	}
+	if opts.Freestanding {
+		return nil, buildFreestanding(text, out, triple)
 	}
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -119,6 +150,9 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 	}
 	if opts.TestHooks {
 		args = append(args, "-DKERN_TEST_HOOKS")
+	}
+	if opts.TSan {
+		args = append(args, "-fsanitize=thread", "-g")
 	}
 	args = append(args, opts.ExtraSources...)
 	args = append(args, "-lpthread")
@@ -162,7 +196,7 @@ func EmitAsm(srcs []*source.File, triple string) (string, []diag.Diagnostic, err
 		return "", nil, fmt.Errorf("backend: %v", errs[0])
 	}
 	if mod.Entry != "" {
-		text = withProgramName(text, srcs[0].Name)
+		text = withProgramName(text, srcs[0].Name, false)
 	}
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -196,9 +230,66 @@ func EmitAsm(srcs []*source.File, triple string) (string, []diag.Diagnostic, err
 }
 
 // withProgramName embeds the program's file name for the trap record.
-func withProgramName(text, name string) string {
+func withProgramName(text, name string, freestanding bool) string {
 	esc := strings.NewReplacer("\\", "\\5C", "\"", "\\22").Replace(name)
 	global := fmt.Sprintf("@kern.progname = private constant [%d x i8] c\"%s\\00\"\n", len(name)+1, esc)
+	entry := "define i32 @main() {\nentry:\n"
+	if freestanding {
+		entry = "define i32 @kern_main() {\nentry:\n"
+	}
 	text = strings.Replace(text, "declare void @kern_start()", "declare void @kern_start()\ndeclare void @kern_set_file(ptr)", 1)
-	return strings.Replace(text, "define i32 @main() {\nentry:\n", global+"define i32 @main() {\nentry:\n  call void @kern_set_file(ptr @kern.progname)\n", 1)
+	return strings.Replace(text, entry, global+entry+"  call void @kern_set_file(ptr @kern.progname)\n", 1)
+}
+
+// buildFreestanding compiles the program, the freestanding runtime and the
+// startup code for a bare-metal triple. With ld.lld on the PATH the result
+// is a linked ELF image (the QEMU virt layout for AArch64); otherwise it is
+// an archive of the three objects, which the user links with the
+// `virt.ld` script shipped in runtime/freestanding/src.
+func buildFreestanding(text, out, triple string) error {
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		return ErrNoClang
+	}
+	dir, err := os.MkdirTemp("", "kern-fs-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	start := freestanding.StartAArch64
+	if strings.HasPrefix(triple, "x86_64") {
+		start = freestanding.StartX8664
+	}
+	files := map[string]string{"prog.ll": text, "rt.c": freestanding.RuntimeC, "start.S": start, "virt.ld": freestanding.VirtLinkerScript}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			return err
+		}
+	}
+	common := []string{"-target", triple, "-ffreestanding", "-nostdlib", "-fno-builtin", "-O1", "-Wno-override-module", "-ffp-model=strict", "-c"}
+	var objs []string
+	for _, src := range []string{"prog.ll", "rt.c", "start.S"} {
+		obj := filepath.Join(dir, src+".o")
+		cmd := exec.Command(clang, append(append([]string{}, common...), "-o", obj, filepath.Join(dir, src))...)
+		if msg, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("clang %s: %v: %s", src, err, msg)
+		}
+		objs = append(objs, obj)
+	}
+	if lld, err := exec.LookPath("ld.lld"); err == nil {
+		args := append([]string{"-nostdlib", "-static", "-T", filepath.Join(dir, "virt.ld"), "-o", out}, objs...)
+		if msg, err := exec.Command(lld, args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("ld.lld: %v: %s", err, msg)
+		}
+		return nil
+	}
+	ar, err := exec.LookPath("llvm-ar")
+	if err != nil {
+		ar = "ar"
+	}
+	_ = os.Remove(out)
+	if msg, err := exec.Command(ar, append([]string{"rcs", out}, objs...)...).CombinedOutput(); err != nil {
+		return fmt.Errorf("ar: %v: %s", err, msg)
+	}
+	return nil
 }

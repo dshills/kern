@@ -1,0 +1,38 @@
+//! phase: 3
+//! expect: output packed
+// A packed struct has no padding (§4.1); its fields are accessed unaligned,
+// which is an unsafe operation.
+module run
+struct Hdr packed { tag: u8; len: u32; crc: u16 }
+struct Plain { tag: u8; len: u32; crc: u16 }
+contract { requires "unaligned access is supported by the target" }
+func decode(h: view[Hdr]) -> u64 { unsafe { return u64(h.tag) + u64(h.len) + u64(h.crc) } }
+contract { requires "the allocator obligations of §6 hold for every call" }
+func main() -> i32 {
+    var arr: [2]Hdr = zero()
+    unsafe {
+        arr[1].tag = 1u8
+        arr[1].len = 70000u32
+        arr[1].crc = 9u16
+    }
+    print_u64(decode(arr[1]))
+    println()
+    alloc := SystemAllocator.new()
+    unsafe {
+        match alloc.alloc(16usize, 8usize) {
+            Ok(raw) => {
+                p := ptr_cast[Hdr, u8](raw)
+                ptr_store(p, Hdr { tag: 2u8, len: 3u32, crc: 4u16 })
+                // the second element starts 7 bytes after the first: packed size
+                second := ptr_offset(p, 1isize)
+                print_u64(u64(ptr_addr(second) - ptr_addr(p)))
+                println()
+                print_u64(u64(ptr_load(ptr_offset(raw, 1isize))))
+                println()
+                alloc.free(raw, 16usize, 8usize)
+            }
+            Err(e) => { print_str("alloc failed"); println() }
+        }
+    }
+    return 0i32
+}

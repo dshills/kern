@@ -340,6 +340,11 @@ func (f *fn) expr(st *flow, e ast.Expr) *result {
 	case *ast.ConvExpr:
 		f.consumeValue(st, x.X)
 		return &result{t: t}
+	case *ast.ArrayLit:
+		for _, el := range x.Elems {
+			f.consumeValue(st, el)
+		}
+		return &result{t: t, owned: true}
 	case *ast.StructLit:
 		for _, fi := range x.Fields {
 			if ft := f.c.info.Types[fi.Value]; ft != nil {

@@ -1,0 +1,13 @@
+//! phase: 3
+//! expect: output exit_code
+// exit terminates the program with the given status after flushing output;
+// nothing after it runs.
+module run
+func main() -> i32 {
+    print_str("before")
+    println()
+    exit(0i32)
+    print_str("unreachable")
+    println()
+    return 3i32
+}

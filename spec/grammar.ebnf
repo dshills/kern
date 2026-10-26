@@ -15,7 +15,8 @@ type_params   = "[" type_param { "," type_param } "]" ;
 type_param    = ident [ ":" constraint { "+" constraint } ] ;
 constraint    = "Copy" | "Send" | "Share" | type_name ;
 
-struct_decl   = [ "view" ] "struct" ident [ type_params ] [ "nocopy" ] "{" { field sep } "}" ;
+struct_decl   = [ "view" ] "struct" ident [ type_params ] [ "nocopy" ] [ "packed" ] "{" { field sep } "}" ;
+                                                  (* packed: no padding; field access is unsafe *)
 field         = ident ":" type ;
 union_decl    = "union" ident [ type_params ] "{" { variant sep } "}" ;
 variant       = ident [ "(" variant_fields ")" ] ;
@@ -93,6 +94,7 @@ primary       = int_lit | float_lit | string_lit | "true" | "false"
               | "replace" "(" place "," expr ")" | "drop" "(" ident ")"
               | "trap" "(" ")"
               | type_name "{" [ field_init { "," field_init } ] "}"   (* struct literal *)
+              | "[" [ expr { "," expr } ] "]"           (* array literal: [N]T of its elements *)
               | "(" expr ")" | "(" ")" ;
 field_init    = ident ":" expr ;
 place         = ident { "." ident | "[" expr "]" } ;

@@ -1,0 +1,269 @@
+// buffer_pool_fail: the failure-path run of buffer_pool.kern (kern has no
+// getenv, so KERN_BENCH_FAIL=1 is this twin with FAIL_MODE = true): pages
+// 0..255 stay pinned, every miss returns Err(AllPinned), and the line ends
+// with ` failures=<N>`.
+// buffer_pool: 256 frames of 4 KiB over a 1024-page in-memory backing
+// store. Store page p holds p in its first 8 bytes (word 0 of 512 u64
+// words) and a counter (word 1, initially 0). The page table is a direct-
+// mapped array page -> frame. N = 5,000,000 operations; operation i draws
+// x from the LCG (seed 42) and pins page p = (x >> 32) & 127 when
+// x >> 56 < 224, else (x >> 32) & 1023: a miss loads p into the unpinned
+// frame with the smallest last-unpin tick (lowest index on ties), writing
+// the victim back first when it is dirty (an error when every frame is
+// pinned); then, through the pin accessor, the page number is verified,
+// the counter incremented and the frame marked dirty, and the accessor's
+// release function unpins (last = ++tick). Per op cs += p | (f << 16).
+// After the loop every dirty frame is flushed, cs += sum over pages of
+// counter(p) * (p + 1), then cs += evictions.
+// ops = N; sampled operation: one pin (with its possible eviction) + unpin.
+// FAIL_MODE (buffer_pool_fail.kern): pages 0..255 are pinned in setup and
+// never released, so a miss finds no victim and returns Err(AllPinned)
+// (failures++, no checksum contribution).
+// checksum as above   (bench/CHECKSUMS.md; matches bench/c/buffer_pool)
+module buffer_pool_bench
+
+const FAIL_MODE: bool = true
+const NONE: u32 = 4294967295u32
+const EMPTY: u64 = 18446744073709551615u64
+
+struct Page { words: [512]u64 }
+// Frame owns its page inline; pg is EMPTY while the frame is unused.
+struct Frame { page: Page; pg: u64; last: u64; pins: u32; dirty: bool }
+union PoolErr { AllPinned }
+
+struct Pool {
+    frames: Vec[Frame]
+    store: Vec[Page]
+    table: [1024]u32
+    tick: u64
+    evictions: u64
+    last_pinned: usize
+}
+
+func new_pool() -> Pool {
+    frames := Vec[Frame].with_capacity(256usize)
+    var fr: Frame = zero()
+    fr.pg = EMPTY
+    for i in 0usize..256usize { frames.push(fr) }
+    store := Vec[Page].with_capacity(1024usize)
+    var pg: Page = zero()
+    for p in 0u64..1024u64 {
+        pg.words[0] = p
+        store.push(pg)
+    }
+    var table: [1024]u32 = zero()
+    for i in 0usize..1024usize { table[i] = NONE }
+    return Pool { frames: move frames, store: move store, table: table, tick: 0u64, evictions: 0u64, last_pinned: 0usize }
+}
+
+impl Pool {
+    // fetch returns the frame holding page p, loading it on a miss into the
+    // unpinned frame with the smallest last-unpin tick (lowest index on
+    // ties) after writing that frame's page back when dirty; Err(AllPinned)
+    // when every frame is pinned. The 4 KiB page moves are whole-value
+    // copies between the two vectors (different roots, no aliasing).
+    func fetch(edit self, p: u64) -> Result[usize, PoolErr] {
+        f := self.table[usize(p)]
+        if f != NONE { return Ok(usize(f)) }
+        victim := NONE
+        best := EMPTY
+        for i in 0usize..256usize {
+            if self.frames.get(i).pins == 0u32 && self.frames.get(i).last < best {
+                best = self.frames.get(i).last
+                victim = u32(i)
+            }
+        }
+        if victim == NONE { return Err(AllPinned) }
+        v := usize(victim)
+        old := self.frames.get(v).pg
+        if old != EMPTY {
+            self.table[usize(old)] = NONE
+            if self.frames.get(v).dirty {
+                with st := self.store.at(usize(old)) { st = self.frames.get(v).page }
+            }
+            self.evictions = self.evictions + 1u64
+        }
+        with fr := self.frames.at(v) {
+            fr.page = self.store.get(usize(p))
+            fr.pg = p
+            fr.dirty = false
+        }
+        self.table[usize(p)] = victim
+        return Ok(v)
+    }
+
+    // pin is the release accessor of §5.3: the returned edit of the frame
+    // is live for the caller's block and unpin_last runs when the block
+    // ends, including on every early exit.
+    func pin(edit self, f: usize) -> edit[Frame] release unpin_last {
+        self.last_pinned = f
+        with fr := self.frames.at(f) { fr.pins = fr.pins + 1u32 }
+        return self.frames.at(f)
+    }
+
+    func unpin_last(edit self) {
+        f := self.last_pinned
+        self.tick = self.tick + 1u64
+        tick := self.tick
+        with fr := self.frames.at(f) {
+            fr.pins = fr.pins - 1u32
+            fr.last = tick
+        }
+    }
+
+    // hold pins frame f for the rest of the run (FAIL_MODE setup).
+    func hold(edit self, f: usize) {
+        with fr := self.frames.at(f) { fr.pins = fr.pins + 1u32 }
+    }
+
+    // flush writes every dirty frame back to the store.
+    func flush(edit self) {
+        for i in 0usize..256usize {
+            pg := self.frames.get(i).pg
+            if pg != EMPTY && self.frames.get(i).dirty {
+                with st := self.store.at(usize(pg)) { st = self.frames.get(i).page }
+            }
+        }
+    }
+}
+
+func main() -> i32 {
+    n := 5_000_000u64
+    pool := new_pool()
+    if FAIL_MODE {
+        for p in 0u64..256u64 {
+            match pool.fetch(p) {
+                Ok(f) => {
+                    if f != usize(p) { return 1i32 }
+                    pool.hold(f)
+                }
+                Err(e) => return 1i32
+            }
+        }
+    }
+    s := new_sampler(n)
+    checksum := 0u64
+    failures := 0u64
+
+    start := now_ns()
+    x := 42u64
+    for i in 0u64..n {
+        x = lcg(x)
+        p := 0u64
+        if (x >> 56u32) < 224u64 { p = (x >> 32u32) & 127u64 } else { p = (x >> 32u32) & 1023u64 }
+        sampled := s.start()
+        match pool.fetch(p) {
+            Ok(f) => {
+                with fr := pool.pin(f) {
+                    if fr.page.words[0] != p { return 1i32 }
+                    fr.page.words[1] = fr.page.words[1] + 1u64
+                    fr.dirty = true
+                }
+                s.stop(sampled)
+                checksum = wrapping_add(checksum, p | (u64(f) << 16u32))
+            }
+            Err(e) => {
+                s.stop(sampled)
+                failures = failures + 1u64
+            }
+        }
+    }
+    ns := now_ns() - start
+
+    pool.flush()
+    for p in 0u64..1024u64 {
+        checksum = wrapping_add(checksum, wrapping_mul(pool.store.get(usize(p)).words[1], p + 1u64))
+    }
+    checksum = wrapping_add(checksum, pool.evictions)
+    if !FAIL_MODE && failures != 0u64 { return 1i32 }
+    if FAIL_MODE { report_failures(n, ns, s, checksum, failures) } else { report(n, ns, s, checksum) }
+    return 0i32
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark plumbing (bench/PROTOCOL.md), duplicated in every bench/kern
+// program so that each benchmark is one self-contained file: wrapping u64
+// arithmetic, the shared LCG, per-operation latency sampling and the report.
+// ---------------------------------------------------------------------------
+
+func lcg(x: u64) -> u64 {
+    return wrapping_add(wrapping_mul(x, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// Sampler times one operation every ops/4096 operations (operation i is
+// sampled iff i % stride == 0) and keeps at most 4096 latencies.
+struct Sampler { lat: Vec[u64]; stride: u64; until: u64; t0: u64 }
+
+func new_sampler(ops: u64) -> Sampler {
+    stride := ops / 4096u64
+    if stride == 0u64 { stride = 1u64 }
+    return Sampler { lat: Vec[u64].with_capacity(4096usize), stride: stride, until: 0u64, t0: 0u64 }
+}
+
+impl Sampler {
+    // start reports whether the next operation is sampled and, if so, reads the clock.
+    func start(edit self) -> bool {
+        if self.until > 0u64 || self.lat.len() >= 4096usize { return false }
+        self.t0 = now_ns()
+        return true
+    }
+    // stop records the latency of a sampled operation and counts down to the next one.
+    func stop(edit self, sampled: bool) {
+        if sampled {
+            self.lat.push(now_ns() - self.t0)
+            self.until = self.stride
+        }
+        if self.until > 0u64 { self.until = self.until - 1u64 }
+    }
+}
+
+// shell_sort orders the samples in place (at most 4096 values).
+func shell_sort(s: edit[Vec[u64]]) {
+    n := s.len()
+    gap := n / 2usize
+    while gap > 0usize {
+        for i in gap..n {
+            x := s.get(i)
+            j := i
+            while j >= gap && s.get(j - gap) > x {
+                prev := s.get(j - gap)
+                with e := s.at(j) { e = prev }
+                j = j - gap
+            }
+            with e := s.at(j) { e = x }
+        }
+        gap = gap / 2usize
+    }
+}
+
+// report_line prints the protocol line without its newline;
+// p50 = sorted[n/2], p99 = sorted[n*99/100].
+func report_line(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    shell_sort(s.lat)
+    n := s.lat.len()
+    p50 := 0u64
+    p99 := 0u64
+    if n > 0usize {
+        p50 = s.lat.get(n / 2usize)
+        p99 = s.lat.get(n * 99usize / 100usize)
+    }
+    print_str("ops="); print_u64(ops)
+    print_str(" ns="); print_u64(ns)
+    print_str(" p50="); print_u64(p50)
+    print_str(" p99="); print_u64(p99)
+    print_str(" checksum="); print_u64(checksum)
+}
+
+// report prints the protocol line.
+func report(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    report_line(ops, ns, s, checksum)
+    println()
+}
+
+// report_failures prints the protocol line with the ` failures=<N>` field
+// that the failure-path run (the _fail.kern twin) adds.
+func report_failures(ops: u64, ns: u64, s: edit[Sampler], checksum: u64, failures: u64) {
+    report_line(ops, ns, s, checksum)
+    print_str(" failures="); print_u64(failures)
+    println()
+}

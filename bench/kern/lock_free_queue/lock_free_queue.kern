@@ -1,0 +1,239 @@
+// lock_free_queue: a bounded single-producer single-consumer ring of 4096
+// u64 slots stored inline with monotonically increasing head (consumer)
+// and tail (producer) Atomic[u64] indices, padded apart so they sit on
+// separate cache lines. push: when tail - head == 4096 by the producer's
+// cached head, re-read head with acquire and return false if still full;
+// write slots[tail & 4095]; tail.store(tail + 1, release). pop: when
+// head == tail by the consumer's cached tail, re-read tail with acquire and
+// return None if still empty; read slots[head & 4095]; head.store(head + 1,
+// release). The slot write and read go through a view of the ring inside
+// unsafe: the audited interior accesses whose discipline is the contract on
+// push and pop. The main thread is the producer: element i is the LCG's
+// i-th value (seed 42), N = 8,000,000 elements, each pushed until push
+// succeeds (spinning). The consumer thread, released by a gate after the
+// producer's setup, pops every element (spinning while empty) and chains
+// cs = (cs XOR v) * 0x100000001b3 (wrapping) from 0. Timed: spawn through
+// join; threads = 2.
+// ops = N; sampled operation: the consumer's i-th pop (including any spin).
+// FAIL_MODE (lock_free_queue_fail.kern): the consumer is held at the gate
+// while the producer attempts elements 0..5119 once each; the 1024 pushes
+// on the full ring return false (failures = 1024; those elements are
+// dropped), then the gate opens and elements 5120..N-1 follow as in the
+// normal run; the consumer pops N - 1024 elements.
+// checksum = cs + number of popped elements
+// (bench/CHECKSUMS.md; matches bench/c/lock_free_queue)
+module lock_free_queue_bench
+
+const FAIL_MODE: bool = false
+const FNV: u64 = 1_099_511_628_211u64
+
+struct Spsc {
+    slots: [4096]u64
+    pad0: [16]u64
+    head: Atomic[u64]
+    pad1: [15]u64
+    tail: Atomic[u64]
+    pad2: [15]u64
+    go: Atomic[u64]
+}
+// The slots change through a view (Interior) and the ring is viewed by
+// both threads (Share), under the obligations stated on push and pop.
+unsafe assert Interior for Spsc
+unsafe assert Share for Spsc
+
+// Cursor is one thread's cached copy of the other thread's index.
+struct Cursor { cache: u64 }
+
+func new_spsc() -> Spsc {
+    var slots: [4096]u64 = zero()
+    var pad0: [16]u64 = zero()
+    var pad: [15]u64 = zero()
+    return Spsc { slots: slots, pad0: pad0, head: Atomic[u64].new(0u64), pad1: pad, tail: Atomic[u64].new(0u64), pad2: pad, go: Atomic[u64].new(0u64) }
+}
+
+contract {
+    invariant "slot (tail & 4095) is written only by the single producer and only while tail - head < 4096, head being the consumer's release-stored value read here with acquire, so the consumer's last read of that slot happens-before the write; the release store of tail publishes the slot"
+    ensures "true: v is the newest element of the ring; false: the ring was full and v was not stored"
+}
+func push(q: view[Spsc], c: edit[Cursor], v: u64) -> bool {
+    t := q.tail.load(relaxed)
+    if t - c.cache == 4096u64 {
+        c.cache = q.head.load(acquire)
+        if t - c.cache == 4096u64 { return false }
+    }
+    unsafe { q.slots[usize(t & 4095u64)] = v }
+    q.tail.store(t + 1u64, release)
+    return true
+}
+
+contract {
+    invariant "slot (head & 4095) is read only by the single consumer and only while head < tail, tail being the producer's release-stored value read here with acquire, so the producer's write of that slot happens-before the read; the release store of head returns the slot to the producer"
+    ensures "Some(v): v was the oldest element and head advanced; None: the ring was empty"
+}
+func pop(q: view[Spsc], c: edit[Cursor]) -> Option[u64] {
+    h := q.head.load(relaxed)
+    if h == c.cache {
+        c.cache = q.tail.load(acquire)
+        if h == c.cache { return None }
+    }
+    var v: u64
+    unsafe { v = q.slots[usize(h & 4095u64)] }
+    q.head.store(h + 1u64, release)
+    return Some(v)
+}
+
+struct COut { cs: u64; popped: u64; s: Sampler }
+
+// consumer waits at the gate, then pops expected elements; a sample covers
+// one pop including the spins while the ring is empty.
+func consumer(q: view[Spsc], expected: u64, ops: u64) -> COut {
+    while q.go.load(acquire) == 0u64 {}
+    s := new_sampler(ops)
+    c := Cursor { cache: 0u64 }
+    cs := 0u64
+    for i in 0u64..expected {
+        sampled := s.start()
+        v := 0u64
+        got := false
+        while !got {
+            match pop(q, c) {
+                Some(x) => {
+                    v = x
+                    got = true
+                }
+                None => {}
+            }
+        }
+        s.stop(sampled)
+        cs = wrapping_mul(cs ^ v, FNV)
+    }
+    return COut { cs: cs, popped: expected, s: move s }
+}
+
+func run(q: view[Spsc], n: u64) -> Result[i32, SpawnErr] {
+    expected := n
+    if FAIL_MODE { expected = n - 1024u64 }
+    start := now_ns()
+    with s := thread.scope() {
+        j := s.spawn(consumer, q, expected, n)?
+        c := Cursor { cache: 0u64 }
+        x := 42u64
+        failures := 0u64
+        first := 0u64
+        if FAIL_MODE {
+            for i in 0u64..5120u64 {
+                x = lcg(x)
+                if !push(q, c, x) { failures = failures + 1u64 }
+            }
+            first = 5120u64
+        }
+        q.go.store(1u64, release)
+        for i in first..n {
+            x = lcg(x)
+            while !push(q, c, x) {}
+        }
+        r := j.get()
+        ns := now_ns() - start
+        if r.popped != expected || (FAIL_MODE && failures != 1024u64) { return Ok(1i32) }
+        checksum := wrapping_add(r.cs, r.popped)
+        if FAIL_MODE { report_failures(n, ns, r.s, checksum, failures) } else { report(n, ns, r.s, checksum) }
+        return Ok(0i32)
+    }
+}
+
+func main() -> i32 {
+    n := 8_000_000u64
+    q := new_spsc()
+    match run(q, n) {
+        Ok(code) => return code
+        Err(e) => return 2i32
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark plumbing (bench/PROTOCOL.md), duplicated in every bench/kern
+// program so that each benchmark is one self-contained file: wrapping u64
+// arithmetic, the shared LCG, per-operation latency sampling and the report.
+// ---------------------------------------------------------------------------
+
+func lcg(x: u64) -> u64 {
+    return wrapping_add(wrapping_mul(x, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// Sampler times one operation every ops/4096 operations (operation i is
+// sampled iff i % stride == 0) and keeps at most 4096 latencies.
+struct Sampler { lat: Vec[u64]; stride: u64; until: u64; t0: u64 }
+
+func new_sampler(ops: u64) -> Sampler {
+    stride := ops / 4096u64
+    if stride == 0u64 { stride = 1u64 }
+    return Sampler { lat: Vec[u64].with_capacity(4096usize), stride: stride, until: 0u64, t0: 0u64 }
+}
+
+impl Sampler {
+    // start reports whether the next operation is sampled and, if so, reads the clock.
+    func start(edit self) -> bool {
+        if self.until > 0u64 || self.lat.len() >= 4096usize { return false }
+        self.t0 = now_ns()
+        return true
+    }
+    // stop records the latency of a sampled operation and counts down to the next one.
+    func stop(edit self, sampled: bool) {
+        if sampled {
+            self.lat.push(now_ns() - self.t0)
+            self.until = self.stride
+        }
+        if self.until > 0u64 { self.until = self.until - 1u64 }
+    }
+}
+
+// shell_sort orders the samples in place (at most 4096 values).
+func shell_sort(s: edit[Vec[u64]]) {
+    n := s.len()
+    gap := n / 2usize
+    while gap > 0usize {
+        for i in gap..n {
+            x := s.get(i)
+            j := i
+            while j >= gap && s.get(j - gap) > x {
+                prev := s.get(j - gap)
+                with e := s.at(j) { e = prev }
+                j = j - gap
+            }
+            with e := s.at(j) { e = x }
+        }
+        gap = gap / 2usize
+    }
+}
+
+// report_line prints the protocol line without its newline;
+// p50 = sorted[n/2], p99 = sorted[n*99/100].
+func report_line(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    shell_sort(s.lat)
+    n := s.lat.len()
+    p50 := 0u64
+    p99 := 0u64
+    if n > 0usize {
+        p50 = s.lat.get(n / 2usize)
+        p99 = s.lat.get(n * 99usize / 100usize)
+    }
+    print_str("ops="); print_u64(ops)
+    print_str(" ns="); print_u64(ns)
+    print_str(" p50="); print_u64(p50)
+    print_str(" p99="); print_u64(p99)
+    print_str(" checksum="); print_u64(checksum)
+}
+
+// report prints the protocol line.
+func report(ops: u64, ns: u64, s: edit[Sampler], checksum: u64) {
+    report_line(ops, ns, s, checksum)
+    println()
+}
+
+// report_failures prints the protocol line with the ` failures=<N>` field
+// that the failure-path run (the _fail.kern twin) adds.
+func report_failures(ops: u64, ns: u64, s: edit[Sampler], checksum: u64, failures: u64) {
+    report_line(ops, ns, s, checksum)
+    print_str(" failures="); print_u64(failures)
+    println()
+}

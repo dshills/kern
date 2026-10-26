@@ -1,0 +1,77 @@
+# Phase 3 report — Systems features (freestanding, unsafe, threads)
+
+**Date:** 2026-10-26. **Plan:** `specs/initial/PLAN.md` Phase 3. **Spec:** v0.2. **Builds on:** Phase 2 (commit `164d988`).
+
+## Deliverables
+
+| # | Deliverable | Location | Status |
+|---|---|---|---|
+| 3.1 | Freestanding mode: `--env freestanding`, no allocator, console device, halt protocol, prologue stack check and its unsafe off switch, ADR-011 closed | `runtime/freestanding/`, `compiler/backend/native/build.go` (`buildFreestanding`), `compiler/backend/llvm/emit.go` (`Options.StackCheck`), interpreter emulation (`Interp.Freestanding`), `tests/freestanding/` with `README.md`, `docs/decisions/ADR-011` | done; QEMU runs are wired but did not run here (see deviations) |
+| 3.2 | Unsafe operations: raw pointers, volatile MMIO, packed layout, inline assembly, Interior escalation; SIMD intrinsics | prelude `ptr_*`, `asm`, `simd_*`, `struct … packed`; `compiler/interp/rawmem.go` (byte heap); backend cases in `compiler/backend/llvm/calls.go`; rules 4.1.6, 6.6, 6.7 in `docs/ownership.md`; fixtures `tests/run/{raw_ptr,raw_take,packed,asm_nop,exit_code,simd_*}.kern` | done |
+| 3.3 | Concurrency: interpreter threads on goroutines, `Mutex`/`Shared`/`Atomic`/scoped and detached threads natively, ThreadSanitizer builds, litmus tests | `compiler/interp/{interp,intrinsics}.go` (`sharedState`, `child`, `await`), `runtime/hosted/src/kern_rt.c`, `tests/concurrency/`, `tests/concurrency/litmus/`, harness `tsan:` header | done |
+| 3.4 | Six remaining workloads in C, Rust and kern; failure-path and thread columns; SIMD packet-parser row; unsafe audit | `bench/`, `docs/unsafe-audit.md` | see Benchmarks |
+
+## Acceptance criteria
+
+1. Freestanding fixtures boot and trap correctly under QEMU on both targets and produce identical output in the interpreter's emulation; `stack` traps fire in freestanding builds — **met in the emulation and in the compiled image's code** (`tests/freestanding/{hello,trap_bounds,stack,mmio}.kern`; the prologue check is present in every function of the AArch64 and x86-64 objects); **not demonstrated under QEMU**: neither `ld.lld` nor QEMU is installed on this host, so the harness compiles the bare-metal objects and skips the run (it links and runs the image when both tools are present).
+2. Concurrency fixtures pass natively and under TSan; the deliberate-race twin is detected — **met** (`tests/concurrency/*.kern` with `tsan: clean`, `race_raw_ptr.kern` with `tsan: race`; the interpreter runs them on real goroutines with the same output).
+3. All thirteen §8 workloads have C, Rust and kern versions with a full benchmark report — see Benchmarks.
+4. `docs/unsafe-audit.md` covers every `unsafe` block, and `UNSAFE_MISSING_CONTRACT` fires on a fixture — see Unsafe audit (`tests/negative/unsafe_missing_contract.kern` from Phase 0).
+5. Every SIMD intrinsic has a passing fixture, and the packet-parser benchmark reports scalar and SIMD rows — fixtures **met** (`tests/run/simd_{add,sub,mul,and,or,xor,shuffle,reduce_add}.kern`); rows: see Benchmarks.
+6. ADR-011 is closed and recorded — **met**.
+
+## What was built
+
+- **Raw pointers.** `RawPtr[T]` operations are prelude intrinsics (`ptr_null`, `ptr_from_addr`, `ptr_addr`, `ptr_cast[U, T]`, `ptr_offset`, `ptr_load`, `ptr_store`, `ptr_take`, `ptr_load_volatile`, `ptr_store_volatile`, `ptr_copy`), every one an unsafe operation, as are `SystemAllocator.alloc`/`free` now (fixtures updated). The interpreter gained a byte-addressed heap (`rawmem.go`): values are encoded in their §4.1 layout, library objects and function values stored into raw memory live in a handle table, and the allocator obligations trap with kind `explicit`. Natively the operations are plain loads, stores and `getelementptr`; volatile accesses carry `volatile`.
+- **Packed structs, inline assembly, exit.** `struct S packed` lays out without padding; field accesses are unaligned (`align 1`) and unsafe. `asm("template")` is an operand-free template with a memory clobber (native-only fixture; the interpreter traps `explicit`). `exit(code)` flushes and terminates (hosted) or halts (freestanding).
+- **SIMD.** `[N]E` arrays with `N` in 2, 4, 8, 16 are vectors for `simd_add/sub/mul/and/or/xor`, `simd_shuffle` (runtime indices, bounds-checked) and `simd_reduce_add` (typed by the checker as the lane type); the backend moves arrays through memory into LLVM vector registers. Array literals `[e1, e2, …]` were added to the language for them.
+- **Freestanding.** The backend emits `kern_main` and, with `Options.StackCheck`, a prologue comparing `llvm.stacksave` against `@kern_stack_limit` that traps with kind `stack`. `runtime/freestanding/src/rt.c` provides the ADR-011 symbol set (console output, trap entry, halt protocol, `memcpy`/`memmove`/`memset`); `start_aarch64.S`/`start_x86_64.S` set the stack and limit and call `kern_start`, `kern_main`, `kern_exit`; `virt.ld` lays the image out for QEMU's `virt`. `kern build --env freestanding` compiles the three objects for `aarch64-unknown-none-elf` (or `x86_64-unknown-none-elf`) and links with `ld.lld` when present, otherwise writes an archive. The interpreter's `--env freestanding` emulation maps volatile stores to `0x0900_0000` to standard output, writes trap records to the console, ends with the halt line, and has no allocator.
+- **Threads.** The interpreter runs spawned functions on goroutines with a per-thread copy of the interpreter (fresh thread-locals, own stack budget and identifier) and process-wide shared state (handler, identity tags, test hooks, output lock, raw heap); `Mutex` is a real lock with recursive-acquisition detection by thread identifier, `Atomic` and `Shared` counts are serialized, joins wait on channels, and a trap on a spawned thread writes its record there and terminates the program at the next join or at its end with status 134 (natively the process aborts at once). `thread_local` instances are per goroutine. The hosted runtime's atomic calls now take the ordering tag correctly (a Phase 2 bug: `Ordering` is a payload-free union and was passed as a struct).
+- **ThreadSanitizer.** `native.Options.TSan` instruments the program and runtime; the harness builds every `tsan: clean` fixture with it and requires no report, and the `tsan: race` twin (two threads storing through one raw pointer, handed to the threads through a struct with `unsafe assert Send`) must produce one. Litmus fixtures `message_passing` (release/acquire) and `store_buffering` (seq_cst) run 200 trials each, differentially.
+- **Interior escalation.** A write through a `view` of an `Interior` type declared in the current module is permitted inside `unsafe` (resolver and checker), the §6 "writes through a view of an Interior type inside its declaring module" operation (`tests/negative/interior_write_{outside_unsafe,unsafe}.kern`).
+
+## Deviations from the plan
+
+- **No QEMU, no `ld.lld` on the development host.** Freestanding images are compiled (three objects, archived) and the prologue check, halt protocol and console driver are verified in the emitted code and the interpreter's emulation; the harness's QEMU path (`qemu-system-aarch64 -M virt -cpu cortex-a72 -serial stdio -display none -no-reboot`) is implemented and documented in `tests/freestanding/README.md` but ran nowhere. The x86-64 `q35` path has startup code and a console driver but no linker script or run.
+- **Inline assembly is operand-free.** `asm("template")` covers the §6 operation with a memory clobber; operands and clobber lists are a later-phase extension.
+- **Library containers are still C.** The kern rewrite of `Vec`/`Pool`/`Arena`/`Box` over the raw-pointer core (deferred from Phase 2) is still deferred: the raw-pointer core now exists and the benchmarks use it directly, but moving the hosted containers into kern is a self-contained task that did not fit this phase; freestanding programs therefore have no containers natively.
+- **Interpreter traps on spawned threads terminate late.** The interpreter cannot abort the main goroutine from a child; the program ends with status 134 at the next join or at the end, after writing the record once. No fixture traps on a spawned thread.
+- **The interpreter's atomics are a global lock**, which is a valid (sequentially consistent) implementation of every ordering; litmus fixtures therefore only ever observe allowed outcomes in the interpreter and exercise the real memory model natively.
+
+## Benchmarks
+
+All thirteen §8 workloads now have C, Rust and kern implementations (`bench/{c,rust,kern}/`); `bench/CHECKSUMS.md` defines the work and every implementation prints the same checksum, including the failure-path runs (`KERN_BENCH_FAIL=1` for C and Rust, the `_fail.kern` twins for kern, which has no `getenv`). The harness gained per-file kern rows, the failure-path column, the thread-count column and a load-average line. `bench/REPORT.md` is the generated report (5 runs per row, 95% confidence intervals; the host carried a load average above 10 from concurrent work during the run, so multi-threaded rows are noisy). kern release against the better of C and Rust:
+
+| Workload | kern / best throughput | kern RSS / lowest | 10% targets |
+|---|---|---|---|
+| vector | 0.25 | 1.00 | RSS |
+| hash_table | 0.50 | 1.06 | RSS |
+| btree | 0.52 | 3.21 | neither |
+| arena_ast | 0.51 | 1.37 | neither |
+| ring_buffer | 1.03 | 1.03 | both |
+| wal | 0.39 | 1.00 | RSS |
+| packet_parser | 0.27 (scalar), SIMD row 42.3 vs 31.6 Mops/s | 1.07 | RSS |
+| buffer_pool | 0.50 (1.36 in a quieter run) | 1.01 | RSS |
+| page_frame_allocator | 0.87 | 1.06 | both |
+| intrusive_run_queue | 1.03 | 1.05 | both |
+| thread_pool | 0.62 | 1.02 | RSS |
+| lock_protected_map | 0.60 | 1.06 | RSS |
+| lock_free_queue | 0.34 | 1.02 | RSS |
+
+Three workloads meet both targets (ring buffer, page-frame allocator, intrusive run queue: array- and raw-pointer-based code with no container calls), the RSS target holds on eleven, and the throughput gap on the rest has the Phase 2 causes (out-of-line C containers, every check on) plus two new ones visible in the Phase 3 rows: the thread pool and the SPSC queue spin without a wait primitive (kern has no condition variable or spin hint, so `thread_pool` p99 is ~30 µs against C's condition variables), and the lock-free queue publishes every element while the C and Rust programs batch their index stores (B-Queue style, documented in `CHECKSUMS.md`), which on Apple silicon is the difference between 280 and 900 Mops/s. The packet parser's SIMD row is 34% faster than its scalar row with `simd_add`/`simd_reduce_add` over `[4]u64` lanes. The `[unproven]` aliasing experiment repeats Phase 2's result (attributes make no difference on `vector`, 288–300 Mops/s either way, Rust 878): the attributed parameters are not the loads the loop performs.
+
+## Unsafe audit
+
+`docs/unsafe-audit.md` lists every `unsafe` block and assertion in `std/core.kern` (three `Interior` assertions, no blocks: the library is intrinsic), `bench/kern/` (the intrusive run queue's thirteen raw-pointer blocks and the lock-free queue's two slot accesses with their `Interior`/`Share` assertions, from the per-block inventory `bench/kern/UNSAFE.md`) and the executable fixtures, each with its contract and the run that exercises its failure path. Every other workload is safe code. `UNSAFE_MISSING_CONTRACT` fires on `tests/negative/unsafe_missing_contract.kern`; the benchmark agent's findings (`bench/kern/COMPILER_ISSUES.md`) led to two resolver fixes in this phase: returning a field of the single access parameter as an access, and treating a field of a returned projection as a place.
+
+## Reviews
+
+- **prism** (OpenAI gpt-6.1-sol, staged diff, docs/fixtures/benchmark programs excluded): 23 findings (9 high, 14 medium), all addressed: SIMD vector loads and stores carry the array's element alignment; volatile loads and stores of large aggregates go through memory; the freestanding stack check runs before anything is written into the frame (allocas are only a stack-pointer adjustment, parameter stores follow the check, and freestanding builds emit no stack probes; the guard margin above the real stack bottom covers LLVM's callee-saved spills); the packed alignment override survives every path step; generated functions carry `sanitize_thread` under TSan; `exit` on a spawned thread ends the interpreter with that status; the raw heap keeps stable chunks (no reallocation under a released lock) with checked sizes and allocation failure; unsafe operations cannot be taken as function values; the packed-field check sits in the shared field resolution; the harness validates normal-run checksums for every program and picks the workload's main kern program by name; the interpreter's fatal state is atomic; shuffle indices stay unsigned; array literals clear the struct-literal restriction; the freestanding console polls the UART's transmit status and escapes file names in records; `memmove` compares addresses as integers; the message-passing litmus spawns the writer first; the harness checks QEMU's and the sanitized programs' termination, probes TSan support once, and requires an actual data-race report.
+- **realitycheck** (spec + plan, OpenAI gpt-6.1-sol, `--max-tokens 65536`): PARTIALLY_ALIGNED, score 100, no drift, no violations; every inventoried item is PARTIAL or UNCLEAR for the same reason as in Phases 1 and 2 (the tool sees a symbol inventory; Phases 4 and 5 are unimplemented as expected).
+- **verifier** (offline): 89 low-severity unit gaps (exported symbols without a direct unit test; the byte heap gained `compiler/interp/rawmem_test.go`, the backend's shape tests cover the new attributes).
+
+## Known limitations carried into Phase 4
+
+- Freestanding builds need an external linker (`ld.lld`) and QEMU to execute; neither is vendored.
+- `asm` has no operands; `packed` is supported for structs only.
+- Detached threads leak their result block natively; the interpreter leaks the goroutine's result.

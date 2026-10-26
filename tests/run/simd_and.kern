@@ -1,0 +1,9 @@
+//! phase: 3
+//! expect: output simd_and
+// SIMD intrinsic simd_and over fixed-width vectors (PLAN.md 3.2); lanes wrap.
+module run
+func main() -> i32 {
+    r := simd_and([12u8, 255u8, 7u8, 1u8, 0u8, 3u8, 9u8, 6u8], [10u8, 15u8, 1u8, 1u8, 1u8, 2u8, 8u8, 4u8])
+    print_u64(u64(r[0]) + u64(r[1]) + u64(r[2])); println()
+    return 0i32
+}

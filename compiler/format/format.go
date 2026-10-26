@@ -231,6 +231,9 @@ func (p *printer) decl(d ast.Decl) {
 		if d.NoCopy {
 			p.w(" nocopy")
 		}
+		if d.Packed {
+			p.w(" packed")
+		}
 		p.w(" ")
 		items := make([]bodyItem, len(d.Fields))
 		for i, f := range d.Fields {
@@ -979,6 +982,15 @@ func (p *printer) expr(e ast.Expr) {
 		p.w(")")
 	case *ast.StructLit:
 		p.structLit(e)
+	case *ast.ArrayLit:
+		p.w("[")
+		for i, el := range e.Elems {
+			if i > 0 {
+				p.w(", ")
+			}
+			p.expr(el)
+		}
+		p.w("]")
 	case *ast.RangeExpr:
 		p.expr(e.Lo)
 		p.w("..")

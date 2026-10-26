@@ -6,6 +6,8 @@ import (
 	"io"
 	"math"
 	"math/bits"
+	"sync"
+	"sync/atomic"
 
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/ir"
@@ -24,30 +26,139 @@ func (t *Trap) Error() string { return "trap " + t.Kind }
 
 // Interp executes a module.
 type Interp struct {
-	mod           *ir.Module
-	file          string
-	out           io.Writer
-	errOut        io.Writer
-	handler       *FuncVal
-	TestHooks     bool
-	failNextAlloc bool
-	stackBytes    int
-	stackUsed     int
-	nextIdent     uint32
-	globals       []Value // this thread's instances of the module's thread_locals
+	mod        *ir.Module
+	file       string
+	out        io.Writer
+	errOut     io.Writer
+	TestHooks  bool
+	stackBytes int
+	stackUsed  int
+	globals    []Value  // this thread's instances of the module's thread_locals
+	heap       *rawHeap // byte-addressed memory for raw pointers
+	sh         *sharedState
+	tid        uint64 // this thread's identifier (0 is the main thread)
+	inTrap     bool   // a trap inside the handler terminates
+	// Freestanding selects the freestanding emulation: console device
+	// writes go to standard output and there is no default allocator.
+	Freestanding bool
 }
 
 // New creates an interpreter for a module. out receives program output,
 // errOut the trap record.
 func New(mod *ir.Module, file string, out, errOut io.Writer) *Interp {
-	return &Interp{mod: mod, file: file, out: out, errOut: errOut, stackBytes: 8 << 20, nextIdent: 1}
+	mu := &sync.Mutex{}
+	return &Interp{mod: mod, file: file, out: &lockedWriter{mu: mu, w: out}, errOut: &lockedWriter{mu: mu, w: errOut}, stackBytes: 8 << 20, heap: newRawHeap(), sh: &sharedState{nextIdent: 1, fatalCh: make(chan struct{})}}
+}
+
+// sharedState is the process-wide interpreter state shared by every thread
+// (spawned threads are goroutines with their own Interp copy).
+type sharedState struct {
+	mu            sync.Mutex
+	handler       *FuncVal
+	nextIdent     uint32
+	failNextAlloc bool
+	nextTid       uint64
+	fatal         atomic.Pointer[Trap]  // the first trap on a spawned thread: the program terminates
+	exit          atomic.Pointer[int32] // an exit requested on a spawned thread
+	fatalOnce     sync.Once
+	fatalCh       chan struct{}
+}
+
+// lockedWriter serializes output from several threads.
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(b []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(b)
+}
+
+// child is a copy of the interpreter for a new thread: fresh thread-locals,
+// its own stack budget and identifier, the shared state in common.
+func (it *Interp) child() *Interp {
+	c := *it
+	c.stackUsed = 0
+	c.globals = it.freshGlobals()
+	c.inTrap = false
+	it.sh.mu.Lock()
+	it.sh.nextTid++
+	c.tid = it.sh.nextTid
+	it.sh.mu.Unlock()
+	return &c
+}
+
+// newIdentity issues a container identity tag (0 when tags are disabled).
+func (it *Interp) newIdentity() uint32 {
+	it.sh.mu.Lock()
+	defer it.sh.mu.Unlock()
+	id := it.sh.nextIdent
+	if id != 0 {
+		it.sh.nextIdent++
+	}
+	return id
+}
+
+// takeFailNextAlloc consumes the fail_next_alloc hook.
+func (it *Interp) takeFailNextAlloc() bool {
+	it.sh.mu.Lock()
+	defer it.sh.mu.Unlock()
+	f := it.sh.failNextAlloc
+	it.sh.failNextAlloc = false
+	return f
+}
+
+// fatalTrap records the first trap on a spawned thread, after its record
+// was written on that thread; joins and the end of the program observe it.
+func (it *Interp) fatalTrap(tr *Trap) {
+	it.sh.fatalOnce.Do(func() {
+		it.sh.fatal.Store(tr)
+		close(it.sh.fatalCh)
+	})
+}
+
+// fatalExit records an exit requested on a spawned thread.
+func (it *Interp) fatalExit(code exitCode) {
+	it.sh.fatalOnce.Do(func() {
+		c := int32(code)
+		it.sh.exit.Store(&c)
+		close(it.sh.fatalCh)
+	})
+}
+
+// terminated reports whether a spawned thread ended the program, with the
+// status: 134 after a trap (its record already written), or the exit code.
+func (it *Interp) terminated() (int, bool) {
+	select {
+	case <-it.sh.fatalCh:
+	default:
+		return 0, false
+	}
+	if c := it.sh.exit.Load(); c != nil {
+		return int(*c), true
+	}
+	return 134, true
+}
+
+// await waits for a thread to finish, terminating the program when any
+// spawned thread trapped or exited.
+func (it *Interp) await(done chan struct{}) {
+	select {
+	case <-done:
+	case <-it.sh.fatalCh:
+	}
+	if code, ok := it.terminated(); ok {
+		panic(exitCode(code))
+	}
 }
 
 // SetIdentityTags disables identity tags (a debug-build feature, PLAN.md
 // 2.2) when off: containers get identity 0 and the check is skipped.
 func (it *Interp) SetIdentityTags(on bool) {
 	if !on {
-		it.nextIdent = 0
+		it.sh.nextIdent = 0
 	}
 }
 
@@ -91,37 +202,65 @@ func (it *Interp) Run() (status int) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
+			if code, ok := r.(exitCode); ok {
+				status = int(code)
+				it.halt(status)
+				return
+			}
 			tr, ok := r.(*Trap)
 			if !ok {
 				panic(r)
 			}
 			it.trapRecord(tr)
 			status = 134
+			it.halt(status)
 		}
 	}()
 	rets := it.call(entry, nil)
 	if len(rets) == 1 {
 		if n, ok := rets[0].(Int); ok {
-			return int(signedOf(n))
+			status = int(signedOf(n))
 		}
 	}
-	return 0
+	if code, ok := it.terminated(); ok {
+		status = code // a spawned thread trapped (record already written) or exited
+	}
+	it.halt(status)
+	return status
 }
+
+// halt writes the freestanding completion line (PLAN.md 3.1); hosted runs
+// end silently.
+func (it *Interp) halt(code int) {
+	if it.Freestanding {
+		_, _ = fmt.Fprintf(it.out, "{\"halt\":{\"code\":%d}}\n", uint32(int32(code)))
+	}
+}
+
+// exitCode is raised by the exit intrinsic and recovered by Run.
+type exitCode int32
 
 // trapRecord writes the trap record (the default handler's output, PLAN.md
 // §0) and runs the registered handler once.
 func (it *Interp) trapRecord(tr *Trap) {
-	rec := map[string]any{"trap": map[string]any{"kind": tr.Kind, "file": it.file, "span": map[string]int{"start": tr.Pos.Start, "end": tr.Pos.End}, "thread": 0}}
+	rec := map[string]any{"trap": map[string]any{"kind": tr.Kind, "file": it.file, "span": map[string]int{"start": tr.Pos.Start, "end": tr.Pos.End}, "thread": it.tid}}
 	b, _ := json.Marshal(rec)
-	if it.handler == nil {
-		_, _ = fmt.Fprintf(it.errOut, "%s\n", b)
+	it.sh.mu.Lock()
+	handler := it.sh.handler
+	it.sh.mu.Unlock()
+	if handler == nil || it.inTrap {
+		if it.Freestanding {
+			_, _ = fmt.Fprintf(it.out, "%s\n", b) // the console is the only device
+		} else {
+			_, _ = fmt.Fprintf(it.errOut, "%s\n", b)
+		}
 		return
 	}
 	// a custom handler: TrapInfo is a struct {kind, file, start, end, thread_id}
-	info := &Struct{Fields: []Value{&Union{Tag: trapKindIndex(tr.Kind)}, Int{Ty: "usize"}, mkInt("usize", uint64(tr.Pos.Start)), mkInt("usize", uint64(tr.Pos.End)), Int{Ty: "u64"}}}
+	info := &Struct{Fields: []Value{&Union{Tag: trapKindIndex(tr.Kind)}, Int{Ty: "usize"}, mkInt("usize", uint64(tr.Pos.Start)), mkInt("usize", uint64(tr.Pos.End)), mkInt("u64", it.tid)}}
 	slot := Value(info)
-	h := it.handler
-	it.handler = nil // a trap inside the handler terminates
+	h := handler
+	it.inTrap = true // a trap inside the handler terminates
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -889,15 +1028,19 @@ func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
 	case *Mutex:
 		it.destroy(x.Val, elem(0))
 	case *Scope:
+		// the scope's end joins every thread it spawned
 		for _, j := range x.Joins {
-			if !j.Taken && j.Done {
+			it.await(j.done)
+			if !j.Taken {
+				j.Taken = true
 				it.destroy(j.Result, elem(0))
 			}
 		}
 	case *Thread:
-		// detached: the result was destroyed when the function returned
+		// detached: the thread runs on; its result is leaked (as natively)
 	case *Join:
 		if !x.Taken {
+			it.await(x.done)
 			x.Taken = true
 			it.destroy(x.Result, elem(0))
 		}

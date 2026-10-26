@@ -1,0 +1,9 @@
+//! phase: 3
+//! expect: output simd_mul
+// SIMD intrinsic simd_mul over fixed-width vectors (PLAN.md 3.2); lanes wrap.
+module run
+func main() -> i32 {
+    r := simd_mul([3i16, -4i16], [5i16, 6i16])
+    print_i64(i64(r[0])); println(); print_i64(i64(r[1])); println()
+    return 0i32
+}

@@ -1,0 +1,9 @@
+//! phase: 3
+//! expect: output simd_or
+// SIMD intrinsic simd_or over fixed-width vectors (PLAN.md 3.2); lanes wrap.
+module run
+func main() -> i32 {
+    r := simd_or([12u8, 0u8], [3u8, 5u8])
+    print_u64(u64(r[0])); println(); print_u64(u64(r[1])); println()
+    return 0i32
+}

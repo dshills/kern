@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -40,6 +41,9 @@ type header struct {
 	testHooks bool
 	noRecord  bool   // trap-record: none — a custom handler writes no default record
 	cfile     string // c: the C counterpart of an FFI fixture (native-only execution)
+	native    bool   // native-only: true — the interpreter cannot execute it (inline assembly)
+	env       string // env: freestanding — run under the freestanding emulation and build bare-metal
+	tsan      string // tsan: clean | race — build natively with ThreadSanitizer and expect no report, or a report
 }
 
 func parseHeader(t *testing.T, f *source.File) header {
@@ -76,6 +80,12 @@ func parseHeader(t *testing.T, f *source.File) header {
 			h.noRecord = val == "none"
 		case "c":
 			h.cfile = val
+		case "native-only":
+			h.native = val == "true"
+		case "env":
+			h.env = val
+		case "tsan":
+			h.tsan = val
 		}
 	}
 	return h
@@ -94,12 +104,18 @@ func checkFiles(fs []*source.File) []diag.Diagnostic {
 func fixtures(t *testing.T) []string {
 	t.Helper()
 	var out []string
-	for _, dir := range []string{"positive", "negative", "adversarial", "trap", "run", "ffi"} {
+	dirs := []string{"positive", "negative", "adversarial", "trap", "run", "ffi", "freestanding", "concurrency", filepath.Join("concurrency", "litmus")}
+	listed := map[string]bool{}
+	for _, dir := range dirs {
+		listed[dir] = true
+	}
+	for _, dir := range dirs {
 		m, _ := filepath.Glob(filepath.Join(dir, "*.kern"))
 		out = append(out, m...)
 		ds, _ := filepath.Glob(filepath.Join(dir, "*"))
 		for _, d := range ds {
-			if st, err := os.Stat(d); err == nil && st.IsDir() {
+			// a subdirectory is a multi-file fixture unless it is a fixture directory itself
+			if st, err := os.Stat(d); err == nil && st.IsDir() && !listed[d] {
 				out = append(out, d)
 			}
 		}
@@ -326,15 +342,20 @@ func execute(t *testing.T, path string, files []*source.File, h header) {
 		}
 		return
 	}
-	if h.cfile != "" {
-		// FFI fixtures execute natively with their C counterpart; the
-		// interpreter bridge is deferred (docs/reports/phase-2.md)
+	if h.cfile != "" || h.native {
+		// FFI fixtures execute natively with their C counterpart (the
+		// interpreter bridge is deferred, docs/reports/phase-2.md); inline
+		// assembly fixtures are native-only by nature
 		nativeOnly(t, path, files, h)
 		return
 	}
 	var out, errb bytes.Buffer
 	it := interp.New(mod, path, &out, &errb)
 	it.TestHooks = h.testHooks
+	if h.env == "freestanding" {
+		freestandingRun(t, path, files, h, mod)
+		return
+	}
 	status := it.Run()
 	switch h.expect {
 	case "trap":
@@ -375,11 +396,153 @@ func execute(t *testing.T, path string, files []*source.File, h header) {
 			t.Fatalf("output mismatch:\n--- want\n%s\n--- got\n%s", want, out.String())
 		}
 	}
-	if h.phase <= 2 {
-		// every executable fixture also runs natively, with or without an
-		// expected-output file
-		nativeRun(t, files, h, out.Bytes(), errb.Bytes(), status)
+	if h.tsan == "race" {
+		// a deliberate-race twin: only ThreadSanitizer judges it
+		tsanRun(t, files, h)
+		return
 	}
+	// every executable fixture also runs natively, with or without an
+	// expected-output file
+	nativeRun(t, files, h, out.Bytes(), errb.Bytes(), status)
+	if h.tsan == "clean" {
+		tsanRun(t, files, h)
+	}
+}
+
+// freestandingRun executes a freestanding fixture in the interpreter's
+// freestanding emulation (console device, halt line) against its expected
+// console output, then builds the bare-metal image: with ld.lld and QEMU on
+// the PATH the image runs under `qemu-system-aarch64 -M virt -cpu cortex-a72
+// -serial stdio -display none -no-reboot` and its console must match too;
+// otherwise the build is an object archive and only compilation is checked.
+func freestandingRun(t *testing.T, path string, files []*source.File, h header, mod *ir.Module) {
+	t.Helper()
+	var out, errb bytes.Buffer
+	it := interp.New(mod, path, &out, &errb)
+	it.TestHooks = h.testHooks
+	it.Freestanding = true
+	status := it.Run()
+	name := h.code
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(path), ".kern")
+	}
+	want, err := os.ReadFile(filepath.Join(filepath.Dir(path), name+".out"))
+	if err != nil {
+		t.Fatalf("missing expected console file for %s", name)
+	}
+	if !bytes.Equal(out.Bytes(), want) {
+		t.Fatalf("console mismatch (status %d):\n--- want\n%s\n--- got\n%s", status, want, out.String())
+	}
+	if errb.Len() != 0 {
+		t.Fatalf("freestanding emulation wrote to standard error: %q", errb.String())
+	}
+	if !native.Available() {
+		t.Log("clang not available: freestanding build skipped")
+		return
+	}
+	img := filepath.Join(t.TempDir(), "image")
+	ds, err := native.Build(files, img, native.Options{Freestanding: true})
+	if err != nil {
+		t.Fatalf("freestanding build: %v", err)
+	}
+	if len(ds) > 0 {
+		t.Fatalf("freestanding build diagnostics: %s", render(ds))
+	}
+	if !native.Linkable() || !native.QEMUAvailable() {
+		t.Log("ld.lld or qemu-system-aarch64 not available: freestanding image compiled, not run")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "qemu-system-aarch64", "-M", "virt", "-cpu", "cortex-a72", "-serial", "stdio", "-display", "none", "-no-reboot", "-kernel", img)
+	var qout, qerr bytes.Buffer
+	cmd.Stdout = &qout
+	cmd.Stderr = &qerr
+	err = cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("QEMU did not exit within the budget")
+	}
+	if err != nil {
+		// PSCI SYSTEM_OFF ends QEMU with status 0; anything else is a guest or emulator failure
+		t.Fatalf("QEMU terminated abnormally: %v\n%s", err, qerr.String())
+	}
+	if !bytes.Equal(bytes.ReplaceAll(qout.Bytes(), []byte("\r\n"), []byte("\n")), want) {
+		t.Fatalf("QEMU console mismatch:\n--- want\n%s\n--- got\n%s", want, qout.String())
+	}
+}
+
+// tsanRun builds the fixture with ThreadSanitizer and checks that a report
+// appears exactly when the fixture declares a deliberate race (PLAN.md 3.3).
+func tsanRun(t *testing.T, files []*source.File, h header) {
+	t.Helper()
+	if !native.Available() {
+		t.Skip("clang not available")
+	}
+	if !tsanSupported(t) {
+		t.Skip("ThreadSanitizer is not supported by this toolchain")
+	}
+	exe := filepath.Join(t.TempDir(), "prog")
+	ds, err := native.Build(files, exe, native.Options{TSan: true, TestHooks: h.testHooks})
+	if err != nil {
+		t.Fatalf("ThreadSanitizer build: %v", err)
+	}
+	if len(ds) > 0 {
+		t.Fatalf("native build diagnostics: %s", render(ds))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	runErr := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("sanitized program did not finish within the budget")
+	}
+	race := strings.Contains(errb.String(), "WARNING: ThreadSanitizer: data race")
+	if strings.Contains(errb.String(), "FATAL: ThreadSanitizer") {
+		t.Fatalf("ThreadSanitizer failed to start:\n%s", errb.String())
+	}
+	switch h.tsan {
+	case "race":
+		if !race {
+			t.Fatalf("deliberate race not reported by ThreadSanitizer; stderr %q", errb.String())
+		}
+	case "clean":
+		if race {
+			t.Fatalf("ThreadSanitizer report on a race-free fixture:\n%s", errb.String())
+		}
+		if runErr != nil {
+			t.Fatalf("sanitized program failed: %v, stderr %q", runErr, errb.String())
+		}
+	}
+}
+
+var tsanProbe struct {
+	once sync.Once
+	ok   bool
+}
+
+// tsanSupported probes the toolchain once with a trivial sanitized C program.
+func tsanSupported(t *testing.T) bool {
+	t.Helper()
+	tsanProbe.once.Do(func() {
+		dir, err := os.MkdirTemp("", "kern-tsan-probe-")
+		if err != nil {
+			return
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+		src := filepath.Join(dir, "p.c")
+		if err := os.WriteFile(src, []byte("int main(void){return 0;}\n"), 0o644); err != nil {
+			return
+		}
+		exe := filepath.Join(dir, "p")
+		if err := exec.Command("clang", "-fsanitize=thread", "-o", exe, src).Run(); err != nil {
+			return
+		}
+		tsanProbe.ok = exec.Command(exe).Run() == nil
+	})
+	return tsanProbe.ok
 }
 
 // nativeOnly runs an FFI fixture natively against its expected output.
@@ -389,8 +552,11 @@ func nativeOnly(t *testing.T, path string, files []*source.File, h header) {
 		t.Skip("clang not available")
 	}
 	exe := filepath.Join(t.TempDir(), "prog")
-	cf := filepath.Join(filepath.Dir(path), h.cfile)
-	ds, err := native.Build(files, exe, native.Options{ExtraSources: []string{cf}})
+	var extra []string
+	if h.cfile != "" {
+		extra = append(extra, filepath.Join(filepath.Dir(path), h.cfile))
+	}
+	ds, err := native.Build(files, exe, native.Options{ExtraSources: extra, TestHooks: h.testHooks})
 	if err != nil {
 		t.Fatalf("native build: %v", err)
 	}

@@ -1,0 +1,5 @@
+//! expect: reject UNSAFE_OP_OUTSIDE_UNSAFE rule=6.4
+//! twin: packed_access_outside_unsafe_ok
+module t
+struct Hdr packed { tag: u8; len: u32 }
+func f(h: view[Hdr]) -> u32 { return h.len }

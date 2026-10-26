@@ -1,0 +1,9 @@
+//! phase: 3
+//! expect: output simd_sub
+// SIMD intrinsic simd_sub over fixed-width vectors (PLAN.md 3.2); lanes wrap.
+module run
+func main() -> i32 {
+    r := simd_sub([5u32, 6u32, 7u32, 8u32], [1u32, 2u32, 3u32, 9u32])
+    print_u64(u64(r[2])); println(); print_u64(u64(r[3])); println()
+    return 0i32
+}

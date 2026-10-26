@@ -1,0 +1,42 @@
+//! phase: 3
+//! expect: output message_passing
+//! tsan: clean
+// Litmus MP (message passing): the writer stores data then the flag with
+// release; the reader spins with acquire and must observe the data. Under the
+// C++20 model the forbidden outcome (flag seen, data stale) never occurs.
+module litmus
+struct Cell { data: Atomic[u64]; flag: Atomic[u64] }
+func writer(c: view[Cell], n: u64) -> u64 {
+    c.data.store(n, relaxed)
+    c.flag.store(1u64, release)
+    return n
+}
+func reader(c: view[Cell]) -> u64 {
+    spins := 0u64
+    while c.flag.load(acquire) == 0u64 { spins = spins + 1u64 }
+    return c.data.load(relaxed)
+}
+func once(c: view[Cell], n: u64) -> Result[bool, SpawnErr] {
+    with s := thread.scope() {
+        w := s.spawn(writer, c, n)?
+        r := s.spawn(reader, c)?
+        got := r.get()
+        sent := w.get()
+        return Ok(got == sent)
+    }
+}
+func main() -> i32 {
+    i := 0u64
+    ok := true
+    while i < 200u64 {
+        c := Cell { data: Atomic[u64].new(0u64), flag: Atomic[u64].new(0u64) }
+        match once(c, i + 1u64) {
+            Ok(b) => { if !b { ok = false } }
+            Err(e) => { ok = false }
+        }
+        i = i + 1u64
+    }
+    print_bool(ok)
+    println()
+    return 0i32
+}

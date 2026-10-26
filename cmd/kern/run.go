@@ -17,10 +17,13 @@ import (
 
 // BuildOptions are the configuration dimensions of PLAN.md §0.
 type BuildOptions struct {
-	Opt        string // debug | release
-	Env        string // hosted | freestanding
-	TestHooks  bool
-	StackBytes int
+	Opt string // debug | release
+	// NoStackCheck drops the freestanding prologue stack check (an unsafe
+	// build option: stack overflow becomes a trusted-boundary obligation).
+	NoStackCheck bool
+	Env          string // hosted | freestanding
+	TestHooks    bool
+	StackBytes   int
 }
 
 // Build resolves, checks, lowers and validates a program. Diagnostics are
@@ -55,6 +58,8 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 			i = len(args)
 		case a == "--test-hooks":
 			opts.TestHooks = true
+		case a == "--unsafe-no-stack-check":
+			opts.NoStackCheck = true
 		case strings.HasPrefix(a, "--opt="), strings.HasPrefix(a, "--env="), strings.HasPrefix(a, "--stack-bytes="):
 			k, v, _ := strings.Cut(a, "=")
 			switch k {
@@ -66,9 +71,6 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 			case "--env":
 				if v != "hosted" && v != "freestanding" {
 					return opts, nil, nil, fmt.Errorf("--env must be hosted or freestanding")
-				}
-				if v == "freestanding" {
-					return opts, nil, nil, fmt.Errorf("--env freestanding is not available before Phase 3")
 				}
 				opts.Env = v
 			case "--stack-bytes":
@@ -123,6 +125,7 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 	}
 	it := interp.New(mod, files[0], stdout, stderr)
 	it.TestHooks = opts.TestHooks
+	it.Freestanding = opts.Env == "freestanding"
 	it.SetIdentityTags(opts.Opt != "release")
 	it.SetStackLimit(opts.StackBytes)
 	return it.Run()

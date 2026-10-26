@@ -1,0 +1,38 @@
+//! phase: 3
+//! expect: output raw_ptr
+// Raw pointers (spec §6): allocation through the system allocator, typed
+// stores and loads in the §4.1 layout, element offsets, casts between
+// pointee types, addresses, and release; every operation inside unsafe with
+// a contract on the wrapper.
+module run
+struct P { a: u8; b: u64; c: u16 }
+contract { requires "the allocator obligations of §6 hold for every call" }
+func main() -> i32 {
+    alloc := SystemAllocator.new()
+    unsafe {
+        match alloc.alloc(64usize, 8usize) {
+            Ok(raw) => {
+                p := ptr_cast[u64, u8](raw)
+                ptr_store(p, 7u64)
+                ptr_store(ptr_offset(p, 1isize), 9u64)
+                q := ptr_cast[P, u8](ptr_offset(raw, 16isize))
+                ptr_store(q, P { a: 1u8, b: 2u64, c: 3u16 })
+                print_u64(ptr_load(p) + ptr_load(ptr_offset(p, 1isize)))
+                println()
+                v := ptr_load(q)
+                print_u64(u64(v.a) + v.b + u64(v.c))
+                println()
+                bytes := ptr_cast[u8, P](q)
+                print_u64(u64(ptr_load(ptr_offset(bytes, 8isize))))
+                println()
+                print_bool(ptr_addr(ptr_offset(raw, 16isize)) == ptr_addr(raw) + 16usize)
+                println()
+                print_bool(ptr_addr(ptr_null[u8]()) == 0usize)
+                println()
+                alloc.free(raw, 64usize, 8usize)
+            }
+            Err(e) => { print_str("alloc failed"); println() }
+        }
+    }
+    return 0i32
+}

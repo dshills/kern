@@ -1,0 +1,9 @@
+//! phase: 3
+//! expect: output simd_xor
+// SIMD intrinsic simd_xor over fixed-width vectors (PLAN.md 3.2); lanes wrap.
+module run
+func main() -> i32 {
+    r := simd_xor([12u64, 7u64, 1u64, 0u64], [10u64, 7u64, 0u64, 9u64])
+    print_u64(r[0] + r[1] + r[2] + r[3]); println()
+    return 0i32
+}

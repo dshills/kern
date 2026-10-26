@@ -1,0 +1,38 @@
+//! phase: 3
+//! expect: output atomic_counter
+//! tsan: clean
+// Atomics across threads: fetch_add from scoped threads, a seq_cst load
+// after the joins, compare_exchange and swap on the result.
+module cc
+func add(a: view[Atomic[u64]], n: u64) -> u64 {
+    i := 0u64
+    while i < n { old := a.fetch_add(1u64, relaxed); i = i + 1u64 }
+    return n
+}
+func run(a: view[Atomic[u64]]) -> Result[u64, SpawnErr] {
+    with s := thread.scope() {
+        j1 := s.spawn(add, a, 5000u64)?
+        j2 := s.spawn(add, a, 5000u64)?
+        return Ok(j1.get() + j2.get())
+    }
+}
+func main() -> i32 {
+    a := Atomic[u64].new(0u64)
+    match run(a) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    print_u64(a.load(seq_cst))
+    println()
+    match a.compare_exchange(10000u64, 1u64, acq_rel, acquire) {
+        Ok(old) => { print_u64(old); println() }
+        Err(cur) => { print_str("cas failed"); println() }
+    }
+    print_u64(a.swap(9u64, seq_cst))
+    println()
+    print_u64(a.fetch_xor(8u64, seq_cst))
+    println()
+    print_u64(a.load(acquire))
+    println()
+    return 0i32
+}

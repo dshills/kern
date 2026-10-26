@@ -1,5 +1,5 @@
 // Command harness builds, runs and reports the benchmark workloads of
-// PLAN.md 2.6 (see bench/PROTOCOL.md for the per-program output line).
+// PLAN.md 2.6 and 3.4 (see bench/PROTOCOL.md for the per-program output line).
 //
 //	go run ./bench/harness [-runs 5] [-out bench/REPORT.md] [-only workload[,...]]
 //	    [-lang c,rust,kern] [-experiment]
@@ -7,8 +7,12 @@
 // Rows are grouped by workload, then build configuration, then language.
 // C is built with `clang -O2`, Rust with `cargo build --release`, kern with
 // `kern build --opt=release` and `--opt=debug` (the driver is built once from
-// ./cmd/kern). Rows whose implementation directory does not exist are
-// skipped and listed in the report.
+// ./cmd/kern). Every `*.kern` file in bench/kern/<workload>/ is a separate
+// row named by its file stem (e.g. packet_parser and packet_parser_simd).
+// Rows whose implementation directory does not exist are skipped and listed
+// in the report. Workloads with a failure path (bench/PROTOCOL.md) are run
+// once more with KERN_BENCH_FAIL=1 and the ` failures=<N>` field they print
+// is reported in the "failure path" column.
 package main
 
 import (
@@ -30,7 +34,22 @@ import (
 	"time"
 )
 
-var allWorkloads = []string{"vector", "hash_table", "btree", "arena_ast", "ring_buffer", "wal", "packet_parser"}
+var allWorkloads = []string{"vector", "hash_table", "btree", "arena_ast", "ring_buffer", "wal", "packet_parser",
+	"buffer_pool", "page_frame_allocator", "intrusive_run_queue", "thread_pool", "lock_protected_map", "lock_free_queue"}
+
+// failureWorkloads lists the workloads whose programs exercise a failure
+// path when KERN_BENCH_FAIL=1 is set (bench/PROTOCOL.md).
+var failureWorkloads = map[string]bool{"buffer_pool": true, "page_frame_allocator": true, "lock_free_queue": true}
+
+// workloadThreads is the thread count of each workload ("1" when absent).
+var workloadThreads = map[string]string{"thread_pool": "4+1", "lock_protected_map": "4", "lock_free_queue": "2"}
+
+func threadsOf(workload string) string {
+	if t, ok := workloadThreads[workload]; ok {
+		return t
+	}
+	return "1"
+}
 
 // slowRun is the per-run wall time above which the report flags a workload.
 const slowRun = 5 * time.Second
@@ -38,13 +57,17 @@ const slowRun = 5 * time.Second
 // runResult is one parsed protocol line plus the child's peak RSS in bytes.
 type runResult struct {
 	ops, ns, p50, p99, checksum uint64
+	failures                    uint64
+	hasFailures                 bool // the line carried a failures= field
 	rss                         float64
 	wall                        time.Duration
 }
 
-// row is one (workload, configuration, language) measurement.
+// row is one (workload, configuration, program) measurement; name is the
+// program's name (the workload for C and Rust, the file stem for kern).
 type row struct {
 	workload, cfg, lang string
+	name                string
 	dir                 string
 	sources             []string
 	kernFile            string
@@ -59,16 +82,35 @@ type row struct {
 	places              string
 	runs                []runResult
 	errs                []string
+	failRun             *runResult // the KERN_BENCH_FAIL=1 run, when made
+	failErr             string
 }
 
-func (r *row) key() string { return r.lang + "/" + r.cfg }
+// label names the row's program within its workload: the language, plus the
+// file stem for kern programs that are not the workload's main file.
+func (r *row) label() string {
+	if r.name == "" || r.name == r.workload {
+		return r.lang
+	}
+	return r.lang + " (" + r.name + ")"
+}
+
+func (r *row) key() string { return r.label() + "/" + r.cfg }
+
+// isMain reports the workload's main program (C and Rust rows, and the kern
+// file named after the workload).
+func (r *row) isMain() bool { return r.name == "" || r.name == r.workload }
+
+// isFailureTwin reports a kern `<w>_fail.kern` program, whose normal run is
+// the failure path (kern has no environment access).
+func (r *row) isFailureTwin() bool { return strings.HasSuffix(r.name, "_fail") }
 
 type toolchain struct {
 	clang, rustc, cargo, goVer string
 	warnings                   []string
 }
 
-var protoRE = regexp.MustCompile(`^ops=(\d+) ns=(\d+) p50=(\d+) p99=(\d+) checksum=(\d+)$`)
+var protoRE = regexp.MustCompile(`^ops=(\d+) ns=(\d+) p50=(\d+) p99=(\d+) checksum=(\d+)(?: failures=(\d+))?$`)
 
 func main() {
 	runs := flag.Int("runs", 5, "repetitions per row")
@@ -142,7 +184,7 @@ func main() {
 			continue
 		}
 		for i := 0; i < *runs; i++ {
-			res, err := runOnce(root, r.bin)
+			res, err := runOnce(root, r.bin, nil)
 			if err != nil {
 				r.errs = append(r.errs, err.Error())
 				logf("  run %d failed: %v", i+1, err)
@@ -152,6 +194,19 @@ func main() {
 		}
 		if len(r.runs) > 0 {
 			logf("  %s", summary(r))
+		}
+		if failureWorkloads[r.workload] {
+			res, err := runOnce(root, r.bin, []string{"KERN_BENCH_FAIL=1"})
+			switch {
+			case err != nil:
+				r.failErr = err.Error()
+				logf("  failure-path run failed: %v", err)
+			case !res.hasFailures:
+				logf("  failure-path run: no failures field")
+			default:
+				r.failRun = &res
+				logf("  failure-path run: failures=%d checksum=%d", res.failures, res.checksum)
+			}
 		}
 	}
 
@@ -177,7 +232,7 @@ func planRows(root string, workloads []string, want map[string]bool) []*row {
 	var rows []*row
 	for _, w := range workloads {
 		if want["c"] {
-			r := &row{workload: w, cfg: "release", lang: "c", dir: filepath.Join(root, "bench", "c", w)}
+			r := &row{workload: w, cfg: "release", lang: "c", name: w, dir: filepath.Join(root, "bench", "c", w)}
 			main := filepath.Join(r.dir, "main.c")
 			if !exists(main) {
 				r.skip = "bench/c/" + w + "/main.c not found"
@@ -186,7 +241,7 @@ func planRows(root string, workloads []string, want map[string]bool) []*row {
 			rows = append(rows, r)
 		}
 		if want["rust"] {
-			r := &row{workload: w, cfg: "release", lang: "rust", dir: filepath.Join(root, "bench", "rust", w)}
+			r := &row{workload: w, cfg: "release", lang: "rust", name: w, dir: filepath.Join(root, "bench", "rust", w)}
 			if !exists(filepath.Join(r.dir, "Cargo.toml")) {
 				r.skip = "bench/rust/" + w + "/Cargo.toml not found"
 			}
@@ -194,20 +249,30 @@ func planRows(root string, workloads []string, want map[string]bool) []*row {
 			rows = append(rows, r)
 		}
 		if want["kern"] {
-			for _, cfg := range []string{"release", "debug"} {
-				r := &row{workload: w, cfg: cfg, lang: "kern", dir: filepath.Join(root, "bench", "kern", w)}
-				r.sources = globFiles(r.dir, "*.kern")
-				switch {
-				case !exists(r.dir):
-					r.skip = "bench/kern/" + w + "/ not found"
-				case exists(filepath.Join(r.dir, w+".kern")):
-					r.kernFile = filepath.Join(r.dir, w+".kern")
-				case len(r.sources) == 1:
-					r.kernFile = r.sources[0]
-				default:
-					r.skip = "bench/kern/" + w + "/" + w + ".kern not found"
+			dir := filepath.Join(root, "bench", "kern", w)
+			files := globFiles(dir, "*.kern")
+			// The workload's main file comes first; the other programs
+			// follow in name order.
+			sort.SliceStable(files, func(i, j int) bool {
+				return filepath.Base(files[i]) == w+".kern" && filepath.Base(files[j]) != w+".kern"
+			})
+			if len(files) == 0 {
+				for _, cfg := range []string{"release", "debug"} {
+					r := &row{workload: w, cfg: cfg, lang: "kern", name: w, dir: dir}
+					if exists(dir) {
+						r.skip = "no .kern file in bench/kern/" + w + "/"
+					} else {
+						r.skip = "bench/kern/" + w + "/ not found"
+					}
+					rows = append(rows, r)
 				}
-				rows = append(rows, r)
+			}
+			for _, f := range files {
+				for _, cfg := range []string{"release", "debug"} {
+					r := &row{workload: w, cfg: cfg, lang: "kern", dir: dir, kernFile: f, sources: []string{f}}
+					r.name = strings.TrimSuffix(filepath.Base(f), ".kern")
+					rows = append(rows, r)
+				}
 			}
 		}
 	}
@@ -231,6 +296,9 @@ func build(root, buildDir, kernBin string, r *row) {
 		return
 	}
 	r.bin = filepath.Join(dir, r.lang+"-"+r.cfg)
+	if r.name != "" && r.name != r.workload {
+		r.bin = filepath.Join(dir, r.lang+"-"+r.name+"-"+r.cfg)
+	}
 	_ = os.Remove(r.bin)
 	start := time.Now()
 	var msg string
@@ -263,10 +331,14 @@ func build(root, buildDir, kernBin string, r *row) {
 	}
 }
 
-// runOnce executes a benchmark binary and parses its protocol line.
-func runOnce(root, bin string) (runResult, error) {
+// runOnce executes a benchmark binary with extra environment variables and
+// parses its protocol line.
+func runOnce(root, bin string, env []string) (runResult, error) {
 	cmd := exec.Command(bin)
 	cmd.Dir = root
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	start := time.Now()
@@ -287,6 +359,10 @@ func runOnce(root, bin string) (runResult, error) {
 		res.p50, _ = strconv.ParseUint(m[3], 10, 64)
 		res.p99, _ = strconv.ParseUint(m[4], 10, 64)
 		res.checksum, _ = strconv.ParseUint(m[5], 10, 64)
+		if m[6] != "" {
+			res.failures, _ = strconv.ParseUint(m[6], 10, 64)
+			res.hasFailures = true
+		}
 		found = true
 		break
 	}
@@ -419,7 +495,7 @@ func aliasingExperiment(root, buildDir, kernBin string, runs int, rows []*row) s
 		}
 		var rs []runResult
 		for i := 0; i < runs; i++ {
-			res, err := runOnce(root, v.bin)
+			res, err := runOnce(root, v.bin, nil)
 			if err != nil {
 				fmt.Fprintf(&b, "| %s | run failed: %v | | |\n", v.name, err)
 				rs = nil
@@ -457,6 +533,10 @@ func writeReport(root string, tc toolchain, workloads []string, rows []*row, run
 	fmt.Fprintf(&b, "- runs per row: %d; intervals are 95%% confidence (Student's t, n-1 degrees of freedom)\n", runs)
 	b.WriteString("- the kern driver is built once with `go build ./cmd/kern`; kern compile times are for `kern build` alone\n")
 	b.WriteString("- the reserved extension column is always \"no\" in Phase 2; only the user-level row (§2.3(a)) exists per workload in this phase\n")
+	b.WriteString("- threads: the workload's thread count (workers + the main thread where it feeds work); failure path: the failures= count printed by the KERN_BENCH_FAIL=1 run, n/a when the workload has no failure path or the program prints no failures field\n")
+	if la := loadAverage(); la != "" {
+		fmt.Fprintf(&b, "- load average at start (1, 5, 15 min): %s; multi-threaded rows are sensitive to other load on the host\n", la)
+	}
 	for _, w := range tc.warnings {
 		fmt.Fprintf(&b, "- warning: %s\n", w)
 	}
@@ -471,6 +551,7 @@ func writeReport(root string, tc toolchain, workloads []string, rows []*row, run
 			}
 		}
 		b.WriteString(checksumLine(wrows))
+		b.WriteString(failureLine(w, wrows))
 		b.WriteString(targetLine(wrows))
 		for _, r := range wrows {
 			for _, x := range r.runs {
@@ -491,20 +572,21 @@ func writeReport(root string, tc toolchain, workloads []string, rows []*row, run
 				continue
 			}
 			fmt.Fprintf(&b, "### %s\n\n", cfg)
-			b.WriteString("| language | throughput (Mops/s) | p50 ns | p99 ns | peak RSS (MiB) | text bytes | compile time | unsafe lines | allocs | copies | ownership places | reserved ext | checksum |\n")
-			b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+			b.WriteString("| language | threads | throughput (Mops/s) | p50 ns | p99 ns | peak RSS (MiB) | text bytes | compile time | unsafe lines | allocs | copies | ownership places | reserved ext | failure path | checksum |\n")
+			b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 			var notes []string
+			threads := threadsOf(w)
 			for _, r := range crows {
 				switch {
 				case r.skip != "":
-					fmt.Fprintf(&b, "| %s | skipped | | | | | | | | | | | |\n", r.lang)
-					notes = append(notes, fmt.Sprintf("%s: skipped (%s)", r.lang, r.skip))
+					fmt.Fprintf(&b, "| %s | %s | skipped | | | | | | | | | | | | |\n", r.label(), threads)
+					notes = append(notes, fmt.Sprintf("%s: skipped (%s)", r.label(), r.skip))
 				case r.buildErr != "":
-					fmt.Fprintf(&b, "| %s | build failed | | | | | | | | | | | |\n", r.lang)
-					notes = append(notes, fmt.Sprintf("%s: build failed: %s", r.lang, firstLine(r.buildErr)))
+					fmt.Fprintf(&b, "| %s | %s | build failed | | | | | | | | | | | | |\n", r.label(), threads)
+					notes = append(notes, fmt.Sprintf("%s: build failed: %s", r.label(), firstLine(r.buildErr)))
 				case len(r.runs) == 0:
-					fmt.Fprintf(&b, "| %s | run failed | | | | | %s | %d | %s | %s | %s | no | |\n", r.lang, r.compile.Round(time.Millisecond), r.unsafeLines, r.allocs, r.copies, r.places)
-					notes = append(notes, fmt.Sprintf("%s: every run failed: %s", r.lang, firstLine(strings.Join(r.errs, "; "))))
+					fmt.Fprintf(&b, "| %s | %s | run failed | | | | | %s | %d | %s | %s | %s | no | %s | |\n", r.label(), threads, r.compile.Round(time.Millisecond), r.unsafeLines, r.allocs, r.copies, r.places, failureCell(r))
+					notes = append(notes, fmt.Sprintf("%s: every run failed: %s", r.label(), firstLine(strings.Join(r.errs, "; "))))
 				default:
 					tp, tpCI := meanCI(mapRuns(r.runs, func(x runResult) float64 { return float64(x.ops) / float64(x.ns) * 1e3 }))
 					p50, p50CI := meanCI(mapRuns(r.runs, func(x runResult) float64 { return float64(x.p50) }))
@@ -514,11 +596,14 @@ func writeReport(root string, tc toolchain, workloads []string, rows []*row, run
 					if r.textNote != "" {
 						text += " (" + r.textNote + ")"
 					}
-					fmt.Fprintf(&b, "| %s | %.1f ± %.1f | %.0f ± %.0f | %.0f ± %.0f | %.1f ± %.1f | %s | %s | %d | %s | %s | %s | no | %d |\n",
-						r.lang, tp, tpCI, p50, p50CI, p99, p99CI, rss, rssCI, text, r.compile.Round(time.Millisecond), r.unsafeLines, r.allocs, r.copies, r.places, r.runs[0].checksum)
+					fmt.Fprintf(&b, "| %s | %s | %.1f ± %.1f | %.0f ± %.0f | %.0f ± %.0f | %.1f ± %.1f | %s | %s | %d | %s | %s | %s | no | %s | %d |\n",
+						r.label(), threads, tp, tpCI, p50, p50CI, p99, p99CI, rss, rssCI, text, r.compile.Round(time.Millisecond), r.unsafeLines, r.allocs, r.copies, r.places, failureCell(r), r.runs[0].checksum)
 					if len(r.errs) > 0 {
-						notes = append(notes, fmt.Sprintf("%s: %d of %d runs failed: %s", r.lang, len(r.errs), runs, firstLine(r.errs[0])))
+						notes = append(notes, fmt.Sprintf("%s: %d of %d runs failed: %s", r.label(), len(r.errs), runs, firstLine(r.errs[0])))
 					}
+				}
+				if r.failErr != "" {
+					notes = append(notes, fmt.Sprintf("%s: failure-path run failed: %s", r.label(), firstLine(r.failErr)))
 				}
 			}
 			b.WriteString("\n")
@@ -537,6 +622,65 @@ func writeReport(root string, tc toolchain, workloads []string, rows []*row, run
 	return b.String()
 }
 
+// failureCell renders the "failure path" column of a row.
+func failureCell(r *row) string {
+	if r.failRun == nil {
+		return "n/a"
+	}
+	return strconv.FormatUint(r.failRun.failures, 10)
+}
+
+// failureLine states whether the failure-path runs of a workload agree on
+// their failures count and checksum.
+func failureLine(workload string, rows []*row) string {
+	if !failureWorkloads[workload] {
+		return ""
+	}
+	var measured []*row
+	for _, r := range rows {
+		if r.failRun != nil {
+			measured = append(measured, r)
+		}
+	}
+	if len(measured) == 0 {
+		return "Failure path: no row printed a failures field.\n\n"
+	}
+	first := measured[0].failRun
+	agree := true
+	for _, r := range measured[1:] {
+		if r.failRun.failures != first.failures || r.failRun.checksum != first.checksum {
+			agree = false
+		}
+	}
+	if agree {
+		return fmt.Sprintf("Failure path: agree across %d row(s) (failures=%d, checksum=%d).\n\n", len(measured), first.failures, first.checksum)
+	}
+	var b strings.Builder
+	b.WriteString("Failure path: **MISMATCH**:")
+	for _, r := range measured {
+		fmt.Fprintf(&b, " %s=failures:%d/checksum:%d", r.key(), r.failRun.failures, r.failRun.checksum)
+	}
+	b.WriteString("\n\n")
+	return b.String()
+}
+
+// loadAverage returns the host's 1/5/15-minute load averages, or "".
+func loadAverage() string {
+	switch runtime.GOOS {
+	case "darwin":
+		if out, err := exec.Command("sysctl", "-n", "vm.loadavg").Output(); err == nil {
+			return strings.Trim(strings.TrimSpace(string(out)), "{} ")
+		}
+	case "linux":
+		if data, err := os.ReadFile("/proc/loadavg"); err == nil {
+			if f := strings.Fields(string(data)); len(f) >= 3 {
+				return strings.Join(f[:3], " ")
+			}
+		}
+	}
+	return ""
+}
+
 // checksumLine states whether every measured row of a workload agrees.
 func checksumLine(rows []*row) string {
 	type cs struct {
@@ -546,8 +690,8 @@ func checksumLine(rows []*row) string {
 	var seen []cs
 	var problems []string
 	for _, r := range rows {
-		if len(r.runs) == 0 {
-			continue
+		if len(r.runs) == 0 || r.isFailureTwin() {
+			continue // a failure-path twin program is compared by failureLine
 		}
 		first := r.runs[0].checksum
 		for _, x := range r.runs[1:] {
@@ -596,8 +740,8 @@ func targetLine(rows []*row) string {
 		tp, _ := meanCI(mapRuns(r.runs, func(x runResult) float64 { return float64(x.ops) / float64(x.ns) * 1e3 }))
 		rss, _ := meanCI(mapRuns(r.runs, func(x runResult) float64 { return x.rss / (1 << 20) }))
 		switch {
-		case r.lang == "kern" && r.cfg == "release":
-			kern = r
+		case r.lang == "kern" && r.cfg == "release" && r.isMain():
+			kern = r // the workload's main program by name
 		case r.lang == "c" || r.lang == "rust":
 			if tp > bestTP {
 				bestTP, bestTPLang = tp, r.lang

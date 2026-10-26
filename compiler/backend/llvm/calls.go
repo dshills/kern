@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/dshills/kern/compiler/ast"
@@ -114,6 +115,124 @@ func (fe *fnEmit) argType(v *ir.Value) string {
 	return fe.e.lty(v.Type)
 }
 
+// vecType is the LLVM vector type of a SIMD array type.
+func (fe *fnEmit) vecType(t resolve.Type) (string, *resolve.Array) {
+	arr := t.(*resolve.Array)
+	return fmt.Sprintf("<%d x %s>", arr.Len, fe.e.lty(arr.Elem)), arr
+}
+
+// toVec loads an array value as a vector register.
+func (fe *fnEmit) toVec(v *ir.Value) string {
+	vt, arr := fe.vecType(v.Type)
+	r := fe.next("t")
+	// the storage is an array: only its element alignment is guaranteed
+	fe.emit("%s = load %s, ptr %s, align %d", r, vt, fe.spill(v), layout.Of(arr.Elem).Align)
+	return r
+}
+
+// fromVec stores a vector register as the array value dst.
+func (fe *fnEmit) fromVec(dst *ir.Value, vec string) {
+	vt, arr := fe.vecType(dst.Type)
+	a := fe.alloca(fe.e.mty(dst.Type))
+	fe.emit("store %s %s, ptr %s, align %d", vt, vec, a, layout.Of(arr.Elem).Align)
+	if isLarge(dst.Type) {
+		fe.addrs[dst] = a
+		return
+	}
+	fe.emit("%s = load %s, ptr %s", fe.v(dst), fe.e.lty(dst.Type), a)
+}
+
+var simdOps = map[string][2]string{"simd_add": {"add", "fadd"}, "simd_sub": {"sub", "fsub"}, "simd_mul": {"mul", "fmul"}, "simd_and": {"and", ""}, "simd_or": {"or", ""}, "simd_xor": {"xor", ""}}
+
+func (fe *fnEmit) simdBinary(c *ir.Call, a []*ir.Value) {
+	vt, arr := fe.vecType(a[0].Type)
+	op := simdOps[c.Intrinsic][0]
+	if resolve.IsFloat(arr.Elem) {
+		op = simdOps[c.Intrinsic][1]
+	}
+	l, r := fe.toVec(a[0]), fe.toVec(a[1])
+	res := fe.next("t")
+	fe.emit("%s = %s %s %s, %s", res, op, vt, l, r)
+	fe.fromVec(c.Dsts[0], res)
+}
+
+// simdShuffle selects lanes from the concatenation of a and b by runtime
+// indices (bounds-checked), lane by lane.
+func (fe *fnEmit) simdShuffle(c *ir.Call, a []*ir.Value) {
+	vt, arr := fe.vecType(a[0].Type)
+	et := fe.e.lty(arr.Elem)
+	l, r := fe.toVec(a[0]), fe.toVec(a[1])
+	idx := fe.spill(a[2])
+	cur := "undef"
+	for i := 0; i < arr.Len; i++ {
+		ip := fe.next("t")
+		fe.emit("%s = getelementptr [%d x i32], ptr %s, i32 0, i32 %d", ip, arr.Len, idx, i)
+		k := fe.next("t")
+		fe.emit("%s = load i32, ptr %s", k, ip)
+		big := fe.next("t")
+		fe.emit("%s = icmp uge i32 %s, %d", big, k, 2*arr.Len)
+		fe.check(big, "bounds", c.Pos)
+		fromB := fe.next("t")
+		fe.emit("%s = icmp uge i32 %s, %d", fromB, k, arr.Len)
+		kb := fe.next("t")
+		fe.emit("%s = sub i32 %s, %d", kb, k, arr.Len)
+		ka := fe.next("t")
+		fe.emit("%s = select i1 %s, i32 0, i32 %s", ka, fromB, k)
+		kbb := fe.next("t")
+		fe.emit("%s = select i1 %s, i32 %s, i32 0", kbb, fromB, kb)
+		ea := fe.next("t")
+		fe.emit("%s = extractelement %s %s, i32 %s", ea, vt, l, ka)
+		eb := fe.next("t")
+		fe.emit("%s = extractelement %s %s, i32 %s", eb, vt, r, kbb)
+		sel := fe.next("t")
+		fe.emit("%s = select i1 %s, %s %s, %s %s", sel, fromB, et, eb, et, ea)
+		nxt := fe.next("t")
+		fe.emit("%s = insertelement %s %s, %s %s, i32 %d", nxt, vt, cur, et, sel, i)
+		cur = nxt
+	}
+	fe.fromVec(c.Dsts[0], cur)
+}
+
+func (fe *fnEmit) simdReduce(c *ir.Call, a []*ir.Value) {
+	vt, arr := fe.vecType(a[0].Type)
+	et := fe.e.lty(arr.Elem)
+	v := fe.toVec(a[0])
+	suffix := fmt.Sprintf("v%d%s", arr.Len, strings.ReplaceAll(strings.ReplaceAll(et, "double", "f64"), "float", "f32"))
+	if resolve.IsFloat(arr.Elem) {
+		name := "llvm.vector.reduce.fadd." + suffix
+		fe.e.declare(name, et+" ("+et+", "+vt+")")
+		fe.emit("%s = call %s @%s(%s %s, %s %s)", fe.v(c.Dsts[0]), et, name, et, fconst(arr.Elem, math.Copysign(0, -1)), vt, v)
+		return
+	}
+	name := "llvm.vector.reduce.add." + suffix
+	fe.e.declare(name, et+" ("+vt+")")
+	fe.emit("%s = call %s @%s(%s %s)", fe.v(c.Dsts[0]), et, name, vt, v)
+}
+
+// asmEscape renders bytes as an LLVM string body.
+func asmEscape(b []byte) string {
+	var sb strings.Builder
+	for _, c := range b {
+		if c >= 0x20 && c < 0x7f && c != '"' && c != '\\' {
+			sb.WriteByte(c)
+		} else {
+			fmt.Fprintf(&sb, "\\%02X", c)
+		}
+	}
+	return sb.String()
+}
+
+// ord renders a memory-ordering argument as the i8 tag the runtime takes
+// (Ordering is a payload-free union: a struct of its tag).
+func (fe *fnEmit) ord(v *ir.Value) string {
+	if _, named := v.Type.(*resolve.Named); !named {
+		return "i8 " + fe.v(v)
+	}
+	r := fe.next("t")
+	fe.emit("%s = extractvalue %s %s, 0", r, fe.e.lty(v.Type), fe.v(v))
+	return "i8 " + r
+}
+
 // isAccessType reports whether t is an access type (a spawned argument of
 // access type is an access value).
 func isAccessType(t resolve.Type) bool {
@@ -209,8 +328,81 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.rt("println", "void ()", "")
 	case "now_ns":
 		setDst(fe.rt("kern_now_ns", "i64 ()", ""))
+	case "exit":
+		fe.rt("kern_exit", "void (i32)", "i32 "+fe.v(a[0]))
+		fe.emit("unreachable")
+		fe.emit("%s:", fe.next("dead")[1:])
+	case "asm":
+		tpl, ok := fe.strs[a[0]]
+		if !ok {
+			fe.fail("asm template must be a string literal")
+			return
+		}
+		fe.emit("call void asm sideeffect \"%s\", \"~{memory}\"()", asmEscape(tpl))
+	// SIMD: arrays reinterpreted as LLVM vectors through memory
+	case "simd_add", "simd_sub", "simd_mul", "simd_and", "simd_or", "simd_xor":
+		fe.simdBinary(c, a)
+	case "simd_shuffle":
+		fe.simdShuffle(c, a)
+	case "simd_reduce_add":
+		fe.simdReduce(c, a)
+	// raw pointers (spec §6)
+	case "ptr_null":
+		fe.vals[dst()] = "null"
+	case "ptr_from_addr":
+		fe.emit("%s = inttoptr i64 %s to ptr", fe.v(dst()), fe.v(a[0]))
+	case "ptr_addr":
+		fe.emit("%s = ptrtoint ptr %s to i64", fe.v(dst()), fe.v(a[0]))
+	case "ptr_cast":
+		fe.vals[dst()] = fe.v(a[0])
+	case "ptr_offset":
+		et := fe.elemType(c, 0)
+		m := fe.next("t")
+		fe.emit("%s = mul i64 %s, %s", m, fe.v(a[1]), sz(et))
+		fe.emit("%s = getelementptr i8, ptr %s, i64 %s", fe.v(dst()), fe.v(a[0]), m)
+	case "ptr_load", "ptr_take":
+		d := dst()
+		if isLarge(d.Type) {
+			fe.loadLarge(d, fe.v(a[0]))
+			return
+		}
+		fe.loadFrom(fe.v(d), d.Type, fe.v(a[0]))
+	case "ptr_store":
+		fe.storeValue(a[1], fe.v(a[0]))
+	case "ptr_load_volatile":
+		d := dst()
+		if isLarge(d.Type) {
+			fe.loadLarge(d, fe.v(a[0])) // an aggregate device read is a byte copy
+			return
+		}
+		if resolve.IsBool(d.Type) {
+			r := fe.next("t")
+			fe.emit("%s = load volatile i8, ptr %s", r, fe.v(a[0]))
+			fe.emit("%s = trunc i8 %s to i1", fe.v(d), r)
+			return
+		}
+		fe.emit("%s = load volatile %s, ptr %s", fe.v(d), e.lty(d.Type), fe.v(a[0]))
+	case "ptr_store_volatile":
+		t := a[1].Type
+		if isLarge(t) {
+			fe.storeValue(a[1], fe.v(a[0]))
+			return
+		}
+		if resolve.IsBool(t) {
+			r := fe.next("t")
+			fe.emit("%s = zext i1 %s to i8", r, fe.v(a[1]))
+			fe.emit("store volatile i8 %s, ptr %s", r, fe.v(a[0]))
+			return
+		}
+		fe.emit("store volatile %s %s, ptr %s", e.lty(t), fe.v(a[1]), fe.v(a[0]))
+	case "ptr_copy":
+		et := fe.elemType(c, 0)
+		m := fe.next("t")
+		fe.emit("%s = mul i64 %s, %s", m, fe.v(a[2]), sz(et))
+		e.declare("llvm.memmove.p0.p0.i64", "void (ptr, ptr, i64, i1)")
+		fe.emit("call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)", fe.v(a[0]), fe.v(a[1]), m)
 	case "fence":
-		fe.rt("kern_fence", "void (i8)", "i8 "+fe.v(a[0]))
+		fe.rt("kern_fence", "void (i8)", fe.ord(a[0]))
 	case "clone":
 		et := fe.elemType(c, 0)
 		if n, ok := et.(*resolve.Named); ok && layout.Opaque(n) {
@@ -318,25 +510,25 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		setDst(fe.rt("kern_atomic_new", "ptr (i64, ptr)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])))
 	case "Atomic.load":
 		et := fe.elemType(c, 0)
-		r := fe.rt("kern_atomic_load", "i64 (ptr, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i8 "+fe.v(a[1]))
+		r := fe.rt("kern_atomic_load", "i64 (ptr, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", "+fe.ord(a[1]))
 		fe.narrow(dst(), r)
 	case "Atomic.store":
 		et := fe.elemType(c, 0)
-		fe.rt("kern_atomic_store", "void (ptr, i64, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fe.widen(a[1])+", i8 "+fe.v(a[2]))
+		fe.rt("kern_atomic_store", "void (ptr, i64, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fe.widen(a[1])+", "+fe.ord(a[2]))
 	case "Atomic.swap":
 		et := fe.elemType(c, 0)
-		r := fe.rt("kern_atomic_swap", "i64 (ptr, i64, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fe.widen(a[1])+", i8 "+fe.v(a[2]))
+		r := fe.rt("kern_atomic_swap", "i64 (ptr, i64, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fe.widen(a[1])+", "+fe.ord(a[2]))
 		fe.narrow(dst(), r)
 	case "Atomic.fetch_add", "Atomic.fetch_sub", "Atomic.fetch_and", "Atomic.fetch_or", "Atomic.fetch_xor":
 		et := fe.elemType(c, 0)
 		op := map[string]int{"Atomic.fetch_add": 0, "Atomic.fetch_sub": 1, "Atomic.fetch_and": 2, "Atomic.fetch_or": 3, "Atomic.fetch_xor": 4}[c.Intrinsic]
-		r := fe.rt("kern_atomic_rmw", "i64 (ptr, i64, i64, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fmt.Sprintf("%d", op)+", i64 "+fe.widen(a[1])+", i8 "+fe.v(a[2]))
+		r := fe.rt("kern_atomic_rmw", "i64 (ptr, i64, i64, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fmt.Sprintf("%d", op)+", i64 "+fe.widen(a[1])+", "+fe.ord(a[2]))
 		fe.narrow(dst(), r)
 	case "Atomic.compare_exchange", "Atomic.compare_exchange_weak":
 		et := fe.elemType(c, 0)
 		d := dst()
 		out, off := fe.unionOut(d)
-		fe.rt("kern_atomic_cmpxchg", "void (ptr, i64, i64, i64, i8, i8, ptr, i64)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fe.widen(a[1])+", i64 "+fe.widen(a[2])+", i8 "+fe.v(a[3])+", i8 "+fe.v(a[4])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.rt("kern_atomic_cmpxchg", "void (ptr, i64, i64, i64, i8, i8, ptr, i64)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fe.widen(a[1])+", i64 "+fe.widen(a[2])+", "+fe.ord(a[3])+", "+fe.ord(a[4])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
 		fe.loadResult(d, out)
 	// threads
 	case "thread.scope":

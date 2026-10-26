@@ -11,6 +11,35 @@ func zero[T: Copy]() -> T
 func wrapping_add[T: Copy](a: T, b: T) -> T
 func wrapping_sub[T: Copy](a: T, b: T) -> T
 func wrapping_mul[T: Copy](a: T, b: T) -> T
+// Raw pointers (spec §6): every operation below is an unsafe operation and
+// requires an unsafe block; the pointee's representation is the §4.1 layout.
+func ptr_null[T]() -> RawPtr[T]
+func ptr_from_addr[T](addr: usize) -> RawPtr[T]
+func ptr_addr[T](p: RawPtr[T]) -> usize
+func ptr_cast[U, T](p: RawPtr[T]) -> RawPtr[U]
+func ptr_offset[T](p: RawPtr[T], n: isize) -> RawPtr[T]
+func ptr_load[T: Copy](p: RawPtr[T]) -> T
+func ptr_store[T](p: RawPtr[T], v: own T)
+func ptr_take[T](p: RawPtr[T]) -> T
+func ptr_load_volatile[T: Copy](p: RawPtr[T]) -> T
+func ptr_store_volatile[T: Copy](p: RawPtr[T], v: T)
+func ptr_copy[T](dst: RawPtr[T], src: RawPtr[T], n: usize)
+// SIMD (PLAN.md 3.2): T is a fixed-width vector [N]E with N in 2, 4, 8, 16
+// and E a number; lanes wrap on overflow. simd_shuffle selects lanes from
+// the concatenation of a and b by index (traps bounds when out of range);
+// simd_reduce_add sums the lanes (wrapping) and is typed by the checker.
+func simd_add[T: Copy](a: T, b: T) -> T
+func simd_sub[T: Copy](a: T, b: T) -> T
+func simd_mul[T: Copy](a: T, b: T) -> T
+func simd_and[T: Copy](a: T, b: T) -> T
+func simd_or[T: Copy](a: T, b: T) -> T
+func simd_xor[T: Copy](a: T, b: T) -> T
+func simd_shuffle[T: Copy, I: Copy](a: T, b: T, idx: I) -> T
+// asm executes an inline assembly template (unsafe; no operands, clobbers
+// memory); the interpreter traps with kind explicit.
+func asm(template: view[]u8)
+// exit terminates the program with a status (hosted) or halts (freestanding).
+func exit(code: i32)
 
 // Hosted output for the Phase 1 interpreter and fixtures.
 func print_u64(v: u64)

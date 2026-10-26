@@ -210,6 +210,15 @@ func (fl *fnLower) expr(e ast.Expr, want resolve.Type) operand {
 		}
 		fl.emit(&ir.Conv{Dst: v, To: x.To, X: xv, Truncate: x.Truncate})
 		return operand{val: v}
+	case *ast.ArrayLit:
+		arr := t.(*resolve.Array)
+		var elems []*ir.Value
+		for _, el := range x.Elems {
+			elems = append(elems, fl.value(el, arr.Elem))
+		}
+		v := fl.newValue(t)
+		fl.emit(&ir.MakeArray{Dst: v, Elems: elems})
+		return operand{val: v, owned: true}
 	case *ast.StructLit:
 		n, ok := t.(*resolve.Named)
 		if !ok {
@@ -544,6 +553,11 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 		fl.fail(x.Pos, "unresolved call")
 	}
 	switch info.Intrinsic {
+	case "simd_reduce_add":
+		vt := fl.ty(info.TypeArgs["T"])
+		v := fl.newValue(t)
+		fl.emit(&ir.Call{Dsts: []*ir.Value{v}, Intrinsic: "simd_reduce_add", Args: []*ir.Value{fl.value(x.Args[0].X, vt)}, Pos: x.Pos, TypeArgs: []resolve.Type{vt}})
+		return operand{val: v}
 	case "len":
 		base := fl.expr(x.Args[0].X, nil)
 		var seq ir.Place

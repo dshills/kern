@@ -2,10 +2,23 @@ package resolve
 
 import (
 	"github.com/dshills/kern/compiler/ast"
+	"strings"
 )
 
 // call types a call expression: plain, generic, method, static, variant
 // constructor, intrinsic (thread.spawn / Scope.spawn) or function value.
+// isUnsafeOp reports the prelude's enumerated unsafe operations (§6): raw
+// pointer operations, inline assembly, and allocator internals.
+func isUnsafeOp(f *FuncDecl) bool {
+	if f.Module != "core" {
+		return false
+	}
+	if f.Receiver == nil {
+		return strings.HasPrefix(f.Name, "ptr_") || f.Name == "asm"
+	}
+	return f.Receiver.Name == "SystemAllocator" && (f.Name == "alloc" || f.Name == "free")
+}
+
 // wrappingIntrinsics are the prelude's wrapping arithmetic forms (§4.1).
 var wrappingIntrinsics = map[string]bool{"wrapping_add": true, "wrapping_sub": true, "wrapping_mul": true}
 
@@ -16,6 +29,9 @@ func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 	case *ast.Ident:
 		if fn.Name == "len" && sc.lookup("len") == nil && c.m.Funcs["len"] == nil {
 			return c.lenBuiltin(sc, x, info)
+		}
+		if fn.Name == "simd_reduce_add" && sc.lookup(fn.Name) == nil && c.m.Funcs[fn.Name] == nil {
+			return c.reduceBuiltin(sc, x, info)
 		}
 		if sc.lookup(fn.Name) == nil {
 			if f, ok := c.m.Funcs[fn.Name]; ok {
@@ -232,6 +248,9 @@ func (c *fnCtx) callFunc(sc *scope, x *ast.CallExpr, info *CallInfo, f *FuncDecl
 		fps[i] = FuncParam{Conv: p.Conv, Type: p.Type}
 	}
 	c.checkArgs(sc, x, info, fps, args, params, m)
+	if strings.HasPrefix(f.Name, "simd_") && f.Module == "core" {
+		c.checkSIMD(x, f, m)
+	}
 	if wrappingIntrinsics[f.Name] && f.Module == "core" {
 		if t, ok := m["T"]; ok && !IsInteger(t) {
 			c.errorf("TYPE_MISMATCH", x.Pos, "%s requires an integer type, found %s", f.Name, typeString(t))
@@ -281,6 +300,9 @@ func (c *fnCtx) callFunc(sc *scope, x *ast.CallExpr, info *CallInfo, f *FuncDecl
 	}
 	if f.Extern != "" && (f.AST == nil || f.AST.Body == nil) && c.unsafe == 0 {
 		c.errorf("UNSAFE_OP_OUTSIDE_UNSAFE", x.Pos, "calling extern function %s requires unsafe", f.Name)
+	}
+	if c.unsafe == 0 && isUnsafeOp(f) {
+		c.errorf("UNSAFE_OP_OUTSIDE_UNSAFE", x.Pos, "%s is an unsafe operation and requires unsafe", f.Name)
 	}
 	return retType(info.Ret)
 }
@@ -482,6 +504,60 @@ func (c *fnCtx) checkReceiver(sc *scope, fn *ast.FieldExpr, conv ast.Conv, recvT
 			c.errorf("TYPE_MISMATCH", fn.X.Span(), "own receiver cannot be an access")
 		}
 	}
+}
+
+// simdVector reports whether t is a SIMD vector type [N]E (N in 2, 4, 8,
+// 16; E a number) and returns its element type and length.
+func simdVector(t Type) (Type, int, bool) {
+	a, ok := t.(*Array)
+	if !ok || (a.Len != 2 && a.Len != 4 && a.Len != 8 && a.Len != 16) || (!IsInteger(a.Elem) && !IsFloat(a.Elem)) {
+		return nil, 0, false
+	}
+	return a.Elem, a.Len, true
+}
+
+// checkSIMD validates the type arguments of a simd_* intrinsic.
+func (c *fnCtx) checkSIMD(x *ast.CallExpr, f *FuncDecl, m map[string]Type) {
+	t, ok := m["T"]
+	if !ok {
+		return
+	}
+	elem, n, isVec := simdVector(t)
+	if !isVec {
+		c.errorf("TYPE_MISMATCH", x.Pos, "%s requires a vector [N]E with N in 2, 4, 8, 16 and a numeric E, found %s", f.Name, typeString(t))
+		return
+	}
+	switch f.Name {
+	case "simd_and", "simd_or", "simd_xor":
+		if !IsInteger(elem) {
+			c.errorf("TYPE_MISMATCH", x.Pos, "%s requires integer lanes, found %s", f.Name, typeString(elem))
+		}
+	case "simd_shuffle":
+		it, ok := m["I"]
+		ia, isArr := it.(*Array)
+		if !ok || !isArr || ia.Len != n || !Identical(ia.Elem, &Prim{Name: "u32"}) {
+			c.errorf("TYPE_MISMATCH", x.Pos, "simd_shuffle requires an index vector [%d]u32", n)
+		}
+	}
+}
+
+// reduceBuiltin types simd_reduce_add(v) as the lane type of v.
+func (c *fnCtx) reduceBuiltin(sc *scope, x *ast.CallExpr, info *CallInfo) Type {
+	info.Intrinsic = "simd_reduce_add"
+	if len(x.Args) != 1 {
+		c.errorf("CALL_ARITY", x.Pos, "simd_reduce_add takes one argument")
+		return &Bad{}
+	}
+	at := valueOf(c.expr(sc, x.Args[0].X, nil))
+	elem, _, ok := simdVector(at)
+	if !ok {
+		c.errorf("TYPE_MISMATCH", x.Args[0].Pos, "simd_reduce_add requires a vector, found %s", typeString(at))
+		return &Bad{}
+	}
+	info.TypeArgs = map[string]Type{"T": at}
+	info.Params = []FuncParam{{Conv: ast.ConvValue, Type: at}}
+	info.Ret = []Type{elem}
+	return elem
 }
 
 // lenBuiltin types len(x) for arrays, slices and sequence accesses (spec §5.2).

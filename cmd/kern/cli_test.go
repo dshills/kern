@@ -197,8 +197,10 @@ func TestRunEmitExplain(t *testing.T) {
 	if code, resp, _ := runWith(t, []string{"run", "--opt=fast", hello}, ""); code != 2 || resp.Diagnostics[0].Code != "CLI_INVALID_FLAGS" {
 		t.Fatalf("bad opt: exit %d resp %+v", code, resp)
 	}
-	if code, resp, _ := runWith(t, []string{"run", "--env=freestanding", hello}, ""); code != 2 || resp.Diagnostics[0].Code != "CLI_INVALID_FLAGS" {
-		t.Fatalf("freestanding before Phase 3: exit %d resp %+v", code, resp)
+	out.Reset()
+	errb.Reset()
+	if code := run([]string{"run", "--env=freestanding", hello}, strings.NewReader(""), &out, &errb); code != 0 || !strings.HasSuffix(out.String(), "{\"halt\":{\"code\":0}}\n") || errb.Len() != 0 {
+		t.Fatalf("freestanding emulation: exit %d out %q err %q", code, out.String(), errb.String())
 	}
 	if code, resp, _ := runWith(t, []string{"run", "--test-hooks", "--opt=release", hello}, ""); code != 2 || resp.Diagnostics[0].Code != "CLI_INVALID_FLAGS" {
 		t.Fatalf("test-hooks in release: exit %d resp %+v", code, resp)

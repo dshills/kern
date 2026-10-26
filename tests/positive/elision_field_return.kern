@@ -1,0 +1,21 @@
+//! phase: 3
+//! expect: output elision_field_return
+// Rule 5.3.4 elision: a field (or element) of the single access parameter is
+// returned as an access rooted at that parameter; a field of a returned
+// projection is itself a place for a view/edit argument.
+module m
+struct Cell { v: u64; tag: u8 }
+struct Pair { a: Cell; b: Cell }
+func bump(c: edit[Cell]) -> edit[u64] { return c.v }
+func first(p: view[Pair]) -> view[Cell] { return p.a }
+func total(x: view[u64]) -> u64 { return copy(x) }
+func main() -> i32 {
+    p := Pair { a: Cell { v: 1u64, tag: 0u8 }, b: Cell { v: 10u64, tag: 1u8 } }
+    with v := bump(p.b) { v = v + 5u64 }
+    print_u64(total(first(p).v) + p.b.v)
+    println()
+    s := Shared[Pair].new(Pair { a: Cell { v: 7u64, tag: 0u8 }, b: Cell { v: 8u64, tag: 0u8 } })
+    print_u64(total(s.get().a.v) + total(s.get().b.v))
+    println()
+    return 0i32
+}

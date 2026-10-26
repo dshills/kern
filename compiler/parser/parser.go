@@ -246,6 +246,10 @@ func (p *parser) parseStruct() *ast.StructDecl {
 	if p.accept(lexer.KwNocopy) {
 		d.NoCopy = true
 	}
+	if p.at(lexer.Ident) && p.toks[p.pos].Text == "packed" {
+		p.next()
+		d.Packed = true
+	}
 	p.expect(lexer.LBrace)
 	p.skipNewlines()
 	for !p.at(lexer.RBrace) {
@@ -1129,6 +1133,27 @@ func (p *parser) parsePrimary() ast.Expr {
 	case lexer.String:
 		p.next()
 		return &ast.StringLit{Pos: tokPos(t), Value: t.Text}
+	case lexer.LBrack:
+		// array literal [e1, e2, ...]
+		p.next()
+		p.nesting++
+		lit := &ast.ArrayLit{Pos: tokPos(t)}
+		savedLit := p.noLit
+		p.noLit = false // brackets remove the ambiguity with a block
+		defer func() { p.noLit = savedLit }()
+		p.skipNewlines()
+		for !p.at(lexer.RBrack) {
+			lit.Elems = append(lit.Elems, p.parseExpr())
+			p.skipNewlines()
+			if !p.accept(lexer.Comma) {
+				break
+			}
+			p.skipNewlines()
+		}
+		p.nesting--
+		end := p.expect(lexer.RBrack)
+		lit.End = end.End
+		return lit
 	case lexer.KwTrue, lexer.KwFalse:
 		p.next()
 		return &ast.BoolLit{Pos: tokPos(t), Value: t.Kind == lexer.KwTrue}

@@ -14,8 +14,31 @@ import (
 
 // Emit renders a module as textual LLVM IR for the given target triple.
 func Emit(mod *ir.Module, triple string) (string, []error) {
-	e := &emitter{mod: mod, types: map[string]bool{}, glue: map[string]bool{}, runtime: map[string]bool{}}
+	return EmitWith(mod, Options{Triple: triple})
+}
+
+// Options selects the emitted program's environment (PLAN.md §0).
+type Options struct {
+	Triple string
+	// Freestanding emits `kern_main` for the freestanding startup code
+	// instead of `main`.
+	Freestanding bool
+	// StackCheck inserts the freestanding stack-limit check in every
+	// prologue (spec §6); off only through the unsafe build option.
+	StackCheck bool
+	// TSan marks every function for ThreadSanitizer instrumentation.
+	TSan bool
+}
+
+// EmitWith renders a module for the given options.
+func EmitWith(mod *ir.Module, opts Options) (string, []error) {
+	e := &emitter{mod: mod, opts: opts, types: map[string]bool{}, glue: map[string]bool{}, runtime: map[string]bool{}}
 	e.declare("kern_trap", "void (i32, i64, i64)")
+	if opts.StackCheck {
+		e.decls.WriteString("@kern_stack_limit = external global ptr\n")
+		e.declare("llvm.stacksave.p0", "ptr ()")
+	}
+	triple := opts.Triple
 	for _, g := range mod.Globals {
 		fmt.Fprintf(&e.decls, "%s = thread_local global %s %s\n", globalSym(g), e.mty(g.Type), e.globalInit(g))
 	}
@@ -32,10 +55,14 @@ func Emit(mod *ir.Module, triple string) (string, []error) {
 	if mod.Entry != "" {
 		entry := mod.Func(mod.Entry)
 		ret := e.retType(entry)
+		entrySym := "@main"
+		if opts.Freestanding {
+			entrySym = "@kern_main" // the startup code calls it and halts with its result
+		}
 		if ret == "void" {
-			fmt.Fprintf(&e.sb, "define i32 @main() {\nentry:\n  call void @kern_start()\n  call %s %s()\n  ret i32 0\n}\n", retOrVoid(ret), fnSym(mod.Entry))
+			fmt.Fprintf(&e.sb, "define i32 %s() {\nentry:\n  call void @kern_start()\n  call %s %s()\n  ret i32 0\n}\n", entrySym, retOrVoid(ret), fnSym(mod.Entry))
 		} else {
-			fmt.Fprintf(&e.sb, "define i32 @main() {\nentry:\n  call void @kern_start()\n  %%r = call %s %s()\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", ret, fnSym(mod.Entry), widenOp(ret), ret)
+			fmt.Fprintf(&e.sb, "define i32 %s() {\nentry:\n  call void @kern_start()\n  %%r = call %s %s()\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", entrySym, ret, fnSym(mod.Entry), widenOp(ret), ret)
 		}
 		e.declare("kern_start", "void ()")
 	}
@@ -50,7 +77,14 @@ func Emit(mod *ir.Module, triple string) (string, []error) {
 	out.WriteString(e.sb.String())
 	// every frame is probed page by page so a large frame cannot skip the
 	// guard page (PLAN.md 2.2)
-	out.WriteString("attributes #0 = { \"probe-stack\"=\"inline-asm\" }\n")
+	attrs := ""
+	if !e.opts.StackCheck {
+		attrs += " \"probe-stack\"=\"inline-asm\"" // hosted: the guard page must not be skipped
+	}
+	if e.opts.TSan {
+		attrs += " sanitize_thread"
+	}
+	fmt.Fprintf(&out, "attributes #0 = {%s }\n", attrs)
 	return out.String(), e.errs
 }
 
@@ -113,6 +147,9 @@ type fnEmit struct {
 	vals    map[*ir.Value]string // LLVM register names
 	accs    map[*ir.Value]bool   // values defined by access_begin (they hold addresses)
 	addrs   map[*ir.Value]string // large aggregate values kept in memory: their private copy
+	pstores strings.Builder      // parameter stores into their slots (after the stack check)
+	strs    map[*ir.Value][]byte // string literal values, for inline assembly templates
+	align   int                  // alignment override for the next load/store (1 inside packed structs)
 	labels  map[*ir.Block]string
 	cur     *ir.Block
 }
@@ -317,7 +354,7 @@ func (e *emitter) retType(f *ir.Func) string {
 }
 
 func (e *emitter) function(f *ir.Func) {
-	fe := &fnEmit{e: e, f: f, vals: map[*ir.Value]string{}, accs: map[*ir.Value]bool{}, addrs: map[*ir.Value]string{}, labels: map[*ir.Block]string{}}
+	fe := &fnEmit{e: e, f: f, vals: map[*ir.Value]string{}, accs: map[*ir.Value]bool{}, addrs: map[*ir.Value]string{}, strs: map[*ir.Value][]byte{}, labels: map[*ir.Block]string{}}
 	for _, b := range f.Blocks {
 		fe.labels[b] = fmt.Sprintf("bb%d", b.ID)
 	}
@@ -341,16 +378,16 @@ func (e *emitter) function(f *ir.Func) {
 		if p.Conv == ast.ConvOut || p.Conv == ast.ConvView || p.Conv == ast.ConvEdit {
 			if pt == "{ ptr, i64 }" {
 				// a sequence access arrives as two scalars
-				fmt.Fprintf(&fe.allocas, "  %%p%d.a = insertvalue { ptr, i64 } undef, ptr %%p%d.p, 0\n  %%p%d = insertvalue { ptr, i64 } %%p%d.a, i64 %%p%d.n, 1\n", i, i, i, i, i)
+				fmt.Fprintf(&fe.pstores, "  %%p%d.a = insertvalue { ptr, i64 } undef, ptr %%p%d.p, 0\n  %%p%d = insertvalue { ptr, i64 } %%p%d.a, i64 %%p%d.n, 1\n", i, i, i, i, i)
 			}
-			fmt.Fprintf(&fe.allocas, "  store %s %%p%d, ptr %s\n", pt, i, fe.local(p))
+			fmt.Fprintf(&fe.pstores, "  store %s %%p%d, ptr %s\n", pt, i, fe.local(p))
 			continue
 		}
 		if pt == "i1" {
-			fmt.Fprintf(&fe.allocas, "  %%pz%d = zext i1 %%p%d to i8\n  store i8 %%pz%d, ptr %s\n", i, i, i, fe.local(p))
+			fmt.Fprintf(&fe.pstores, "  %%pz%d = zext i1 %%p%d to i8\n  store i8 %%pz%d, ptr %s\n", i, i, i, fe.local(p))
 			continue
 		}
-		fmt.Fprintf(&fe.allocas, "  store %s %%p%d, ptr %s\n", pt, i, fe.local(p))
+		fmt.Fprintf(&fe.pstores, "  store %s %%p%d, ptr %s\n", pt, i, fe.local(p))
 	}
 	for _, b := range f.Blocks {
 		fe.cur = b
@@ -360,7 +397,17 @@ func (e *emitter) function(f *ir.Func) {
 		}
 		fe.term(b.Term)
 	}
-	fmt.Fprintf(&e.sb, "define %s %s(%s) #0 {\nentry:\n%s  br label %%bb%d\n%s}\n\n", e.retType(f), e.symOf(f), strings.Join(ps, ", "), fe.allocas.String(), f.Entry.ID, fe.body.String())
+	// the entry block: allocas (a stack-pointer adjustment only), then in
+	// freestanding builds the stack-limit check before anything is written
+	// into the frame (the limit sits a guard margin above the real bottom,
+	// which covers the callee-saved spills LLVM makes at the frame's top;
+	// no stack probes are emitted in that mode), then the parameter stores
+	entry := fe.allocas.String()
+	if e.opts.StackCheck {
+		entry += fmt.Sprintf("  %%sp = call ptr @llvm.stacksave.p0()\n  %%lim = load ptr, ptr @kern_stack_limit\n  %%ovf = icmp ult ptr %%sp, %%lim\n  br i1 %%ovf, label %%stackovf, label %%frame\nstackovf:\n  call void @kern_trap(i32 %d, i64 %d, i64 %d)\n  unreachable\nframe:\n", trapKind("stack"), f.Pos.Start, f.Pos.End)
+	}
+	entry += fe.pstores.String() + fmt.Sprintf("  br label %%bb%d\n", f.Entry.ID)
+	fmt.Fprintf(&e.sb, "define %s %s(%s) #0 {\nentry:\n%s%s}\n\n", e.retType(f), e.symOf(f), strings.Join(ps, ", "), entry, fe.body.String())
 }
 
 func isParam(f *ir.Func, l *ir.Local) bool {
@@ -382,6 +429,7 @@ type pl struct {
 	seq    bool
 	elem   resolve.Type
 	direct bool // the place is an access-typed local itself: a load yields the access
+	align  int  // 1 inside a packed struct (unaligned access), else 0
 }
 
 func (fe *fnEmit) place(p ir.Place) pl {
@@ -417,7 +465,17 @@ func (fe *fnEmit) place(p ir.Place) pl {
 	return cur
 }
 
+// step derives a sub-place; the alignment override of a packed access is
+// kept through every path element.
 func (fe *fnEmit) step(cur pl, el ir.PathElem) pl {
+	next := fe.step1(cur, el)
+	if cur.align != 0 && next.align == 0 {
+		next.align = cur.align
+	}
+	return next
+}
+
+func (fe *fnEmit) step1(cur pl, el ir.PathElem) pl {
 	switch el.Kind {
 	case ir.PathField:
 		n, ok := cur.ty.(*resolve.Named)
@@ -428,7 +486,11 @@ func (fe *fnEmit) step(cur pl, el ir.PathElem) pl {
 		_, ft := resolve.FieldType(n, el.Name)
 		r := fe.next("t")
 		fe.emit("%s = getelementptr %s, ptr %s, i32 0, i32 %d", r, fe.e.namedType(n), cur.ptr, el.Field)
-		return pl{ptr: r, ty: ft}
+		al := cur.align
+		if n.Decl.Packed {
+			al = 1
+		}
+		return pl{ptr: r, ty: ft, align: al}
 	case ir.PathVariant:
 		n, ok := cur.ty.(*resolve.Named)
 		if !ok {
@@ -491,11 +553,19 @@ func (fe *fnEmit) step(cur pl, el ir.PathElem) pl {
 func (fe *fnEmit) loadFrom(dst string, t resolve.Type, ptr string) {
 	if resolve.IsBool(t) {
 		r := fe.next("t")
-		fe.emit("%s = load i8, ptr %s", r, ptr)
+		fe.emit("%s = load i8, ptr %s%s", r, ptr, fe.alignSuffix())
 		fe.emit("%s = trunc i8 %s to i1", dst, r)
 		return
 	}
-	fe.emit("%s = load %s, ptr %s", dst, fe.e.lty(t), ptr)
+	fe.emit("%s = load %s, ptr %s%s", dst, fe.e.lty(t), ptr, fe.alignSuffix())
+}
+
+// alignSuffix renders the alignment override of the current access.
+func (fe *fnEmit) alignSuffix() string {
+	if fe.align > 0 {
+		return fmt.Sprintf(", align %d", fe.align)
+	}
+	return ""
 }
 
 // storeTo stores a value of type t to a pointer (bool: i1 -> i8).
@@ -509,7 +579,7 @@ func (fe *fnEmit) storeTo(t resolve.Type, val, ptr string) {
 	if isUnit(t) {
 		return
 	}
-	fe.emit("store %s %s, ptr %s", fe.e.lty(t), val, ptr)
+	fe.emit("store %s %s, ptr %s%s", fe.e.lty(t), val, ptr, fe.alignSuffix())
 }
 
 // ---- instructions ----
@@ -570,17 +640,23 @@ func (fe *fnEmit) instr(in ir.Instr) {
 			fe.loadLarge(i.Dst, p.ptr)
 			return
 		}
+		fe.align = p.align
 		fe.loadFrom(fe.v(i.Dst), i.Dst.Type, p.ptr)
+		fe.align = 0
 	case *ir.Store:
 		p := fe.place(i.Place)
+		fe.align = p.align
 		fe.storeValue(i.Src, p.ptr)
+		fe.align = 0
 	case *ir.Move:
 		p := fe.place(i.Src)
 		if isLarge(i.Dst.Type) {
 			fe.loadLarge(i.Dst, p.ptr)
 			return
 		}
+		fe.align = p.align
 		fe.loadFrom(fe.v(i.Dst), i.Dst.Type, p.ptr)
+		fe.align = 0
 	case *ir.Drop:
 		if g := e.glueFor(i.Type); g != "null" {
 			p := fe.place(i.Place)
@@ -746,6 +822,7 @@ func (fe *fnEmit) constant(c *ir.Const) {
 		s1 := fe.next("t")
 		fe.emit("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", s1, name)
 		fe.emit("%s = insertvalue { ptr, i64 } %s, i64 %d, 1", fe.v(c.Dst), s1, len(c.Bytes))
+		fe.strs[c.Dst] = c.Bytes
 	case resolve.IsBool(c.Dst.Type):
 		if c.Bool {
 			fe.vals[c.Dst] = "true"

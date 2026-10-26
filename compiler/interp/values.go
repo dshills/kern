@@ -5,6 +5,7 @@ package interp
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/dshills/kern/compiler/resolve"
 )
@@ -134,6 +135,9 @@ type Shared struct {
 type Mutex struct {
 	Val    Value
 	Locked bool
+	owner  uint64     // thread holding the lock (recursive acquisition traps)
+	state  sync.Mutex // guards Locked and owner
+	lock   sync.Mutex // the lock itself
 }
 
 // Atomic holds an atomic primitive.
@@ -146,12 +150,16 @@ type Scope struct{ Joins []*Join }
 type Thread struct {
 	Result Value
 	Done   bool
+	done   chan struct{} // closed when the thread's function returned or trapped
+	trap   *Trap
 }
 
 // Join is a scoped thread handle.
 type Join struct {
 	Result Value
 	Done   bool
+	done   chan struct{}
+	trap   *Trap
 	Taken  bool
 }
 

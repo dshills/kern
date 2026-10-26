@@ -1,0 +1,10 @@
+//! phase: 3
+//! expect: output simd_reduce_add
+// SIMD intrinsic simd_reduce_add over fixed-width vectors (PLAN.md 3.2); lanes wrap.
+module run
+func main() -> i32 {
+    print_u64(simd_reduce_add([1u64, 2u64, 3u64, 4u64])); println()
+    print_i64(i64(simd_reduce_add([100i8, 100i8]))); println()
+    print_bool(simd_reduce_add([0.5f32, 0.25f32, 0.25f32, 1.0f32]) == 2.0f32); println()
+    return 0i32
+}
