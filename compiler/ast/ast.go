@@ -313,19 +313,23 @@ type ExprStmt struct {
 // Expr is an expression.
 type Expr interface{ Node }
 
-// IntLit is an integer literal; Suffix is the type suffix or "".
+// IntLit is an integer literal; Suffix is the type suffix or "". Text is the
+// literal's source text without any sign (digits, separators and suffix); it
+// is empty for nodes not produced by the parser.
 type IntLit struct {
 	Pos
 	Value  uint64
 	Suffix string
 	Neg    bool
+	Text   string
 }
 
-// FloatLit is a float literal.
+// FloatLit is a float literal. Text is the literal's source text, as for IntLit.
 type FloatLit struct {
 	Pos
 	Value  float64
 	Suffix string
+	Text   string
 }
 
 // StringLit is a string literal.

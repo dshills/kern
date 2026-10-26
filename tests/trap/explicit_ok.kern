@@ -1,0 +1,8 @@
+//! phase: 1
+//! expect: output explicit_ok
+//! twin: explicit
+
+module t
+func main() -> i32 {
+    return 0i32
+}

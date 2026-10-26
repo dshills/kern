@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: output bounds_ok
+//! twin: bounds
+
+module t
+func main() -> i32 {
+    var a: [4]u64 = zero()
+    i := 3usize
+    print_u64(a[i])
+    return 0i32
+}

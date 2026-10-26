@@ -1,0 +1,12 @@
+//! phase: 1
+//! expect: trap vacant
+//! twin: vacant_ok
+
+module t
+func main() -> i32 {
+    p := Pool[u64].new()
+    match p.alloc(1u64) {
+        Ok(a) => { p.free(a); p.free(a); return 0i32 }
+        Err(e) => return 1i32
+    }
+}

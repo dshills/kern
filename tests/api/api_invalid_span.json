@@ -1,0 +1,1 @@
+{"schema_version": "0.2", "command": "explain-ownership", "files": ["../../examples/vector/vector.kern"], "span": {"file": "other.kern", "start": 0, "end": 10}}

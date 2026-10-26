@@ -1,0 +1,4 @@
+module lib
+struct Point { X: u64; hidden: u64 }
+func Make() -> Point { return Point { X: 1u64, hidden: 2u64 } }
+func Sum(p: view[Point]) -> u64 { return p.X + p.hidden }

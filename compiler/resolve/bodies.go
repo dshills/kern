@@ -68,7 +68,7 @@ func (r *resolver) checkFunc(m *Module, file string, fd *FuncDecl, _ *scope) {
 
 func (c *fnCtx) declareParams(sc *scope) {
 	for _, p := range c.fd.Params {
-		sym := &Symbol{Kind: SymParam, Name: p.Name, Type: p.Type, Conv: p.Conv, Pos: p.Pos, ID: c.newID()}
+		sym := &Symbol{Kind: SymParam, Name: p.Name, Type: p.Type, Conv: p.Conv, Pos: p.Pos, ID: c.newID(), File: c.file}
 		if a, ok := p.Type.(*Access); ok {
 			sym.Type = a.Elem
 			if a.Seq {
@@ -104,7 +104,7 @@ func (c *fnCtx) declare(sc *scope, node any, name string, kind SymbolKind, t Typ
 	if _, dup := sc.vars[name]; dup {
 		c.errorf("NAME_DUPLICATE", pos, "%s is already declared in this scope", name)
 	}
-	sym := &Symbol{Kind: kind, Name: name, Type: t, Conv: conv, Pos: pos, ID: c.newID()}
+	sym := &Symbol{Kind: kind, Name: name, Type: t, Conv: conv, Pos: pos, ID: c.newID(), File: c.file}
 	sc.vars[name] = sym
 	if node != nil {
 		c.r.prog.Info.Decls[node] = sym

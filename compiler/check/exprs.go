@@ -268,6 +268,10 @@ func (f *fn) expr(st *flow, e ast.Expr) *result {
 		return &result{t: t}
 	case *ast.Try:
 		f.consumeValue(st, x.X)
+		// the error path exits every scope (spec §4.1 error propagation),
+		// after the operand's own moves have taken effect
+		f.c.info.Drops[x] = f.exitSyms(st, 0)
+		f.c.info.OutFieldDrops[x] = f.outFieldDrops(st)
 		if call, ok := x.X.(*ast.CallExpr); ok {
 			if sym := f.outArgOf(call); sym != nil {
 				st.vars[sym] = &varState{st: stInit}

@@ -1,1 +1,1 @@
-{"schema_version": "9.9", "command": "check", "files": ["../examples/vector/vector.kern"]}
+{"schema_version": "9.9", "command": "check", "files": ["../../examples/vector/vector.kern"]}

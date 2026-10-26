@@ -16,6 +16,9 @@ func (f *fn) block(st *flow, b *ast.Block) *flow {
 		}
 		cur = f.stmt(cur, s)
 	}
+	if !cur.dead {
+		f.c.info.Drops[b] = f.exitSyms(cur, len(f.scopes)-1)
+	}
 	f.popScope()
 	return cur
 }
@@ -67,6 +70,7 @@ func (f *fn) stmt(st *flow, s ast.Stmt) *flow {
 	case *ast.Break, *ast.Continue:
 		out := st.clone()
 		out.dead = true
+		f.c.info.Drops[s] = f.exitSyms(st, f.loopScopeIndex())
 		f.recordLoopExit(st, s)
 		return out
 	case *ast.Unsafe:
@@ -212,9 +216,16 @@ func (f *fn) assign(st *flow, s *ast.Assign) *flow {
 	if len(target.path) == 0 {
 		// whole-variable assignment: initializes or replaces
 		if vs != nil && (vs.st == stUninit || vs.st == stMoved || vs.st == stPartial) {
+			if vs.st == stPartial {
+				all := f.outFieldDrops(st)
+				f.c.info.OutFieldDrops[s] = map[*resolve.Symbol][]string{root: all[root]}
+			}
 			f.finish(st, s)
 			st.vars[root] = &varState{st: stInit}
 			return st
+		}
+		if (vs == nil || vs.st == stInit) && !resolve.IsCopy(root.Type) && (root.Kind == resolve.SymLocal || root.Kind == resolve.SymParam && root.Conv != ast.ConvView && root.Conv != ast.ConvEdit) {
+			f.c.info.Drops[s] = []*resolve.Symbol{root}
 		}
 	} else if vs != nil && vs.st != stInit {
 		// field assignment on uninitialized or moved storage
@@ -297,7 +308,13 @@ func (f *fn) with(st *flow, s *ast.With) *flow {
 			}
 		}
 	}
+	if r != nil && r.owned {
+		f.c.info.OwnedSubject[s] = true
+	}
 	out := f.block(st, s.Body)
+	if !out.dead {
+		f.c.info.Drops[s] = f.exitSyms(out, len(f.scopes)-1)
+	}
 	f.popScope()
 	return out
 }
@@ -336,6 +353,9 @@ func (f *fn) match(st *flow, s *ast.Match) *flow {
 	if r != nil && r.pl.root != nil && !s.Move && needsFreeze {
 		f.encl = append(f.encl, &access{pl: r.pl, kind: accFreeze, start: 0, end: forever, pos: s.Subject.Span()})
 	}
+	if r != nil && r.owned {
+		f.c.info.OwnedSubject[s] = true
+	}
 	outVar := f.outArgOf(s.Subject)
 	var results []*flow
 	for _, arm := range s.Arms {
@@ -347,20 +367,28 @@ func (f *fn) match(st *flow, s *ast.Match) *flow {
 				armSt.vars[outVar] = &varState{st: stUninit}
 			}
 		}
+		armScope := f.pushScope(arm)
 		for i := range arm.BindPos {
 			if sym := f.c.info.Decls[&arm.BindPos[i]]; sym != nil {
 				if sym.Kind == resolve.SymLocal {
 					armSt.vars[sym] = &varState{st: stInit}
+					armScope.owned = append(armScope.owned, sym)
 				} else {
-					sc.bindings = append(sc.bindings, sym)
+					armScope.bindings = append(armScope.bindings, sym)
 					if r != nil {
 						f.bindAccess(sym, r)
 					}
 				}
 			}
 		}
-		results = append(results, f.block(armSt, arm.Body))
+		end := f.block(armSt, arm.Body)
+		if !end.dead {
+			f.c.info.Drops[arm] = f.exitSyms(end, len(f.scopes)-1)
+		}
+		f.popScope()
+		results = append(results, end)
 	}
+	_ = sc
 	f.popScope()
 	return f.join(results, s.Pos)
 }
@@ -396,6 +424,7 @@ func (f *fn) forStmt(st *flow, s *ast.For) *flow {
 	}
 	f.finish(st, s)
 	sc := f.pushScope(s)
+	sc.isLoop = true
 	if r != nil && r.pl.root != nil {
 		f.encl = append(f.encl, &access{pl: r.pl, kind: accFreeze, start: 0, end: forever, pos: s.Iter.Span()})
 	}
@@ -405,6 +434,7 @@ func (f *fn) forStmt(st *flow, s *ast.For) *flow {
 		if sym != nil {
 			if sym.Kind == resolve.SymLocal {
 				b.vars[sym] = &varState{st: stInit}
+				sc.owned = append(sc.owned, sym)
 			} else {
 				sc.bindings = append(sc.bindings, sym)
 				if r != nil {
@@ -412,7 +442,11 @@ func (f *fn) forStmt(st *flow, s *ast.For) *flow {
 				}
 			}
 		}
-		return f.block(b, s.Body)
+		end := f.block(b, s.Body)
+		if !end.dead {
+			f.c.info.Drops[s] = f.exitSyms(end, len(f.scopes)-1)
+		}
+		return end
 	}, s.Pos)
 	f.popScope()
 	return out
@@ -427,7 +461,11 @@ func (f *fn) loop(st *flow, cond ast.Expr, body *ast.Block, pos ast.Pos) *flow {
 		f.consumeValue(back, cond)
 		f.finish(back, body)
 	}
-	return f.loopBodyWith(st, func(in *flow) *flow { return f.block(in, body) }, reeval, pos)
+	sc := f.pushScope(body)
+	sc.isLoop = true
+	out := f.loopBodyWith(st, func(in *flow) *flow { return f.block(in, body) }, reeval, pos)
+	f.popScope()
+	return out
 }
 
 // loopBody checks a loop body once from the entry state and requires the
@@ -588,11 +626,17 @@ func (f *fn) declaredAtOrAbove(sym *resolve.Symbol) bool {
 func (f *fn) ret(st *flow, s *ast.Return) *flow {
 	out := st.clone()
 	out.dead = true
+	defer func() {
+		f.c.info.Drops[s] = f.exitSyms(st, 0)
+	}()
 	if s.Value == nil {
 		f.normalReturn(st, s.Pos)
 		return out
 	}
 	isErr := f.isErrReturn(s.Value)
+	if isErr {
+		f.c.info.OutFieldDrops[s] = f.outFieldDrops(st)
+	}
 	if len(f.fd.Ret) >= 1 {
 		if _, isAcc := f.fd.Ret[0].(*resolve.Access); isAcc || len(f.fd.Ret) > 1 {
 			f.returnAccess(st, s)

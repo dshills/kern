@@ -1,0 +1,16 @@
+//! phase: 1
+//! expect: trap disjoint
+//! twin: disjoint_ok
+
+module t
+struct C { v: u64 }
+func main() -> i32 {
+    p := Pool[C].new()
+    match p.alloc(C { v: 1u64 }) {
+        Ok(a) => {
+            with x, y := p.get2(a, a) { x.v = y.v }
+            return 0i32
+        }
+        Err(e) => return 1i32
+    }
+}

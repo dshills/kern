@@ -1,0 +1,865 @@
+package interp
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"math/bits"
+
+	"github.com/dshills/kern/compiler/ast"
+	"github.com/dshills/kern/compiler/ir"
+	"github.com/dshills/kern/compiler/resolve"
+)
+
+// Trap is the error raised by a trap (spec §6).
+type Trap struct {
+	Kind string
+	Pos  ast.Pos
+	File string
+}
+
+func (t *Trap) Error() string { return "trap " + t.Kind }
+
+// Interp executes a module.
+type Interp struct {
+	mod           *ir.Module
+	file          string
+	out           io.Writer
+	errOut        io.Writer
+	handler       *FuncVal
+	TestHooks     bool
+	failNextAlloc bool
+	stackBytes    int
+	stackUsed     int
+	nextIdent     uint32
+}
+
+// New creates an interpreter for a module. out receives program output,
+// errOut the trap record.
+func New(mod *ir.Module, file string, out, errOut io.Writer) *Interp {
+	return &Interp{mod: mod, file: file, out: out, errOut: errOut, stackBytes: 8 << 20, nextIdent: 1}
+}
+
+// SetStackLimit sets the interpreter's stack budget in bytes; each activation
+// is accounted as 512 bytes plus 16 per local and value.
+func (it *Interp) SetStackLimit(bytes int) {
+	if bytes > 0 {
+		it.stackBytes = bytes
+	}
+}
+
+// Run executes the entry function and returns the process exit status: the
+// program's result when it returns an integer, 0 otherwise, 134 on a trap.
+func (it *Interp) Run() (status int) {
+	entry := it.mod.Func(it.mod.Entry)
+	if entry == nil {
+		_, _ = fmt.Fprintf(it.errOut, "no entry function\n")
+		return 3
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tr, ok := r.(*Trap)
+			if !ok {
+				panic(r)
+			}
+			it.trapRecord(tr)
+			status = 134
+		}
+	}()
+	rets := it.call(entry, nil)
+	if len(rets) == 1 {
+		if n, ok := rets[0].(Int); ok {
+			return int(signedOf(n))
+		}
+	}
+	return 0
+}
+
+// trapRecord writes the trap record (the default handler's output, PLAN.md
+// §0) and runs the registered handler once.
+func (it *Interp) trapRecord(tr *Trap) {
+	rec := map[string]any{"trap": map[string]any{"kind": tr.Kind, "file": it.file, "span": map[string]int{"start": tr.Pos.Start, "end": tr.Pos.End}, "thread": 0}}
+	b, _ := json.Marshal(rec)
+	if it.handler == nil {
+		_, _ = fmt.Fprintf(it.errOut, "%s\n", b)
+		return
+	}
+	// a custom handler: TrapInfo is a struct {kind, file, start, end, thread_id}
+	info := &Struct{Fields: []Value{&Union{Tag: trapKindIndex(tr.Kind)}, Int{Ty: "usize"}, mkInt("usize", uint64(tr.Pos.Start)), mkInt("usize", uint64(tr.Pos.End)), Int{Ty: "u64"}}}
+	slot := Value(info)
+	h := it.handler
+	it.handler = nil // a trap inside the handler terminates
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if _, ok := r.(*Trap); !ok {
+					panic(r)
+				}
+			}
+		}()
+		it.callNamed(h.Name, []Value{&Access{Ref: slotRef{&slot}}})
+	}()
+}
+
+var trapKinds = []string{"bounds", "overflow", "div_zero", "shift", "conversion", "generation", "vacant", "identity", "disjoint", "oom", "stack", "explicit", "unreachable"}
+
+func trapKindIndex(k string) int {
+	for i, n := range trapKinds {
+		if n == k {
+			return i
+		}
+	}
+	return len(trapKinds) - 1
+}
+
+func (it *Interp) trap(kind string, pos ast.Pos) {
+	panic(&Trap{Kind: kind, Pos: pos, File: it.file})
+}
+
+// frame is one activation.
+type frame struct {
+	f      *ir.Func
+	locals []Value
+	vals   []Value
+}
+
+func (it *Interp) callNamed(name string, args []Value) []Value {
+	f := it.mod.Func(name)
+	if f == nil {
+		if fn, ok := intrinsics[name]; ok {
+			return fn(it, args, callCtx{})
+		}
+		panic(fmt.Sprintf("interp: unknown function %s", name))
+	}
+	return it.call(f, args)
+}
+
+func (it *Interp) call(f *ir.Func, args []Value) []Value {
+	if f.Intrinsic {
+		name := intrinsicOf(f.Name)
+		if fn, ok := intrinsics[name]; ok {
+			return fn(it, args, callCtx{pos: f.Pos})
+		}
+		panic(fmt.Sprintf("interp: no intrinsic for %s", f.Name))
+	}
+	frameBytes := 512 + 16*(len(f.Locals)+f.NumValues)
+	if it.stackUsed+frameBytes > it.stackBytes {
+		it.trap("stack", f.Pos)
+	}
+	it.stackUsed += frameBytes
+	defer func() { it.stackUsed -= frameBytes }()
+	fr := &frame{f: f, locals: make([]Value, len(f.Locals)), vals: make([]Value, f.NumValues)}
+	for i, p := range f.Params {
+		if i < len(args) {
+			fr.locals[p.ID] = args[i]
+		}
+	}
+	b := f.Entry
+	for {
+		for _, in := range b.Instrs {
+			it.exec(fr, in)
+		}
+		switch t := b.Term.(type) {
+		case *ir.Br:
+			b = t.Target
+		case *ir.CondBr:
+			if fr.vals[t.Cond.ID].(Bool) {
+				b = t.Then
+			} else {
+				b = t.Else
+			}
+		case *ir.Switch:
+			tag := int(fr.vals[t.Tag.ID].(Int).Bits)
+			if nb, ok := t.Cases[tag]; ok {
+				b = nb
+			} else {
+				b = t.Default
+			}
+		case *ir.Ret:
+			out := make([]Value, len(t.Vals))
+			for i, v := range t.Vals {
+				out[i] = fr.vals[v.ID]
+			}
+			return out
+		case *ir.Unreachable:
+			it.trap("unreachable", f.Pos)
+		default:
+			panic("interp: block without terminator")
+		}
+	}
+}
+
+// intrinsicOf strips the specialization suffix: "Vec.push[T=u64]" -> "Vec.push".
+func intrinsicOf(name string) string {
+	for i := 0; i < len(name); i++ {
+		if name[i] == '[' {
+			return name[:i]
+		}
+	}
+	return name
+}
+
+// ---- places ----
+
+// resolve returns the ref and, for sequences, the window of a place.
+func (it *Interp) resolve(fr *frame, p ir.Place) (ref, *seqRef) {
+	var cur ref
+	var seq *seqRef
+	if p.Local != nil {
+		cur = slotRef{&fr.locals[p.Local.ID]}
+		if a, ok := fr.locals[p.Local.ID].(*Access); ok && (p.Local.Conv == ast.ConvView || p.Local.Conv == ast.ConvEdit) {
+			cur, seq = a.Ref, a.Seq
+		}
+	} else {
+		a := fr.vals[p.Access.ID].(*Access)
+		cur, seq = a.Ref, a.Seq
+	}
+	for _, e := range p.Path {
+		switch e.Kind {
+		case ir.PathField:
+			s := cur.get().(*Struct)
+			cur = idxRef{elems: func() []Value { return s.Fields }, i: e.Field}
+			seq = nil
+		case ir.PathVariant:
+			u := cur.get().(*Union)
+			cur = idxRef{elems: func() []Value { return u.Fields }, i: e.Field}
+			seq = nil
+		case ir.PathIndex:
+			i := int(fr.vals[e.Index.ID].(Int).Bits)
+			if seq == nil {
+				arr := cur.get().(*Array)
+				seq = &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(arr.Elems)}
+			}
+			cur = seq.at(i)
+			seq = nil
+		case ir.PathSlice:
+			lo := int(fr.vals[e.Lo.ID].(Int).Bits)
+			hi := int(fr.vals[e.Hi.ID].(Int).Bits)
+			if seq == nil {
+				arr := cur.get().(*Array)
+				seq = &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(arr.Elems)}
+			}
+			seq = &seqRef{elems: seq.elems, lo: seq.lo + lo, hi: seq.lo + hi}
+			cur = nil
+		}
+	}
+	return cur, seq
+}
+
+func (it *Interp) length(fr *frame, p ir.Place) int {
+	cur, seq := it.resolve(fr, p)
+	if seq != nil {
+		return seq.length()
+	}
+	if arr, ok := cur.get().(*Array); ok {
+		return len(arr.Elems)
+	}
+	panic("interp: len of non-sequence")
+}
+
+// ---- instructions ----
+
+func (it *Interp) exec(fr *frame, in ir.Instr) {
+	switch i := in.(type) {
+	case *ir.Const:
+		fr.vals[i.Dst.ID] = it.constValue(i)
+	case *ir.Load:
+		r, seq := it.resolve(fr, i.Place)
+		if seq != nil {
+			fr.vals[i.Dst.ID] = &Access{Seq: seq}
+			return
+		}
+		fr.vals[i.Dst.ID] = copyValue(r.get())
+	case *ir.Store:
+		r, _ := it.resolve(fr, i.Place)
+		r.set(fr.vals[i.Src.ID])
+	case *ir.Move:
+		r, _ := it.resolve(fr, i.Src)
+		fr.vals[i.Dst.ID] = r.get()
+		r.set(nil)
+	case *ir.Drop:
+		r, _ := it.resolve(fr, i.Place)
+		it.destroy(r.get(), i.Type)
+		r.set(nil)
+	case *ir.AccessBegin:
+		r, seq := it.resolve(fr, i.Place)
+		fr.vals[i.Dst.ID] = &Access{Ref: r, Seq: seq, Edit: i.Edit}
+	case *ir.AccessEnd:
+		if i.Release != "" {
+			it.callNamed(i.Release, []Value{fr.vals[i.Recv.ID]})
+		}
+	case *ir.Call:
+		args := make([]Value, len(i.Args))
+		for k, a := range i.Args {
+			args[k] = fr.vals[a.ID]
+		}
+		var rets []Value
+		switch {
+		case i.Intrinsic != "":
+			fn, ok := intrinsics[i.Intrinsic]
+			if !ok {
+				panic(fmt.Sprintf("interp: unknown intrinsic %s", i.Intrinsic))
+			}
+			rets = fn(it, args, callCtx{pos: i.Pos, targs: i.TypeArgs})
+		case i.Fn != nil:
+			rets = it.callNamed(fr.vals[i.Fn.ID].(FuncVal).Name, args)
+		default:
+			rets = it.callNamed(i.Callee, args)
+		}
+		for k, d := range i.Dsts {
+			if k < len(rets) {
+				fr.vals[d.ID] = rets[k]
+			}
+		}
+	case *ir.Binary:
+		fr.vals[i.Dst.ID] = it.binary(i.Op, fr.vals[i.L.ID], fr.vals[i.R.ID], i.Mode)
+	case *ir.Unary:
+		x := fr.vals[i.X.ID]
+		switch i.Op {
+		case "!":
+			fr.vals[i.Dst.ID] = !x.(Bool)
+		default:
+			switch v := x.(type) {
+			case Int:
+				fr.vals[i.Dst.ID] = mkInt(v.Ty, -v.Bits)
+			case Float:
+				fr.vals[i.Dst.ID] = mkFloat(v.Ty, -v.V)
+			}
+		}
+	case *ir.Conv:
+		fr.vals[i.Dst.ID] = it.conv(fr.vals[i.X.ID], i.To, i.Truncate, i.Saturate)
+	case *ir.CheckOverflow:
+		it.checkOverflow(i.Op, fr.vals[i.L.ID], fr.vals[i.R.ID], i.Pos)
+	case *ir.CheckBounds:
+		ln := fr.vals[i.Len.ID].(Int).Bits
+		if i.Index != nil {
+			if fr.vals[i.Index.ID].(Int).Bits >= ln {
+				it.trap("bounds", i.Pos)
+			}
+			return
+		}
+		lo := fr.vals[i.Lo.ID].(Int).Bits
+		hi := fr.vals[i.Hi.ID].(Int).Bits
+		if lo > hi || hi > ln {
+			it.trap("bounds", i.Pos)
+		}
+	case *ir.CheckConv:
+		it.checkConv(fr.vals[i.X.ID], i.To, i.Pos)
+	case *ir.Len:
+		fr.vals[i.Dst.ID] = mkInt("usize", uint64(it.length(fr, i.Place)))
+	case *ir.MakeStruct:
+		s := &Struct{Fields: make([]Value, len(i.Fields))}
+		for k, f := range i.Fields {
+			s.Fields[k] = fr.vals[f.ID]
+		}
+		fr.vals[i.Dst.ID] = s
+	case *ir.MakeUnion:
+		u := &Union{Tag: i.Tag, Fields: make([]Value, len(i.Fields))}
+		for k, f := range i.Fields {
+			u.Fields[k] = fr.vals[f.ID]
+		}
+		fr.vals[i.Dst.ID] = u
+	case *ir.MakeArray:
+		a := &Array{Elems: make([]Value, len(i.Elems))}
+		for k, e := range i.Elems {
+			a.Elems[k] = fr.vals[e.ID]
+		}
+		fr.vals[i.Dst.ID] = a
+	case *ir.Zero:
+		fr.vals[i.Dst.ID] = zeroOf(i.Dst.Type)
+	case *ir.Tag:
+		r, _ := it.resolve(fr, i.Place)
+		fr.vals[i.Dst.ID] = mkInt("u32", uint64(r.get().(*Union).Tag))
+	case *ir.FuncRef:
+		fr.vals[i.Dst.ID] = FuncVal{Name: i.Name}
+	case *ir.Trap:
+		it.trap(i.Kind, i.Pos)
+	case *ir.Copy:
+		fr.vals[i.Dst.ID] = copyValue(fr.vals[i.Src.ID])
+	case *ir.UnsafeBegin, *ir.UnsafeEnd, *ir.Init:
+	default:
+		panic(fmt.Sprintf("interp: unsupported instruction %T", in))
+	}
+}
+
+func (it *Interp) constValue(c *ir.Const) Value {
+	switch {
+	case c.Unit:
+		return Unit{}
+	case c.Bytes != nil:
+		elems := make([]Value, len(c.Bytes))
+		for i, b := range c.Bytes {
+			elems[i] = mkInt("u8", uint64(b))
+		}
+		arr := &Array{Elems: elems}
+		return &Access{Seq: &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(elems)}}
+	}
+	switch t := c.Dst.Type.(type) {
+	case *resolve.Prim:
+		switch t.Name {
+		case "bool":
+			return Bool(c.Bool)
+		case "f32", "f64":
+			return mkFloat(t.Name, c.Float)
+		}
+		v := c.Int
+		if c.Neg {
+			v = -v
+		}
+		return mkInt(t.Name, v)
+	}
+	return Unit{}
+}
+
+// ---- arithmetic (spec §4.1) ----
+
+func (it *Interp) checkOverflow(op string, l, r Value, pos ast.Pos) {
+	a, ok := l.(Int)
+	if !ok {
+		return // floats never trap
+	}
+	b := r.(Int)
+	ty := a.Ty
+	w := width(ty)
+	switch op {
+	case "/", "%":
+		if b.Bits == 0 {
+			it.trap("div_zero", pos)
+		}
+		if signed(ty) && signedOf(a) == minSigned(w) && signedOf(b) == -1 {
+			it.trap("overflow", pos)
+		}
+	case "<<", ">>":
+		if b.Bits >= uint64(w) {
+			it.trap("shift", pos)
+		}
+		if op == "<<" {
+			// a set bit shifted out traps (spec §4.1)
+			shifted := mask(ty, a.Bits<<b.Bits) >> b.Bits
+			if shifted != a.Bits {
+				it.trap("overflow", pos)
+			}
+		}
+	case "+", "-", "*":
+		if signed(ty) {
+			x, y := signedOf(a), signedOf(b)
+			var res int64
+			var over bool
+			switch op {
+			case "+":
+				res = x + y
+				over = (x > 0 && y > 0 && res < 0) || (x < 0 && y < 0 && res >= 0)
+			case "-":
+				res = x - y
+				over = (x >= 0 && y < 0 && res < 0) || (x < 0 && y > 0 && res >= 0)
+			case "*":
+				if x != 0 && y != 0 {
+					res = x * y
+					over = res/y != x || (x == -1 && y == math.MinInt64) || (y == -1 && x == math.MinInt64)
+				}
+			}
+			if !over && w < 64 && (res < minSigned(w) || res > maxSigned(w)) {
+				over = true
+			}
+			if over {
+				it.trap("overflow", pos)
+			}
+			return
+		}
+		x, y := a.Bits, b.Bits
+		var over bool
+		switch op {
+		case "+":
+			s, c := bits.Add64(x, y, 0)
+			over = c != 0 || mask(ty, s) != s
+		case "-":
+			over = y > x
+		case "*":
+			hi, lo := bits.Mul64(x, y)
+			over = hi != 0 || mask(ty, lo) != lo
+		}
+		if over {
+			it.trap("overflow", pos)
+		}
+	}
+}
+
+func minSigned(w uint) int64 { return -(1 << (w - 1)) }
+func maxSigned(w uint) int64 { return 1<<(w-1) - 1 }
+
+func (it *Interp) binary(op string, l, r Value, mode string) Value {
+	switch a := l.(type) {
+	case Bool:
+		b := r.(Bool)
+		switch op {
+		case "==":
+			return Bool(a == b)
+		case "!=":
+			return Bool(a != b)
+		case "&&":
+			return a && b
+		case "||":
+			return a || b
+		}
+	case Float:
+		b := r.(Float)
+		switch op {
+		case "+":
+			return mkFloat(a.Ty, a.V+b.V)
+		case "-":
+			return mkFloat(a.Ty, a.V-b.V)
+		case "*":
+			return mkFloat(a.Ty, a.V*b.V)
+		case "/":
+			return mkFloat(a.Ty, a.V/b.V)
+		case "==":
+			return Bool(a.V == b.V)
+		case "!=":
+			return Bool(a.V != b.V)
+		case "<":
+			return Bool(a.V < b.V)
+		case "<=":
+			return Bool(a.V <= b.V)
+		case ">":
+			return Bool(a.V > b.V)
+		case ">=":
+			return Bool(a.V >= b.V)
+		}
+	case Int:
+		b := r.(Int)
+		ty := a.Ty
+		if signed(ty) {
+			x, y := signedOf(a), signedOf(b)
+			switch op {
+			case "+":
+				return mkInt(ty, uint64(x+y))
+			case "-":
+				return mkInt(ty, uint64(x-y))
+			case "*":
+				return mkInt(ty, uint64(x*y))
+			case "/":
+				return mkInt(ty, uint64(x/y))
+			case "%":
+				return mkInt(ty, uint64(x%y))
+			case "<<":
+				return mkInt(ty, uint64(x<<(b.Bits&63)))
+			case ">>":
+				return mkInt(ty, uint64(x>>(b.Bits&63)))
+			case "&":
+				return mkInt(ty, a.Bits&b.Bits)
+			case "|":
+				return mkInt(ty, a.Bits|b.Bits)
+			case "^":
+				return mkInt(ty, a.Bits^b.Bits)
+			case "==":
+				return Bool(x == y)
+			case "!=":
+				return Bool(x != y)
+			case "<":
+				return Bool(x < y)
+			case "<=":
+				return Bool(x <= y)
+			case ">":
+				return Bool(x > y)
+			case ">=":
+				return Bool(x >= y)
+			}
+		}
+		x, y := a.Bits, b.Bits
+		switch op {
+		case "+":
+			return mkInt(ty, x+y)
+		case "-":
+			return mkInt(ty, x-y)
+		case "*":
+			return mkInt(ty, x*y)
+		case "/":
+			return mkInt(ty, x/y)
+		case "%":
+			return mkInt(ty, x%y)
+		case "<<":
+			return mkInt(ty, x<<(y&63))
+		case ">>":
+			return mkInt(ty, x>>(y&63))
+		case "&":
+			return mkInt(ty, x&y)
+		case "|":
+			return mkInt(ty, x|y)
+		case "^":
+			return mkInt(ty, x^y)
+		case "==":
+			return Bool(x == y)
+		case "!=":
+			return Bool(x != y)
+		case "<":
+			return Bool(x < y)
+		case "<=":
+			return Bool(x <= y)
+		case ">":
+			return Bool(x > y)
+		case ">=":
+			return Bool(x >= y)
+		}
+	case *Union:
+		b := r.(*Union)
+		switch op {
+		case "==":
+			return Bool(equalValues(a, b))
+		case "!=":
+			return Bool(!equalValues(a, b))
+		}
+	case *Struct:
+		b := r.(*Struct)
+		switch op {
+		case "==":
+			return Bool(equalValues(a, b))
+		case "!=":
+			return Bool(!equalValues(a, b))
+		}
+	}
+	panic(fmt.Sprintf("interp: unsupported binary %s on %T", op, l))
+}
+
+func equalValues(a, b Value) bool {
+	switch x := a.(type) {
+	case Int:
+		return x.Bits == b.(Int).Bits
+	case Float:
+		return x.V == b.(Float).V
+	case Bool:
+		return x == b.(Bool)
+	case Unit:
+		return true
+	case *Struct:
+		y := b.(*Struct)
+		for i := range x.Fields {
+			if !equalValues(x.Fields[i], y.Fields[i]) {
+				return false
+			}
+		}
+		return true
+	case *Union:
+		y := b.(*Union)
+		if x.Tag != y.Tag {
+			return false
+		}
+		for i := range x.Fields {
+			if !equalValues(x.Fields[i], y.Fields[i]) {
+				return false
+			}
+		}
+		return true
+	case *Array:
+		y := b.(*Array)
+		for i := range x.Elems {
+			if !equalValues(x.Elems[i], y.Elems[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func (it *Interp) checkConv(x Value, to string, pos ast.Pos) {
+	switch v := x.(type) {
+	case Int:
+		if to == "f32" || to == "f64" {
+			return
+		}
+		var val int64
+		var big bool
+		if signed(v.Ty) {
+			val = signedOf(v)
+		} else if v.Bits > math.MaxInt64 {
+			big = true
+		} else {
+			val = int64(v.Bits)
+		}
+		w := width(to)
+		if signed(to) {
+			if big || val < minSigned(w) || val > maxSigned(w) {
+				it.trap("conversion", pos)
+			}
+			return
+		}
+		if val < 0 {
+			it.trap("conversion", pos)
+		}
+		if w < 64 && (big || uint64(val) > (1<<w)-1) {
+			it.trap("conversion", pos)
+		}
+	case Float:
+		if to == "f32" || to == "f64" {
+			return
+		}
+		if math.IsNaN(v.V) || math.IsInf(v.V, 0) {
+			it.trap("conversion", pos)
+		}
+		t := math.Trunc(v.V)
+		w := width(to)
+		if signed(to) {
+			if t < -math.Ldexp(1, int(w)-1) || t >= math.Ldexp(1, int(w)-1) {
+				it.trap("conversion", pos)
+			}
+		} else if t < 0 || t >= math.Ldexp(1, int(w)) {
+			it.trap("conversion", pos)
+		}
+	}
+}
+
+func (it *Interp) conv(x Value, to string, truncate, saturate bool) Value {
+	switch v := x.(type) {
+	case Int:
+		if to == "f32" || to == "f64" {
+			if signed(v.Ty) {
+				return mkFloat(to, float64(signedOf(v)))
+			}
+			return mkFloat(to, float64(v.Bits))
+		}
+		bitsv := v.Bits
+		if signed(v.Ty) {
+			bitsv = uint64(signedOf(v)) // sign-extend to 64 bits
+		}
+		return mkInt(to, bitsv)
+	case Float:
+		if to == "f32" || to == "f64" {
+			return mkFloat(to, v.V)
+		}
+		t := math.Trunc(v.V)
+		w := width(to)
+		if saturate {
+			if math.IsNaN(t) {
+				return Int{Ty: to}
+			}
+			if signed(to) {
+				if t < -math.Ldexp(1, int(w)-1) {
+					return mkInt(to, uint64(minSigned(w)))
+				}
+				if t >= math.Ldexp(1, int(w)-1) {
+					return mkInt(to, uint64(maxSigned(w)))
+				}
+			} else if t < 0 {
+				return Int{Ty: to}
+			} else if t >= math.Ldexp(1, int(w)) {
+				return mkInt(to, math.MaxUint64)
+			}
+		}
+		if signed(to) {
+			return mkInt(to, uint64(int64(t)))
+		}
+		return mkInt(to, uint64(t))
+	}
+	return x
+}
+
+// ---- destruction (spec §5.7) ----
+
+// destroy runs a value's destructor and destroys its fields in reverse
+// declaration order.
+func (it *Interp) destroy(v Value, t resolve.Type) {
+	if v == nil || resolve.IsCopy(t) {
+		return
+	}
+	switch x := t.(type) {
+	case *resolve.Array:
+		arr, ok := v.(*Array)
+		if !ok {
+			return
+		}
+		for i := len(arr.Elems) - 1; i >= 0; i-- {
+			it.destroy(arr.Elems[i], x.Elem)
+		}
+	case *resolve.Named:
+		if x.Decl.Module == "core" {
+			it.destroyLibrary(v, x)
+			return
+		}
+		args := typeArgs(x)
+		if x.Decl.Destructor != nil {
+			slot := v
+			it.callNamed(x.String()+".destructor", []Value{&Access{Ref: slotRef{&slot}, Edit: true}})
+			v = slot
+		}
+		switch val := v.(type) {
+		case *Struct:
+			for i := len(x.Decl.Fields) - 1; i >= 0; i-- {
+				it.destroy(val.Fields[i], resolve.Subst(x.Decl.Fields[i].Type, args))
+			}
+		case *Union:
+			vd := x.Decl.Variants[val.Tag]
+			for i := len(vd.Fields) - 1; i >= 0; i-- {
+				it.destroy(val.Fields[i], resolve.Subst(vd.Fields[i].Type, args))
+			}
+		}
+	}
+}
+
+func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
+	elem := func(i int) resolve.Type {
+		if i < len(n.Args) {
+			return n.Args[i]
+		}
+		return &resolve.Unit{}
+	}
+	switch x := v.(type) {
+	case *Box:
+		if !x.Dead {
+			x.Dead = true
+			it.destroy(x.Val, elem(0))
+		}
+	case *Vec:
+		if !x.Dead {
+			x.Dead = true
+			for i := len(x.Items) - 1; i >= 0; i-- {
+				it.destroy(x.Items[i], elem(0))
+			}
+		}
+	case *Pool:
+		if !x.Dead {
+			x.Dead = true
+			for i := len(x.Slots) - 1; i >= 0; i-- {
+				if x.Slots[i].Live {
+					it.destroy(x.Slots[i].Val, elem(0))
+				}
+			}
+		}
+	case *Arena:
+		if !x.Dead {
+			x.Dead = true
+			for i := len(x.Slots) - 1; i >= 0; i-- {
+				it.destroy(x.Slots[i], elem(0))
+			}
+		}
+	case *Shared:
+		x.Count--
+		if x.Count == 0 {
+			it.destroy(x.Val, elem(0))
+		}
+	case *Mutex:
+		it.destroy(x.Val, elem(0))
+	case *Scope:
+		for _, j := range x.Joins {
+			if !j.Taken && j.Done {
+				it.destroy(j.Result, elem(0))
+			}
+		}
+	case *Thread:
+		// detached: the result was destroyed when the function returned
+	case *Join:
+		if !x.Taken {
+			x.Taken = true
+			it.destroy(x.Result, elem(0))
+		}
+	case *Union, *Struct:
+		// Option/Result and other prelude unions: destroy payloads by type
+		args := typeArgs(n)
+		if u, ok := v.(*Union); ok {
+			vd := n.Decl.Variants[u.Tag]
+			for i := len(vd.Fields) - 1; i >= 0; i-- {
+				it.destroy(u.Fields[i], resolve.Subst(vd.Fields[i].Type, args))
+			}
+		}
+	}
+}

@@ -97,6 +97,72 @@ type bindScope struct {
 	owned    []*resolve.Symbol // owned locals declared in this scope
 	encl     int               // length of f.encl at scope entry
 	scopeSym *resolve.Symbol   // the Scope binding for `with s := thread.scope()`
+	isLoop   bool              // the scope of a loop (break/continue exit up to it)
+}
+
+// exitSyms lists the symbols whose scope ends when control leaves the scopes
+// from the innermost down to index stop (inclusive), in destruction order:
+// per scope, access bindings in reverse order, then initialized owned locals
+// in reverse declaration order.
+func (f *fn) exitSyms(st *flow, stop int) []*resolve.Symbol {
+	var out []*resolve.Symbol
+	for i := len(f.scopes) - 1; i >= stop; i-- {
+		s := f.scopes[i]
+		for j := len(s.bindings) - 1; j >= 0; j-- {
+			out = append(out, s.bindings[j])
+		}
+		for j := len(s.owned) - 1; j >= 0; j-- {
+			sym := s.owned[j]
+			if vs, ok := st.vars[sym]; ok && vs.st == stInit {
+				out = append(out, sym)
+			}
+		}
+	}
+	return out
+}
+
+// outFieldDrops lists the initialized fields of partially initialized out
+// storage, for an error-path exit.
+func (f *fn) outFieldDrops(st *flow) map[*resolve.Symbol][]string {
+	var out map[*resolve.Symbol][]string
+	for _, o := range f.outParams {
+		vs, ok := st.vars[o]
+		if !ok {
+			continue
+		}
+		if vs.st == stInit {
+			if out == nil {
+				out = map[*resolve.Symbol][]string{}
+			}
+			out[o] = []string{"*"} // the whole value, by the ordinary rule
+			continue
+		}
+		if vs.st != stPartial {
+			continue
+		}
+		if out == nil {
+			out = map[*resolve.Symbol][]string{}
+		}
+		// reverse initialization order is approximated by reverse declaration order
+		if n, ok := o.Type.(*resolve.Named); ok {
+			for i := len(n.Decl.Fields) - 1; i >= 0; i-- {
+				if vs.fields[n.Decl.Fields[i].Name] {
+					out[o] = append(out[o], n.Decl.Fields[i].Name)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// loopScopeIndex returns the index of the innermost loop scope, or 0.
+func (f *fn) loopScopeIndex() int {
+	for i := len(f.scopes) - 1; i >= 0; i-- {
+		if f.scopes[i].isLoop {
+			return i
+		}
+	}
+	return 0
 }
 
 func (f *fn) errorf(code diag.Code, pos ast.Pos, format string, args ...any) {
@@ -127,12 +193,18 @@ func (c *checker) checkFunc(file string, fd *resolve.FuncDecl, body *ast.Block, 
 			st.vars[sym] = &varState{st: stInit}
 		}
 	}
-	f.pushScope(body)
+	outer := f.pushScope(body)
+	for _, p := range fd.Params {
+		if sym := f.params[p.Name]; sym != nil && (p.Conv == ast.ConvOwn || p.Conv == ast.ConvValue) {
+			outer.owned = append(outer.owned, sym)
+		}
+	}
 	end := f.block(st, body)
-	f.popScope()
 	if !end.dead {
 		f.normalReturn(end, body.Pos)
+		f.c.info.Drops[fd.AST] = f.exitSyms(end, 0)
 	}
+	f.popScope()
 	if f.hasUnsafe && fd.Contract == nil {
 		f.errorf("UNSAFE_MISSING_CONTRACT", fd.Pos, "function %s contains unsafe but has no contract block", fd.Name)
 	}

@@ -26,11 +26,31 @@ func Lex(src []byte) ([]Token, []Error) {
 	return l.toks, l.errs
 }
 
+// Comment is one `//` line comment. Text is the source text from the marker
+// to the end of the line, excluding the line terminator. OwnLine reports that
+// only whitespace precedes the comment on its line.
+type Comment struct {
+	Start, End int
+	Text       string
+	OwnLine    bool
+}
+
+// LexWithComments is Lex, additionally returning every comment in source
+// order. Fixture header lines (`//!`) are returned as comments too. The
+// tokens and errors are identical to those of Lex.
+func LexWithComments(src []byte) ([]Token, []Comment, []Error) {
+	l := &lexer{src: src, keepComments: true}
+	l.run()
+	return l.toks, l.comments, l.errs
+}
+
 type lexer struct {
-	src  []byte
-	pos  int
-	toks []Token
-	errs []Error
+	src          []byte
+	pos          int
+	toks         []Token
+	errs         []Error
+	keepComments bool
+	comments     []Comment
 }
 
 func (l *lexer) emit(k Kind, start, end int, text string) {
@@ -61,8 +81,16 @@ func (l *lexer) run() {
 		case c == ' ' || c == '\t' || c == '\r':
 			l.pos++
 		case c == '/' && l.peek(1) == '/':
+			start := l.pos
 			for l.pos < len(l.src) && l.src[l.pos] != '\n' {
 				l.pos++
+			}
+			if l.keepComments {
+				end := l.pos
+				if end > start && l.src[end-1] == '\r' {
+					end--
+				}
+				l.comments = append(l.comments, Comment{Start: start, End: end, Text: string(l.src[start:end]), OwnLine: l.ownLine(start)})
 			}
 		case c == '"':
 			l.lexString()
@@ -78,6 +106,21 @@ func (l *lexer) run() {
 		l.emit(Newline, l.pos, l.pos, "\n")
 	}
 	l.emit(EOF, l.pos, l.pos, "")
+}
+
+// ownLine reports whether only spaces and tabs precede offset start on its line.
+func (l *lexer) ownLine(start int) bool {
+	for i := start - 1; i >= 0; i-- {
+		switch l.src[i] {
+		case ' ', '\t', '\r':
+			continue
+		case '\n':
+			return true
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (l *lexer) peek(n int) byte {

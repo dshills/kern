@@ -3,6 +3,8 @@
 package tests
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,13 +14,16 @@ import (
 
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
+	"github.com/dshills/kern/compiler/interp"
+	"github.com/dshills/kern/compiler/ir"
+	"github.com/dshills/kern/compiler/lower"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
 
 // Phase is the current implementation phase; fixtures whose executable phase
 // is later are check-only.
-const Phase = 0
+const Phase = 1
 
 type header struct {
 	phase     int
@@ -77,7 +82,7 @@ func checkFiles(fs []*source.File) []diag.Diagnostic {
 func fixtures(t *testing.T) []string {
 	t.Helper()
 	var out []string
-	for _, dir := range []string{"positive", "negative", "adversarial", "trap"} {
+	for _, dir := range []string{"positive", "negative", "adversarial", "trap", "run"} {
 		m, _ := filepath.Glob(filepath.Join(dir, "*.kern"))
 		out = append(out, m...)
 		ds, _ := filepath.Glob(filepath.Join(dir, "*"))
@@ -107,7 +112,13 @@ func loadFixture(t *testing.T, path string) (*source.File, []*source.File) {
 		}
 		return f, []*source.File{f}
 	}
-	names, _ := filepath.Glob(filepath.Join(path, "*.kern"))
+	var names []string
+	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".kern") {
+			names = append(names, p)
+		}
+		return nil
+	})
 	sort.Strings(names)
 	var files []*source.File
 	for _, n := range names {
@@ -134,6 +145,9 @@ func TestFixtures(t *testing.T) {
 				}
 				if len(ds) != 0 {
 					t.Fatalf("expected acceptance, got %d diagnostics:\n%s", len(ds), render(ds))
+				}
+				if h.phase <= Phase {
+					execute(t, path, all, h)
 				}
 			case "reject":
 				if h.phase != -1 {
@@ -277,4 +291,67 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b)
+}
+
+// execute runs an accepted fixture that has a main function through the
+// interpreter and checks its expected output or trap (spec §7 Testing).
+func execute(t *testing.T, path string, files []*source.File, h header) {
+	t.Helper()
+	prog := resolve.Resolve(files)
+	if ds := check.Check(prog); len(ds) > 0 {
+		t.Fatalf("check: %s", ds[0].Message)
+	}
+	mod, ds := lower.Lower(prog)
+	if len(ds) > 0 {
+		t.Fatalf("lower: %s", ds[0].Message)
+	}
+	if errs := ir.Validate(mod); len(errs) > 0 {
+		t.Fatalf("validate: %v", errs[0])
+	}
+	if mod.Entry == "" {
+		if h.expect != "accept" {
+			t.Fatalf("%s fixture has no main", h.expect)
+		}
+		return
+	}
+	var out, errb bytes.Buffer
+	it := interp.New(mod, path, &out, &errb)
+	it.TestHooks = h.testHooks
+	status := it.Run()
+	switch h.expect {
+	case "trap":
+		if status != 134 {
+			t.Fatalf("expected trap %s (status 134), got status %d, stderr %q", h.code, status, errb.String())
+		}
+		var rec struct {
+			Trap struct {
+				Kind string `json:"kind"`
+			} `json:"trap"`
+		}
+		line := bytes.SplitN(errb.Bytes(), []byte("\n"), 2)[0]
+		if err := json.Unmarshal(line, &rec); err != nil || rec.Trap.Kind != h.code {
+			t.Fatalf("expected trap record of kind %s, got %q", h.code, errb.String())
+		}
+		if bytes.Count(bytes.TrimSpace(errb.Bytes()), []byte("\n")) != 0 {
+			t.Fatalf("expected exactly one trap record, got %q", errb.String())
+		}
+	case "output", "accept":
+		if status == 134 {
+			t.Fatalf("unexpected trap: %s", errb.String())
+		}
+		name := h.code
+		if name == "" {
+			name = strings.TrimSuffix(filepath.Base(path), ".kern")
+		}
+		want, err := os.ReadFile(filepath.Join(filepath.Dir(path), name+".out"))
+		if err != nil {
+			if h.expect == "output" {
+				t.Fatalf("missing expected-output file for %s", name)
+			}
+			return
+		}
+		if !bytes.Equal(out.Bytes(), want) {
+			t.Fatalf("output mismatch:\n--- want\n%s\n--- got\n%s", want, out.String())
+		}
+	}
 }

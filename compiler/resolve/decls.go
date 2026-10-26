@@ -3,6 +3,7 @@ package resolve
 import (
 	"embed"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/dshills/kern/compiler/ast"
@@ -145,6 +146,21 @@ type Info struct {
 	Consts   map[ast.Expr]bool // expressions that are compile-time constants
 	Fields   map[*ast.FieldExpr]*FieldDecl
 	Variants map[*ast.Arm]*VariantDecl
+	// Drops records, per exit point, the symbols whose scope ends there in
+	// destruction order: access bindings (AccessEnd, with release) and
+	// owned locals/parameters that are initialized at that point (Drop).
+	// Keys: *ast.Block (fallthrough end), *ast.Return, *ast.Try (error
+	// path), *ast.Break, *ast.Continue, *ast.With (binding scope end),
+	// *ast.FuncDecl / *ast.Destructor (parameter drops at the function's
+	// fallthrough end), *ast.Assign (the previous value of a reassigned
+	// whole variable).
+	Drops map[any][]*Symbol
+	// OutFieldDrops records, per error-path exit (*ast.Return, *ast.Try),
+	// the initialized fields of partially initialized out storage to destroy.
+	OutFieldDrops map[any]map[*Symbol][]string
+	// OwnedSubject marks with/match statements whose subject is an owned
+	// value consumed by the statement (a temporary the lowering must own).
+	OwnedSubject map[any]bool
 }
 
 func newInfo() *Info {
@@ -152,6 +168,7 @@ func newInfo() *Info {
 		Types: map[ast.Expr]Type{}, Idents: map[*ast.Ident]*Symbol{}, Calls: map[*ast.CallExpr]*CallInfo{},
 		Funcs: map[*ast.FuncDecl]*FuncDecl{}, Decls: map[any]*Symbol{}, Consts: map[ast.Expr]bool{},
 		Fields: map[*ast.FieldExpr]*FieldDecl{}, Variants: map[*ast.Arm]*VariantDecl{},
+		Drops: map[any][]*Symbol{}, OutFieldDrops: map[any]map[*Symbol][]string{}, OwnedSubject: map[any]bool{},
 	}
 }
 
@@ -196,6 +213,7 @@ type Symbol struct {
 	Module *Module
 	TParam *TypeParamType
 	ID     int
+	File   string // declaring file (locals, parameters, bindings)
 	// Access bindings: the root symbol and path they derive from (set by checker).
 }
 
@@ -206,30 +224,82 @@ func Resolve(files []*source.File) *Program {
 	core := r.loadPrelude()
 	prog.Core = core
 	prog.Modules["core"] = core
-	main := newModule("")
+	// Files are grouped by module (spec/types.md §1: one directory is one
+	// module; a request may carry several directories). Files in one
+	// directory must agree on the module name (MODULE_MISMATCH).
+	type modFiles struct{ mod *Module }
+	byName := map[string]*modFiles{}
+	var order []string
+	byDir := map[string]string{}
 	for _, f := range files {
 		af, ds := parser.Parse(f)
 		prog.Diags = append(prog.Diags, ds...)
 		if af == nil {
 			continue
 		}
-		if main.Name == "" {
-			main.Name = af.Module
-		} else if main.Name != af.Module {
-			prog.Diags = append(prog.Diags, diag.New("MODULE_MISMATCH", f.Name, diag.Span{Start: af.Start, End: af.Start + 6}, "file declares module %q, expected %q", af.Module, main.Name))
+		dir := filepath.Dir(f.Name)
+		if prev, ok := byDir[dir]; ok && prev != af.Module {
+			prog.Diags = append(prog.Diags, diag.New("MODULE_MISMATCH", f.Name, diag.Span{Start: af.Start, End: af.Start + 6}, "file declares module %q, expected %q", af.Module, prev))
+			continue
 		}
-		main.Files = append(main.Files, af)
+		byDir[dir] = af.Module
+		mf, ok := byName[af.Module]
+		if !ok {
+			mf = &modFiles{mod: newModule(af.Module)}
+			byName[af.Module] = mf
+			order = append(order, af.Module)
+		}
+		mf.mod.Files = append(mf.mod.Files, af)
 	}
-	if len(prog.Diags) > 0 {
+	if len(prog.Diags) > 0 || len(order) == 0 {
 		return prog
 	}
-	prog.Main = main
-	prog.Modules[main.Name] = main
-	r.collect(main)
-	if len(prog.Diags) > 0 {
-		return prog
+	// dependency order: a module is resolved after the modules it imports
+	resolved := map[string]bool{"core": true}
+	var sorted []string
+	var visit func(name string, stack map[string]bool)
+	visit = func(name string, stack map[string]bool) {
+		if resolved[name] || stack[name] {
+			return
+		}
+		stack[name] = true
+		for _, f := range byName[name].mod.Files {
+			for _, imp := range f.Imports {
+				alias := imp.Path[strings.LastIndex(imp.Path, "/")+1:]
+				if _, ok := byName[alias]; ok {
+					visit(alias, stack)
+				}
+			}
+		}
+		resolved[name] = true
+		sorted = append(sorted, name)
 	}
-	r.checkBodies(main)
+	for _, name := range order {
+		visit(name, map[string]bool{})
+	}
+	// the main module: the one that declares main, else the last one given
+	mainName := order[len(order)-1]
+	for _, name := range order {
+		for _, f := range byName[name].mod.Files {
+			for _, d := range f.Decls {
+				if fd, ok := d.(*ast.FuncDecl); ok && fd.Name == "main" {
+					mainName = name
+				}
+			}
+		}
+	}
+	for _, name := range sorted {
+		m := byName[name].mod
+		prog.Modules[name] = m
+		r.collect(m)
+		if len(prog.Diags) > 0 {
+			return prog
+		}
+	}
+	for _, name := range sorted {
+		r.checkBodies(byName[name].mod)
+	}
+	prog.Main = byName[mainName].mod
 	diag.Sort(prog.Diags)
 	return prog
 }
@@ -571,6 +641,9 @@ func (r *resolver) resolveTypeName(m *Module, file string, sc *scope, t *ast.Typ
 		if !ok {
 			r.errorf("NAME_UNRESOLVED", file, t.Pos, "unknown type %s.%s", t.Pkg, t.Name)
 			return &Unit{}
+		}
+		if !isExported(t.Name) && mod.Name != "core" {
+			r.errorf("NAME_PRIVATE", file, t.Pos, "%s.%s is private to module %s", t.Pkg, t.Name, mod.Name)
 		}
 		return r.instantiate(m, file, sc, td, t)
 	}

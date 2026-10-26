@@ -368,6 +368,9 @@ func (c *fnCtx) fieldWant(sc *scope, x *ast.FieldExpr, want Type) Type {
 		if mod, ok := c.m.Imports[id.Name]; ok && sc.lookup(id.Name) == nil {
 			if f, ok := mod.Funcs[x.Name]; ok {
 				c.r.prog.Info.Idents[id] = &Symbol{Kind: SymModule, Name: id.Name, Module: mod}
+				if !isExported(x.Name) && mod.Name != "core" {
+					c.errorf("NAME_PRIVATE", x.Pos, "%s.%s is private to module %s", id.Name, x.Name, mod.Name)
+				}
 				return f.Type
 			}
 			c.errorf("NAME_UNRESOLVED", x.Pos, "module %s has no %s", id.Name, x.Name)

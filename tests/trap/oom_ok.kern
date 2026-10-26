@@ -1,0 +1,8 @@
+//! phase: 1
+//! expect: output oom_ok
+//! twin: oom
+module t
+func main() -> i32 {
+    b := Box.new(1u64)
+    return 0i32
+}

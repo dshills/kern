@@ -56,3 +56,33 @@ func TestLexerTerminatesOnOddInput(t *testing.T) {
 		}
 	}
 }
+
+func TestLexWithComments(t *testing.T) {
+	src := "//! phase: 1\nmodule m\n// own line\nfunc f() { }   // trailing\t\n"
+	toks, comments, errs := LexWithComments([]byte(src))
+	if len(errs) != 0 {
+		t.Fatalf("errors: %v", errs)
+	}
+	plain, _ := Lex([]byte(src))
+	if len(plain) != len(toks) {
+		t.Fatalf("token streams differ: %d vs %d", len(plain), len(toks))
+	}
+	for i := range plain {
+		if plain[i] != toks[i] {
+			t.Fatalf("token %d differs: %+v vs %+v", i, plain[i], toks[i])
+		}
+	}
+	want := []Comment{
+		{Start: 0, End: 12, Text: "//! phase: 1", OwnLine: true},
+		{Start: 22, End: 33, Text: "// own line", OwnLine: true},
+		{Start: 49, End: 61, Text: "// trailing\t", OwnLine: false},
+	}
+	if len(comments) != len(want) {
+		t.Fatalf("got %d comments %+v, want %d", len(comments), comments, len(want))
+	}
+	for i := range want {
+		if comments[i] != want[i] {
+			t.Fatalf("comment %d: got %+v want %+v", i, comments[i], want[i])
+		}
+	}
+}

@@ -1,0 +1,7 @@
+consume 2
+drop 2
+inner
+drop 3
+drop 1
+end
+drop 4

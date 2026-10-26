@@ -1,0 +1,22 @@
+//! phase: 1
+//! expect: output destruction_order
+// Destructors run at static points, in reverse declaration order, exactly once.
+module run
+struct Noisy { id: u64 }
+impl Noisy {
+    destructor(edit self) { print_str("drop "); print_u64(self.id); println() }
+}
+func make(id: u64) -> Noisy { return Noisy { id: id } }
+func consume(n: own Noisy) { print_str("consume "); print_u64(n.id); println() }
+func main() -> i32 {
+    a := make(1u64)
+    b := make(2u64)
+    consume(b)
+    {
+        c := make(3u64)
+        print_str("inner"); println()
+    }
+    a = make(4u64)
+    print_str("end"); println()
+    return 0i32
+}

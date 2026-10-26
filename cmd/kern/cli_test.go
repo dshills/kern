@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dshills/kern/compiler/diag"
+	"github.com/dshills/kern/compiler/format"
 	"github.com/dshills/kern/compiler/source"
 )
 
@@ -42,7 +44,15 @@ func TestAPIFixtures(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := strings.ToUpper(strings.TrimSuffix(filepath.Base(f), ".json"))
-		code, resp, _ := runWith(t, []string{"check"}, string(b))
+		// the command under test is the request's own; malformed requests go to check
+		cmd := "check"
+		var probe struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal(b, &probe) == nil && probe.Command != "" && probe.Command != "frobnicate" {
+			cmd = probe.Command
+		}
+		code, resp, _ := runWith(t, []string{cmd}, string(b))
 		if code != 2 || resp.OK || len(resp.Diagnostics) != 1 || string(resp.Diagnostics[0].Code) != want {
 			t.Errorf("%s: exit %d, resp %+v", f, code, resp)
 		}
@@ -88,5 +98,138 @@ func TestInternalError(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "injected") {
 		t.Fatalf("stderr log missing wrapped error: %q", stderr)
+	}
+}
+
+// formatResult decodes a `format` response result (§16).
+func formatResult(t *testing.T, resp diag.Response) []FormattedFile {
+	t.Helper()
+	b, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Files []FormattedFile `json:"files"`
+	}
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatalf("result is not a format result: %v", err)
+	}
+	return r.Files
+}
+
+func TestFormatCommand(t *testing.T) {
+	ok := filepath.Join("..", "..", "tests", "negative", "use_after_move_ok.kern")
+	bad := filepath.Join("..", "..", "tests", "negative", "syntax.kern")
+	src, err := source.Load(ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := format.Format(src)
+
+	// success: convenience form
+	code, resp, _ := runWith(t, []string{"format", ok}, "")
+	if code != 0 || !resp.OK || len(resp.Diagnostics) != 0 {
+		t.Fatalf("format: exit %d resp %+v", code, resp)
+	}
+	files := formatResult(t, resp)
+	if len(files) != 1 || files[0].File != ok || files[0].Formatted != string(want) || !strings.HasSuffix(files[0].Formatted, "\n") {
+		t.Fatalf("unexpected result %+v", files)
+	}
+
+	// success: machine-API request on stdin
+	req := fmt.Sprintf(`{"schema_version":%q,"command":"format","files":[%q]}`, diag.SchemaVersion, ok)
+	if code, resp, _ := runWith(t, []string{"format"}, req); code != 0 || !resp.OK || len(formatResult(t, resp)) != 1 {
+		t.Fatalf("format via stdin: exit %d resp %+v", code, resp)
+	}
+
+	// failure: a file that does not parse
+	code, resp, _ = runWith(t, []string{"format", bad}, "")
+	if code != 2 || resp.OK || resp.Result != nil || len(resp.Diagnostics) != 1 || resp.Diagnostics[0].Code != "SYNTAX" {
+		t.Fatalf("unparseable file: exit %d resp %+v", code, resp)
+	}
+	// failure: one bad file fails the whole request
+	code, resp, _ = runWith(t, []string{"format", ok, bad}, "")
+	if code != 2 || resp.OK || resp.Result != nil || len(resp.Diagnostics) != 1 || resp.Diagnostics[0].Code != "SYNTAX" {
+		t.Fatalf("mixed request: exit %d resp %+v", code, resp)
+	}
+	// request/command mismatch
+	req = fmt.Sprintf(`{"schema_version":%q,"command":"check","files":[%q]}`, diag.SchemaVersion, ok)
+	if code, resp, _ := runWith(t, []string{"format"}, req); code != 2 || resp.Diagnostics[0].Code != "API_UNKNOWN_COMMAND" {
+		t.Fatalf("mismatched command: exit %d resp %+v", code, resp)
+	}
+	// --human writes the formatted source itself
+	var out, errb bytes.Buffer
+	if code := run([]string{"format", "--human", ok}, strings.NewReader(""), &out, &errb); code != 0 || out.String() != string(want) {
+		t.Fatalf("human: exit %d out %q", code, out.String())
+	}
+}
+
+func TestFormatInternalError(t *testing.T) {
+	saved := formatHook
+	formatHook = func([]*source.File) ([]FormattedFile, []diag.Diagnostic, error) {
+		return nil, nil, &InternalError{Err: errors.New("injected")}
+	}
+	defer func() { formatHook = saved }()
+	ok := filepath.Join("..", "..", "tests", "negative", "use_after_move_ok.kern")
+	code, resp, stderr := runWith(t, []string{"format", ok}, "")
+	if code != 3 || resp.OK || len(resp.Diagnostics) != 1 || resp.Diagnostics[0].Code != "INTERNAL" {
+		t.Fatalf("internal: exit %d resp %+v", code, resp)
+	}
+	if !strings.Contains(stderr, "injected") {
+		t.Fatalf("stderr log missing wrapped error: %q", stderr)
+	}
+}
+
+func TestRunEmitExplain(t *testing.T) {
+	hello := filepath.Join("..", "..", "tests", "run", "hello.kern")
+	var out, errb bytes.Buffer
+	if code := run([]string{"run", hello}, strings.NewReader(""), &out, &errb); code != 0 || out.String() != "hello, kern\n7\n" {
+		t.Fatalf("run: exit %d out %q err %q", code, out.String(), errb.String())
+	}
+	trap := filepath.Join("..", "..", "tests", "trap", "bounds.kern")
+	out.Reset()
+	errb.Reset()
+	if code := run([]string{"run", trap}, strings.NewReader(""), &out, &errb); code != 134 || !strings.Contains(errb.String(), `"kind":"bounds"`) {
+		t.Fatalf("trap: exit %d err %q", code, errb.String())
+	}
+	if code, resp, _ := runWith(t, []string{"run", "--opt=fast", hello}, ""); code != 2 || resp.Diagnostics[0].Code != "CLI_INVALID_FLAGS" {
+		t.Fatalf("bad opt: exit %d resp %+v", code, resp)
+	}
+	if code, resp, _ := runWith(t, []string{"run", "--env=freestanding", hello}, ""); code != 2 || resp.Diagnostics[0].Code != "CLI_INVALID_FLAGS" {
+		t.Fatalf("freestanding before Phase 3: exit %d resp %+v", code, resp)
+	}
+	if code, resp, _ := runWith(t, []string{"run", "--test-hooks", "--opt=release", hello}, ""); code != 2 || resp.Diagnostics[0].Code != "CLI_INVALID_FLAGS" {
+		t.Fatalf("test-hooks in release: exit %d resp %+v", code, resp)
+	}
+	bad := filepath.Join("..", "..", "tests", "negative", "use_after_move.kern")
+	if code, resp, _ := runWith(t, []string{"run", bad}, ""); code != 2 || resp.OK || resp.Diagnostics[0].Code != "OWN_USE_AFTER_MOVE" {
+		t.Fatalf("run of rejected program: exit %d resp %+v", code, resp)
+	}
+	code, resp, _ := runWith(t, []string{"emit-ir", hello}, "")
+	if code != 0 || !resp.OK {
+		t.Fatalf("emit-ir: exit %d resp %+v", code, resp)
+	}
+	if irText, _ := resp.Result.(map[string]any)["ir"].(string); !strings.Contains(irText, "call intrinsic Vec.push") {
+		t.Fatalf("emit-ir result lacks IR: %v", resp.Result)
+	}
+	src, _ := os.ReadFile(hello)
+	req := fmt.Sprintf(`{"schema_version":"0.2","command":"explain-ownership","files":[%q],"span":{"file":%q,"start":0,"end":%d}}`, hello, hello, len(src))
+	code, resp, _ = runWith(t, []string{"explain-ownership"}, req)
+	if code != 0 || !resp.OK {
+		t.Fatalf("explain-ownership: exit %d resp %+v", code, resp)
+	}
+	places, _ := resp.Result.(map[string]any)["places"].([]any)
+	if len(places) == 0 {
+		t.Fatalf("explain-ownership returned no places: %v", resp.Result)
+	}
+	found := false
+	for _, p := range places {
+		pm := p.(map[string]any)
+		if pm["state"] == "owned" && pm["drop_at"] != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected an owned place with a drop point: %v", places)
 	}
 }

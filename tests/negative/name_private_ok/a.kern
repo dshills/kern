@@ -1,0 +1,8 @@
+//! phase: 1
+//! expect: accept
+//! twin: name_private
+module m
+import "lib"
+func f(p: view[lib.Point]) -> u64 {
+    return p.X + lib.Sum(p)
+}

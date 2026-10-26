@@ -1,0 +1,15 @@
+//! phase: 1
+//! expect: output hello
+module run
+func main() -> i32 {
+    print_str("hello, kern")
+    println()
+    v := Vec[u64].new()
+    v.push(3u64)
+    v.push(4u64)
+    total := 0u64
+    for x in v.as_view() { total = total + x }
+    print_u64(total)
+    println()
+    return 0i32
+}

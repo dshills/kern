@@ -1,0 +1,27 @@
+//! phase: 1
+//! expect: output pool_handles
+module run
+struct Cell { v: u64 }
+func main() -> i32 {
+    p := Pool[Cell].new()
+    match p.alloc(Cell { v: 10u64 }) {
+        Ok(a) => {
+            match p.alloc(Cell { v: 20u64 }) {
+                Ok(b) => {
+                    with x, y := p.get2(a, b) {
+                        t := x.v
+                        x.v = y.v
+                        y.v = t
+                    }
+                    print_u64(p.get(a).v); println()
+                    print_u64(p.get(b).v); println()
+                    p.free(a)
+                    print_u64(u64(p.len())); println()
+                }
+                Err(e) => return 1i32
+            }
+        }
+        Err(e) => return 1i32
+    }
+    return 0i32
+}

@@ -1,0 +1,7 @@
+//! expect: reject NAME_PRIVATE rule=T.1
+//! twin: name_private_ok
+module m
+import "lib"
+func f(p: view[lib.Point]) -> u64 {
+    return p.hidden   // NAME_PRIVATE: lowercase field of another module's type
+}

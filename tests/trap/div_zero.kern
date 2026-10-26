@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: trap div_zero
+//! twin: div_zero_ok
+
+module t
+func main() -> i32 {
+    x := 10u64
+    z := 0u64
+    y := x / z
+    return 0i32
+}

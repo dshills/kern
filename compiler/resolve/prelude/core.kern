@@ -7,6 +7,22 @@ module core
 // initialize an array without naming every element).
 func zero[T: Copy]() -> T
 
+// Hosted output for the Phase 1 interpreter and fixtures.
+func print_u64(v: u64)
+func print_i64(v: i64)
+func print_bool(v: bool)
+func print_str(s: view[]u8)
+func println()
+
+// Test hooks (PLAN.md 2.3): available only under --test-hooks.
+struct testing { phantom: u8 }
+impl testing {
+    func seed_generation[T](p: edit[Pool[T]], slot: u32, gen: u32)
+    func seed_shared_count[T](s: view[Shared[T]], count: u64)
+    // the next allocation by a convenience constructor fails (oom trap)
+    func fail_next_alloc()
+}
+
 union Option[T] { Some(T); None }
 union Result[T, E] { Ok(T); Err(E) }
 union AllocErr { OutOfMemory }

@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: trap explicit
+//! twin: explicit_ok
+
+module t
+func main() -> i32 {
+    trap()
+    return 0i32
+}

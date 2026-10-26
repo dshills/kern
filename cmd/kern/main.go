@@ -1,4 +1,5 @@
-// Command kern is the kern compiler driver. Phase 0 provides `check`.
+// Command kern is the kern compiler driver. Phase 0 provides `check`;
+// `format` prints the canonical form of each file (spec/format.md).
 //
 // Machine-API form (spec §7): `kern check < request.json > response.json`.
 // Convenience form: `kern check file.kern...` builds the request from the
@@ -14,17 +15,13 @@ import (
 
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
+	"github.com/dshills/kern/compiler/format"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
 
-// Request is the §7 machine-API request.
-type Request struct {
-	SchemaVersion string   `json:"schema_version"`
-	Command       string   `json:"command"`
-	Files         []string `json:"files"`
-	Target        string   `json:"target,omitempty"`
-}
+// Request is the §7 machine-API request (compiler/diag/schema.go).
+type Request = diag.Request
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -32,10 +29,13 @@ func main() {
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: kern <check> [files...]")
+		_, _ = fmt.Fprintln(stderr, "usage: kern <check|format|emit-ir|explain-ownership|run> [files...]")
 		return 2
 	}
 	cmd := args[0]
+	if cmd == "run" {
+		return runProgram(args[1:], stdout, stderr)
+	}
 	human := false
 	var files []string
 	for _, a := range args[1:] {
@@ -48,7 +48,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		files = append(files, a)
 	}
-	if cmd != "check" {
+	if cmd != "check" && cmd != "format" && cmd != "emit-ir" && cmd != "explain-ownership" {
 		return fail(stdout, "API_UNKNOWN_COMMAND", "unknown command %q", cmd)
 	}
 	var req Request
@@ -69,7 +69,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if req.SchemaVersion != diag.SchemaVersion {
 		return fail(stdout, "API_UNSUPPORTED_SCHEMA", "schema_version %q is not supported (want %s)", req.SchemaVersion, diag.SchemaVersion)
 	}
-	if req.Command != "" && req.Command != "check" {
+	if req.Command != "" && req.Command != cmd {
 		return fail(stdout, "API_UNKNOWN_COMMAND", "unknown command %q", req.Command)
 	}
 	if len(req.Files) == 0 {
@@ -83,14 +83,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		srcs = append(srcs, f)
 	}
+	if cmd == "format" {
+		return runFormat(req, srcs, human, stdout, stderr)
+	}
+	if cmd == "emit-ir" {
+		return emitIR(req, srcs, stdout, stderr)
+	}
+	if cmd == "explain-ownership" {
+		return explainOwnership(req, srcs, stdout, stderr)
+	}
 	ds, err := checkHook(srcs)
 	if err != nil {
-		var ie *InternalError
-		if errors.As(err, &ie) {
-			_, _ = fmt.Fprintf(stderr, "{\"level\":\"error\",\"internal\":%q}\n", ie.Error())
-			d := diag.New("INTERNAL", req.Files[0], diag.Span{}, "%v", ie)
-			_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: []diag.Diagnostic{d}})
-			return 3
+		if code := internal(req, err, stdout, stderr); code != 0 {
+			return code
 		}
 	}
 	if human {
@@ -102,7 +107,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	resp := diag.Response{SchemaVersion: diag.SchemaVersion, OK: len(ds) == 0, Result: map[string]any{"files": req.Files}, Diagnostics: ds}
+	resp := diag.Response{SchemaVersion: diag.SchemaVersion, OK: len(ds) == 0, Result: diag.CheckResult{Files: req.Files}, Diagnostics: ds}
 	if err := diag.Write(stdout, resp); err != nil {
 		return 3
 	}
@@ -110,6 +115,54 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	return 0
+}
+
+// runFormat formats every requested file. Any parse failure makes the whole
+// request fail with the parse diagnostics (ok=false, exit 2) and no result.
+func runFormat(req Request, srcs []*source.File, human bool, stdout, stderr io.Writer) int {
+	files, ds, err := formatHook(srcs)
+	if err != nil {
+		if code := internal(req, err, stdout, stderr); code != 0 {
+			return code
+		}
+	}
+	if human {
+		for _, d := range ds {
+			_, _ = fmt.Fprintln(stdout, diag.Render(d))
+		}
+		for _, f := range files {
+			_, _ = io.WriteString(stdout, f.Formatted)
+		}
+		if len(ds) > 0 {
+			return 2
+		}
+		return 0
+	}
+	var result any
+	if len(ds) == 0 {
+		result = map[string]any{"files": files}
+	}
+	resp := diag.Response{SchemaVersion: diag.SchemaVersion, OK: len(ds) == 0, Result: result, Diagnostics: ds}
+	if err := diag.Write(stdout, resp); err != nil {
+		return 3
+	}
+	if len(ds) > 0 {
+		return 2
+	}
+	return 0
+}
+
+// internal reports a compiler panic wrapped as InternalError (exit 3); it
+// returns 0 for any other error.
+func internal(req Request, err error, stdout, stderr io.Writer) int {
+	var ie *InternalError
+	if !errors.As(err, &ie) {
+		return 0
+	}
+	_, _ = fmt.Fprintf(stderr, "{\"level\":\"error\",\"internal\":%q}\n", ie.Error())
+	d := diag.New("INTERNAL", req.Files[0], diag.Span{}, "%v", ie)
+	_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: []diag.Diagnostic{d}})
+	return 3
 }
 
 func fail(w io.Writer, code diag.Code, format string, args ...any) int {
@@ -120,6 +173,39 @@ func fail(w io.Writer, code diag.Code, format string, args ...any) int {
 
 // checkHook is the check entry point; tests replace it to inject failures.
 var checkHook = CheckFiles
+
+// formatHook is the format entry point; tests replace it to inject failures.
+var formatHook = FormatFiles
+
+// FormattedFile is one entry of the `format` result (spec §16).
+type FormattedFile struct {
+	File      string `json:"file"`
+	Formatted string `json:"formatted"`
+}
+
+// FormatFiles formats each file, converting panics to InternalError. When
+// any file fails to parse it returns the parse diagnostics of every failing
+// file, sorted, and no formatted files.
+func FormatFiles(srcs []*source.File) (files []FormattedFile, ds []diag.Diagnostic, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = &InternalError{Err: fmt.Errorf("%v", r)}
+		}
+	}()
+	for _, f := range srcs {
+		out, fds := format.Format(f)
+		if len(fds) > 0 {
+			ds = append(ds, fds...)
+			continue
+		}
+		files = append(files, FormattedFile{File: f.Name, Formatted: string(out)})
+	}
+	if len(ds) > 0 {
+		diag.Sort(ds)
+		return nil, ds, nil
+	}
+	return files, nil, nil
+}
 
 // InternalError wraps a compiler panic.
 type InternalError struct{ Err error }

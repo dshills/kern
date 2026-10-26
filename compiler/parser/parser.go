@@ -1104,7 +1104,7 @@ func (p *parser) parsePrimary() ast.Expr {
 		if err != nil {
 			p.errorf(t, "invalid float literal")
 		}
-		return &ast.FloatLit{Pos: tokPos(t), Value: v, Suffix: suffix}
+		return &ast.FloatLit{Pos: tokPos(t), Value: v, Suffix: suffix, Text: t.Text}
 	case lexer.String:
 		p.next()
 		return &ast.StringLit{Pos: tokPos(t), Value: t.Text}
@@ -1224,7 +1224,7 @@ func parseIntLit(t lexer.Token, p *parser) ast.Expr {
 	if err != nil {
 		p.errorf(t, "integer literal out of range")
 	}
-	return &ast.IntLit{Pos: tokPos(t), Value: v, Suffix: suffix}
+	return &ast.IntLit{Pos: tokPos(t), Value: v, Suffix: suffix, Text: t.Text}
 }
 
 // parseIndexArg parses one element of an `x[...]` list: an expression, or a
