@@ -1,0 +1,111 @@
+//! phase: 3
+//! expect: output lexer
+// The kern lexer written in kern (ADR-013 self-hosting experiment): tokenizes
+// a kern source held in a byte sequence and prints the token count and a
+// checksum over the token kinds. Keywords are recognized through a table of
+// candidates; operators follow spec/grammar.ebnf.
+module selfhost
+union Kind { Ident; Keyword; Int; Float; Str; Punct; Op; Newline; Comment }
+struct Token { kind: Kind; start: usize; end: usize }
+func kind_code(k: Kind) -> u64 {
+    match k {
+        Ident => return 1u64
+        Keyword => return 2u64
+        Int => return 3u64
+        Float => return 4u64
+        Str => return 5u64
+        Punct => return 6u64
+        Op => return 7u64
+        Newline => return 8u64
+        Comment => return 9u64
+    }
+}
+func is_letter(c: u8) -> bool { return c == 95u8 || (c >= 97u8 && c <= 122u8) || (c >= 65u8 && c <= 90u8) }
+func is_digit(c: u8) -> bool { return c >= 48u8 && c <= 57u8 }
+func is_space(c: u8) -> bool { return c == 32u8 || c == 9u8 || c == 13u8 }
+func same(src: view[[]u8], a: usize, b: usize, kw: view[[]u8]) -> bool {
+    if b - a != len(kw) { return false }
+    i := 0usize
+    while i < len(kw) {
+        if src[a + i] != kw[i] { return false }
+        i = i + 1usize
+    }
+    return true
+}
+func is_keyword(src: view[[]u8], a: usize, b: usize) -> bool {
+    if same(src, a, b, "module") || same(src, a, b, "import") || same(src, a, b, "struct") || same(src, a, b, "union") { return true }
+    if same(src, a, b, "func") || same(src, a, b, "return") || same(src, a, b, "if") || same(src, a, b, "else") { return true }
+    if same(src, a, b, "while") || same(src, a, b, "for") || same(src, a, b, "in") || same(src, a, b, "with") { return true }
+    if same(src, a, b, "match") || same(src, a, b, "view") || same(src, a, b, "edit") || same(src, a, b, "own") { return true }
+    if same(src, a, b, "out") || same(src, a, b, "var") || same(src, a, b, "unsafe") || same(src, a, b, "contract") { return true }
+    return same(src, a, b, "impl") || same(src, a, b, "const") || same(src, a, b, "move") || same(src, a, b, "copy")
+}
+struct Lexer { src_len: usize; pos: usize; tokens: Vec[Token] }
+impl Lexer {
+    func new(n: usize) -> Lexer { return Lexer { src_len: n, pos: 0usize, tokens: Vec[Token].new() } }
+    func push(edit self, k: Kind, a: usize, b: usize) { self.tokens.push(Token { kind: k, start: a, end: b }) }
+    func run(edit self, src: view[[]u8]) {
+        while self.pos < self.src_len {
+            c := src[self.pos]
+            if is_space(c) { self.pos = self.pos + 1usize } else if c == 10u8 { q := self.pos; self.push(Newline, q, q + 1usize); self.pos = q + 1usize } else if c == 47u8 && self.pos + 1usize < self.src_len && src[self.pos + 1usize] == 47u8 {
+                a := self.pos
+                while self.pos < self.src_len && src[self.pos] != 10u8 { self.pos = self.pos + 1usize }
+                e := self.pos; self.push(Comment, a, e)
+            } else if is_letter(c) {
+                a := self.pos
+                while self.pos < self.src_len && (is_letter(src[self.pos]) || is_digit(src[self.pos])) { self.pos = self.pos + 1usize }
+                e := self.pos
+                if is_keyword(src, a, e) { self.push(Keyword, a, e) } else { self.push(Ident, a, e) }
+            } else if is_digit(c) {
+                a := self.pos
+                is_float := false
+                while self.pos < self.src_len && (is_digit(src[self.pos]) || src[self.pos] == 95u8) { self.pos = self.pos + 1usize }
+                if self.pos + 1usize < self.src_len && src[self.pos] == 46u8 && is_digit(src[self.pos + 1usize]) {
+                    is_float = true
+                    self.pos = self.pos + 1usize
+                    while self.pos < self.src_len && is_digit(src[self.pos]) { self.pos = self.pos + 1usize }
+                }
+                while self.pos < self.src_len && (is_letter(src[self.pos]) || is_digit(src[self.pos])) { self.pos = self.pos + 1usize }
+                e := self.pos
+                if is_float { self.push(Float, a, e) } else { self.push(Int, a, e) }
+            } else if c == 34u8 {
+                a := self.pos
+                self.pos = self.pos + 1usize
+                while self.pos < self.src_len && src[self.pos] != 34u8 {
+                    // a backslash escapes the next byte when there is one
+                    if src[self.pos] == 92u8 && self.pos + 1usize < self.src_len { self.pos = self.pos + 1usize }
+                    self.pos = self.pos + 1usize
+                }
+                if self.pos < self.src_len { self.pos = self.pos + 1usize } // the closing quote; an unterminated string ends at the source's end
+                e := self.pos
+                self.push(Str, a, e)
+            } else if c == 40u8 || c == 41u8 || c == 123u8 || c == 125u8 || c == 91u8 || c == 93u8 || c == 44u8 || c == 59u8 || c == 58u8 {
+                q := self.pos
+                self.push(Punct, q, q + 1usize)
+                self.pos = q + 1usize
+            } else {
+                a := self.pos
+                self.pos = self.pos + 1usize
+                if self.pos < self.src_len && (src[self.pos] == 61u8 || src[self.pos] == 62u8 || src[self.pos] == 60u8 || src[self.pos] == 38u8 || src[self.pos] == 124u8) { self.pos = self.pos + 1usize }
+                e := self.pos
+                self.push(Op, a, e)
+            }
+        }
+    }
+    func checksum(view self) -> u64 {
+        cs := 0u64
+        for t in self.tokens.as_view() { cs = wrapping_add(wrapping_mul(cs, 31u64), kind_code(t.kind) + u64(t.end - t.start)) }
+        return cs
+    }
+}
+func main() -> i32 {
+    with source := "module demo\n// a comment\nstruct P { x: u64; y: f32 }\nfunc add(a: u64, b: u64) -> u64 { return a + b }\nfunc main() -> i32 {\n    p := P { x: 1_000u64, y: 2.5f32 }\n    if p.x >= 10u64 && p.y != 0.0f32 { print_str(\"ok\"); println() }\n    return i32(add(p.x, 2u64) % 7u64)\n}\n" {
+        lx := Lexer.new(len(source))
+        lx.run(source)
+        print_u64(u64(lx.tokens.len()))
+        println()
+        print_u64(lx.checksum())
+        println()
+    }
+    return 0i32
+}

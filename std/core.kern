@@ -38,6 +38,9 @@ func simd_shuffle[T: Copy, I: Copy](a: T, b: T, idx: I) -> T
 // asm executes an inline assembly template (unsafe; no operands, clobbers
 // memory); the interpreter traps with kind explicit.
 func asm(template: view[]u8)
+// yield_now lets another thread run (a scheduling hint; hosted only, a
+// no-op in the freestanding mode and the interpreter's scheduler).
+func yield_now()
 // exit terminates the program with a status (hosted) or halts (freestanding).
 func exit(code: i32)
 

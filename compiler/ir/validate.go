@@ -258,9 +258,16 @@ func (v *validator) transfer(b *Block, st *vstate) *vstate {
 			oa := openAccess{edit: i.Edit, root: root, path: path, param: isParam}
 			if i.Place.Access != nil {
 				parent, ok := st.open[i.Place.Access]
-				if !ok {
+				switch {
+				case v.consts[i.Place.Access]:
+					// a literal sequence (a string constant) is a read-only
+					// access that is always open and never ends
+					if i.Edit {
+						v.errorf("%s: edit reborrow through a literal %s", blockName(b), v2(i.Place.Access))
+					}
+				case !ok:
 					v.errorf("%s: reborrow through %s which is not open", blockName(b), v2(i.Place.Access))
-				} else if i.Edit && !parent.edit {
+				case i.Edit && !parent.edit:
 					v.errorf("%s: edit reborrow through read-only access %s", blockName(b), v2(i.Place.Access))
 				}
 				oa.parent = i.Place.Access

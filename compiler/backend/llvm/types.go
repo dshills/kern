@@ -25,6 +25,7 @@ type emitter struct {
 	runtime  map[string]bool // declared runtime functions
 	errs     []error
 	thunks   int
+	dbg      *debugInfo // DWARF metadata, nil without debug info
 }
 
 // lty maps a type to its LLVM type in registers (bool is i1).

@@ -7,11 +7,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/dshills/kern/compiler/backend/native"
@@ -43,9 +45,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if cmd == "build" {
 		return buildCommand(args[1:], stdout, stderr)
 	}
+	if cmd == "debug" {
+		return debugCommand(args[1:], stdout, stderr)
+	}
 	human := false
 	cliTarget := ""
 	cacheDir := ""
+	lineSpan := 0
 	cfg := incremental.Config{Opt: "debug", Env: "hosted"}
 	var files []string
 	for _, a := range args[1:] {
@@ -59,6 +65,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		if strings.HasPrefix(a, "--cache=") {
 			cacheDir = strings.TrimPrefix(a, "--cache=")
+			continue
+		}
+		if strings.HasPrefix(a, "--line=") {
+			// explain-ownership convenience: the span of one source line of the first file
+			if n, err := strconv.Atoi(strings.TrimPrefix(a, "--line=")); err == nil && n > 0 {
+				lineSpan = n
+			} else {
+				return fail(stdout, "CLI_INVALID_FLAGS", "--line must be a positive integer")
+			}
 			continue
 		}
 		if strings.HasPrefix(a, "--opt=") || strings.HasPrefix(a, "--env=") {
@@ -121,6 +136,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return fail(stdout, "API_FILE_NOT_FOUND", "cannot read %s: %v", name, err)
 		}
 		srcs = append(srcs, f)
+	}
+	if lineSpan > 0 && len(srcs) > 0 {
+		req.Span = &diag.RequestSpan{File: srcs[0].Name, Start: lineStart(srcs[0].Bytes, lineSpan), End: lineEnd(srcs[0].Bytes, lineSpan)}
 	}
 	if cmd == "format" {
 		return runFormat(req, srcs, human, stdout, stderr)
@@ -261,6 +279,27 @@ func FormatFiles(srcs []*source.File) (files []FormattedFile, ds []diag.Diagnost
 }
 
 func errorf(format string, args ...any) error { return fmt.Errorf(format, args...) }
+
+// lineStart and lineEnd give the byte span [start, end) of a 1-based line.
+func lineStart(src []byte, line int) int {
+	off := 0
+	for n := 1; n < line && off < len(src); n++ {
+		i := bytes.IndexByte(src[off:], '\n')
+		if i < 0 {
+			return len(src)
+		}
+		off += i + 1
+	}
+	return off
+}
+
+func lineEnd(src []byte, line int) int {
+	start := lineStart(src, line)
+	if i := bytes.IndexByte(src[start:], '\n'); i >= 0 {
+		return start + i
+	}
+	return len(src)
+}
 
 // InternalError wraps a compiler panic.
 type InternalError struct{ Err error }

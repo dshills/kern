@@ -43,6 +43,8 @@ type Options struct {
 	// ElideChecks is the measurement-only option that drops runtime checks
 	// (PLAN.md 4.4); it is not a build configuration of the language.
 	ElideChecks bool
+	// Debug emits DWARF line information for the debugger (`kern debug`).
+	Debug bool
 	// NoStackCheck is the unsafe build option that drops the freestanding
 	// prologue check (stack overflow becomes a trusted-boundary obligation).
 	NoStackCheck bool
@@ -113,7 +115,14 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 			triple = FreestandingTriple
 		}
 	}
-	text, errs := llvm.EmitWith(mod, llvm.Options{Triple: triple, Freestanding: opts.Freestanding, StackCheck: opts.Freestanding && !opts.NoStackCheck, TSan: opts.TSan, ElideChecks: opts.ElideChecks})
+	lo := llvm.Options{Triple: triple, Freestanding: opts.Freestanding, StackCheck: opts.Freestanding && !opts.NoStackCheck, TSan: opts.TSan, ElideChecks: opts.ElideChecks}
+	if opts.Debug {
+		lo.Sources = map[string][]byte{}
+		for _, f := range srcs {
+			lo.Sources[f.Name] = f.Bytes
+		}
+	}
+	text, errs := llvm.EmitWith(mod, lo)
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("backend: %v", errs[0])
 	}
@@ -156,6 +165,9 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 	}
 	if opts.TSan {
 		args = append(args, "-fsanitize=thread", "-g")
+	}
+	if opts.Debug {
+		args = append(args, "-g", "-O0")
 	}
 	args = append(args, opts.ExtraSources...)
 	args = append(args, "-lpthread")

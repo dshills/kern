@@ -32,11 +32,17 @@ type Options struct {
 	// measurement-only option (PLAN.md 4.4, the intrinsic-overhead
 	// separation), never a build configuration of the language.
 	ElideChecks bool
+	// Sources enables DWARF emission: file name to bytes, for line and
+	// column numbers (PLAN.md Phase 5 debugger).
+	Sources map[string][]byte
 }
 
 // EmitWith renders a module for the given options.
 func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 	e := &emitter{mod: mod, opts: opts, types: map[string]bool{}, glue: map[string]bool{}, runtime: map[string]bool{}}
+	if opts.Sources != nil {
+		e.dbg = newDebugInfo(opts.Sources)
+	}
 	e.declare("kern_trap", "void (i32, i64, i64)")
 	if opts.StackCheck {
 		e.decls.WriteString("@kern_stack_limit = external global ptr\n")
@@ -79,6 +85,9 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 	out.WriteString("\n")
 	out.WriteString(e.glueBody.String())
 	out.WriteString(e.sb.String())
+	if e.dbg != nil {
+		out.WriteString(e.dbg.metadata())
+	}
 	// every frame is probed page by page so a large frame cannot skip the
 	// guard page (PLAN.md 2.2)
 	attrs := ""
@@ -153,6 +162,7 @@ type fnEmit struct {
 	addrs   map[*ir.Value]string // large aggregate values kept in memory: their private copy
 	pstores strings.Builder      // parameter stores into their slots (after the stack check)
 	strs    map[*ir.Value][]byte // string literal values, for inline assembly templates
+	dbgLoc  string               // the current instruction's !DILocation, "" without debug info
 	align   int                  // alignment override for the next load/store (1 inside packed structs)
 	labels  map[*ir.Block]string
 	cur     *ir.Block
@@ -227,7 +237,13 @@ func (fe *fnEmit) storeValue(src *ir.Value, ptr string) {
 func (fe *fnEmit) local(l *ir.Local) string { return fmt.Sprintf("%%l%d", l.ID) }
 
 func (fe *fnEmit) emit(format string, args ...any) {
-	fmt.Fprintf(&fe.body, "  "+format+"\n", args...)
+	line := fmt.Sprintf(format, args...)
+	// instructions of a function with debug info carry their location;
+	// labels and terminators of trap blocks are left alone
+	if fe.dbgLoc != "" && !strings.HasSuffix(line, ":") && !strings.HasPrefix(line, "unreachable") && !strings.HasPrefix(line, "%dead") {
+		line += ", !dbg " + fe.dbgLoc
+	}
+	fmt.Fprintf(&fe.body, "  %s\n", line)
 }
 
 // alloca reserves entry-block storage and returns its pointer register.
@@ -397,7 +413,13 @@ func (e *emitter) function(f *ir.Func) {
 		fe.cur = b
 		fmt.Fprintf(&fe.body, "%s:\n", fe.labels[b])
 		for _, in := range b.Instrs {
+			if e.dbg != nil {
+				fe.dbgLoc = e.dbg.location(f, instrPos(in))
+			}
 			fe.instr(in)
+		}
+		if e.dbg != nil {
+			fe.dbgLoc = e.dbg.location(f, f.Pos)
 		}
 		fe.term(b.Term)
 	}
@@ -411,7 +433,11 @@ func (e *emitter) function(f *ir.Func) {
 		entry += fmt.Sprintf("  %%sp = call ptr @llvm.stacksave.p0()\n  %%lim = load ptr, ptr @kern_stack_limit\n  %%ovf = icmp ult ptr %%sp, %%lim\n  br i1 %%ovf, label %%stackovf, label %%frame\nstackovf:\n  call void @kern_trap(i32 %d, i64 %d, i64 %d)\n  unreachable\nframe:\n", trapKind("stack"), f.Pos.Start, f.Pos.End)
 	}
 	entry += fe.pstores.String() + fmt.Sprintf("  br label %%bb%d\n", f.Entry.ID)
-	fmt.Fprintf(&e.sb, "define %s %s(%s) #0 {\nentry:\n%s%s}\n\n", e.retType(f), e.symOf(f), strings.Join(ps, ", "), entry, fe.body.String())
+	dbgSuffix := ""
+	if e.dbg != nil {
+		dbgSuffix = " !dbg " + e.dbg.subprogram(f)
+	}
+	fmt.Fprintf(&e.sb, "define %s %s(%s) #0%s {\nentry:\n%s%s}\n\n", e.retType(f), e.symOf(f), strings.Join(ps, ", "), dbgSuffix, entry, fe.body.String())
 }
 
 func isParam(f *ir.Func, l *ir.Local) bool {

@@ -74,6 +74,7 @@ static void kern_halt(int code) {
 }
 void kern_exit(int32_t code) { kern_halt((int)code); }
 void kern_start(void) {}
+void kern_yield(void) {}
 void kern_set_file(const char *name) { kern_file = name; }
 void *kern_set_handler(void *fn) { void *old = kern_handler; kern_handler = fn; return old; }
 void kern_fence(uint8_t o) { (void)o; __atomic_thread_fence(__ATOMIC_SEQ_CST); }

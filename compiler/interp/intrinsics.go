@@ -3,6 +3,7 @@ package interp
 import (
 	"fmt"
 	"math"
+	"runtime"
 	"sync"
 	"time"
 
@@ -411,7 +412,8 @@ func init() {
 			}
 			return []Value{acc}
 		},
-		"exit": func(it *Interp, a []Value, _ callCtx) []Value { panic(exitCode(signedOf(a[0].(Int)))) },
+		"exit":      func(it *Interp, a []Value, _ callCtx) []Value { panic(exitCode(signedOf(a[0].(Int)))) },
+		"yield_now": func(it *Interp, a []Value, _ callCtx) []Value { runtime.Gosched(); return nil },
 		// test hooks
 		"testing.seed_generation": func(it *Interp, a []Value, c callCtx) []Value {
 			pos := c.pos

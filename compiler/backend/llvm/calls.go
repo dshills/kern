@@ -328,6 +328,8 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.rt("println", "void ()", "")
 	case "now_ns":
 		setDst(fe.rt("kern_now_ns", "i64 ()", ""))
+	case "yield_now":
+		fe.rt("kern_yield", "void ()", "")
 	case "exit":
 		fe.rt("kern_exit", "void (i32)", "i32 "+fe.v(a[0]))
 		fe.emit("unreachable")

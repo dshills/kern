@@ -1,0 +1,26 @@
+//! phase: 3
+//! expect: output yield_spin
+//! tsan: clean
+// yield_now in a spin loop waiting for a flag set by another thread.
+module cc
+func setter(f: view[Atomic[u64]]) -> u64 { f.store(1u64, release); return 1u64 }
+func waiter(f: view[Atomic[u64]]) -> u64 {
+    spins := 0u64
+    while f.load(acquire) == 0u64 { yield_now(); spins = spins + 1u64 }
+    return 1u64
+}
+func run(f: view[Atomic[u64]]) -> Result[u64, SpawnErr] {
+    with s := thread.scope() {
+        w := s.spawn(waiter, f)?
+        t := s.spawn(setter, f)?
+        return Ok(w.get() + t.get())
+    }
+}
+func main() -> i32 {
+    f := Atomic[u64].new(0u64)
+    match run(f) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}

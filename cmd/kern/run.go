@@ -23,9 +23,11 @@ type BuildOptions struct {
 	NoStackCheck bool
 	// ElideChecks drops runtime checks: measurement only (PLAN.md 4.4).
 	ElideChecks bool
-	Env         string // hosted | freestanding
-	TestHooks   bool
-	StackBytes  int
+	// Debug emits DWARF line information.
+	Debug      bool
+	Env        string // hosted | freestanding
+	TestHooks  bool
+	StackBytes int
 }
 
 // Build resolves, checks, lowers and validates a program. Diagnostics are
@@ -64,6 +66,8 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 			opts.NoStackCheck = true
 		case a == "--unsafe-elide-checks":
 			opts.ElideChecks = true
+		case a == "--debug":
+			opts.Debug = true
 		case strings.HasPrefix(a, "--opt="), strings.HasPrefix(a, "--env="), strings.HasPrefix(a, "--stack-bytes="):
 			k, v, _ := strings.Cut(a, "=")
 			switch k {
