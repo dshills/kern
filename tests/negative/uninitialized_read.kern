@@ -1,0 +1,7 @@
+//! expect: reject INIT_UNINITIALIZED_READ rule=5.1.7
+//! twin: uninitialized_read_ok
+module m
+func f() -> u64 {
+    var x: u64
+    return x   // INIT_UNINITIALIZED_READ
+}

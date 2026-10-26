@@ -1,0 +1,10 @@
+//! phase: 1
+//! expect: accept
+//! twin: live_across_spawn
+module m
+func sum(v: view[Vec[u64]]) -> u64 { return 0u64 }
+func f(v: own Vec[u64]) {
+    with s := thread.scope() {
+        r := s.spawn(sum, v)
+    }
+}

@@ -1,0 +1,10 @@
+//! expect: reject OWN_DESTRUCTURE_DESTRUCTOR rule=5.3.1
+//! twin: destructure_destructor_ok
+module m
+union Slot { Full(Box[u64]); Empty }
+func take_it(s: own Slot) -> u64 {
+    match move s {   // OWN_DESTRUCTURE_DESTRUCTOR: Slot holds a Box, which has a destructor
+        Full(b) => return b.into()
+        Empty => return 0u64
+    }
+}

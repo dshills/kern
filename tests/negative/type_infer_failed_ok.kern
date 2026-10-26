@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: type_infer_failed
+module m
+func f() { x := Option[u64].None }

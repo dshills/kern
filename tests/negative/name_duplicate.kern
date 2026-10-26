@@ -1,0 +1,5 @@
+//! expect: reject NAME_DUPLICATE rule=T.1
+//! twin: name_duplicate_ok
+module m
+struct A { x: u64 }
+struct A { y: u64 }   // NAME_DUPLICATE

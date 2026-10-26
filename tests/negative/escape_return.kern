@@ -1,0 +1,6 @@
+//! expect: reject ACC_ESCAPE_RETURN rule=5.2.2
+//! twin: escape_return_ok
+module m
+func first(v: view[Vec[u64]], w: own Vec[u64]) -> view[u64] {
+    return w.get(0usize)   // ACC_ESCAPE_RETURN: derived from a local, not the access parameter
+}

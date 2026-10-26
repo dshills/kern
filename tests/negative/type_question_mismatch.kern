@@ -1,0 +1,5 @@
+//! expect: reject TYPE_QUESTION_MISMATCH rule=T.5
+//! twin: type_question_mismatch_ok
+module m
+func g() -> Result[u64, u8] { return Ok(1u64) }
+func f() -> Result[u64, u16] { return Ok(g()?) }   // TYPE_QUESTION_MISMATCH

@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: accept
+//! twin: unsafe_op_outside_unsafe
+module m
+extern "C" func c_abs(v: i32) -> i32
+contract { requires "c_abs is total" }
+func f(v: i32) -> i32 {
+    unsafe { return c_abs(v) }
+}

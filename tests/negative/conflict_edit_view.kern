@@ -1,0 +1,6 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: conflict_edit_view_ok
+module m
+func f(v: edit[Vec[u64]]) {
+    v.push(v.get(0usize))   // ACC_CONFLICT: view of v live while v is edited
+}

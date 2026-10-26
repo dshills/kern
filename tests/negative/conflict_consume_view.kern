@@ -1,0 +1,8 @@
+//! expect: reject OWN_USE_AFTER_MOVE rule=5.1.4
+//! twin: conflict_consume_view_ok
+module m
+func use(b: own Box[u64], v: view[u64]) { }
+func f() {
+    b := Box.new(1u64)
+    use(b, b.get())   // consume/view conflict on a variable reports as OWN_USE_AFTER_MOVE (rule 5.4.4)
+}

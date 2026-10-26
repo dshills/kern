@@ -1,0 +1,8 @@
+//! phase: 1
+//! expect: accept
+//! twin: send_not_send
+module m
+func w(v: own Vec[u64]) -> u64 { return 0u64 }
+func f(v: own Vec[u64]) {
+    r := thread.spawn(w, v)
+}

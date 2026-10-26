@@ -1,0 +1,8 @@
+//! expect: reject NAME_DUPLICATE rule=T.1
+//! twin: method_namespace_ok
+module m
+interface A { func name(view self) -> u64 }
+interface B { func name(view self) -> u32 }
+struct S { x: u64 }
+impl A for S { func name(view self) -> u64 { return self.x } }
+impl B for S { func name(view self) -> u32 { return 0u32 } }   // NAME_DUPLICATE: methods share one namespace

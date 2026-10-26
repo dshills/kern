@@ -1,0 +1,8 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: conflict_edit_edit_ok
+module m
+func both(a: edit[u64], b: edit[u64]) { }
+func f() {
+    x := 1u64
+    both(x, x)   // ACC_CONFLICT
+}

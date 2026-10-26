@@ -1,0 +1,4 @@
+//! expect: reject PARAM_OWN_REQUIRED rule=5.2.1
+//! twin: param_own_required_ok
+module m
+func f(v: Vec[u64]) { }   // PARAM_OWN_REQUIRED

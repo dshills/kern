@@ -1,0 +1,6 @@
+//! expect: reject ACC_UNBOUND_PROJECTION rule=5.3.2
+//! twin: unbound_projection_ok
+module m
+func f(v: edit[Vec[Box[u64]]]) {
+    e := v.at(0usize)   // ACC_UNBOUND_PROJECTION
+}

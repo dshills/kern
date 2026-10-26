@@ -1,0 +1,36 @@
+//! phase: 1
+//! expect: accept
+// Zero-copy packet parsing: the header is decoded into a Copy struct and the
+// payload is returned as a sub-slice view through the elision rule (§5.3).
+module packet_parser
+
+struct Header { src: u16; dst: u16; len: u16 }
+union ParseErr { Short; BadLength }
+
+func be16(b: view[]u8, at: usize) -> u16 {
+    return u16(b[at]) << 8u32 | u16(b[at + 1usize])
+}
+
+func parse_header(pkt: view[]u8) -> Result[Header, ParseErr] {
+    if len_of(pkt) < 6usize { return Err(Short) }
+    h := Header { src: be16(pkt, 0usize), dst: be16(pkt, 2usize), len: be16(pkt, 4usize) }
+    if 6usize + usize(h.len) > len_of(pkt) { return Err(BadLength) }
+    return Ok(h)
+}
+
+func len_of(b: view[]u8) -> usize { return len(b) }
+
+func payload(pkt: view[]u8, h: Header) -> view[]u8 {
+    return pkt[6usize : 6usize + usize(h.len)]
+}
+
+func checksum(data: view[]u8) -> u64 {
+    total := 0u64
+    for b in data { total = total + u64(b) }
+    return total
+}
+
+func handle(pkt: view[]u8) -> Result[u64, ParseErr] {
+    h := parse_header(pkt)?
+    with body := payload(pkt, h) { return Ok(checksum(body)) }
+}

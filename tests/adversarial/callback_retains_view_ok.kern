@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: accept
+//! twin: callback_retains_view
+module adversarial
+struct Callback { f: func(view[u64]) -> u64; ctx: Box[u64] }
+func invoke(cb: view[Callback]) -> u64 {
+    g := cb.f
+    return g(cb.ctx.get())
+}

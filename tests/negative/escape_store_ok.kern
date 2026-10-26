@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: escape_store
+module m
+struct Holder { v: u64 }

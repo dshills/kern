@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: accept
+//! twin: partial_move
+module m
+struct Pair { a: Box[u64]; b: Box[u64] }
+func sink(b: own Box[u64]) { }
+func f(p: own Pair) {
+    sink(replace(p.a, Box.new(0u64)))
+}

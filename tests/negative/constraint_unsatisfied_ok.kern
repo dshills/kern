@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: constraint_unsatisfied
+module m
+func dup[T: Copy](x: T) -> T { return x }
+func f() { w := dup[u64](1u64) }

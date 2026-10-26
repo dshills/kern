@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: constraint_required
+module m
+interface Named { func name(view self) -> u64 }
+func call[T: Named](x: view[T]) -> u64 { return x.name() }

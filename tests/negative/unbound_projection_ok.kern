@@ -1,0 +1,7 @@
+//! phase: 1
+//! expect: accept
+//! twin: unbound_projection
+module m
+func f(v: edit[Vec[Box[u64]]]) {
+    with e := v.at(0usize) { }
+}

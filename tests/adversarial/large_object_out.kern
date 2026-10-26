@@ -1,0 +1,17 @@
+//! phase: 1
+//! expect: accept
+//! twin: large_object_out_reject
+// Large-object construction without copies: the page is built in place
+// through an out parameter (spec §5.2).
+module adversarial
+struct Page { id: u64; data: [4096]u8 }
+func init_page(p: out Page, id: u64) {
+    var d: [4096]u8 = zero()
+    p.id = id
+    p.data = d
+}
+func make() -> u64 {
+    var p: Page
+    init_page(out p, 7u64)
+    return p.id
+}

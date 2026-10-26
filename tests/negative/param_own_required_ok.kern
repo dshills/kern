@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: param_own_required
+module m
+func f(v: own Vec[u64]) { }

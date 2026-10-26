@@ -1,0 +1,9 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: interior_pointer_growth_ok
+// Holding an access into a container while it grows is rejected (spec §5.4).
+module adversarial
+func grow(v: edit[Vec[u64]]) {
+    with first := v.at(0usize) {
+        v.push(first)   // ACC_CONFLICT: v is frozen while first is live
+    }
+}

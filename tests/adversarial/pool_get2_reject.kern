@@ -1,0 +1,9 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: pool_get2
+module adversarial
+struct Cell { v: u64 }
+func two_ats(p: edit[Pool[Cell]], a: PoolId[Cell], b: PoolId[Cell]) {
+    with x := p.at(a) {
+        with y := p.at(b) { y.v = x.v }   // ACC_CONFLICT: p is frozen by x
+    }
+}

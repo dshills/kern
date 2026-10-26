@@ -1,0 +1,4 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: type_mismatch_ok
+module m
+func f() -> u64 { return true }   // TYPE_MISMATCH

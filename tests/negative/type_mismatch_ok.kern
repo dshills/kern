@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: type_mismatch
+module m
+func f() -> u64 { return 1u64 }

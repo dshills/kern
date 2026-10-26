@@ -1,0 +1,22 @@
+//! phase: 3
+//! expect: accept
+//! twin: concurrent_container_reject
+// Concurrent container access: shared reads through Share values under a
+// scoped spawn, mutation only inside a Mutex (spec §5.5).
+module adversarial
+func count(p: view[Pool[u64]]) -> usize { return p.len() }
+func add(m: view[Mutex[Pool[u64]]]) -> u64 {
+    with p := m.lock() {
+        match p.alloc(1u64) {
+            Ok(id) => return 1u64
+            Err(e) => return 0u64
+        }
+    }
+}
+func run(pool: own Pool[u64], m: own Mutex[Pool[u64]]) -> Result[usize, SpawnErr] {
+    with s := thread.scope() {
+        j1 := s.spawn(count, pool)?
+        j2 := s.spawn(count, pool)?
+        return Ok(j1.get() + j2.get())
+    }
+}

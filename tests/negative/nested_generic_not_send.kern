@@ -1,0 +1,9 @@
+//! expect: reject SEND_NOT_SEND rule=5.5.2
+//! twin: nested_generic_not_send_ok
+module m
+struct Raw { p: RawPtr[u8] }
+func send_it(b: own Box[Box[Raw]]) -> u64 { return 0u64 }
+func f(b: own Box[Box[Raw]]) -> Result[u64, SpawnErr] {
+    h := thread.spawn(send_it, b)?   // SEND_NOT_SEND: the inner Box holds a RawPtr
+    return Ok(h.join())
+}

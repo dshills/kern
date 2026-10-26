@@ -1,0 +1,30 @@
+//! phase: 1
+//! expect: accept
+// An expression tree stored in an Arena, with children referenced by Copy
+// handles, evaluated recursively through view projections (spec §5.6).
+module arena_ast
+
+union Expr {
+    Num(i64)
+    Add(lhs: ArenaId[Expr], rhs: ArenaId[Expr])
+    Neg(ArenaId[Expr])
+}
+
+struct Ast { nodes: Arena[Expr] }
+
+func eval(a: view[Ast], id: ArenaId[Expr]) -> i64 {
+    match a.nodes.get(id) {
+        Num(n) => return n
+        Add(l, r) => return eval(a, l) + eval(a, r)
+        Neg(x) => return 0i64 - eval(a, x)
+    }
+}
+
+func build(a: edit[Ast]) -> Result[ArenaId[Expr], AllocErr] {
+    one := a.nodes.alloc(Num(1i64))?
+    two := a.nodes.alloc(Num(2i64))?
+    sum := a.nodes.alloc(Add(one, two))?
+    return a.nodes.alloc(Neg(sum))
+}
+
+func count_nodes(a: view[Ast]) -> usize { return a.nodes.len() }

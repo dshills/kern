@@ -1,0 +1,4 @@
+//! expect: reject FFI_UNSUPPORTED_TYPE rule=7.2
+//! twin: ffi_unsupported_type_ok
+module m
+extern "C" func takes_slice(v: view[]u8) -> i32   // FFI_UNSUPPORTED_TYPE

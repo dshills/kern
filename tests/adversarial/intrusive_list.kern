@@ -1,0 +1,17 @@
+//! phase: 2
+//! expect: accept
+//! twin: intrusive_list_reject
+// Intrusive doubly-linked list: raw links live behind an audited unsafe
+// API; safe code only sees handles (spec §5.8).
+module adversarial
+struct Task { id: u64; prev: RawPtr[Task]; next: RawPtr[Task] }
+struct RunQueue { tasks: Pool[Task]; head: RawPtr[Task] }
+extern "C" func link_after(prev: RawPtr[Task], node: RawPtr[Task])
+contract {
+    invariant "every RawPtr link points at a live slot of tasks"
+    requires "id is a live handle"
+}
+func push_back(q: edit[RunQueue], id: PoolId[Task]) {
+    unsafe { link_after(q.head, q.head) }
+    with t := q.tasks.at(id) { t.id = t.id + 0u64 }
+}

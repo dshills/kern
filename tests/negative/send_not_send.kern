@@ -1,0 +1,7 @@
+//! expect: reject SEND_NOT_SEND rule=5.5.2
+//! twin: send_not_send_ok
+module m
+func w(p: own RawPtr[u8]) -> u64 { return 0u64 }
+func f(p: RawPtr[u8]) {
+    r := thread.spawn(w, p)   // SEND_NOT_SEND
+}

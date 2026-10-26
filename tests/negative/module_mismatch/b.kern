@@ -1,0 +1,2 @@
+module other
+func g() { }

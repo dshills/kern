@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+// Marker derivation terminates on an expanding recursive instantiation.
+module m
+struct Nest[T] { inner: Option[Box[Nest[Option[T]]]]; v: u64 }
+func f(n: own Nest[u64]) -> u64 { return n.v }

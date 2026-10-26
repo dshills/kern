@@ -1,0 +1,13 @@
+//! phase: 1
+//! expect: accept
+//! twin: pool_get2_reject
+// Two simultaneous edits into one pool through get2 (runtime disjointness).
+module adversarial
+struct Cell { v: u64 }
+func swap_cells(p: edit[Pool[Cell]], a: PoolId[Cell], b: PoolId[Cell]) {
+    with x, y := p.get2(a, b) {
+        t := x.v
+        x.v = y.v
+        y.v = t
+    }
+}

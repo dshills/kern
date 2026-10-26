@@ -1,0 +1,142 @@
+// kern standard-library prelude: declarations only (Phase 0 is check-only).
+// Functions without bodies are intrinsics implemented by the compiler or, from
+// Phase 1, by the interpreter and the kern standard library.
+module core
+
+// zero() yields the all-zero value of any Copy type (the only way to
+// initialize an array without naming every element).
+func zero[T: Copy]() -> T
+
+union Option[T] { Some(T); None }
+union Result[T, E] { Ok(T); Err(E) }
+union AllocErr { OutOfMemory }
+union AllocOrInit[E] { Alloc(AllocErr); Init(E) }
+union SpawnErr { ResourceExhausted }
+
+interface Allocator {
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr]
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize)
+}
+
+struct SystemAllocator nocopy { phantom: u8 }
+impl Allocator for SystemAllocator {
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr]
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize)
+}
+impl SystemAllocator {
+    func new() -> SystemAllocator
+}
+
+struct Box[T] nocopy { inner: T }
+impl Box[T] {
+    func new(v: own T) -> Box[T]
+    func get(view self) -> view[T]
+    func at(edit self) -> edit[T]
+    func into(own self) -> T
+    destructor(edit self) { }
+}
+
+struct Vec[T] nocopy { phantom: T }
+impl Vec[T] {
+    func new() -> Vec[T]
+    func with_capacity(n: usize) -> Vec[T]
+    func len(view self) -> usize
+    func push(edit self, v: own T)
+    func pop(edit self) -> Option[T]
+    func get(view self, i: usize) -> view[T]
+    func at(edit self, i: usize) -> edit[T]
+    func as_view(view self) -> view[]T
+    func as_edit(edit self) -> edit[]T
+    func clear(edit self)
+    destructor(edit self) { }
+}
+
+struct PoolId[T] { index: u32; gen: u32; phantom_tag: u32 }
+struct Pool[T] nocopy { phantom: T }
+impl Pool[T] {
+    func new() -> Pool[T]
+    func alloc(edit self, v: own T) -> Result[PoolId[T], AllocErr]
+    func get(view self, id: PoolId[T]) -> view[T]
+    func at(edit self, id: PoolId[T]) -> edit[T]
+    contract { invariant "a != b is checked at runtime; the two accesses are disjoint" }
+    func get2(edit self, a: PoolId[T], b: PoolId[T]) -> (edit[T], edit[T])
+    func free(edit self, id: PoolId[T])
+    func len(view self) -> usize
+    destructor(edit self) { }
+}
+
+struct ArenaId[T] { index: u32; phantom_tag: u32 }
+struct Arena[T] nocopy { phantom: T }
+impl Arena[T] {
+    func new() -> Arena[T]
+    func alloc(edit self, v: own T) -> Result[ArenaId[T], AllocErr]
+    func get(view self, id: ArenaId[T]) -> view[T]
+    func at(edit self, id: ArenaId[T]) -> edit[T]
+    func len(view self) -> usize
+    destructor(edit self) { }
+}
+
+struct Shared[T] nocopy { inner: T }
+impl Shared[T] {
+    func new(v: own T) -> Shared[T]
+    func get(view self) -> view[T]
+    func clone(view self) -> Shared[T]
+    destructor(edit self) { }
+}
+unsafe assert Interior for Shared
+
+struct Mutex[T] nocopy { inner: T }
+impl Mutex[T] {
+    func new(v: own T) -> Mutex[T]
+    contract { invariant "the lock guarantees exclusivity of the returned edit while it is live" }
+    func lock(view self) -> edit[T] release unlock
+    func unlock(view self)
+    destructor(edit self) { }
+}
+unsafe assert Interior for Mutex
+
+struct Atomic[T] { inner: T }
+impl Atomic[T] {
+    func new(v: T) -> Atomic[T]
+    func load(view self, ord: Ordering) -> T
+    func store(view self, v: T, ord: Ordering)
+    func swap(view self, v: T, ord: Ordering) -> T
+    func compare_exchange(view self, expected: T, desired: T, success: Ordering, failure: Ordering) -> Result[T, T]
+    func compare_exchange_weak(view self, expected: T, desired: T, success: Ordering, failure: Ordering) -> Result[T, T]
+    func fetch_add(view self, v: T, ord: Ordering) -> T
+    func fetch_sub(view self, v: T, ord: Ordering) -> T
+    func fetch_and(view self, v: T, ord: Ordering) -> T
+    func fetch_or(view self, v: T, ord: Ordering) -> T
+    func fetch_xor(view self, v: T, ord: Ordering) -> T
+}
+unsafe assert Interior for Atomic
+union Ordering { relaxed; acquire; release; acq_rel; seq_cst }
+func fence(ord: Ordering)
+
+struct Thread[R] nocopy { phantom: R }
+impl Thread[R] {
+    func join(own self) -> R
+    destructor(edit self) { }
+}
+struct Join[R] nocopy { phantom: R }
+impl Join[R] {
+    func get(own self) -> R
+    destructor(edit self) { }
+}
+struct Scope nocopy { phantom: u8 }
+impl Scope {
+    // spawn is an intrinsic: spawn(f, args...) with the §5.5 rules; typed by the checker.
+    destructor(edit self) { }
+}
+struct thread { phantom: u8 }
+impl thread {
+    func scope() -> Scope
+    // thread.spawn(f, own args...) -> Result[Thread[R], SpawnErr] is an intrinsic typed by the checker.
+}
+
+union TrapKind { bounds; overflow; div_zero; shift; conversion; generation; vacant; identity; disjoint; oom; stack; explicit; unreachable }
+struct TrapInfo { kind: TrapKind; file: RawPtr[u8]; start: usize; end: usize; thread_id: u64 }
+struct trap { phantom: u8 }
+impl trap {
+    func set_handler(f: func(view[TrapInfo])) -> func(view[TrapInfo])
+}

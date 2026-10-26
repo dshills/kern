@@ -1,0 +1,22 @@
+//! phase: 2
+//! expect: accept
+//! twin: ffi_registration_reject
+// FFI lifetime mismatch is handled by an owned registration object whose
+// destructor unregisters; the callback state never outlives it.
+module adversarial
+struct State { hits: u64 }
+extern "C" func c_register(ctx: RawPtr[u8]) -> i32
+extern "C" func c_unregister(ctx: RawPtr[u8])
+struct Registration { ctx: RawPtr[u8]; state: Box[State] }
+impl Registration {
+    destructor(edit self) { c_unregister_safe(self.ctx) }
+}
+contract { requires "ctx was returned by c_register and not yet unregistered" }
+func c_unregister_safe(ctx: RawPtr[u8]) { unsafe { c_unregister(ctx) } }
+contract { ensures "the returned registration owns the C-side callback slot" }
+func register(ctx: RawPtr[u8], st: own Box[State]) -> Result[Registration, i32] {
+    var rc: i32
+    unsafe { rc = c_register(ctx) }
+    if rc != 0i32 { return Err(rc) }
+    return Ok(Registration { ctx: ctx, state: st })
+}

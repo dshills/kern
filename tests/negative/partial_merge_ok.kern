@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: accept
+//! twin: partial_merge
+module m
+struct P { a: u64; b: u64 }
+func init_p(p: out P, c: bool) {
+    if c { p.a = 1u64 } else { p.a = 3u64 }
+    p.b = 2u64
+}

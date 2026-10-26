@@ -1,0 +1,7 @@
+//! expect: reject UNSAFE_OP_OUTSIDE_UNSAFE rule=6.4
+//! twin: unsafe_op_outside_unsafe_ok
+module m
+extern "C" func c_abs(v: i32) -> i32
+func f(v: i32) -> i32 {
+    return c_abs(v)   // UNSAFE_OP_OUTSIDE_UNSAFE
+}

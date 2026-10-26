@@ -1,0 +1,6 @@
+//! expect: reject ACC_PERMISSION_ESCALATION rule=5.3.4
+//! twin: permission_escalation_ok
+module m
+func bump(v: view[Vec[u64]]) {
+    v.push(1u64)   // ACC_PERMISSION_ESCALATION: edit receiver given a view place
+}

@@ -1,0 +1,10 @@
+//! expect: reject SHARE_NOT_SHARE rule=5.5.3
+//! twin: share_not_share_ok
+module m
+struct Raw { p: RawPtr[u8] }
+func look(r: view[Raw]) -> u64 { return 0u64 }
+func f(r: own Raw) {
+    with s := thread.scope() {
+        j := s.spawn(look, r)   // SHARE_NOT_SHARE
+    }
+}

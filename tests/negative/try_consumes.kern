@@ -1,0 +1,11 @@
+//! expect: reject OWN_USE_AFTER_MOVE rule=5.1.4
+//! twin: try_consumes_ok
+// `?` consumes a move-only Result place (prism regression).
+module m
+func make() -> Result[Box[u64], u8] { return Ok(Box.new(1u64)) }
+func f() -> Result[u64, u8] {
+    r := make()
+    a := r?
+    b := r?   // OWN_USE_AFTER_MOVE: r was consumed by the first ?
+    return Ok(a.into() + b.into())
+}

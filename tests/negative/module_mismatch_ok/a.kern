@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: module_mismatch
+module m
+func f() { }

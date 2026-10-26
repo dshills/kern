@@ -1,0 +1,8 @@
+//! expect: reject OWN_CONDITIONAL_MOVE rule=5.1.5
+//! twin: conditional_move_ok
+module m
+func sink(b: own Box[u64]) { }
+func f(c: bool) {
+    b := Box.new(1u64)
+    if c { sink(b) }   // OWN_CONDITIONAL_MOVE at the join
+}

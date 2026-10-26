@@ -1,0 +1,6 @@
+//! expect: reject IMPL_SIGNATURE_MISMATCH rule=T.4
+//! twin: impl_signature_mismatch_ok
+module m
+interface Named { func name(view self) -> u64 }
+struct A { x: u64 }
+impl Named for A { func name(view self) -> u32 { return 0u32 } }   // IMPL_SIGNATURE_MISMATCH

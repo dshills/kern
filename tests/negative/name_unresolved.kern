@@ -1,0 +1,4 @@
+//! expect: reject NAME_UNRESOLVED rule=T.1
+//! twin: name_unresolved_ok
+module m
+func f() -> u64 { return nothing }   // NAME_UNRESOLVED

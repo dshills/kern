@@ -1,0 +1,7 @@
+//! phase: 1
+//! expect: accept
+//! twin: atomic_invalid_ordering
+module m
+func f(a: view[Atomic[u32]]) -> u32 {
+    return a.load(acquire)
+}

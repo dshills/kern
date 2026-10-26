@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: name_duplicate
+module m
+struct A { x: u64 }
+struct B { y: u64 }

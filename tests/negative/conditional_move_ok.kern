@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: accept
+//! twin: conditional_move
+module m
+func sink(b: own Box[u64]) { }
+func f(c: bool) {
+    b := Box.new(1u64)
+    if c { sink(b) } else { drop(b) }
+}

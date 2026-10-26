@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: syntax
+module m
+func f() { }

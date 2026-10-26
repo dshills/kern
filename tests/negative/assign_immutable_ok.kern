@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: assign_immutable
+module m
+func f() { x := 1u64; x = 2u64 }

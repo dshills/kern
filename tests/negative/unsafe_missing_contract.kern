@@ -1,0 +1,7 @@
+//! expect: reject UNSAFE_MISSING_CONTRACT rule=6.4
+//! twin: unsafe_missing_contract_ok
+module m
+extern "C" func c_abs(v: i32) -> i32
+func f(v: i32) -> i32 {
+    unsafe { return c_abs(v) }   // UNSAFE_MISSING_CONTRACT
+}

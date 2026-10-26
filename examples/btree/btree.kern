@@ -1,0 +1,74 @@
+//! phase: 1
+//! expect: accept
+// B-tree node split and merge over Pool handles (spec §5.6). Two nodes are
+// edited at once through Pool.get2, whose disjointness is checked at runtime.
+module btree
+
+const MAX: usize = 4usize
+const MIN: usize = 2usize
+
+struct Node {
+    keys: [4]u64
+    count: usize
+    children: [5]PoolId[Node]
+    leaf: bool
+}
+
+struct BTree { nodes: Pool[Node]; root: PoolId[Node] }
+
+contract {
+    requires "left and right are distinct live handles in t.nodes"
+    ensures "left keeps MIN keys and right receives the rest"
+}
+func split_child(t: edit[BTree], left: PoolId[Node], right: PoolId[Node]) -> u64 {
+    median := t.nodes.get(left).keys[2]
+    with l, r := t.nodes.get2(left, right) {
+        r.keys[0] = l.keys[3]
+        r.count = 1usize
+        r.leaf = l.leaf
+        if !l.leaf {
+            r.children[0] = l.children[3]
+            r.children[1] = l.children[4]
+        }
+        l.count = MIN
+    }
+    return median
+}
+
+// merge_into concatenates two sibling leaves; internal-node merging (which
+// moves the parent separator and the right child handles) is a Phase 2 item.
+func merge_into(t: edit[BTree], left: PoolId[Node], right: PoolId[Node]) -> bool {
+    if !t.nodes.get(left).leaf || !t.nodes.get(right).leaf { return false }
+    if t.nodes.get(left).count + t.nodes.get(right).count > MAX { return false }
+    with l, r := t.nodes.get2(left, right) {
+        i := 0usize
+        while i < r.count {
+            l.keys[l.count] = r.keys[i]
+            l.count = l.count + 1usize
+            i = i + 1usize
+        }
+        r.count = 0usize
+    }
+    t.nodes.free(right)
+    return true
+}
+
+func insert_key(t: edit[BTree], id: PoolId[Node], key: u64) -> bool {
+    with n := t.nodes.at(id) {
+        if n.count >= MAX { return false }
+        n.keys[n.count] = key
+        n.count = n.count + 1usize
+        return true
+    }
+}
+
+func find(t: view[BTree], id: PoolId[Node], key: u64) -> bool {
+    with n := t.nodes.get(id) {
+        i := 0usize
+        while i < n.count {
+            if n.keys[i] == key { return true }
+            i = i + 1usize
+        }
+        return false
+    }
+}

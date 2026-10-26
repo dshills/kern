@@ -1,0 +1,9 @@
+//! expect: reject INIT_FIELD_OF_UNINITIALIZED rule=5.1.8
+//! twin: field_of_uninitialized_ok
+module m
+struct P { x: u64; y: u64 }
+func f() -> u64 {
+    var p: P
+    p.x = 1u64   // INIT_FIELD_OF_UNINITIALIZED
+    return p.x
+}

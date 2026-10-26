@@ -1,0 +1,16 @@
+//! phase: 1
+//! expect: accept
+// A field read through a returned projection keeps the projection's place
+// and lifetime (prism regression): v.get(i).x is a read of a Copy field.
+module m
+struct P { x: u64; y: u64 }
+func sum(v: view[Vec[P]]) -> u64 {
+    total := 0u64
+    i := 0usize
+    while i < v.len() {
+        total = total + v.get(i).x
+        i = i + 1usize
+    }
+    return total
+}
+func through_ptr(f: func(u64) -> u64, x: u64) -> u64 { return f(x) }

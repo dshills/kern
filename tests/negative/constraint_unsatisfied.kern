@@ -1,0 +1,5 @@
+//! expect: reject CONSTRAINT_UNSATISFIED rule=T.4
+//! twin: constraint_unsatisfied_ok
+module m
+func dup[T: Copy](x: T) -> T { return x }
+func f(v: own Vec[u64]) { w := dup[Vec[u64]](v) }   // CONSTRAINT_UNSATISFIED

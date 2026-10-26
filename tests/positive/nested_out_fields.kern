@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: accept
+// Nested field reads of out storage are checked against the first
+// root-relative field (prism regression).
+module m
+struct Inner { x: u64; y: u64 }
+struct Outer { inner: Inner; tag: u64 }
+func init_outer(o: out Outer) {
+    o.inner = Inner { x: 1u64, y: 2u64 }
+    o.tag = o.inner.x
+}

@@ -1,0 +1,8 @@
+//! expect: reject OWN_PARTIAL_MOVE rule=5.1.6
+//! twin: partial_move_ok
+module m
+struct Pair { a: Box[u64]; b: Box[u64] }
+func sink(b: own Box[u64]) { }
+func f(p: own Pair) {
+    sink(p.a)   // OWN_PARTIAL_MOVE
+}

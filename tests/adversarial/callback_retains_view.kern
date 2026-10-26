@@ -1,0 +1,6 @@
+//! expect: reject ACC_ESCAPE_STORE rule=5.2.2
+//! twin: callback_retains_view_ok
+// Callbacks retaining references are not expressible: an access cannot be
+// stored in the callback's context (spec §5.8).
+module adversarial
+struct Callback { f: func(view[u64]) -> u64; ctx: view[u64] }   // ACC_ESCAPE_STORE

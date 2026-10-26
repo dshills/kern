@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: name_unresolved
+module m
+func f() -> u64 { nothing := 1u64; return nothing }

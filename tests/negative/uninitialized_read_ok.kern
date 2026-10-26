@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: accept
+//! twin: uninitialized_read
+module m
+func f() -> u64 {
+    var x: u64
+    x = 1u64
+    return x
+}

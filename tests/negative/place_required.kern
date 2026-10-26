@@ -1,0 +1,5 @@
+//! expect: reject PLACE_REQUIRED rule=T.5
+//! twin: place_required_ok
+module m
+func look(v: view[u64]) -> u64 { return v }
+func f() -> u64 { return look(1u64 + 2u64) }   // PLACE_REQUIRED

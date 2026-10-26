@@ -1,0 +1,41 @@
+//! phase: 3
+//! expect: accept
+// Ownership transfer to a thread, scoped parallel work over views, and a
+// lock-protected counter (spec §5.5).
+module thread_handoff
+
+struct Job { id: u64; payload: Vec[u64] }
+
+func work(j: own Job) -> u64 {
+    return j.id + u64(j.payload.len())
+}
+
+func handoff(j: own Job) -> Result[u64, SpawnErr] {
+    t := thread.spawn(work, j)?
+    return Ok(t.join())
+}
+
+func sum_part(v: view[Vec[u64]]) -> u64 {
+    total := 0u64
+    for x in v.as_view() { total = total + x }
+    return total
+}
+
+func parallel_sum(a: own Vec[u64], b: own Vec[u64]) -> Result[u64, SpawnErr] {
+    with s := thread.scope() {
+        ja := s.spawn(sum_part, a)?
+        jb := s.spawn(sum_part, b)?
+        return Ok(ja.get() + jb.get())
+    }
+}
+
+func bump(counter: view[Mutex[u64]]) {
+    with c := counter.lock() { c = c + 1u64 }
+}
+
+func shared_counter() -> u64 {
+    m := Shared[Mutex[u64]].new(Mutex[u64].new(0u64))
+    bump(m.get())
+    bump(m.get())
+    with c := m.get().lock() { return copy(c) }
+}

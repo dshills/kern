@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: type_question_mismatch
+module m
+func g() -> Result[u64, u8] { return Ok(1u64) }
+func f() -> Result[u64, u8] { return Ok(g()?) }

@@ -1,0 +1,9 @@
+//! expect: reject UNSAFE_OP_OUTSIDE_UNSAFE rule=6.4
+//! twin: intrusive_list
+module adversarial
+struct Task { id: u64; prev: RawPtr[Task]; next: RawPtr[Task] }
+struct RunQueue { tasks: Pool[Task]; head: RawPtr[Task] }
+extern "C" func link_after(prev: RawPtr[Task], node: RawPtr[Task])
+func push_back(q: edit[RunQueue], id: PoolId[Task]) {
+    link_after(q.head, q.head)   // UNSAFE_OP_OUTSIDE_UNSAFE
+}

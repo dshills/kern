@@ -1,0 +1,8 @@
+//! phase: 1
+//! expect: accept
+//! twin: interior_pointer_growth
+module adversarial
+func grow(v: edit[Vec[u64]]) {
+    first := v.get(0usize)
+    v.push(first)
+}

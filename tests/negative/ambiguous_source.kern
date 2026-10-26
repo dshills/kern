@@ -1,0 +1,6 @@
+//! expect: reject ACC_AMBIGUOUS_SOURCE rule=5.3.4
+//! twin: ambiguous_source_ok
+module m
+func pick(a: view[Vec[u64]], b: view[Vec[u64]]) -> view[u64] {
+    return a.get(0usize)   // ACC_AMBIGUOUS_SOURCE
+}

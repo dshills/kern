@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: accept
+//! twin: share_not_share
+module m
+struct Plain { x: u64 }
+func look(r: view[Plain]) -> u64 { return r.x }
+func f(r: own Plain) {
+    with s := thread.scope() {
+        j := s.spawn(look, r)
+    }
+}

@@ -1,0 +1,9 @@
+//! expect: reject INIT_OUT_NOT_SET rule=5.2.1
+//! twin: partial_merge_ok
+// Two partial branches initializing different fields merge to their
+// intersection (prism regression).
+module m
+struct P { a: u64; b: u64 }
+func init_p(p: out P, c: bool) {
+    if c { p.a = 1u64 } else { p.b = 2u64 }
+}   // INIT_OUT_NOT_SET: neither field is initialized on every path

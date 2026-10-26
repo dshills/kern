@@ -1,0 +1,7 @@
+//! expect: reject ACC_MULTI_ACCESS_SAFE rule=5.3.4
+//! twin: multi_access_safe_ok
+module m
+struct Node { count: u32 }
+func two(p: edit[Pool[Node]], a: PoolId[Node], b: PoolId[Node]) -> (edit[Node], edit[Node]) {
+    return p.get2(a, b)   // ACC_MULTI_ACCESS_SAFE: not inside unsafe
+}

@@ -1,0 +1,15 @@
+//! expect: reject INIT_OUT_RESULT_UNHANDLED rule=5.2.3
+//! twin: large_object_out
+module adversarial
+struct Page { id: u64; data: [4096]u8 }
+func init_page(p: out Page, id: u64) -> Result[(), u8] {
+    var d: [4096]u8 = zero()
+    p.id = id
+    p.data = d
+    return Ok(())
+}
+func make() -> u64 {
+    var p: Page
+    r := init_page(out p, 7u64)   // INIT_OUT_RESULT_UNHANDLED
+    return 0u64
+}

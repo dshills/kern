@@ -1,0 +1,8 @@
+//! expect: reject INIT_OUT_NOT_SET rule=5.2.1
+//! twin: out_not_set_ok
+module m
+struct P { x: u64; y: u64 }
+func init_p(p: out P, c: bool) {
+    p.x = 1u64
+    if c { p.y = 2u64 }   // INIT_OUT_NOT_SET on the other path
+}

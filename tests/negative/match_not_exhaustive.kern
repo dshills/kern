@@ -1,0 +1,8 @@
+//! expect: reject MATCH_NOT_EXHAUSTIVE rule=T.5
+//! twin: match_not_exhaustive_ok
+module m
+func f(r: view[Result[u64, u8]]) -> u64 {
+    match r {   // MATCH_NOT_EXHAUSTIVE
+        Ok(v) => return v
+    }
+}

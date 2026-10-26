@@ -1,0 +1,22 @@
+//! phase: 1
+//! expect: accept
+// Self-reference, parent pointers and cycles through Copy handles into an
+// owning Pool: expressible in safe code (spec §5.6).
+module adversarial
+struct Node { parent: PoolId[Node]; next: PoolId[Node]; value: u64 }
+struct Graph { nodes: Pool[Node] }
+func link(g: edit[Graph], a: PoolId[Node], b: PoolId[Node]) {
+    with na := g.nodes.at(a) { na.next = b }
+    with nb := g.nodes.at(b) { nb.parent = a; nb.next = a }
+}
+func walk(g: view[Graph], start: PoolId[Node], steps: usize) -> u64 {
+    cur := start
+    total := 0u64
+    i := 0usize
+    while i < steps {
+        total = total + g.nodes.get(cur).value
+        cur = g.nodes.get(cur).next
+        i = i + 1usize
+    }
+    return total
+}

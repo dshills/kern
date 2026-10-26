@@ -1,0 +1,7 @@
+//! phase: 1
+//! expect: accept
+//! twin: escape_return
+module m
+func first(v: view[Vec[u64]], w: own Vec[u64]) -> view[u64] {
+    return v.get(0usize)
+}

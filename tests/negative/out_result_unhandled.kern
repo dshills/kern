@@ -1,0 +1,9 @@
+//! expect: reject INIT_OUT_RESULT_UNHANDLED rule=5.2.3
+//! twin: out_result_unhandled_ok
+module m
+struct P { x: u64 }
+func init_p(p: out P) -> Result[(), u8] { p.x = 1u64; return Ok(()) }
+func f() {
+    var p: P
+    r := init_p(out p)   // INIT_OUT_RESULT_UNHANDLED
+}

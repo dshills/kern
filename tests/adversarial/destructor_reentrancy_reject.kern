@@ -1,0 +1,10 @@
+//! expect: reject OWN_PARTIAL_MOVE rule=5.1.6
+//! twin: destructor_reentrancy
+module adversarial
+struct Res { handle: u64; log: Vec[u64] }
+func sink(v: own Vec[u64]) { }
+impl Res {
+    destructor(edit self) {
+        sink(self.log)   // OWN_PARTIAL_MOVE: cannot move a field out of self
+    }
+}

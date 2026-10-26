@@ -1,0 +1,4 @@
+//! expect: reject MODULE_MISMATCH rule=T.1
+//! twin: module_mismatch_ok
+module m
+func f() { }

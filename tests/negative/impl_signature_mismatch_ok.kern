@@ -1,0 +1,7 @@
+//! phase: 1
+//! expect: accept
+//! twin: impl_signature_mismatch
+module m
+interface Named { func name(view self) -> u64 }
+struct A { x: u64 }
+impl Named for A { func name(view self) -> u64 { return self.x } }

@@ -1,0 +1,8 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: conflict_enclosing_ok
+module m
+func f(v: edit[Vec[u64]]) {
+    with e := v.at(0usize) {
+        v.push(1u64)   // ACC_CONFLICT: v is frozen by the binding
+    }
+}

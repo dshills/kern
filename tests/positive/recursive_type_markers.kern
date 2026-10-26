@@ -1,0 +1,12 @@
+//! phase: 1
+//! expect: accept
+// Marker derivation terminates on recursive type graphs (prism regression).
+module m
+struct Tree { kids: Vec[Tree]; label: u64 }
+union Json { Null; Arr(Vec[Json]); Obj(Vec[Pair]) }
+struct Pair { key: u64; value: Box[Json] }
+func send_it(t: own Tree) -> u64 { return t.label }
+func f(t: own Tree) -> Result[u64, SpawnErr] {
+    h := thread.spawn(send_it, t)?
+    return Ok(h.join())
+}

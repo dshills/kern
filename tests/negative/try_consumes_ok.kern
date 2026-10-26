@@ -1,0 +1,10 @@
+//! phase: 1
+//! expect: accept
+//! twin: try_consumes
+module m
+func make() -> Result[Box[u64], u8] { return Ok(Box.new(1u64)) }
+func f() -> Result[u64, u8] {
+    a := make()?
+    b := make()?
+    return Ok(a.into() + b.into())
+}

@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: variant_constraint
+module m
+union Slot[T: Copy] { Full(T); Empty }
+func f() { s := Full(1u64) }

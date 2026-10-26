@@ -1,0 +1,44 @@
+//! phase: 1
+//! expect: accept
+// A growable vector of u64 built on the standard Vec, exercising conventions,
+// projections and iteration over a sequence access.
+module vector
+
+struct Stats { count: usize; total: u64; max: u64 }
+
+func push_all(v: edit[Vec[u64]], items: view[]u64) {
+    for x in items { v.push(x) }
+}
+
+func stats(v: view[Vec[u64]]) -> Stats {
+    s := Stats { count: v.len(), total: 0u64, max: 0u64 }
+    for x in v.as_view() {
+        s.total = s.total + x
+        if x > s.max { s.max = x }
+    }
+    return s
+}
+
+func double_all(v: edit[Vec[u64]]) {
+    n := v.len()
+    i := 0usize
+    while i < n {
+        with e := v.at(i) { e = e * 2u64 }
+        i = i + 1usize
+    }
+}
+
+func build() -> Vec[u64] {
+    v := Vec[u64].new()
+    v.push(1u64)
+    v.push(2u64)
+    v.push(3u64)
+    double_all(v)
+    return v
+}
+
+func main() -> u64 {
+    v := build()
+    s := stats(v)
+    return s.total + u64(s.count) + s.max
+}

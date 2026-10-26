@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: place_required
+module m
+func look(v: view[u64]) -> u64 { return v }
+func f() -> u64 { x := 1u64 + 2u64; return look(x) }

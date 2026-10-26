@@ -1,0 +1,6 @@
+//! expect: reject ATOMIC_INVALID_ORDERING rule=5.5.5
+//! twin: atomic_invalid_ordering_ok
+module m
+func f(a: view[Atomic[u32]]) -> u32 {
+    return a.load(release)   // ATOMIC_INVALID_ORDERING
+}

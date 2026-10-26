@@ -1,0 +1,4 @@
+//! expect: reject SYNTAX rule=4.0
+//! twin: syntax_ok
+module m
+func f( {   // SYNTAX

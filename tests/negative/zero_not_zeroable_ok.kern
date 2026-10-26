@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: zero_not_zeroable
+module m
+struct Plain { a: u64; b: [4]u8; p: RawPtr[u8] }
+func f() { var h: Plain = zero() }

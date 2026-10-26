@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: ffi_unsupported_type
+module m
+extern "C" func takes_ptr(v: RawPtr[u8], n: usize) -> i32

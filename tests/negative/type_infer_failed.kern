@@ -1,0 +1,4 @@
+//! expect: reject TYPE_INFER_FAILED rule=T.4
+//! twin: type_infer_failed_ok
+module m
+func f() { x := None }   // TYPE_INFER_FAILED

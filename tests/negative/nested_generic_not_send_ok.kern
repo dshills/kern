@@ -1,0 +1,10 @@
+//! phase: 1
+//! expect: accept
+//! twin: nested_generic_not_send
+module m
+struct Plain { p: u64 }
+func send_it(b: own Box[Box[Plain]]) -> u64 { return 0u64 }
+func f(b: own Box[Box[Plain]]) -> Result[u64, SpawnErr] {
+    h := thread.spawn(send_it, b)?
+    return Ok(h.join())
+}

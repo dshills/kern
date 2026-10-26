@@ -1,0 +1,5 @@
+//! expect: reject CONSTRAINT_UNSATISFIED rule=T.4
+//! twin: variant_constraint_ok
+module m
+union Slot[T: Copy] { Full(T); Empty }
+func f(b: own Box[u64]) { s := Full(b) }   // CONSTRAINT_UNSATISFIED: Box is not Copy

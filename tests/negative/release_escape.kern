@@ -1,0 +1,6 @@
+//! expect: reject ACC_RELEASE_ESCAPE rule=5.3.4
+//! twin: release_escape_ok
+module m
+func grab(m: view[Mutex[u64]]) -> edit[u64] {
+    return m.lock()   // ACC_RELEASE_ESCAPE
+}

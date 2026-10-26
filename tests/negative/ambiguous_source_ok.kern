@@ -1,0 +1,7 @@
+//! phase: 1
+//! expect: accept
+//! twin: ambiguous_source
+module m
+func pick(a: view[Vec[u64]], i: usize) -> view[u64] {
+    return a.get(i)
+}

@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: call_arity
+module m
+func g(a: u64, b: u64) -> u64 { return a + b }
+func f() -> u64 { return g(1u64, 2u64) }

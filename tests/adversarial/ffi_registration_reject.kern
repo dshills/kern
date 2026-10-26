@@ -1,0 +1,5 @@
+//! expect: reject FFI_UNSUPPORTED_TYPE rule=7.2
+//! twin: ffi_registration
+module adversarial
+struct State { hits: u64 }
+extern "C" func c_register(st: view[State]) -> i32   // FFI_UNSUPPORTED_TYPE: an access cannot cross the C ABI

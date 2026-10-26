@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: accept
+//! twin: out_not_set
+module m
+struct P { x: u64; y: u64 }
+func init_p(p: out P, c: bool) {
+    p.x = 1u64
+    p.y = 2u64
+}

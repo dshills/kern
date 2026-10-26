@@ -1,0 +1,4 @@
+//! expect: reject ASSIGN_IMMUTABLE rule=T.5
+//! twin: assign_immutable_ok
+module m
+func f() { 1u64 = 2u64 }   // ASSIGN_IMMUTABLE

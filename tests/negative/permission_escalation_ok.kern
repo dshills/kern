@@ -1,0 +1,7 @@
+//! phase: 1
+//! expect: accept
+//! twin: permission_escalation
+module m
+func bump(v: edit[Vec[u64]]) {
+    v.push(1u64)
+}

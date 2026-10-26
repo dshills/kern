@@ -1,0 +1,4 @@
+//! expect: reject TYPE_ARITY rule=T.4
+//! twin: type_arity_ok
+module m
+func f(v: own Vec[u64, u8]) { }   // TYPE_ARITY

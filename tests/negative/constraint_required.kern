@@ -1,0 +1,5 @@
+//! expect: reject CONSTRAINT_REQUIRED rule=T.4
+//! twin: constraint_required_ok
+module m
+interface Named { func name(view self) -> u64 }
+func call[T](x: view[T]) -> u64 { return x.name() }   // CONSTRAINT_REQUIRED

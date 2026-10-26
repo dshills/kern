@@ -1,0 +1,9 @@
+//! expect: reject OWN_USE_AFTER_MOVE rule=5.1.4
+//! twin: loop_condition_move_ok
+// A loop condition is evaluated again on the back edge (prism regression).
+module m
+func check(b: own Box[u64]) -> bool { return true }
+func f() {
+    b := Box.new(1u64)
+    while check(b) { }   // OWN_USE_AFTER_MOVE on the second evaluation
+}

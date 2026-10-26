@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: accept
+//! twin: method_namespace
+module m
+interface A { func name(view self) -> u64 }
+interface B { func id(view self) -> u32 }
+struct S { x: u64 }
+impl A for S { func name(view self) -> u64 { return self.x } }
+impl B for S { func id(view self) -> u32 { return 0u32 } }

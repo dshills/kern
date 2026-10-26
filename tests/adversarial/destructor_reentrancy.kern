@@ -1,0 +1,13 @@
+//! phase: 1
+//! expect: accept
+//! twin: destructor_reentrancy_reject
+// A destructor only reaches self through its edit binding; it cannot move
+// self out or be re-entered (spec §5.7).
+module adversarial
+struct Res { handle: u64; log: Vec[u64] }
+impl Res {
+    destructor(edit self) {
+        self.log.push(self.handle)
+        self.handle = 0u64
+    }
+}

@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: name_shadows_param
+module m
+func f(x: u64) -> u64 { y := 2u64; return x + y }

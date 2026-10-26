@@ -1,0 +1,13 @@
+//! expect: reject INIT_CONDITIONAL rule=5.2.3
+//! twin: init_conditional_ok
+module m
+struct P { x: u64 }
+func init_p(p: out P) -> Result[(), u8] { p.x = 1u64; return Ok(()) }
+func f() -> u64 {
+    var p: P
+    match init_p(out p) {
+        Ok(u) => { }
+        Err(e) => { }
+    }   // INIT_CONDITIONAL
+    return 0u64
+}

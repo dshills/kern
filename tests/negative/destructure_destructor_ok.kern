@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: accept
+//! twin: destructure_destructor
+module m
+union Slot { Full(u64); Empty }
+func take_it(s: own Slot) -> u64 {
+    match move s {
+        Full(v) => return v
+        Empty => return 0u64
+    }
+}

@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: accept
+//! twin: out_result_unhandled
+module m
+struct P { x: u64 }
+func init_p(p: out P) -> Result[(), u8] { p.x = 1u64; return Ok(()) }
+func f() -> Result[u64, u8] {
+    var p: P
+    init_p(out p)?
+    return Ok(p.x)
+}

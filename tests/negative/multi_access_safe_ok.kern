@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: accept
+//! twin: multi_access_safe
+module m
+struct Node { count: u32 }
+contract { requires "a != b" }
+func two(p: edit[Pool[Node]], a: PoolId[Node], b: PoolId[Node]) -> (edit[Node], edit[Node]) {
+    unsafe { return p.get2(a, b) }
+}
