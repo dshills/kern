@@ -1,0 +1,605 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dshills/kern/tools/agent-api/schema.json",
+  "title": "kern machine API, schema_version 0.2",
+  "description": "Hand-maintained transcription of spec §7 (Machine API) and §16 (result schemas and structured-edit format). This file is the normative machine-readable copy for schema_version 0.2; tools/agent-api/schema.md is generated from compiler/diag/schema.go and must agree with it.",
+  "$comment": "Validate a request against #/$defs/request, a response against #/$defs/response, and a response of a known command against #/$defs/responses/$defs/<command>. The result object of each command is #/$defs/results/$defs/<command>.",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/response" }
+  ],
+  "$defs": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.2",
+      "description": "Schema version carried by every request and response (§7)."
+    },
+    "command": {
+      "type": "string",
+      "description": "One of the eleven §7 machine-API commands.",
+      "enum": [
+        "check",
+        "format",
+        "explain-ownership",
+        "show-layout",
+        "show-allocations",
+        "show-copies",
+        "show-effects",
+        "show-bounds-checks",
+        "emit-ir",
+        "emit-asm",
+        "apply-structured-edit"
+      ]
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Byte offset into a file, on a UTF-8 character boundary."
+    },
+    "span": {
+      "type": "object",
+      "description": "Half-open byte range [start, end) within a file (§16 common types).",
+      "properties": {
+        "start": { "$ref": "#/$defs/offset" },
+        "end": { "$ref": "#/$defs/offset" }
+      },
+      "required": ["start", "end"],
+      "additionalProperties": false
+    },
+    "loc": {
+      "type": "object",
+      "description": "A span within a named file (§16 common types).",
+      "properties": {
+        "file": { "type": "string" },
+        "span": { "$ref": "#/$defs/span" }
+      },
+      "required": ["file", "span"],
+      "additionalProperties": false
+    },
+    "label": {
+      "type": "string",
+      "description": "Provenance label of a reported fact, derived from IR provenance tags (§7, §16).",
+      "enum": ["proven", "runtime-checked", "assumed-unsafe", "estimated", "unknown"]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["error", "warning", "info"]
+    },
+    "related": {
+      "type": "object",
+      "description": "A labelled secondary location in the same file as the diagnostic.",
+      "properties": {
+        "label": { "type": "string" },
+        "start": { "$ref": "#/$defs/offset" },
+        "end": { "$ref": "#/$defs/offset" }
+      },
+      "required": ["label", "start", "end"],
+      "additionalProperties": false
+    },
+    "diagnostic": {
+      "type": "object",
+      "description": "One §16 diagnostic. Exactly these fields and nothing more.",
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$",
+          "description": "Stable diagnostic code; every code maps to one numbered rule in the language reference."
+        },
+        "severity": { "$ref": "#/$defs/severity" },
+        "rule": {
+          "type": "string",
+          "description": "The violated rule identifier, section.bullet (for example 5.1.4)."
+        },
+        "file": {
+          "type": "string",
+          "description": "The file the span refers to. Empty only for API_* and INTERNAL diagnostics that have no source location (PLAN.md §0)."
+        },
+        "span": { "$ref": "#/$defs/span" },
+        "related": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/related" }
+        },
+        "fix": {
+          "description": "An optional machine-applicable structured edit, or null.",
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/structured_edit" }
+          ]
+        },
+        "op_index": {
+          "description": "Zero-based index into the request's edit ops for EDIT_* diagnostics; null otherwise.",
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 0 }
+          ]
+        }
+      },
+      "required": ["code", "severity", "rule", "file", "span", "related", "fix", "op_index"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "$comment": "PLAN.md §0: the empty file name is permitted only for API_* and INTERNAL codes.",
+          "if": {
+            "properties": { "code": { "pattern": "^(API_[A-Z0-9_]+|INTERNAL)$" } },
+            "required": ["code"]
+          },
+          "then": {},
+          "else": {
+            "properties": { "file": { "minLength": 1 } }
+          }
+        },
+        {
+          "$comment": "§16: op_index is non-null only for EDIT_* diagnostics.",
+          "if": {
+            "properties": { "code": { "pattern": "^EDIT_[A-Z0-9_]+$" } },
+            "required": ["code"]
+          },
+          "then": {},
+          "else": {
+            "properties": { "op_index": { "type": "null" } }
+          }
+        }
+      ]
+    },
+    "edit_op": {
+      "description": "One structured-edit operation (§16). The op discriminator selects the shape.",
+      "oneOf": [
+        { "$ref": "#/$defs/edit_ops/$defs/replace_span" },
+        { "$ref": "#/$defs/edit_ops/$defs/insert" },
+        { "$ref": "#/$defs/edit_ops/$defs/delete_span" },
+        { "$ref": "#/$defs/edit_ops/$defs/rename_symbol" }
+      ]
+    },
+    "edit_ops": {
+      "$comment": "The four structured-edit operation shapes.",
+      "$defs": {
+        "replace_span": {
+          "type": "object",
+          "description": "Replace the non-empty span [start, end) of file with text.",
+          "properties": {
+            "op": { "const": "replace_span" },
+            "file": { "type": "string" },
+            "span": { "$ref": "#/$defs/span" },
+            "text": { "type": "string" }
+          },
+          "required": ["op", "file", "span", "text"],
+          "additionalProperties": false
+        },
+        "insert": {
+          "type": "object",
+          "description": "Insert text immediately before the original byte at offset at.",
+          "properties": {
+            "op": { "const": "insert" },
+            "file": { "type": "string" },
+            "at": { "$ref": "#/$defs/offset" },
+            "text": { "type": "string" }
+          },
+          "required": ["op", "file", "at", "text"],
+          "additionalProperties": false
+        },
+        "delete_span": {
+          "type": "object",
+          "description": "Delete the non-empty span [start, end) of file.",
+          "properties": {
+            "op": { "const": "delete_span" },
+            "file": { "type": "string" },
+            "span": { "$ref": "#/$defs/span" }
+          },
+          "required": ["op", "file", "span"],
+          "additionalProperties": false
+        },
+        "rename_symbol": {
+          "type": "object",
+          "description": "Rename the declaration at span and every resolved use of it across the request files.",
+          "properties": {
+            "op": { "const": "rename_symbol" },
+            "file": { "type": "string" },
+            "span": { "$ref": "#/$defs/span" },
+            "new_name": { "type": "string", "minLength": 1 }
+          },
+          "required": ["op", "file", "span", "new_name"],
+          "additionalProperties": false
+        }
+      }
+    },
+    "structured_edit": {
+      "type": "object",
+      "description": "Structured edit (§16): the edit of an apply-structured-edit request and the fix carried by a diagnostic.",
+      "properties": {
+        "ops": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/edit_op" }
+        }
+      },
+      "required": ["ops"],
+      "additionalProperties": false
+    },
+    "request_span": {
+      "type": "object",
+      "description": "The span of a request: a half-open byte range in one of the request files (§7).",
+      "properties": {
+        "file": { "type": "string" },
+        "start": { "$ref": "#/$defs/offset" },
+        "end": { "$ref": "#/$defs/offset" }
+      },
+      "required": ["file", "start", "end"],
+      "additionalProperties": false
+    },
+    "request": {
+      "type": "object",
+      "description": "The §7 machine-API request, read as one JSON document from standard input.",
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/schema_version" },
+        "command": { "$ref": "#/$defs/command" },
+        "files": {
+          "type": "array",
+          "description": "Source file paths; an empty array is API_NO_FILES.",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "target": {
+          "type": "string",
+          "description": "LLVM-style target triple; when absent, the host target is used."
+        },
+        "span": {
+          "$ref": "#/$defs/request_span",
+          "description": "Required by explain-ownership (API_MISSING_SPAN otherwise) and ignored by every other command."
+        },
+        "edit": {
+          "$ref": "#/$defs/structured_edit",
+          "description": "The structured edit applied by apply-structured-edit."
+        }
+      },
+      "required": ["schema_version", "command", "files"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "command": { "const": "explain-ownership" } }, "required": ["command"] },
+          "then": { "required": ["span"] }
+        },
+        {
+          "if": { "properties": { "command": { "const": "apply-structured-edit" } }, "required": ["command"] },
+          "then": { "required": ["edit"] }
+        }
+      ]
+    },
+    "response": {
+      "type": "object",
+      "description": "The §7 response envelope, written as one JSON document to standard output. result is the command-specific object of #/$defs/results or null.",
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/schema_version" },
+        "ok": { "type": "boolean" },
+        "result": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/results/$defs/check" },
+            { "$ref": "#/$defs/results/$defs/format" },
+            { "$ref": "#/$defs/results/$defs/explain-ownership" },
+            { "$ref": "#/$defs/results/$defs/show-layout" },
+            { "$ref": "#/$defs/results/$defs/show-allocations" },
+            { "$ref": "#/$defs/results/$defs/show-copies" },
+            { "$ref": "#/$defs/results/$defs/show-effects" },
+            { "$ref": "#/$defs/results/$defs/show-bounds-checks" },
+            { "$ref": "#/$defs/results/$defs/emit-ir" },
+            { "$ref": "#/$defs/results/$defs/emit-asm" },
+            { "$ref": "#/$defs/results/$defs/apply-structured-edit" }
+          ]
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/diagnostic" }
+        }
+      },
+      "required": ["schema_version", "ok", "result", "diagnostics"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "$comment": "§7 Failure: ok=false carries a non-empty diagnostics array.",
+          "if": { "properties": { "ok": { "const": false } } },
+          "then": { "properties": { "diagnostics": { "minItems": 1 } } }
+        },
+        {
+          "$comment": "A successful response carries its command's result object.",
+          "if": { "properties": { "ok": { "const": true } } },
+          "then": { "properties": { "result": { "type": "object" } } }
+        }
+      ]
+    },
+    "results": {
+      "$comment": "One result schema per command, keyed by command name under $defs so that the command named format does not collide with the format keyword.",
+      "$defs": {
+        "check": {
+          "type": "object",
+          "description": "check: the files checked; diagnostics carry all findings. Proven by construction (no label).",
+          "properties": {
+            "files": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["files"],
+          "additionalProperties": false
+        },
+        "format": {
+          "type": "object",
+          "description": "format: formatting per spec/format.md. format(format(x)) == format(x), and check(format(x)) yields the same diagnostic codes as check(x).",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "file": { "type": "string" },
+                  "formatted": { "type": "string", "description": "The formatted source text." }
+                },
+                "required": ["file", "formatted"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": ["files"],
+          "additionalProperties": false
+        },
+        "explain-ownership": {
+          "type": "object",
+          "description": "explain-ownership: one entry for every place that intersects the request span.",
+          "properties": {
+            "places": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/place" }
+            }
+          },
+          "required": ["places"],
+          "additionalProperties": false
+        },
+        "show-layout": {
+          "type": "object",
+          "description": "show-layout: size, alignment and field offsets of every type for the target. Proven by construction (no label).",
+          "properties": {
+            "target": { "type": "string" },
+            "types": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "size": { "type": "integer", "minimum": 0 },
+                  "align": { "type": "integer", "minimum": 1 },
+                  "fields": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": { "type": "string" },
+                        "offset": { "type": "integer", "minimum": 0 },
+                        "size": { "type": "integer", "minimum": 0 }
+                      },
+                      "required": ["name", "offset", "size"],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": ["name", "size", "align", "fields"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": ["target", "types"],
+          "additionalProperties": false
+        },
+        "show-allocations": {
+          "type": "object",
+          "description": "show-allocations: every allocation site.",
+          "properties": {
+            "sites": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "loc": { "$ref": "#/$defs/loc" },
+                  "allocator": { "type": "string" },
+                  "size": {
+                    "description": "Static allocation size in bytes, or null when runtime-dependent.",
+                    "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }]
+                  },
+                  "label": { "$ref": "#/$defs/label" }
+                },
+                "required": ["loc", "allocator", "size", "label"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": ["sites"],
+          "additionalProperties": false
+        },
+        "show-copies": {
+          "type": "object",
+          "description": "show-copies: every copy for the target. bytes is the inline size of the type per show-layout; heap is true iff the copy also duplicates owned heap storage, whose size is runtime-dependent and not reported.",
+          "properties": {
+            "target": { "type": "string" },
+            "copies": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "loc": { "$ref": "#/$defs/loc" },
+                  "type": { "type": "string" },
+                  "bytes": { "type": "integer", "minimum": 0 },
+                  "kind": { "type": "string", "enum": ["bitwise", "explicit-deep"] },
+                  "heap": { "type": "boolean" },
+                  "label": { "$ref": "#/$defs/label" }
+                },
+                "required": ["loc", "type", "bytes", "kind", "heap", "label"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": ["target", "copies"],
+          "additionalProperties": false
+        },
+        "show-effects": {
+          "type": "object",
+          "description": "show-effects: effects per function, transitive over statically resolved callees. true means the effect is possible; false means the compiler proved it impossible and is only emitted with label proven. A call through a function pointer or into FFI makes every effect true with label unknown (FFI: assumed-unsafe).",
+          "properties": {
+            "target": { "type": "string" },
+            "functions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "allocates": { "type": "boolean" },
+                  "traps": { "type": "boolean" },
+                  "spawns": { "type": "boolean" },
+                  "unsafe": { "type": "boolean" },
+                  "label": { "$ref": "#/$defs/label" }
+                },
+                "required": ["name", "allocates", "traps", "spawns", "unsafe", "label"],
+                "additionalProperties": false,
+                "if": {
+                  "anyOf": [
+                    { "properties": { "allocates": { "const": false } }, "required": ["allocates"] },
+                    { "properties": { "traps": { "const": false } }, "required": ["traps"] },
+                    { "properties": { "spawns": { "const": false } }, "required": ["spawns"] },
+                    { "properties": { "unsafe": { "const": false } }, "required": ["unsafe"] }
+                  ]
+                },
+                "then": { "properties": { "label": { "const": "proven" } } }
+              }
+            }
+          },
+          "required": ["target", "functions"],
+          "additionalProperties": false
+        },
+        "show-bounds-checks": {
+          "type": "object",
+          "description": "show-bounds-checks: every runtime check and every check replaced by a proof fact. label is runtime-checked or proven; proven_by is non-null iff label is proven.",
+          "properties": {
+            "checks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "loc": { "$ref": "#/$defs/loc" },
+                  "kind": { "type": "string", "enum": ["bounds", "generation", "disjoint", "overflow"] },
+                  "label": { "type": "string", "enum": ["runtime-checked", "proven"] },
+                  "proven_by": {
+                    "description": "The recorded proof fact (loop_bound, dominated_by_check, constant) when label is proven; null otherwise.",
+                    "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+                  }
+                },
+                "required": ["loc", "kind", "label", "proven_by"],
+                "additionalProperties": false,
+                "if": { "properties": { "label": { "const": "proven" } }, "required": ["label"] },
+                "then": { "properties": { "proven_by": { "type": "string" } } },
+                "else": { "properties": { "proven_by": { "type": "null" } } }
+              }
+            }
+          },
+          "required": ["checks"],
+          "additionalProperties": false
+        },
+        "emit-ir": {
+          "type": "object",
+          "description": "emit-ir: textual semantic IR for the request files. Proven by construction (no label).",
+          "properties": {
+            "ir": { "type": "string" }
+          },
+          "required": ["ir"],
+          "additionalProperties": false
+        },
+        "emit-asm": {
+          "type": "object",
+          "description": "emit-asm: native assembly for the target. Proven by construction (no label).",
+          "properties": {
+            "target": { "type": "string" },
+            "asm": { "type": "string" }
+          },
+          "required": ["target", "asm"],
+          "additionalProperties": false
+        },
+        "apply-structured-edit": {
+          "type": "object",
+          "description": "apply-structured-edit: the new source of every changed file plus the diagnostics of a check on the result. Coordinate, overlap and symbol failures are atomic and set ok=false. Once the ops are applied the edit has succeeded (ok=true, applied = number of ops) even if the result does not parse or check: each changed file is returned formatted (formatted=true) when it parses, and verbatim (formatted=false) with the parse diagnostics otherwise.",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "file": { "type": "string" },
+                  "source": { "type": "string", "description": "The new source text of the changed file." },
+                  "formatted": { "type": "boolean", "description": "true when the new source parsed and was formatted; false when returned verbatim." }
+                },
+                "required": ["file", "source", "formatted"],
+                "additionalProperties": false
+              }
+            },
+            "applied": { "type": "integer", "minimum": 0, "description": "Number of request ops applied." }
+          },
+          "required": ["files", "applied"],
+          "additionalProperties": false
+        }
+      }
+    },
+    "place": {
+      "type": "object",
+      "description": "One explain-ownership place.",
+      "properties": {
+        "loc": { "$ref": "#/$defs/loc" },
+        "owner": { "$ref": "#/$defs/loc" },
+        "state": { "type": "string", "enum": ["owned", "moved", "uninitialized", "access"] },
+        "accesses": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/access_entry" }
+        },
+        "drop_at": {
+          "description": "Where the place's static drop occurs, or null when it is moved out or never dropped.",
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/loc" }]
+        },
+        "contract": {
+          "description": "The contract block of the place's declaring function, or null when it has none.",
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/contract" }]
+        },
+        "label": { "$ref": "#/$defs/label" }
+      },
+      "required": ["loc", "owner", "state", "accesses", "drop_at", "contract", "label"],
+      "additionalProperties": false
+    },
+    "access_entry": {
+      "type": "object",
+      "description": "One access of a place.",
+      "properties": {
+        "kind": { "type": "string", "enum": ["view", "edit", "consume", "init"] },
+        "span": { "$ref": "#/$defs/span" },
+        "root": { "$ref": "#/$defs/loc" }
+      },
+      "required": ["kind", "span", "root"],
+      "additionalProperties": false
+    },
+    "contract": {
+      "type": "object",
+      "description": "A contract block: invariant, requires and ensures clauses as source text.",
+      "properties": {
+        "invariant": { "type": "array", "items": { "type": "string" } },
+        "requires": { "type": "array", "items": { "type": "string" } },
+        "ensures": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["invariant", "requires", "ensures"],
+      "additionalProperties": false
+    },
+    "responses": {
+      "$comment": "The envelope specialised per command: result is that command's result object or null.",
+      "$defs": {
+        "check": { "allOf": [{ "$ref": "#/$defs/response" }, { "properties": { "result": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/results/$defs/check" }] } } }] },
+        "format": { "allOf": [{ "$ref": "#/$defs/response" }, { "properties": { "result": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/results/$defs/format" }] } } }] },
+        "explain-ownership": { "allOf": [{ "$ref": "#/$defs/response" }, { "properties": { "result": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/results/$defs/explain-ownership" }] } } }] },
+        "show-layout": { "allOf": [{ "$ref": "#/$defs/response" }, { "properties": { "result": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/results/$defs/show-layout" }] } } }] },
+        "show-allocations": { "allOf": [{ "$ref": "#/$defs/response" }, { "properties": { "result": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/results/$defs/show-allocations" }] } } }] },
+        "show-copies": { "allOf": [{ "$ref": "#/$defs/response" }, { "properties": { "result": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/results/$defs/show-copies" }] } } }] },
+        "show-effects": { "allOf": [{ "$ref": "#/$defs/response" }, { "properties": { "result": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/results/$defs/show-effects" }] } } }] },
+        "show-bounds-checks": { "allOf": [{ "$ref": "#/$defs/response" }, { "properties": { "result": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/results/$defs/show-bounds-checks" }] } } }] },
+        "emit-ir": { "allOf": [{ "$ref": "#/$defs/response" }, { "properties": { "result": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/results/$defs/emit-ir" }] } } }] },
+        "emit-asm": { "allOf": [{ "$ref": "#/$defs/response" }, { "properties": { "result": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/results/$defs/emit-asm" }] } } }] },
+        "apply-structured-edit": { "allOf": [{ "$ref": "#/$defs/response" }, { "properties": { "result": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/results/$defs/apply-structured-edit" }] } } }] }
+      }
+    }
+  }
+}

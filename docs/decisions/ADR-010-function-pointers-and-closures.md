@@ -1,6 +1,6 @@
 # ADR-010: Function pointers now; non-escaping closures later; no escaping closures
 
-**Status:** Open (closes in Phase 1, PLAN.md Phase 1 key decisions)
+**Status:** Decided (Phase 1, 2026-10-26): capture-free function pointers now; non-escaping closures deferred; escaping closures are a non-goal
 **Date:** 2026-10-26
 **Spec:** §2.2 (escaping closures are a non-goal), §4 (function values, closures deferred),
 §5.5 (`spawn` takes a function and owned arguments), §5.8 (callbacks retaining references),
@@ -126,8 +126,11 @@ Excluded: escaping closures would need lifetimes, which is the whole of what ADR
 
 ## Conclusion
 
-Leading option: plain capture-free function pointers plus owned context values, which is
-what Phase 0 and Phase 1 implement. The record closes in Phase 1 when the Phase 1 report
+Decided in Phase 1: plain capture-free function pointers plus owned context values. The Phase 1
+report records the function-value fixtures passing (callback_retains_view_ok, thread_handoff,
+hello) and the Phase 0 workload notes show that no §8 workload needed a closure for
+correctness or for the 10% target (thread_pool uses `(func, own Box[Task])` jobs). The
+record was:  The record closes in Phase 1 when the Phase 1 report
 records (a) the function-value fixtures passing and (b) the workload notes showing that no
 §8 workload needed a closure for correctness or for the 10% target. If a note shows the
 `(func, own context)` rewrite fails for a workload, the next step is non-escaping,
