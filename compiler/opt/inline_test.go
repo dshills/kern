@@ -253,6 +253,40 @@ func main() -> i32 {
 	}
 }
 
+// TestInlineReturnInsideUnsafe inlines callees that return from inside an
+// unsafe block, at depth one and two, into a short-circuit condition inside
+// the caller's own unsafe block: the copy must close the callee's open
+// regions before the branch to the join, or the join's depth disagrees
+// between the short-circuit path and the inlined path.
+func TestInlineReturnInsideUnsafe(t *testing.T) {
+	src := `module t
+contract { requires "x is small" }
+func bump(x: u64) -> u64 { unsafe { return x + 1u64 } }
+contract { requires "x is small" }
+func deep(x: u64) -> u64 {
+    unsafe {
+        if x == 0u64 { return 7u64 }
+        unsafe { return x * 2u64 }
+    }
+}
+contract { requires "nothing" }
+func main() -> i32 {
+    a := 3u64
+    unsafe {
+        if a != 0u64 && bump(a) > 2u64 { print_u64(deep(a)) } else { print_u64(deep(0u64)) }
+    }
+    println()
+    print_u64(deep(0u64))
+    println()
+    return 0i32
+}
+`
+	_, inl := same(t, src)
+	if got := calls(inl.Func("t.main")); len(got) != 0 {
+		t.Fatalf("main still calls %v", got)
+	}
+}
+
 func TestInlineStaysCall(t *testing.T) {
 	cases := map[string]struct{ src, callee string }{
 		"loop": {`module t
@@ -491,6 +525,47 @@ func TestInlineChainBounded(t *testing.T) {
 		if s := size(f); s > MaxGrowth+MaxCalleeSize+8 {
 			t.Fatalf("%s grew to size %d", f.Name, s)
 		}
+	}
+}
+
+// TestInlineThenProve: after inlining, a length guard in the caller proves
+// the byte reader's checks at constant offsets (PLAN.md 6.4).
+func TestInlineThenProve(t *testing.T) {
+	src := `module t
+func rd(p: view[]u8, at: usize) -> u16 {
+    return (u16(p[at]) << 8u32) | u16(p[at + 1usize])
+}
+func parse(pkt: view[]u8) -> u64 {
+    if len(pkt) < 4usize { return 0u64 }
+    return u64(rd(pkt, 0usize)) + u64(rd(pkt, 2usize)) + u64(rd(pkt, 3usize))
+}
+func main() -> i32 {
+    var b: [6]u8 = zero()
+    print_u64(parse(b))
+    println()
+    return 0i32
+}
+`
+	mod := lowerSrc(t, src)
+	if err := Run(mod, Options{Inline: true}); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, b := range mod.Func("t.parse").Blocks {
+		for _, in := range b.Instrs {
+			if cb, ok := in.(*ir.CheckBounds); ok && cb.Index != nil {
+				if cb.Prov.Label == "proven" {
+					got = append(got, cb.Prov.ProvenBy)
+				} else {
+					got = append(got, "runtime")
+				}
+			}
+		}
+	}
+	// offsets 0, 1, 2, 3 are covered by the guard; 4 is not
+	want := "dominated_by_check dominated_by_check dominated_by_check dominated_by_check dominated_by_check runtime"
+	if g := strings.Join(got, " "); g != want {
+		t.Fatalf("checks %q, want %q\n%s", g, want, ir.Print(mod))
 	}
 }
 

@@ -1,0 +1,54 @@
+//! phase: 3
+//! expect: output inlined_params
+// Helpers the release build inlines (PLAN.md 6.3): an own parameter with a
+// destructor (destroyed exactly once, in the copy's exit), a local the
+// helper reassigns, a view of a struct field read
+// through the aliased parameter access, and two return paths that go
+// through result locals. The debug build and the interpreter call them.
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) {
+        print_str("drop ")
+        print_u64(self.id)
+        println()
+    }
+}
+struct Pair { lo: u64; hi: u64 }
+func consume(tk: own Tok, extra: u64) -> u64 {
+    return tk.id + extra
+}
+func twice(n: u64) -> u64 {
+    var m: u64 = n
+    m = m + m
+    return m
+}
+func top(p: view[Pair]) -> u64 {
+    return p.hi
+}
+func pick(p: view[Pair], first: bool) -> u64 {
+    if first { return p.lo }
+    return p.hi
+}
+func main() -> i32 {
+    a := Tok { id: 5u64 }
+    print_u64(consume(a, 1u64))
+    println()
+    n := 4u64
+    print_u64(twice(n))
+    println()
+    print_u64(n)
+    println()
+    q := Pair { lo: 1u64, hi: 7u64 }
+    print_u64(top(q))
+    println()
+    print_u64(pick(q, true))
+    println()
+    print_u64(pick(q, false))
+    println()
+    b := Tok { id: 9u64 }
+    x := consume(b, 0u64)
+    print_u64(x)
+    println()
+    return 0i32
+}

@@ -1,0 +1,20 @@
+//! phase: 3
+//! expect: trap bounds
+//! twin: inlined_bounds_ok
+// The trap happens inside a small helper that the release build inlines
+// into main (PLAN.md 6) and the debug build calls; the record (kind
+// bounds, the helper's own span) is the same in every configuration and
+// both engines.
+module t
+func rd(p: view[]u8, at: usize) -> u16 {
+    return (u16(p[at]) << 8u32) | u16(p[at + 1usize])
+}
+func main() -> i32 {
+    var buf: [4]u8 = zero()
+    buf[1usize] = 9u8
+    print_u64(u64(rd(buf, 0usize)))
+    println()
+    print_u64(u64(rd(buf, 3usize)))
+    println()
+    return 0i32
+}

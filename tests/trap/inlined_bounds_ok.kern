@@ -1,0 +1,17 @@
+//! phase: 3
+//! expect: output inlined_bounds_ok
+// The accepting twin of inlined_bounds: every read stays in range.
+module t
+func rd(p: view[]u8, at: usize) -> u16 {
+    return (u16(p[at]) << 8u32) | u16(p[at + 1usize])
+}
+func main() -> i32 {
+    var buf: [4]u8 = zero()
+    buf[1usize] = 9u8
+    buf[3usize] = 2u8
+    print_u64(u64(rd(buf, 0usize)))
+    println()
+    print_u64(u64(rd(buf, 2usize)))
+    println()
+    return 0i32
+}

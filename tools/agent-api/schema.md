@@ -289,7 +289,7 @@ Effects are transitive over statically resolved callees. `true` means the effect
 
 ### show-bounds-checks
 
-Every `check_*` instruction of the IR, kept or replaced by a recorded proof fact.
+Every `check_*` instruction of the IR, kept or replaced by a recorded proof fact. One entry per source location and kind: the IR occurrences of a location (generic instantiations, the copies the release inliner makes in each caller, and the retained callee while it is still reachable) are aggregated, and the entry is `proven` with the first proven occurrence's `proven_by` only when every occurrence is proven, `runtime-checked` otherwise. The result is computed for the `--opt` level the command runs with: `release` inlines small helpers into their callers before the proof pass, `debug` keeps every call. `show-copies` and `show-allocations` likewise report a location once however many occurrences it has.
 
 #### `ShowBoundsChecksResult`
 

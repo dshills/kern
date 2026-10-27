@@ -60,7 +60,7 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 			e.externDecl(f)
 			continue
 		}
-		if f.Intrinsic {
+		if f.Intrinsic || f.Inlined {
 			continue
 		}
 		e.function(f)

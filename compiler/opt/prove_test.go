@@ -1,4 +1,4 @@
-package lower
+package opt
 
 import (
 	"os"
@@ -8,6 +8,7 @@ import (
 
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/ir"
+	"github.com/dshills/kern/compiler/lower"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
@@ -68,6 +69,76 @@ func wrapped(data: view[]u8, i: usize) -> u64 {
     if j < len(data) { return u64(data[i]) }
     return 0u64
 }
+func header(p: view[]u8) -> u64 {
+    if len(p) < 4usize { return 0u64 }
+    return u64(p[3usize]) + u64(p[4usize])
+}
+func header_ge(p: view[]u8) -> u64 {
+    if len(p) >= 4usize { return u64(p[3usize]) + u64(p[4usize]) }
+    return 0u64
+}
+func header_le(p: view[]u8) -> u64 {
+    if len(p) <= 4usize { return 0u64 }
+    return u64(p[4usize]) + u64(p[5usize])
+}
+func header_rev(p: view[]u8) -> u64 {
+    if 4usize < len(p) { return u64(p[4usize]) + u64(p[5usize]) }
+    return 0u64
+}
+func header_other(p: view[]u8) -> u64 {
+    if 4usize < len(p) { return 0u64 }
+    return u64(p[0usize])
+}
+func signed(p: view[]u8, i: i64) -> u64 {
+    if i < 4i64 { return u64(p[usize(i)]) }
+    return 0u64
+}
+struct Counter { idx: usize; pad: u64 }
+unsafe assert Interior for Counter
+contract { invariant "idx is only ever advanced by one through this view" }
+func bump(c: view[Counter]) { unsafe { c.idx = c.idx + 1usize } }
+func interior_local(a: view[]u8) -> u64 {
+    var c: Counter = Counter { idx: 1usize, pad: 0u64 }
+    i := c.idx
+    if i < len(a) {
+        x := a[i]
+        bump(c)
+        j := c.idx
+        return u64(x) + u64(a[j])
+    }
+    return 0u64
+}
+func same(c: view[Counter]) -> view[Counter] { return c }
+func interior_alias(a: view[]u8) -> u64 {
+    var c: Counter = Counter { idx: 1usize, pad: 0u64 }
+    i := c.idx
+    if i < len(a) {
+        x := a[i]
+        with d := same(c) {
+            bump(d)
+        }
+        j := c.idx
+        return u64(x) + u64(a[j])
+    }
+    return 0u64
+}
+func tail(p: view[]u8) -> view[]u8 { return p[2usize : len(p)] }
+func shorter(p: view[]u8) -> u64 {
+    if len(p) < 4usize { return 0u64 }
+    with q := tail(p) {
+        return u64(q[3usize])
+    }
+}
+func interior(a: view[]u8, c: view[Counter]) -> u64 {
+    i := c.idx
+    if i < len(a) {
+        x := a[i]
+        bump(c)
+        j := c.idx
+        return u64(x) + u64(a[j])
+    }
+    return 0u64
+}
 `
 
 // TestProve checks the proof facts the lowering records on bounds checks
@@ -90,10 +161,11 @@ func TestProve(t *testing.T) {
 	if ds := check.Check(prog); len(ds) > 0 {
 		t.Fatalf("check: %s", ds[0].Message)
 	}
-	mod, ds := Lower(prog)
+	mod, ds := lower.Lower(prog)
 	if len(ds) > 0 {
 		t.Fatalf("lower: %s", ds[0].Message)
 	}
+	Prove(mod)
 	if errs := ir.Validate(mod); len(errs) > 0 {
 		t.Fatalf("validator: %v", errs[0])
 	}
@@ -105,6 +177,21 @@ func TestProve(t *testing.T) {
 		"t.after":   "dominated_by_check runtime",
 		"t.stored":  "dominated_by_check runtime",
 		"t.wrapped": "runtime", // a wrapping addition proves nothing about its operand
+		// `!(len < 4)` proves index 3 and not 4; so does `len >= 4`
+		"t.header":    "dominated_by_check runtime",
+		"t.header_ge": "dominated_by_check runtime",
+		// `!(len <= 4)` proves 4 and not 5; so does `4 < len`
+		"t.header_le":  "dominated_by_check runtime",
+		"t.header_rev": "dominated_by_check runtime",
+		// `!(4 < len)` bounds len from above: nothing about an index
+		"t.header_other": "runtime",
+		// a signed comparison proves nothing
+		"t.signed": "runtime",
+		// a call that receives a view of a local may write it (Interior)
+		"t.interior":       "dominated_by_check runtime",
+		"t.interior_local": "dominated_by_check runtime", // a view of a local passed to a call forgets the local
+		"t.interior_alias": "dominated_by_check runtime", // so does a projection a call returned from that view
+		"t.shorter":        "runtime",                    // a returned projection is not the argument's place
 	}
 	for name, exp := range want {
 		fn := mod.Func(name)

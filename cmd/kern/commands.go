@@ -72,7 +72,7 @@ func resolveChecked(srcs []*source.File) (prog *resolve.Program, ds []diag.Diagn
 }
 
 func showCopies(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
-	mod, ds, err := Build(srcs)
+	mod, ds, err := Build(srcs, cliOpt)
 	if err != nil {
 		return internal(req, err, stdout, stderr)
 	}
@@ -83,7 +83,7 @@ func showCopies(req Request, srcs []*source.File, stdout, stderr io.Writer) int 
 }
 
 func showAllocations(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
-	mod, ds, err := Build(srcs)
+	mod, ds, err := Build(srcs, cliOpt)
 	if err != nil {
 		return internal(req, err, stdout, stderr)
 	}
@@ -94,7 +94,7 @@ func showAllocations(req Request, srcs []*source.File, stdout, stderr io.Writer)
 }
 
 func showBoundsChecks(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
-	mod, ds, err := Build(srcs)
+	mod, ds, err := Build(srcs, cliOpt)
 	if err != nil {
 		return internal(req, err, stdout, stderr)
 	}
@@ -116,7 +116,7 @@ func emitAsm(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
 }
 
 func showEffects(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
-	mod, ds, err := Build(srcs)
+	mod, ds, err := Build(srcs, cliOpt)
 	if err != nil {
 		return internal(req, err, stdout, stderr)
 	}

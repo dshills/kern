@@ -1,0 +1,17 @@
+//! phase: 3
+//! expect: trap bounds
+//! twin: bounds_const_guard_ok
+// `len(p) >= 4` (the Else edge of `len(p) < 4`) proves indexes up to 3; the
+// read at 4 is not covered and traps on a four-byte input.
+module t
+func header(p: view[]u8) -> u64 {
+    if len(p) < 4usize { return 0u64 }
+    return u64(p[3usize]) + u64(p[4usize])
+}
+func main() -> i32 {
+    var b: [4]u8 = zero()
+    b[3usize] = 1u8
+    print_u64(header(b))
+    println()
+    return 0i32
+}

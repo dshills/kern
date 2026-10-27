@@ -14,6 +14,9 @@ func Print(m *Module) string {
 		fmt.Fprintf(&sb, "entry %s\n", m.Entry)
 	}
 	for _, f := range m.Funcs {
+		if f.Inlined {
+			continue // every call was inlined; nothing emits, runs or reports it
+		}
 		sb.WriteString("\n")
 		PrintFunc(&sb, f)
 	}

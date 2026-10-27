@@ -15,8 +15,8 @@ import (
 	"github.com/dshills/kern/compiler/backend/llvm"
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
-	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/lower"
+	"github.com/dshills/kern/compiler/opt"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 	"github.com/dshills/kern/runtime/freestanding"
@@ -124,8 +124,8 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 	if len(ds) > 0 {
 		return ds, nil
 	}
-	if errs := ir.Validate(mod); len(errs) > 0 {
-		return nil, fmt.Errorf("ir: %v", errs[0])
+	if err := opt.Run(mod, opt.OptionsFor(opts.Opt)); err != nil {
+		return nil, fmt.Errorf("ir: %v", err)
 	}
 	if mod.Entry == "" {
 		return nil, errors.New("no main function")
@@ -223,8 +223,8 @@ func EmitAsm(srcs []*source.File, triple string) (string, []diag.Diagnostic, err
 	if len(ds) > 0 {
 		return "", ds, nil
 	}
-	if errs := ir.Validate(mod); len(errs) > 0 {
-		return "", nil, fmt.Errorf("ir: %v", errs[0])
+	if err := opt.Run(mod, opt.Options{}); err != nil {
+		return "", nil, fmt.Errorf("ir: %v", err)
 	}
 	if triple == "" {
 		triple = HostTriple()

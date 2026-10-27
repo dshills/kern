@@ -123,6 +123,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if cliTarget != "" && req.Target != "" && cliTarget != req.Target {
 		return fail(stdout, "API_TARGET_CONFLICT", "CLI --target %s differs from the request target %s", cliTarget, req.Target)
 	}
+	cliOpt = cfg.Opt
 	if cliTarget != "" {
 		req.Target = cliTarget
 	}

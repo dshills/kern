@@ -24,6 +24,7 @@ import (
 	"github.com/dshills/kern/compiler/interp"
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/lower"
+	"github.com/dshills/kern/compiler/opt"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
@@ -39,6 +40,7 @@ type header struct {
 	rule      string
 	twin      string
 	testHooks bool
+	config    string // config: opt=debug|release — the fixture is valid in that configuration only
 	noRecord  bool   // trap-record: none — a custom handler writes no default record
 	cfile     string // c: the C counterpart of an FFI fixture (native-only execution)
 	native    bool   // native-only: true — the interpreter cannot execute it (inline assembly)
@@ -77,6 +79,8 @@ func parseHeader(t *testing.T, f *source.File) header {
 			h.twin = val
 		case "test-hooks":
 			h.testHooks = val == "true"
+		case "config":
+			h.config = val
 		case "trap-record":
 			h.noRecord = val == "none"
 		case "c":
@@ -346,8 +350,8 @@ func execute(t *testing.T, path string, files []*source.File, h header) {
 	if len(ds) > 0 {
 		t.Fatalf("lower: %s", ds[0].Message)
 	}
-	if errs := ir.Validate(mod); len(errs) > 0 {
-		t.Fatalf("validate: %v", errs[0])
+	if err := opt.Run(mod, opt.Options{}); err != nil {
+		t.Fatalf("validate: %v", err)
 	}
 	if mod.Entry == "" {
 		if h.expect != "accept" {
@@ -647,15 +651,32 @@ func nativeOnly(t *testing.T, path string, files []*source.File, h header) {
 // interpreter's: exit status, standard output byte for byte, and the trap
 // record's kind and span (PLAN.md 2.1 differential testing). Stack traps
 // compare by kind only: the native fault handler has no source span
-// (ADR-012). Without clang the native half is skipped and logged.
+// (ADR-012). Without clang the native half is skipped and logged. The
+// build runs in every configuration the fixture is valid in: `--opt debug`
+// (every fixture) and `--opt release` (not one with test hooks, which the
+// release runtime lacks, not an identity-tag trap, which only a debug
+// build raises, and not one whose `config:` names debug), so the release
+// inliner (PLAN.md 6) is compared against the interpreter on every
+// executable fixture.
 func nativeRun(t *testing.T, files []*source.File, h header, wantOut, wantErr []byte, wantStatus int) {
+	t.Helper()
+	if !strings.Contains(h.config, "opt=release") {
+		nativeRunOpt(t, files, h, wantOut, wantErr, wantStatus, "debug")
+	}
+	if h.testHooks || h.code == "identity" || strings.Contains(h.config, "opt=debug") {
+		return
+	}
+	nativeRunOpt(t, files, h, wantOut, wantErr, wantStatus, "release")
+}
+
+func nativeRunOpt(t *testing.T, files []*source.File, h header, wantOut, wantErr []byte, wantStatus int, optLevel string) {
 	t.Helper()
 	if !native.Available() {
 		t.Log("clang not available: native differential run skipped")
 		return
 	}
 	exe := filepath.Join(t.TempDir(), "prog")
-	ds, err := native.Build(files, exe, native.Options{TestHooks: h.testHooks})
+	ds, err := native.Build(files, exe, native.Options{TestHooks: h.testHooks, Opt: optLevel})
 	if err != nil {
 		t.Fatalf("native build: %v", err)
 	}

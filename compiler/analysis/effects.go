@@ -44,7 +44,7 @@ func Effects(mod *ir.Module, target string) diag.ShowEffectsResult {
 	summaries := map[string]*effects{}
 	var defined []*ir.Func
 	for _, f := range mod.Funcs {
-		if f.Intrinsic {
+		if f.Intrinsic || f.Inlined {
 			continue
 		}
 		if f.Extern != "" && len(f.Blocks) == 0 {

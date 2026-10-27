@@ -126,3 +126,14 @@ named proof facts, which keeps `proven_by` explainable. No separate "safe build"
 All memory- and arithmetic-safety checks are on in every build configuration; only the
 identity tag is a debug-only aid. Checks are eliminated only by recorded proof facts, which
 the validator enforces and `show-bounds-checks` reports with labels derived from provenance.
+
+## Implementation note (2026-10-27)
+
+The three proof facts exist: `loop_bound` from the lowering of `for` loops (Phase 1), and
+`dominated_by_check` and `constant` from the proof pass `compiler/opt/prove.go`, which runs on
+every lowered function after the release inliner (`compiler/opt/inline.go`, PLAN.md Phase 6)
+in the pipeline `lower → validate → inline → validate → prove → validate` (`opt.Run`). The
+backend leaves a proven check out; the interpreter executes it, so a wrong proof is a
+disagreement in the differential harness rather than an unchecked access. The reports
+`docs/reports/bounds-check-elimination.md` and `docs/reports/inliner.md` record what each
+pass changed in the measurements.

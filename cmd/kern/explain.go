@@ -44,6 +44,12 @@ func explainOwnership(req Request, srcs []*source.File, stdout, stderr io.Writer
 	if len(lds) > 0 {
 		return internal(req, &InternalError{Err: fmt.Errorf("%s", lds[0].Message)}, stdout, stderr)
 	}
+	// ownership is explained on the lowered IR as written: inlining would
+	// rename a helper's locals and drop its body, and the symbols below
+	// are matched to IR locals by name
+	if errs := ir.Validate(mod); len(errs) > 0 {
+		return internal(req, &InternalError{Err: fmt.Errorf("IR validation: %v", errs[0])}, stdout, stderr)
+	}
 	res := diag.ExplainOwnershipResult{Places: []diag.Place{}}
 	intersects := func(p ast.Pos) bool { return p.Start < req.Span.End && req.Span.Start < p.End }
 	// symbols by position, in order

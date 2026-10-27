@@ -5,6 +5,7 @@
 package analysis
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -75,7 +76,7 @@ func loc(f *ir.Func, p ast.Pos) diag.Loc {
 func Copies(mod *ir.Module, target string) diag.ShowCopiesResult {
 	res := diag.ShowCopiesResult{Target: target, Copies: []diag.Copy{}}
 	for _, f := range mod.Funcs {
-		if f.Library {
+		if f.Library || f.Inlined {
 			continue // user-level facts only (§2.3(a)); the library's internals are not the program's copies
 		}
 		for _, b := range f.Blocks {
@@ -94,8 +95,27 @@ func Copies(mod *ir.Module, target string) diag.ShowCopiesResult {
 			}
 		}
 	}
+	res.Copies = dedupe(res.Copies, func(c diag.Copy) string {
+		return c.Loc.File + "|" + c.Kind + "|" + c.Type + "|" + fmt.Sprint(c.Loc.Span)
+	})
 	sortByLoc(res.Copies, func(c diag.Copy) diag.Loc { return c.Loc })
 	return res
+}
+
+// dedupe keeps the first entry per key: a location reported once however
+// many IR occurrences it has (PLAN.md 6.3).
+func dedupe[T any](xs []T, key func(T) string) []T {
+	seen := map[string]bool{}
+	out := xs[:0]
+	for _, x := range xs {
+		k := key(x)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, x)
+	}
+	return out
 }
 
 func isAggregateCopy(t resolve.Type) bool {
@@ -129,7 +149,7 @@ var allocating = map[string]bool{
 func Allocations(mod *ir.Module) diag.ShowAllocationsResult {
 	res := diag.ShowAllocationsResult{Sites: []diag.AllocationSite{}}
 	for _, f := range mod.Funcs {
-		if f.Library {
+		if f.Library || f.Inlined {
 			continue // the library's own allocations are attributed to the user-level call
 		}
 		for _, b := range f.Blocks {
@@ -168,6 +188,9 @@ func Allocations(mod *ir.Module) diag.ShowAllocationsResult {
 			}
 		}
 	}
+	res.Sites = dedupe(res.Sites, func(s diag.AllocationSite) string {
+		return s.Loc.File + "|" + s.Allocator + "|" + fmt.Sprint(s.Loc.Span)
+	})
 	sortByLoc(res.Sites, func(s diag.AllocationSite) diag.Loc { return s.Loc })
 	return res
 }
@@ -182,19 +205,38 @@ var checking = map[string]string{
 }
 
 // BoundsChecks reports every bounds, overflow, generation and disjointness
-// check with its provenance label.
+// check with its provenance label: one entry per source location and kind,
+// aggregated over the IR occurrences of that location (generic
+// instantiations, the copies inlining makes in each caller, and the
+// retained callee when it is still reachable): proven, with the first
+// proven occurrence's fact, when every occurrence is proven, and
+// runtime-checked otherwise (PLAN.md 6.3).
 func BoundsChecks(mod *ir.Module) diag.ShowBoundsChecksResult {
 	res := diag.ShowBoundsChecksResult{Checks: []diag.BoundsCheck{}}
+	type key struct {
+		loc  diag.Loc
+		kind string
+	}
+	index := map[key]int{}
 	add := func(f *ir.Func, p ast.Pos, kind string, prov ir.Provenance) {
 		c := diag.BoundsCheck{Loc: loc(f, p), Kind: kind, Label: diag.Label(prov.Label)}
 		if prov.Label == "proven" && prov.ProvenBy != "" {
 			by := prov.ProvenBy
 			c.ProvenBy = &by
 		}
+		k := key{c.Loc, kind}
+		if i, seen := index[k]; seen {
+			prev := &res.Checks[i]
+			if c.Label != diag.Label("proven") {
+				prev.Label, prev.ProvenBy = c.Label, nil // one unproven occurrence makes the location runtime-checked
+			}
+			return
+		}
+		index[k] = len(res.Checks)
 		res.Checks = append(res.Checks, c)
 	}
 	for _, f := range mod.Funcs {
-		if f.Library {
+		if f.Library || f.Inlined {
 			continue // the library's checks are reported at the user-level call that performs them
 		}
 		for _, b := range f.Blocks {

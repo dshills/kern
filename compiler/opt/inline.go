@@ -349,7 +349,43 @@ func growthOf(c *ir.Call, g *ir.Func) int {
 		}
 		n += len(c.Dsts)
 	}
+	for _, d := range retDepths(g) {
+		n += d
+	}
 	return n
+}
+
+// retDepths is the unsafe depth at each of g's returns. A function may
+// return from inside an unsafe block (the exit closes the region), but
+// once inlined the return is a branch to the join, so the copy closes
+// the open regions there. Validation guarantees one depth per block.
+func retDepths(g *ir.Func) map[*ir.Block]int {
+	entry := map[*ir.Block]int{g.Entry: 0}
+	out := map[*ir.Block]int{}
+	var visit func(b *ir.Block)
+	visit = func(b *ir.Block) {
+		d := entry[b]
+		for _, in := range b.Instrs {
+			switch in.(type) {
+			case *ir.UnsafeBegin:
+				d++
+			case *ir.UnsafeEnd:
+				d--
+			}
+		}
+		if _, ok := b.Term.(*ir.Ret); ok {
+			out[b] = d
+		}
+		for _, s := range successors(b.Term) {
+			if _, seen := entry[s]; seen {
+				continue
+			}
+			entry[s] = d
+			visit(s)
+		}
+	}
+	visit(g.Entry)
+	return out
 }
 
 // copier maps the callee's values, locals and blocks to the caller's copies.
@@ -532,6 +568,7 @@ func rewrite(f *ir.Func, b *ir.Block, k int, c *ir.Call, g *ir.Func) {
 	// returns: a single ret whose values are distinct and defined in g
 	// defines the call's destinations directly; otherwise result locals
 	direct, rets := retPlan(c, g, aliased)
+	depths := retDepths(g)
 	if direct {
 		for i, v := range rets[0].Term.(*ir.Ret).Vals {
 			m.vals[v] = c.Dsts[i]
@@ -567,6 +604,9 @@ func rewrite(f *ir.Func, b *ir.Block, k int, c *ir.Call, g *ir.Func) {
 				for i, v := range r.Vals {
 					nb.Instrs = append(nb.Instrs, &ir.Store{Place: ir.Place{Local: results[i]}, Src: m.v(v)}, &ir.Init{Place: ir.Place{Local: results[i]}})
 				}
+			}
+			for d := depths[blk]; d > 0; d-- {
+				nb.Instrs = append(nb.Instrs, &ir.UnsafeEnd{})
 			}
 			nb.Term = &ir.Br{Target: cont}
 			continue

@@ -408,3 +408,81 @@ func TestStructuredEdit(t *testing.T) {
 		t.Fatalf("effects of twice: %v", seen["m.twice"])
 	}
 }
+
+// TestBoundsChecksAggregated: after inlining (release), a check inside a
+// helper inlined at two call sites is reported once, with the proof the
+// copies carry; a helper whose body is retained (taken by func_ref) keeps
+// the weaker label when the retained body cannot prove it (PLAN.md 6.3).
+func TestBoundsChecksAggregated(t *testing.T) {
+	dir := t.TempDir()
+	src := `module t
+func rd(p: view[]u8, at: usize) -> u16 {
+    return (u16(p[at]) << 8u32) | u16(p[at + 1usize])
+}
+func parse(pkt: view[]u8) -> u64 {
+    if len(pkt) < 4usize { return 0u64 }
+    return u64(rd(pkt, 0usize)) + u64(rd(pkt, 2usize))
+}
+func main() -> i32 {
+    var b: [6]u8 = zero()
+    print_u64(parse(b))
+    println()
+    return 0i32
+}
+`
+	path := filepath.Join(dir, "agg.kern")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	count := func(opt string) (int, map[string]int) {
+		code, resp, _ := runWith(t, []string{"show-bounds-checks", "--opt=" + opt, path}, "")
+		if code != 0 || !resp.OK {
+			t.Fatalf("show-bounds-checks --opt=%s: exit %d resp %+v", opt, code, resp)
+		}
+		checks := resp.Result.(map[string]any)["checks"].([]any)
+		labels := map[string]int{}
+		n := 0
+		for _, c := range checks {
+			cm := c.(map[string]any)
+			if cm["kind"] != "bounds" {
+				continue
+			}
+			n++
+			labels[cm["label"].(string)]++
+		}
+		return n, labels
+	}
+	// the helper's two reads: one entry each in both configurations
+	nDebug, lDebug := count("debug")
+	nRelease, lRelease := count("release")
+	if nDebug != 2 || nRelease != 2 {
+		t.Fatalf("expected the helper's two bounds checks once each, got debug %d release %d", nDebug, nRelease)
+	}
+	if lDebug["proven"] != 0 {
+		t.Fatalf("debug keeps the call: nothing proven, got %v", lDebug)
+	}
+	if lRelease["proven"] != 2 {
+		t.Fatalf("release inlines the helper under the guard: both reads proven, got %v", lRelease)
+	}
+	// a retained body (the helper also taken as a function value) keeps the location runtime-checked
+	src2 := strings.Replace(src, "func main() -> i32 {\n", "func apply(f: func(view[]u8, usize) -> u16, p: view[]u8) -> u16 { return f(p, 1usize) }\nfunc main() -> i32 {\n    var c: [6]u8 = zero()\n    print_u64(u64(apply(rd, c)))\n    println()\n", 1)
+	path2 := filepath.Join(dir, "agg2.kern")
+	if err := os.WriteFile(path2, []byte(src2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, resp, _ := runWith(t, []string{"show-bounds-checks", "--opt=release", path2}, "")
+	if code != 0 || !resp.OK {
+		t.Fatalf("show-bounds-checks: exit %d resp %+v", code, resp)
+	}
+	n, labels := 0, map[string]int{}
+	for _, c := range resp.Result.(map[string]any)["checks"].([]any) {
+		cm := c.(map[string]any)
+		if cm["kind"] == "bounds" {
+			n++
+			labels[cm["label"].(string)]++
+		}
+	}
+	if n != 2 || labels["runtime-checked"] != 2 {
+		t.Fatalf("a retained body keeps its reads runtime-checked: got %d entries %v", n, labels)
+	}
+}

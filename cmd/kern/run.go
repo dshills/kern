@@ -11,6 +11,7 @@ import (
 	"github.com/dshills/kern/compiler/interp"
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/lower"
+	"github.com/dshills/kern/compiler/opt"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
@@ -32,7 +33,7 @@ type BuildOptions struct {
 
 // Build resolves, checks, lowers and validates a program. Diagnostics are
 // returned for user errors; a validator failure is an internal error.
-func Build(srcs []*source.File) (*ir.Module, []diag.Diagnostic, error) {
+func Build(srcs []*source.File, optLevel string) (*ir.Module, []diag.Diagnostic, error) {
 	prog := resolve.Resolve(srcs)
 	if len(prog.Diags) > 0 {
 		return nil, prog.Diags, nil
@@ -44,11 +45,15 @@ func Build(srcs []*source.File) (*ir.Module, []diag.Diagnostic, error) {
 	if len(ds) > 0 {
 		return nil, nil, &InternalError{Err: fmt.Errorf("%s", ds[0].Message)}
 	}
-	if errs := ir.Validate(mod); len(errs) > 0 {
-		return nil, nil, &InternalError{Err: fmt.Errorf("IR validation: %v", errs[0])}
+	if err := opt.Run(mod, opt.OptionsFor(optLevel)); err != nil {
+		return nil, nil, &InternalError{Err: fmt.Errorf("IR validation after %v", err)}
 	}
 	return mod, nil, nil
 }
+
+// cliOpt is the `--opt` level of the current machine command, set by main
+// before dispatch (the §16 request carries no configuration).
+var cliOpt = "debug"
 
 // parseRunArgs separates the run subcommand's flags, files and program args.
 func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
@@ -119,7 +124,7 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 		}
 		srcs = append(srcs, f)
 	}
-	mod, ds, err := Build(srcs)
+	mod, ds, err := Build(srcs, opts.Opt)
 	req := Request{SchemaVersion: diag.SchemaVersion, Command: "run", Files: files}
 	if err != nil {
 		return internal(req, err, stdout, stderr)
@@ -141,7 +146,7 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 
 // emitIR implements the emit-ir machine command.
 func emitIR(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
-	mod, ds, err := Build(srcs)
+	mod, ds, err := Build(srcs, cliOpt)
 	if err != nil {
 		return internal(req, err, stdout, stderr)
 	}

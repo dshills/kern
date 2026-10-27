@@ -1,4 +1,4 @@
-package lower
+package opt
 
 import (
 	"fmt"
@@ -24,16 +24,27 @@ import (
 //   - constant: a literal index into an array whose length its type gives.
 //
 // Two equivalences hold everywhere: a local stored exactly once (and never
-// moved from or opened for edit) holds that value wherever it is read, the
-// checker having rejected reads before the store; and the length of an
-// access value never changes. Nothing else is assumed: a wrapping
-// addition, a value loaded through an access, and whatever a call or a
-// store through an edit access may have changed are opaque.
+// moved from or accessed, by view or edit) holds that value wherever it is
+// read, the checker having rejected reads before the store; and the length
+// of an access value never changes. An access opened on another access denotes
+// the same place (a reborrow), so places are resolved through those before
+// they are named. Nothing else is assumed: a wrapping addition proves
+// nothing, a store through an access or a call forgets every local it may
+// reach (a call may write through any access it receives, an edit or a
+// view of an Interior value), and a global is opaque.
+func Prove(mod *ir.Module) {
+	for _, f := range mod.Funcs {
+		if !f.Inlined {
+			prove(f)
+		}
+	}
+}
+
 func prove(f *ir.Func) {
 	if f.Entry == nil {
 		return
 	}
-	p := &prover{f: f, def: map[*ir.Value]ir.Instr{}, equiv: map[*ir.Value]*ir.Value{}, edits: map[*ir.Local]bool{}, clen: map[*ir.Value]uint64{}, out: map[*ir.Block]*facts{}, single: map[*ir.Local]*ir.Value{}, alens: map[string]*ir.Value{}}
+	p := &prover{f: f, def: map[*ir.Value]ir.Instr{}, equiv: map[*ir.Value]*ir.Value{}, edits: map[*ir.Local]bool{}, accessed: map[*ir.Local]bool{}, alias: map[*ir.Value][]*ir.Value{}, clen: map[*ir.Value]uint64{}, out: map[*ir.Block]*facts{}, single: map[*ir.Local]*ir.Value{}, alens: map[string]*ir.Value{}, reborrow: map[*ir.Value]ir.Place{}}
 	stores := map[*ir.Local]int{}
 	unstable := map[*ir.Local]bool{}
 	for _, b := range f.Blocks {
@@ -43,11 +54,38 @@ func prove(f *ir.Func) {
 			}
 			switch i := in.(type) {
 			case *ir.AccessBegin:
-				if i.Edit && i.Place.Local != nil {
-					p.edits[i.Place.Local] = true
-					unstable[i.Place.Local] = true
+				p.reborrow[i.Dst] = i.Place
+				if base := p.resolve(i.Place); base.Local != nil {
+					// any access to the local makes it unstable: a callee may
+					// write through an edit, or through a view of an Interior
+					// value, so its stored value is not the value it holds
+					unstable[base.Local] = true
+					p.accessed[base.Local] = true
+					if i.Edit {
+						p.edits[base.Local] = true
+					}
+				}
+			case *ir.Call:
+				// a returned projection may alias the access argument it was
+				// derived from (the checker requires exactly one access source
+				// for a returned access, and the validator roots it there; every
+				// access argument is kept as a candidate regardless): it is
+				// never the same place, only something a write through it may
+				// reach
+				for _, d := range i.Dsts {
+					if _, isAcc := d.Type.(*resolve.Access); !isAcc {
+						continue
+					}
+					for _, a := range i.Args {
+						if _, ok := a.Type.(*resolve.Access); ok {
+							p.alias[d] = append(p.alias[d], a)
+						}
+					}
 				}
 			case *ir.Store:
+				// Init is not a write: it marks the place initialized by the
+				// store before it (or by a call through an access, which
+				// excludes the local above) and has no runtime effect
 				if i.Place.Local != nil {
 					stores[i.Place.Local]++
 					if len(i.Place.Path) == 0 && stores[i.Place.Local] == 1 {
@@ -91,14 +129,17 @@ func prove(f *ir.Func) {
 }
 
 type prover struct {
-	f      *ir.Func
-	def    map[*ir.Value]ir.Instr  // the defining instruction of every value
-	equiv  map[*ir.Value]*ir.Value // a loaded or length value known equal to an earlier one
-	edits  map[*ir.Local]bool      // locals an edit access is opened on somewhere in the function
-	clen   map[*ir.Value]uint64    // length values of arrays, from their types
-	out    map[*ir.Block]*facts    // the state at the end of each processed block
-	single map[*ir.Local]*ir.Value // locals stored exactly once: the value they hold everywhere
-	alens  map[string]*ir.Value    // the first Len of each place rooted at an access value
+	f        *ir.Func
+	def      map[*ir.Value]ir.Instr    // the defining instruction of every value
+	equiv    map[*ir.Value]*ir.Value   // a loaded or length value known equal to an earlier one
+	edits    map[*ir.Local]bool        // locals an edit access is opened on somewhere in the function
+	accessed map[*ir.Local]bool        // locals any access is opened on somewhere in the function
+	alias    map[*ir.Value][]*ir.Value // a returned projection: the access arguments it may alias (invalidation only, never identity)
+	clen     map[*ir.Value]uint64      // length values of arrays, from their types
+	out      map[*ir.Block]*facts      // the state at the end of each processed block
+	single   map[*ir.Local]*ir.Value   // locals stored exactly once: the value they hold everywhere
+	alens    map[string]*ir.Value      // the first Len of each place rooted at an access value
+	reborrow map[*ir.Value]ir.Place    // the place each access value denotes: what it was opened on
 }
 
 // facts is the state at a program point.
@@ -156,6 +197,49 @@ func (p *prover) invalidateEdits(s *facts) {
 	}
 }
 
+// invalidateAccessed forgets every local any access was opened on: an
+// access of unknown origin (a parameter, a projection a call returned
+// without an access argument) may reach any of them, through an edit or a
+// view of an Interior value.
+func (p *prover) invalidateAccessed(s *facts) {
+	for l := range p.accessed {
+		s.invalidate(l)
+	}
+}
+
+// forgetReached forgets what a write through the access may reach: the
+// local it resolves to; for a returned projection, every local any of the
+// access arguments it may alias resolves to, transitively; and every
+// accessed local as soon as one origin is unknown.
+func (p *prover) forgetReached(s *facts, a *ir.Value) {
+	seen := map[*ir.Value]bool{}
+	var walk func(a *ir.Value) bool
+	walk = func(a *ir.Value) bool {
+		if seen[a] {
+			return true
+		}
+		seen[a] = true
+		if _, root := p.placeKey(ir.Place{Access: a}); root != nil {
+			s.invalidate(root)
+			return true
+		}
+		cands, ok := p.alias[a]
+		if !ok {
+			return false // a parameter, or a projection with no access argument: unknown
+		}
+		known := true
+		for _, c := range cands {
+			if !walk(c) {
+				known = false
+			}
+		}
+		return known
+	}
+	if !walk(a) {
+		p.invalidateAccessed(s)
+	}
+}
+
 func (p *prover) instr(s *facts, in ir.Instr) {
 	switch i := in.(type) {
 	case *ir.Load:
@@ -165,7 +249,7 @@ func (p *prover) instr(s *facts, in ir.Instr) {
 				return
 			}
 		}
-		if key, ok := p.localKey(i.Place); ok {
+		if key, root := p.placeKey(i.Place); root != nil {
 			if v, known := s.locals[key]; known {
 				p.equiv[i.Dst] = v
 			} else {
@@ -173,42 +257,58 @@ func (p *prover) instr(s *facts, in ir.Instr) {
 			}
 		}
 	case *ir.Store:
-		if i.Place.Local != nil {
-			s.invalidate(i.Place.Local)
-			if key, ok := p.localKey(i.Place); ok {
-				s.locals[key] = p.canon(i.Src)
-			}
+		key, root := p.placeKey(i.Place)
+		if root == nil {
+			p.forgetReached(s, i.Place.Access)
 			return
 		}
-		p.invalidateEdits(s)
+		s.invalidate(root)
+		s.locals[key] = p.canon(i.Src)
 	case *ir.Move:
-		if i.Src.Local != nil {
-			s.invalidate(i.Src.Local)
+		if _, root := p.placeKey(i.Src); root != nil {
+			s.invalidate(root)
 			return
 		}
-		p.invalidateEdits(s)
+		p.forgetReached(s, i.Src.Access)
 	case *ir.Drop:
-		if i.Place.Local != nil {
-			s.invalidate(i.Place.Local)
+		if _, root := p.placeKey(i.Place); root != nil {
+			s.invalidate(root)
 			return
 		}
-		p.invalidateEdits(s)
+		p.forgetReached(s, i.Place.Access)
 	case *ir.Init:
-		if i.Place.Local != nil {
-			s.invalidate(i.Place.Local)
+		if _, root := p.placeKey(i.Place); root != nil {
+			s.invalidate(root)
+			return
 		}
+		p.forgetReached(s, i.Place.Access)
 	case *ir.AccessBegin:
-		if i.Edit && i.Place.Local != nil {
-			s.invalidate(i.Place.Local)
+		p.reborrow[i.Dst] = i.Place // the access denotes the place it was opened on
+		if _, root := p.placeKey(i.Place); root != nil && i.Edit {
+			s.invalidate(root)
 		}
 	case *ir.Call:
+		// the callee may write through any access it receives: an edit, or a
+		// view of an Interior value (unsafe code in its declaring module);
+		// an argument whose origin is unknown may reach any accessed local
+		for _, a := range i.Args {
+			if _, isAcc := a.Type.(*resolve.Access); isAcc {
+				p.forgetReached(s, a)
+			}
+		}
 		p.invalidateEdits(s)
 	case *ir.Len:
-		if n, ok := arrayLen(i.Place); ok {
+		place := p.resolve(i.Place)
+		if n, ok := arrayLen(place); ok {
 			p.clen[i.Dst] = n
 		}
-		if i.Place.Access != nil {
-			key, _ := p.lenKey(i.Place)
+		key, root := p.placeKey(i.Place)
+		if key == "" {
+			return
+		}
+		if root == nil {
+			// rooted at an access value (a parameter or a returned
+			// projection): immutable, so the length holds everywhere
 			if v, known := p.alens[key]; known {
 				p.equiv[i.Dst] = v
 			} else {
@@ -216,12 +316,10 @@ func (p *prover) instr(s *facts, in ir.Instr) {
 			}
 			return
 		}
-		if key, ok := p.lenKey(i.Place); ok {
-			if v, known := s.lens[key]; known {
-				p.equiv[i.Dst] = v
-			} else {
-				s.lens[key] = i.Dst
-			}
+		if v, known := s.lens[key]; known {
+			p.equiv[i.Dst] = v
+		} else {
+			s.lens[key] = i.Dst
 		}
 	case *ir.CheckBounds:
 		if i.Index == nil {
@@ -246,8 +344,8 @@ func (p *prover) instr(s *facts, in ir.Instr) {
 }
 
 // edgeFacts adds what the branch from pred to b establishes: the Then edge
-// of `a < b` or `a > b`, the Else edge of `a >= b` or `a <= b`, on
-// unsigned operands.
+// of `a < b` or `a > b`, the Else edge of `a >= b` or `a <= b`, and the
+// strict bound a literal gives on the other edges, on unsigned operands.
 func (p *prover) edgeFacts(s *facts, pred, b *ir.Block) {
 	cb, ok := pred.Term.(*ir.CondBr)
 	if !ok || cb.Then == cb.Else {
@@ -263,6 +361,13 @@ func (p *prover) edgeFacts(s *facts, pred, b *ir.Block) {
 		lo, hi = cmp.L, cmp.R
 	case b == cb.Then && cmp.Op == ">", b == cb.Else && cmp.Op == "<=":
 		lo, hi = cmp.R, cmp.L
+	case b == cb.Else && cmp.Op == "<", b == cb.Then && cmp.Op == ">=":
+		// `len >= K` (the Else edge of `len < K`, the Then edge of `len >= K`)
+		// with a literal K >= 1 establishes K - 1 < len
+		if k, ok := p.constant(p.canon(cmp.R)); ok && k >= 1 {
+			s.addLt(nil, k-1, p.canon(cmp.L))
+		}
+		return
 	default:
 		return
 	}
@@ -316,25 +421,36 @@ func (p *prover) constant(v *ir.Value) (uint64, bool) {
 	return c.Int, true
 }
 
-// localKey names a place rooted at a local, with its path.
-func (p *prover) localKey(pl ir.Place) (string, bool) {
-	if pl.Local == nil {
-		return "", false
+// resolve follows access values to what they were opened on (a local, or
+// another access: a reborrow), so a place rooted at one is the opened
+// place extended by the path; a parameter access, or a projection a call
+// returned (which may be a sub-slice or a field of its argument), has no
+// exact origin and stays as it is.
+func (p *prover) resolve(pl ir.Place) ir.Place {
+	for pl.Access != nil {
+		base, ok := p.reborrow[pl.Access]
+		if !ok {
+			return pl
+		}
+		path := append(append([]ir.PathElem(nil), base.Path...), pl.Path...)
+		pl = ir.Place{Local: base.Local, Access: base.Access, Global: base.Global, Path: path}
 	}
-	return fmt.Sprintf("l%d|", pl.Local.ID) + p.pathKey(pl.Path), true
+	return pl
 }
 
-// lenKey names a place whose length is stable until its root changes: one
-// rooted at a local, or at an access value (an immutable pointer and
-// length pair).
-func (p *prover) lenKey(pl ir.Place) (string, bool) {
+// placeKey names a place after resolving reborrows: "l<id>|path" with the
+// root local when it reaches one, "a<id>|path" with no root when it stays
+// rooted at an access value (a parameter or a returned projection), and
+// "" for a global.
+func (p *prover) placeKey(pl ir.Place) (string, *ir.Local) {
+	pl = p.resolve(pl)
 	switch {
 	case pl.Local != nil:
-		return p.localKey(pl)
+		return fmt.Sprintf("l%d|", pl.Local.ID) + p.pathKey(pl.Path), pl.Local
 	case pl.Access != nil:
-		return fmt.Sprintf("a%d|", pl.Access.ID) + p.pathKey(pl.Path), true
+		return fmt.Sprintf("a%d|", pl.Access.ID) + p.pathKey(pl.Path), nil
 	}
-	return "", false
+	return "", nil
 }
 
 func (p *prover) pathKey(path []ir.PathElem) string {
@@ -410,64 +526,6 @@ func unsigned(t resolve.Type) bool {
 		return true
 	}
 	return false
-}
-
-// defs lists the values an instruction defines.
-func defs(in ir.Instr) []*ir.Value {
-	switch i := in.(type) {
-	case *ir.Const:
-		return []*ir.Value{i.Dst}
-	case *ir.Load:
-		return []*ir.Value{i.Dst}
-	case *ir.Move:
-		return []*ir.Value{i.Dst}
-	case *ir.AccessBegin:
-		return []*ir.Value{i.Dst}
-	case *ir.Call:
-		return i.Dsts
-	case *ir.Binary:
-		return []*ir.Value{i.Dst}
-	case *ir.Unary:
-		return []*ir.Value{i.Dst}
-	case *ir.Conv:
-		return []*ir.Value{i.Dst}
-	case *ir.Len:
-		return []*ir.Value{i.Dst}
-	case *ir.MakeStruct:
-		return []*ir.Value{i.Dst}
-	case *ir.MakeUnion:
-		return []*ir.Value{i.Dst}
-	case *ir.MakeArray:
-		return []*ir.Value{i.Dst}
-	case *ir.Zero:
-		return []*ir.Value{i.Dst}
-	case *ir.Tag:
-		return []*ir.Value{i.Dst}
-	case *ir.FuncRef:
-		return []*ir.Value{i.Dst}
-	case *ir.Copy:
-		return []*ir.Value{i.Dst}
-	}
-	return nil
-}
-
-func successors(t ir.Term) []*ir.Block {
-	switch x := t.(type) {
-	case *ir.Br:
-		return []*ir.Block{x.Target}
-	case *ir.CondBr:
-		return []*ir.Block{x.Then, x.Else}
-	case *ir.Switch:
-		var out []*ir.Block
-		for _, b := range x.Cases {
-			out = append(out, b)
-		}
-		if x.Default != nil {
-			out = append(out, x.Default)
-		}
-		return out
-	}
-	return nil
 }
 
 // postorder lists the blocks reachable from entry in reverse postorder:

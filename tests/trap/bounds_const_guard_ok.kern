@@ -1,0 +1,29 @@
+//! phase: 3
+//! expect: output bounds_const_guard_ok
+// The accepting twin of bounds_const_guard: the proven reads below the
+// guard's bound, in both comparison forms, and a short input that takes
+// the guard's exit.
+module t
+func header(p: view[]u8) -> u64 {
+    if len(p) < 4usize { return 100u64 }
+    return u64(p[3usize]) + u64(p[0usize])
+}
+func header_ge(p: view[]u8) -> u64 {
+    if len(p) >= 4usize { return u64(p[3usize]) * 2u64 }
+    return 200u64
+}
+func main() -> i32 {
+    var b: [4]u8 = zero()
+    b[0usize] = 5u8
+    b[3usize] = 1u8
+    print_u64(header(b))
+    println()
+    print_u64(header_ge(b))
+    println()
+    var s: [2]u8 = zero()
+    print_u64(header(s))
+    println()
+    print_u64(header_ge(s))
+    println()
+    return 0i32
+}
