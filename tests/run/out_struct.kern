@@ -1,0 +1,26 @@
+//! phase: 1
+//! expect: output out_struct
+// A struct out parameter initialized field by field, including a nested
+// struct and an array field, is visible in the caller's storage afterwards.
+module run
+struct Inner { x: u64; y: u64 }
+struct Outer { inner: Inner; tag: u64; arr: [3]u64 }
+func init_outer(o: out Outer, base: u64) {
+    o.inner = Inner { x: base, y: base + 1u64 }
+    o.tag = o.inner.x + o.inner.y
+    o.arr = [base, base * 2u64, base * 3u64]
+}
+func init_inner(i: out Inner) {
+    i.x = 40u64
+    i.y = 2u64
+}
+func main() -> i32 {
+    var o: Outer
+    init_outer(out o, 10u64)
+    print_u64(o.inner.x); print_str(" "); print_u64(o.inner.y); print_str(" "); print_u64(o.tag); println()
+    print_u64(o.arr[0]); print_str(" "); print_u64(o.arr[1]); print_str(" "); print_u64(o.arr[2]); println()
+    var i: Inner
+    init_inner(out i)
+    print_u64(i.x + i.y); println()
+    return 0i32
+}

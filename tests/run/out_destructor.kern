@@ -1,0 +1,31 @@
+//! phase: 1
+//! expect: output out_destructor
+// An out parameter of a type with a destructor: the callee initializes the
+// storage once (no destructor runs for the storage it writes into) and the
+// caller destroys the value exactly once, at scope end or on reassignment.
+module run
+struct Noisy { id: u64 }
+impl Noisy {
+    destructor(edit self) { print_str("drop "); print_u64(self.id); println() }
+}
+struct Pair { a: Noisy; b: Noisy }
+func init_noisy(n: out Noisy, id: u64) { n = Noisy { id: id } }
+func init_pair(p: out Pair, id: u64) {
+    p.a = Noisy { id: id }
+    p.b = Noisy { id: id + 1u64 }
+}
+func main() -> i32 {
+    var n: Noisy
+    init_noisy(out n, 1u64)
+    print_str("init "); print_u64(n.id); println()
+    {
+        var p: Pair
+        init_pair(out p, 2u64)
+        print_str("pair "); print_u64(p.a.id); print_str(" "); print_u64(p.b.id); println()
+    }
+    var m: Noisy
+    init_noisy(out m, 4u64)
+    m = Noisy { id: 5u64 }
+    print_str("end"); println()
+    return 0i32
+}

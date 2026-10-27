@@ -1,0 +1,8 @@
+init 1
+pair 2 3
+drop 3
+drop 2
+drop 4
+end
+drop 5
+drop 1
