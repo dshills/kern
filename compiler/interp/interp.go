@@ -39,7 +39,7 @@ type Interp struct {
 	tid        uint64 // this thread's identifier (0 is the main thread)
 	inTrap     bool   // a trap inside the handler terminates
 	// Freestanding selects the freestanding emulation: console device
-	// writes go to standard output and there is no default allocator.
+	// writes go to standard output and the halt line ends the run.
 	Freestanding bool
 }
 

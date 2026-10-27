@@ -1,0 +1,42 @@
+//! phase: 3
+//! expect: output containers
+//! env: freestanding
+// The library containers on bare metal (ADR-011): Vec and Pool allocate
+// through the freestanding runtime's SystemAllocator, a first-fit free list
+// over a static arena. The vector grows through several reallocations, the
+// pool frees and reuses slots, and a checksum of both goes to the console;
+// the interpreter's emulation and both QEMU targets must print the same.
+module fs
+struct Cell { v: u64 }
+func mix(h: u64, x: u64) -> u64 { return (h * 31u64 + x) % 1000003u64 }
+func main() -> i32 {
+    v := Vec[u64].new()
+    for i in 0u64..1000u64 { v.push(i * 7u64) }
+    h := 0u64
+    for i in 0usize..v.len() { h = mix(h, v.get(i)) }
+    print_u64(u64(v.len())); println()
+    print_u64(h); println()
+    // every other slot is freed and the pool refilled: the freed slots are
+    // reused; the checksum covers the surviving and the new elements
+    p := Pool[Cell].new()
+    var ids: [96]PoolId[Cell] = zero()
+    for i in 0usize..64usize {
+        match p.alloc(Cell { v: u64(i) * 3u64 }) {
+            Ok(id) => ids[i] = id
+            Err(e) => return 1i32
+        }
+    }
+    for i in 0usize..32usize { p.free(ids[i * 2usize]) }
+    for i in 0usize..32usize {
+        match p.alloc(Cell { v: 1000u64 + u64(i) }) {
+            Ok(id) => ids[64usize + i] = id
+            Err(e) => return 1i32
+        }
+    }
+    for i in 0usize..96usize {
+        if i >= 64usize || i % 2usize == 1usize { h = mix(h, p.get(ids[i]).v) }
+    }
+    print_u64(u64(p.len())); println()
+    print_u64(h); println()
+    return 0i32
+}

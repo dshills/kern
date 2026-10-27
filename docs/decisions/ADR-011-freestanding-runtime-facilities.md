@@ -150,11 +150,47 @@ and the startup code provide, and nothing else:
 | `kern_fence` | `fence` lowered to a compiler fence |
 | `memcpy`, `memmove`, `memset` | required by LLVM for aggregate moves |
 | `trunc`, `truncf` | the float-to-integer conversion's `llvm.trunc`, a libm call on baseline x86-64 (added 2026-10-27 when the q35 images first ran) |
+| `kern_sysalloc_new`, `kern_sysalloc_alloc`, `kern_sysalloc_realloc`, `kern_sysalloc_free` | the `SystemAllocator` behind the library containers: a first-fit free list over a static 1 MiB arena (`KERN_HEAP_SIZE`) in `.bss`, with the hosted signatures and the §6 obligations (alignment a power of two at most 4096, size a multiple of it, `realloc` keeps the common prefix and leaves the old block on failure, `free` with one allocation's values); exhaustion returns `Err(OutOfMemory)`, never a trap (added 2026-10-27, amendment below) |
+| `kern_next_identity` | the container identity tag counter (spec §5.6): from 1 in debug builds, 0 in a release build (`-DKERN_RELEASE`), as on the hosts (added 2026-10-27) |
 
-No allocator (`SystemAllocator.new` is absent natively and traps `explicit` in the interpreter's
-emulation), no threads, no TLS (none of the three freestanding workloads needs it), no library
-containers (they live in the hosted runtime; freestanding programs use arrays and raw pointers).
-The interpreter's `--env freestanding` emulation implements exactly this contract. The
-undefined-symbol experiment was run by building `tests/freestanding/*.kern` against the empty
-runtime: the set above is what the images demand. QEMU execution is wired in the harness and
-ran nowhere in this phase (no `ld.lld` or QEMU on the development host, `docs/reports/phase-3.md`).
+No threads, no TLS (none of the three freestanding workloads needs it). The interpreter's
+`--env freestanding` emulation implements exactly this contract. The undefined-symbol experiment
+was run by building `tests/freestanding/*.kern` against the empty runtime: the set above is what
+the images demand. QEMU execution is wired in the harness and ran nowhere in this phase (no
+`ld.lld` or QEMU on the development host, `docs/reports/phase-3.md`).
+
+## Amendment (2026-10-27): the system allocator and the library containers
+
+The Phase 3 decision provided no allocator: the containers were C code in the hosted runtime,
+and a freestanding program allocated only through an `Allocator` it supplied. Once `Box`, `Vec`,
+`Pool` and `Arena` became kern code over the raw-pointer core (`docs/reports/containers-in-kern.md`),
+the only thing between a freestanding program and the containers was `SystemAllocator`, which
+the containers call through `heap_alloc`/`heap_realloc`/`heap_free`. The freestanding runtime
+now provides it, so freestanding programs have the containers natively and the interpreter's
+emulation no longer traps `explicit` on `SystemAllocator.new`.
+
+- **Storage.** A static array of `KERN_HEAP_SIZE` (1 MiB) bytes, 4096-aligned, in `.bss`;
+  both linker scripts (`virt.ld`, `q35.ld`) place `.bss` after the image, so no script changed
+  and both targets link. The arena is not in the image file (`NOBITS`); the loaders zero it.
+- **Algorithm.** A first-fit free list sorted by address. Block boundaries are multiples of 16
+  bytes, so a free block always has room for its header (size and next); an allocated block
+  has no header, since `free` and `realloc` receive the allocation's size and alignment (the
+  §6 obligation). A release coalesces with both neighbours; `realloc` shrinks and grows in
+  place when the bytes after the block are free (a `Vec` growing alone in the arena never
+  copies), otherwise takes a new block, copies the common prefix and releases the old one, and
+  on failure leaves the old block. Every allocation is 16-byte aligned at least, as on the hosts.
+- **Failure.** Exhaustion returns `Err(OutOfMemory)`; the convenience constructors (`Box.new`,
+  `Vec.push`) then trap `oom` as in hosted mode. A request that violates the obligations
+  (alignment, size, or a pointer the arena does not hold) traps with kind `explicit`.
+- **Emulation.** The interpreter's freestanding emulation serves `SystemAllocator` from its
+  raw heap exactly as hosted mode does, so a program's console transcript is the same in the
+  emulation and under QEMU on both targets (`tests/freestanding/containers.kern`). The
+  emulation's heap is not bounded by `KERN_HEAP_SIZE`: only the point of exhaustion differs.
+- **Alignment on AArch64.** The images run with the MMU off, where every access is to Device
+  memory and must be aligned to its size; LLVM's vector widening of struct copies (a 16-byte
+  store to an 8-aligned `[N]Vec[T]` element) raised alignment faults as soon as containers were
+  stored in arrays. AArch64 freestanding builds now pass `-mstrict-align`, so compiled code
+  emits only naturally aligned accesses; x86-64 has no such requirement.
+- **Rejected: a bounded emulation heap.** Making the interpreter fail at the same point as the
+  arena would still not agree with it (fragmentation differs), and a program that depends on
+  the exhaustion point is relying on the arena size, which is a build-time constant to change.

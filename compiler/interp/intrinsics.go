@@ -180,12 +180,9 @@ func init() {
 			return []Value{prev}
 		},
 		// allocator stand-in
-		"SystemAllocator.new": func(it *Interp, a []Value, c callCtx) []Value {
-			if it.Freestanding {
-				it.trap("explicit", c.pos) // the freestanding mode provides no default allocator (spec §6)
-			}
-			return []Value{&SysAlloc{}}
-		},
+		// hosted and freestanding alike: the freestanding runtime serves the
+		// system allocator from a static arena (ADR-011)
+		"SystemAllocator.new": func(it *Interp, a []Value, c callCtx) []Value { return []Value{&SysAlloc{}} },
 		"SystemAllocator.alloc": func(it *Interp, a []Value, c callCtx) []Value {
 			size, align := u64(a[1]), u64(a[2])
 			// the §6 obligations: a power-of-two alignment up to 4096 and a size that is a multiple of it

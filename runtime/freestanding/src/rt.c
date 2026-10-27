@@ -1,9 +1,11 @@
 // kern freestanding runtime (PLAN.md 3.1, ADR-011): no OS assumptions, no
-// allocator, no threads. Output goes to a console device (the QEMU virt
-// PL011 UART on AArch64, the 16550 at port 0x3F8 on x86-64); traps run the
-// handler once and halt; exit and halt write a final `{"halt": {"code": n}}`
-// line and power the machine off. trunc/truncf and the memory routines are
-// the libc symbols LLVM may call for in compiled code.
+// threads. Output goes to a console device (the QEMU virt PL011 UART on
+// AArch64, the 16550 at port 0x3F8 on x86-64); traps run the handler once
+// and halt; exit and halt write a final `{"halt": {"code": n}}` line and
+// power the machine off. The system allocator behind the library containers
+// is a first-fit free list over a static arena of KERN_HEAP_SIZE bytes.
+// trunc/truncf and the memory routines are the libc symbols LLVM may call
+// for in compiled code.
 #include <stdint.h>
 #include <stddef.h>
 
@@ -136,3 +138,167 @@ void *memmove(void *d, const void *s, size_t n) {
     return d;
 }
 void *memset(void *d, int c, size_t n) { char *dp = d; while (n--) *dp++ = (char)c; return d; }
+
+// ---- container identity tags (spec §5.6) ----
+
+// kern_next_identity issues the next container identity tag, as the hosted
+// runtime does: a counter from 1 in debug builds, 0 in a release build.
+// Once the counter wraps it stays at 0, which disables the check, rather
+// than issuing tags a second time. There are no threads, so a plain
+// counter suffices.
+static uint32_t kern_identity = 1;
+uint32_t kern_next_identity(void) {
+#ifdef KERN_RELEASE
+    return 0;
+#else
+    if (kern_identity == 0) return 0;
+    return kern_identity++;
+#endif
+}
+
+// ---- SystemAllocator (spec §6, ADR-011) ----
+//
+// The system allocator serves the library containers (Box, Vec, Pool,
+// Arena) from a static arena of KERN_HEAP_SIZE bytes in .bss, which both
+// linker scripts place after the image (virt and q35 alike). It is a
+// first-fit free list: every block boundary is a multiple of
+// KERN_HEAP_GRAIN bytes, a free block keeps its size and the next free
+// block in its first bytes (the list is sorted by address, so a release
+// coalesces with both neighbours), and an allocated block carries no
+// header: free and realloc receive the allocation's size and alignment,
+// the §6 obligation. A request that violates the obligations (alignment
+// not a power of two or above 4096, size not a multiple of it, a pointer
+// the arena does not hold) traps with kind `explicit`; exhaustion returns
+// Err(OutOfMemory) and never traps. Allocations are 16-byte aligned at
+// least, as on the hosts.
+#ifndef KERN_HEAP_SIZE
+#define KERN_HEAP_SIZE (1u << 20)
+#endif
+#define KERN_HEAP_GRAIN 16u
+_Static_assert(KERN_HEAP_SIZE >= KERN_HEAP_GRAIN && KERN_HEAP_SIZE % KERN_HEAP_GRAIN == 0, "KERN_HEAP_SIZE must be a positive multiple of KERN_HEAP_GRAIN");
+
+typedef struct kern_free_block { size_t size; struct kern_free_block *next; } kern_free_block;
+typedef struct { int unused; } kern_sysalloc;
+
+static uint8_t kern_heap[KERN_HEAP_SIZE] __attribute__((aligned(4096)));
+static kern_free_block *kern_free_head = 0;
+static int kern_heap_ready = 0;
+
+static void kern_heap_init(void) {
+    if (kern_heap_ready) return;
+    kern_heap_ready = 1;
+    kern_free_head = (kern_free_block *)kern_heap;
+    kern_free_head->size = KERN_HEAP_SIZE;
+    kern_free_head->next = 0;
+}
+
+// kern_block_size is the arena bytes a request of size occupies: rounded
+// up to the grain, at least one grain (size 0 is a unique pointer); 0 when
+// the request can never fit.
+static size_t kern_block_size(int64_t size) {
+    if ((uint64_t)size > KERN_HEAP_SIZE) return 0;
+    size_t n = ((size_t)size + KERN_HEAP_GRAIN - 1) / KERN_HEAP_GRAIN * KERN_HEAP_GRAIN;
+    return n ? n : KERN_HEAP_GRAIN;
+}
+static size_t kern_block_align(int64_t align) { return (size_t)align < KERN_HEAP_GRAIN ? KERN_HEAP_GRAIN : (size_t)align; }
+static void kern_check_request(int64_t size, int64_t align) {
+    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0);
+}
+// kern_check_block traps unless p with n bytes lies in the arena on a grain
+// boundary: a pointer that was not one allocation's.
+static void kern_check_block(const void *p, size_t n) {
+    uintptr_t a = (uintptr_t)p, lo = (uintptr_t)kern_heap, hi = lo + KERN_HEAP_SIZE;
+    if (a < lo || a >= hi || n > hi - a || (a & (KERN_HEAP_GRAIN - 1)) != 0) kern_trap(11, 0, 0);
+}
+
+// kern_heap_take carves n bytes at alignment al (both multiples of the
+// grain) out of the first free block that fits; the parts of the block
+// before and after the allocation stay free.
+static uint8_t *kern_heap_take(size_t n, size_t al) {
+    kern_free_block *prev = 0;
+    for (kern_free_block *cur = kern_free_head; cur; prev = cur, cur = cur->next) {
+        uintptr_t start = (uintptr_t)cur, end = start + cur->size;
+        uintptr_t a = (start + al - 1) & ~(uintptr_t)(al - 1);
+        if (a > end || end - a < n) continue;
+        kern_free_block **link = prev ? &prev->next : &kern_free_head;
+        kern_free_block *next = cur->next;
+        size_t head = (size_t)(a - start), tail = (size_t)(end - (a + n));
+        *link = next;
+        if (tail) { kern_free_block *t = (kern_free_block *)(a + n); t->size = tail; t->next = next; *link = t; next = t; }
+        if (head) { cur->size = head; cur->next = next; *link = cur; }
+        return (uint8_t *)a;
+    }
+    return 0;
+}
+
+// kern_heap_release returns the n bytes at p to the free list, merging
+// them with a free neighbour on either side.
+static void kern_heap_release(uint8_t *p, size_t n) {
+    kern_free_block *prev = 0, *cur = kern_free_head;
+    while (cur && (uint8_t *)cur < p) { prev = cur; cur = cur->next; }
+    if (cur && p + n == (uint8_t *)cur) { n += cur->size; cur = cur->next; }
+    if (prev && (uint8_t *)prev + prev->size == p) { prev->size += n; prev->next = cur; return; }
+    kern_free_block *b = (kern_free_block *)p;
+    b->size = n;
+    b->next = cur;
+    if (prev) prev->next = b; else kern_free_head = b;
+}
+
+// kern_heap_extend grows the n-byte block at p to m bytes in place when the
+// bytes after it are free; it reports whether it did.
+static int kern_heap_extend(uint8_t *p, size_t n, size_t m) {
+    kern_free_block *prev = 0, *cur = kern_free_head;
+    while (cur && (uint8_t *)cur < p + n) { prev = cur; cur = cur->next; }
+    if (!cur || (uint8_t *)cur != p + n || cur->size < m - n) return 0;
+    kern_free_block **link = prev ? &prev->next : &kern_free_head;
+    size_t rest = cur->size - (m - n);
+    kern_free_block *next = cur->next;
+    if (rest) { kern_free_block *t = (kern_free_block *)(p + m); t->size = rest; t->next = next; *link = t; }
+    else *link = next;
+    return 1;
+}
+
+void *kern_sysalloc_new(void) { static kern_sysalloc a; return &a; }
+void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off) {
+    (void)a;
+    kern_check_request(size, align);
+    kern_heap_init();
+    size_t n = kern_block_size(size);
+    uint8_t *p = n ? kern_heap_take(n, kern_block_align(align)) : 0;
+    if (p == 0) { out[0] = 1; return; } // Err(OutOfMemory)
+    out[0] = 0;
+    memcpy(out + off, &p, sizeof p);
+}
+// kern_sysalloc_realloc shrinks or grows the allocation in place when the
+// arena allows, else takes a new block, copies the common prefix and
+// releases the old one; on failure the old allocation stays.
+void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t size, int64_t align, char *out, int64_t off) {
+    (void)a;
+    kern_check_request(size, align);
+    kern_check_request(old_size, align);
+    kern_heap_init();
+    size_t on = kern_block_size(old_size), n = kern_block_size(size), al = kern_block_align(align);
+    if (on == 0) kern_trap(11, 0, 0); // larger than the arena: not one allocation's size
+    kern_check_block(p, on);
+    uint8_t *q = p;
+    if (n == 0) { out[0] = 1; return; }
+    if (n < on) kern_heap_release(q + n, on - n);
+    else if (n > on && !(((uintptr_t)q & (al - 1)) == 0 && kern_heap_extend(q, on, n))) {
+        uint8_t *np = kern_heap_take(n, al);
+        if (np == 0) { out[0] = 1; return; }
+        memcpy(np, q, (size_t)(old_size < size ? old_size : size));
+        kern_heap_release(q, on);
+        q = np;
+    }
+    out[0] = 0;
+    memcpy(out + off, &q, sizeof q);
+}
+void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align) {
+    (void)a;
+    kern_check_request(size, align);
+    kern_heap_init();
+    size_t n = kern_block_size(size);
+    if (n == 0) kern_trap(11, 0, 0);
+    kern_check_block(p, n);
+    kern_heap_release(p, n);
+}
