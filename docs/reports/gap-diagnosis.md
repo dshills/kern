@@ -184,8 +184,10 @@ Ranked by expected gain per change, with the evidence above:
    6.5 of 7.5, 0.62 → about 0.87.
 4. **Union layout without a byte-array padding slot** (backend): fold
    tag and padding into one integer of the payload's alignment so an
-   `Expr` store is three stores, not ten. A few percent on arena_ast's
-   allocation half; worth taking with 2.
+   `Expr` store is three stores, not ten. Predicted here as a few percent
+   on arena_ast's allocation half; measured below at 34%, because the
+   aggregate also crosses the call to `alloc` by value, as ten scalars
+   under the old shape and three words under the new.
 5. **Big-endian word reads** as a library or intrinsic operation, or a
    backend pattern for shift-or of adjacent byte loads: Rust's lead over C
    on the parser (163 against 136) is this alone.
@@ -229,3 +231,35 @@ agree at the median within 2% for arena_ast (75.7 against 75.2) and
 lock_protected_map (15.2 against 14.9), and scatter between 500 and 730
 for both on lock_free_queue. The three readings are the host's;
 `bench/REPORT.md` is the run as measured.
+
+## Applied next: unions as words of their alignment
+
+The fourth change followed in the next commit. A union's LLVM type was
+`{ tag, [pad x i8], [n x iUnit] }`; it is now `{ [Size/unit x iUnit] }`
+with `unit` the alignment in bits (capped at 64), the same size and
+alignment, `compiler/backend/llvm/types.go`. Nothing reads the shape:
+the tag and every payload field are addressed by byte offset, so only
+the aggregate value changes, and `Expr` goes from `{ i8, [7 x i8],
+[2 x i64] }` to `{ [3 x i64] }`, `Result[ArenaId, AllocErr]` from
+`{ i8, [3 x i8], [2 x i32] }` to `{ [3 x i32] }`.
+
+In `arena_ast_bench.alloc` after `clang -O2` the stores go from 16 to 9,
+and the `Expr` argument crosses the call as three words instead of ten
+scalars, with the `Result` returned as `[3 x i32]`. `alloc` is still out
+of line (103 instructions). Timed on a busy host (one-minute load 4 to
+5, five runs each, the two compilers' binaries interleaved, best three
+of five):
+
+| workload | before (Mops/s) | after |
+|---|---|---|
+| arena_ast | 77.6, 78.4, 78.8 | 104.2, 105.1, 105.2 |
+| packet_parser | 116.3, 120.3 | 115.4, 117.1, 117.4 |
+| wal | 4.7 | 4.63, 4.67, 4.70 |
+
+arena_ast gains 34%: against the quiet-host Rust figure in the method
+table (139.7), that is 0.57 to 0.75. The parser and wal, whose unions
+are already small, do not move.
+Checksums agree on all three, and `go test ./...`, `golangci-lint run
+./...` and the Prism review pass. The full harness was not run for this
+change: the host was busy all evening (Spotlight), and the two
+side-session runs were queued ahead of it.

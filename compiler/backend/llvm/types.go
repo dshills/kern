@@ -118,27 +118,17 @@ func (e *emitter) namedType(n *resolve.Named) string {
 			fmt.Fprintf(&e.decls, "%s = type { %s }\n", name, strings.Join(fields, ", "))
 		}
 	case resolve.KindUnion:
+		// the whole union as words of its alignment: the tag and every
+		// payload field are read and written through byte offsets, so the
+		// shape only matters for the aggregate value passed and stored as a
+		// whole, which this keeps to one store per word (a tag field followed
+		// by a byte array of padding became a store per byte)
 		li := layout.Of(n)
-		tag := "i8"
-		if li.TagSize == 2 {
-			tag = "i16"
+		unit := li.Align * 8
+		if li.Align > 8 {
+			unit = 64
 		}
-		// tag, padding to the payload, then the payload as bytes grouped by alignment
-		pad := li.Payload - li.TagSize
-		pay := li.Size - li.Payload
-		parts := []string{tag}
-		if pad > 0 {
-			parts = append(parts, fmt.Sprintf("[%d x i8]", pad))
-		}
-		if pay > 0 {
-			unit := li.Align * 8
-			if li.Align > 8 {
-				unit = 64
-			}
-			n := pay / (unit / 8)
-			parts = append(parts, fmt.Sprintf("[%d x i%d]", n, unit))
-		}
-		fmt.Fprintf(&e.decls, "%s = type { %s }\n", name, strings.Join(parts, ", "))
+		fmt.Fprintf(&e.decls, "%s = type { [%d x i%d] }\n", name, li.Size/(unit/8), unit)
 	}
 	return name
 }
