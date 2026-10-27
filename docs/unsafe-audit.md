@@ -54,7 +54,7 @@ executions of every fixture compare the containers' behaviour directly.
 | `Box.at` | 1 | `ptr_addr`, `ptr_edit` | requires "p is null or addresses the live T owned by this Box" |
 | `Box.into` | 1 | `heap_free`, `ptr_addr`, `ptr_cast`, `ptr_take` | requires "p is null or addresses the live T owned by this Box; the Box is consumed" |
 | `Box.release` | 1 | `heap_free`, `ptr_addr`, `ptr_cast`, `ptr_take` | requires "p is null (after into) or addresses the live T owned by this Box" |
-| `Vec.reserve` | 1 | `heap_alloc`, `ptr_cast` | requires "data addresses cap elements of which the first size are live" |
+| `Vec.reserve` | 1 | `heap_alloc`, `heap_realloc`, `ptr_cast` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.push` | 1 | `ptr_offset`, `ptr_store` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.pop` | 1 | `ptr_offset`, `ptr_take` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.get` | 1 | `ptr_offset`, `ptr_view` | requires "data addresses cap elements of which the first size are live" |
@@ -63,7 +63,7 @@ executions of every fixture compare the containers' behaviour directly.
 | `Vec.as_edit` | 1 | `ptr_edit_seq` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.clear` | 1 | `ptr_offset`, `ptr_take` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.release` | 1 | `heap_free`, `ptr_cast` | requires "data addresses cap elements of which the first size are live" |
-| `Pool.grow` | 1 | `heap_free`, `heap_try_alloc`, `ptr_addr`, `ptr_cast`, `ptr_copy` | requires "the three buffers hold cap entries; the first count slots are initialized" |
+| `Pool.grow` | 1 | `heap_free`, `heap_try_alloc`, `heap_try_realloc`, `ptr_addr`, `ptr_cast`, `ptr_copy` | requires "the three buffers hold cap entries; the first count slots are initialized" |
 | `Pool.alloc` | 1 | `ptr_load`, `ptr_offset`, `ptr_store` | requires "the three buffers hold cap entries; the first count slots are initialized" |
 | `Pool.check` | 1 | `ptr_load`, `ptr_offset` | requires "the three buffers hold cap entries; the first count slots are initialized" |
 | `Pool.get` | 1 | `ptr_offset`, `ptr_view` | requires "data addresses cap slots; slot idx holds a live element after check" |
@@ -72,7 +72,7 @@ executions of every fixture compare the containers' behaviour directly.
 | `Pool.free` | 1 | `ptr_load`, `ptr_offset`, `ptr_store`, `ptr_take` | requires "data addresses cap slots; slot idx holds a live element after check" |
 | `Pool.seed_generation` | 1 | `ptr_load`, `ptr_offset`, `ptr_store` | requires "the three buffers hold cap entries; the first count slots are initialized" |
 | `Pool.release` | 1 | `heap_free`, `ptr_cast`, `ptr_load`, `ptr_offset`, `ptr_take` | requires "the three buffers hold cap entries; the first count slots are initialized" |
-| `Arena.grow` | 1 | `heap_try_alloc`, `ptr_addr`, `ptr_cast` | requires "data addresses cap elements of which the first size are live" |
+| `Arena.grow` | 1 | `heap_try_alloc`, `heap_try_realloc`, `ptr_addr`, `ptr_cast` | requires "data addresses cap elements of which the first size are live" |
 | `Arena.alloc` | 1 | `ptr_offset`, `ptr_store` | requires "data addresses cap elements of which the first size are live" |
 | `Arena.get` | 1 | `ptr_offset`, `ptr_view` | requires "data addresses cap elements of which the first size are live" |
 | `Arena.at` | 1 | `ptr_edit`, `ptr_offset` | requires "data addresses cap elements of which the first size are live" |
