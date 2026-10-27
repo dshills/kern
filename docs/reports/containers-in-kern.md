@@ -75,6 +75,13 @@ the better of C and Rust (bench/REPORT.md; the previous report was generated
 
 Throughput targets met: 2 workloads before, 3 after; RSS targets met: 11 before and after; checksums identical on all 13.
 
+*Update 2026-10-27, after merging the freestanding allocator and the Pool
+realloc growth fix (`docs/reports/btree-rss.md`):* a full `go run ./bench/harness`
+on `main` (load average 4.9 at start) confirms the three throughput targets
+(buffer_pool 0.92, ring_buffer 1.00, intrusive_run_queue 1.03) and eleven RSS
+targets; btree peak RSS is now 1.44× C instead of 3.21×, and lock_protected_map
+reads 0.61 against 0.55 here. Checksums agree on all thirteen.
+
 The container workloads moved as the Phase 3 report predicted: vector runs
 2.9× faster, hash table, B-tree, WAL, buffer pool and lock-protected map
 1.8–1.9× faster; buffer_pool joins ring_buffer and intrusive_run_queue in
