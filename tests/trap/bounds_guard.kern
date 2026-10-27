@@ -1,0 +1,26 @@
+//! phase: 3
+//! expect: trap bounds
+//! twin: bounds_guard_ok
+// The guard `i + 1 < n` proves p[i] and p[i + 1] in range, so the backend
+// leaves those checks out (the interpreter keeps them); the tail access
+// p[i + 1] under `i < n` is not covered and traps with kind bounds on an
+// odd length.
+module t
+func fold(p: view[]u8) -> u32 {
+    s := 0u32
+    n := len(p)
+    i := 0usize
+    while i + 1usize < n {
+        s = wrapping_add(s, (u32(p[i]) << 8u32) | u32(p[i + 1usize]))
+        i = i + 2usize
+    }
+    if i < n { s = wrapping_add(s, u32(p[i + 1usize])) }
+    return s
+}
+func main() -> i32 {
+    var buf: [5]u8 = zero()
+    buf[0usize] = 1u8
+    print_u64(u64(fold(buf)))
+    println()
+    return 0i32
+}

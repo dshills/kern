@@ -414,6 +414,7 @@ func (l *lowerer) lowerFunc(f *ir.Func, p *pending) {
 		}
 	}
 	sortBlocks(f)
+	prove(f)
 }
 
 func (l *lowerer) lowerDestructor(f *ir.Func, p *pending) {
@@ -439,6 +440,7 @@ func (l *lowerer) lowerDestructor(f *ir.Func, p *pending) {
 		fl.terminate(&ir.Ret{})
 	}
 	sortBlocks(f)
+	prove(f)
 }
 
 func sortBlocks(f *ir.Func) {

@@ -1,0 +1,30 @@
+//! phase: 3
+//! expect: output bounds_guard_ok
+// The accepting twin of bounds_guard: the proven accesses run without
+// their checks natively and the tail access stays in range.
+module t
+func fold(p: view[]u8) -> u32 {
+    s := 0u32
+    n := len(p)
+    i := 0usize
+    while i + 1usize < n {
+        s = wrapping_add(s, (u32(p[i]) << 8u32) | u32(p[i + 1usize]))
+        i = i + 2usize
+    }
+    if i < n { s = wrapping_add(s, u32(p[i]) << 8u32) }
+    return s
+}
+func main() -> i32 {
+    var buf: [5]u8 = zero()
+    buf[0usize] = 1u8
+    buf[4usize] = 2u8
+    print_u64(u64(fold(buf)))
+    println()
+    var a: [4]u64 = zero()
+    a[1usize] = 5u64
+    i := 3usize
+    a[i] = 7u64
+    print_u64(a[1usize] + a[i])
+    println()
+    return 0i32
+}

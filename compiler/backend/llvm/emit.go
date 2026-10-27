@@ -173,22 +173,33 @@ func bareName(name string) string {
 // ---- per-function state ----
 
 type fnEmit struct {
-	e       *emitter
-	f       *ir.Func
-	body    strings.Builder
-	allocas strings.Builder
-	tmp     int
-	vals    map[*ir.Value]string // LLVM register names
-	accs    map[*ir.Value]bool   // values defined by access_begin (they hold addresses)
-	addrs   map[*ir.Value]string // large aggregate values kept in memory: their private copy
-	pstores strings.Builder      // parameter stores into their slots (after the stack check)
-	strs    map[*ir.Value][]byte // string literal values, for inline assembly templates
-	tags    map[*ir.Value]int    // payload-free union literals (memory orderings): their tag
-	packed  map[*ir.Value]bool   // accesses opened inside a packed struct (unaligned places)
-	dbgLoc  string               // the current instruction's !DILocation, "" without debug info
-	align   int                  // alignment override for the next load/store (1 inside packed structs)
-	labels  map[*ir.Block]string
-	cur     *ir.Block
+	e        *emitter
+	f        *ir.Func
+	body     strings.Builder
+	allocas  strings.Builder
+	tmp      int
+	vals     map[*ir.Value]string // LLVM register names
+	accs     map[*ir.Value]bool   // values defined by access_begin (they hold addresses)
+	addrs    map[*ir.Value]string // large aggregate values kept in memory: their private copy
+	pstores  strings.Builder      // parameter stores into their slots (after the stack check)
+	strs     map[*ir.Value][]byte // string literal values, for inline assembly templates
+	tags     map[*ir.Value]int    // payload-free union literals (memory orderings): their tag
+	packed   map[*ir.Value]bool   // accesses opened inside a packed struct (unaligned places)
+	curLabel string               // the basic block being written (a predecessor of the trap block)
+	traps    []trapEdge           // the checks that branch to the function's trap block
+	dbgLoc   string               // the current instruction's !DILocation, "" without debug info
+	align    int                  // alignment override for the next load/store (1 inside packed structs)
+	labels   map[*ir.Block]string
+	cur      *ir.Block
+}
+
+// trapEdge is one check's branch into the function's shared trap block:
+// the block it comes from, and the kind and span its phi entries carry.
+type trapEdge struct {
+	from  string
+	kind  int
+	start string
+	end   string
 }
 
 func (fe *fnEmit) next(prefix string) string {
@@ -440,6 +451,7 @@ func (e *emitter) function(f *ir.Func) {
 	for _, b := range f.Blocks {
 		fe.cur = b
 		fmt.Fprintf(&fe.body, "%s:\n", fe.labels[b])
+		fe.curLabel = fe.labels[b]
 		for _, in := range b.Instrs {
 			if e.dbg != nil {
 				fe.dbgLoc = e.dbg.location(f, instrPos(in))
@@ -450,6 +462,23 @@ func (e *emitter) function(f *ir.Func) {
 			fe.dbgLoc = e.dbg.location(f, f.Pos)
 		}
 		fe.term(b.Term)
+	}
+	if len(fe.traps) > 0 {
+		// one trap landing block per function: every check is a compare
+		// and a branch here, and the kind and span it reports arrive by phi,
+		// so the checks cost LLVM's inliner one call, not one per check
+		var kinds, starts, ends []string
+		for _, t := range fe.traps {
+			kinds = append(kinds, fmt.Sprintf("[ %d, %%%s ]", t.kind, t.from))
+			starts = append(starts, fmt.Sprintf("[ %s, %%%s ]", t.start, t.from))
+			ends = append(ends, fmt.Sprintf("[ %s, %%%s ]", t.end, t.from))
+		}
+		fmt.Fprintf(&fe.body, "trap:\n")
+		fe.emit("%%trap.kind = phi i32 %s", strings.Join(kinds, ", "))
+		fe.emit("%%trap.start = phi i64 %s", strings.Join(starts, ", "))
+		fe.emit("%%trap.end = phi i64 %s", strings.Join(ends, ", "))
+		fe.emit("call void @kern_trap(i32 %%trap.kind, i64 %%trap.start, i64 %%trap.end)")
+		fe.emit("unreachable")
 	}
 	// the entry block: allocas (a stack-pointer adjustment only), then in
 	// freestanding builds the stack-limit check before anything is written
@@ -649,16 +678,16 @@ func (fe *fnEmit) storeTo(t resolve.Type, val, ptr string) {
 
 // ---- instructions ----
 
-// check emits `br i1 cond, trap, cont` with a trap block for kind.
+// check emits `br i1 cond, trap, cont`: the trap block is the function's
+// shared landing block, which reports kind and the span by phi.
 func (fe *fnEmit) check(cond string, kind string, pos ast.Pos) {
 	fe.tmp++
-	t := fmt.Sprintf("tr%d", fe.tmp)
 	c := fmt.Sprintf("ok%d", fe.tmp)
-	fe.emit("br i1 %s, label %%%s, label %%%s", cond, t, c)
-	fmt.Fprintf(&fe.body, "%s:\n", t)
-	fe.emit("call void @kern_trap(i32 %d, %s)", trapKind(kind), fe.span(pos))
-	fe.emit("unreachable")
+	fe.emit("br i1 %s, label %%trap, label %%%s", cond, c)
+	start, end := fe.spanParts(pos)
+	fe.traps = append(fe.traps, trapEdge{from: fe.curLabel, kind: trapKind(kind), start: start, end: end})
 	fmt.Fprintf(&fe.body, "%s:\n", c)
+	fe.curLabel = c
 }
 
 var trapKinds = []string{"bounds", "overflow", "div_zero", "shift", "conversion", "generation", "vacant", "identity", "disjoint", "oom", "stack", "explicit", "unreachable"}
@@ -790,7 +819,10 @@ func (fe *fnEmit) instr(in ir.Instr) {
 		}
 		fe.checkOverflow(i)
 	case *ir.CheckBounds:
-		if e.opts.ElideChecks {
+		if e.opts.ElideChecks || i.Prov.Label == "proven" {
+			// a proven check (spec §7 invariant 3): the lowering recorded
+			// the fact that makes it redundant; the interpreter still
+			// executes it, which the differential harness relies on
 			return
 		}
 		if i.Index != nil {

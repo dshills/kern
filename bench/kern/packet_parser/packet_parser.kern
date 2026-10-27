@@ -46,16 +46,19 @@ func wr32(h: edit[]u8, at: usize, v: u32) {
     wr16(h, at + 2usize, truncate[u16](v))
 }
 
-// sum16 is the folded ones'-complement sum of big-endian 16-bit words.
+// sum16 is the folded ones'-complement sum of big-endian 16-bit words; the
+// 32-bit accumulation wraps, as the C (`uint32_t s += ...`) and Rust
+// (`s += ... as u32`, release) versions do (the sum of a packet's at most
+// 88 words cannot reach 2^32, and the fold reduces any value).
 func sum16(p: view[]u8) -> u16 {
     s := 0u32
     n := len(p)
     i := 0usize
     while i + 1usize < n {
-        s = s + u32(rd16(p, i))
+        s = wrapping_add(s, u32(rd16(p, i)))
         i = i + 2usize
     }
-    if i < n { s = s + (u32(p[i]) << 8u32) }
+    if i < n { s = wrapping_add(s, u32(p[i]) << 8u32) }
     while (s >> 16u32) != 0u32 { s = (s & 65535u32) + (s >> 16u32) }
     return u16(s)
 }

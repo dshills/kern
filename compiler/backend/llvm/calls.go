@@ -307,10 +307,16 @@ func (fe *fnEmit) handle(v *ir.Value) string {
 // Inside a library function the span is the one its caller passed (the
 // user-level call that entered the library), whatever p is.
 func (fe *fnEmit) span(p ast.Pos) string {
+	start, end := fe.spanParts(p)
+	return "i64 " + start + ", i64 " + end
+}
+
+// spanParts renders the two span operands separately (phi entries).
+func (fe *fnEmit) spanParts(p ast.Pos) (string, string) {
 	if fe.f.Library {
-		return "i64 %span.s, i64 %span.e"
+		return "%span.s", "%span.e"
 	}
-	return fmt.Sprintf("i64 %d, i64 %d", p.Start, p.End)
+	return fmt.Sprintf("%d", p.Start), fmt.Sprintf("%d", p.End)
 }
 
 // withSpan appends the span arguments a library callee takes.
