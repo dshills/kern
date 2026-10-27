@@ -31,9 +31,10 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
           echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-20 main" | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
-          sudo apt-get install -y clang-20 lld-20 libclang-rt-20-dev qemu-system-arm qemu-system-x86
+          sudo apt-get install -y clang-20 lld-20 llvm-20 libclang-rt-20-dev qemu-system-arm qemu-system-x86
           sudo update-alternatives --install /usr/local/bin/clang clang /usr/bin/clang-20 100
           sudo update-alternatives --install /usr/local/bin/ld.lld ld.lld /usr/bin/ld.lld-20 100
+          sudo update-alternatives --install /usr/local/bin/llvm-objcopy llvm-objcopy /usr/bin/llvm-objcopy-20 100
 
       - name: Install toolchain (macOS)
         if: runner.os == 'macOS'
@@ -46,6 +47,7 @@ jobs:
         run: |
           clang --version
           ld.lld --version
+          llvm-objcopy --version
           qemu-system-aarch64 --version
           qemu-system-x86_64 --version
 

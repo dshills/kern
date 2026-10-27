@@ -2,6 +2,9 @@
 // library objects (Shared, Mutex, Atomic), threads, the system allocator and
 // the test hooks. Linked by `kern build` with every program. The containers
 // (Box, Vec, Pool, Arena) are kern code in std/core.kern.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE // pthread_getattr_np on glibc
+#endif
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>

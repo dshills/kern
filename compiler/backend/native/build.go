@@ -193,7 +193,7 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 		args = append(args, "-g", "-O0")
 	}
 	args = append(args, opts.ExtraSources...)
-	args = append(args, "-lpthread")
+	args = append(args, "-lpthread", "-lm") // libm: float intrinsics lower to trunc, fmod, ...
 	if triple != HostTriple() {
 		args = append(args, "-target", triple)
 	}
