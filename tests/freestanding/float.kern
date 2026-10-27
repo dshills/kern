@@ -1,0 +1,23 @@
+//! phase: 3
+//! expect: output float
+//! env: freestanding
+// Floating-point and vector arithmetic on bare metal: the startup code must
+// enable SSE (x86-64) and FP/SIMD at EL1 (AArch64), or the first such
+// instruction faults before anything reaches the console. The values come
+// out of loops so the compiler cannot fold the arithmetic away.
+module fs
+func main() -> i32 {
+    sum := 0.0f64
+    i := 0u64
+    while i < 1000u64 { sum = sum + f64(i) * 0.5f64; i = i + 1u64 }
+    print_u64(u64(sum))
+    println()
+    v := [0.0f64, 0.0f64]
+    j := 0u64
+    while j < 100u64 { v = simd_add(v, [f64(j), 1.0f64]); j = j + 1u64 }
+    print_u64(u64(v[0]))
+    println()
+    print_u64(u64(v[1]))
+    println()
+    return 0i32
+}

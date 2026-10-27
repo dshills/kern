@@ -149,6 +149,7 @@ and the startup code provide, and nothing else:
 | `print_u64`, `print_i64`, `print_bool`, `print_str`, `println` | console output through the device (`0x0900_0000` PL011 on `virt`, port `0x3F8` on `q35`) |
 | `kern_fence` | `fence` lowered to a compiler fence |
 | `memcpy`, `memmove`, `memset` | required by LLVM for aggregate moves |
+| `trunc`, `truncf` | the float-to-integer conversion's `llvm.trunc`, a libm call on baseline x86-64 (added 2026-10-27 when the q35 images first ran) |
 
 No allocator (`SystemAllocator.new` is absent natively and traps `explicit` in the interpreter's
 emulation), no threads, no TLS (none of the three freestanding workloads needs it), no library

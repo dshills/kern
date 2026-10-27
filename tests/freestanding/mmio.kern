@@ -1,8 +1,10 @@
 //! phase: 3
 //! expect: output mmio
 //! env: freestanding
+//! target: aarch64
 // Volatile stores to the console device address write bytes directly: the
-// program's own driver for the PL011 data register.
+// program's own driver for the PL011 data register. AArch64 only: on q35 the
+// 16550 console is port I/O, not memory-mapped.
 module fs
 contract { requires "0x0900_0000 is the console device of the target machine" }
 func putc(c: u8) { unsafe { ptr_store_volatile(ptr_from_addr[u8](150994944usize), c) } }

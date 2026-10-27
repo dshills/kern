@@ -44,6 +44,7 @@ type header struct {
 	native    bool   // native-only: true — the interpreter cannot execute it (inline assembly)
 	env       string // env: freestanding — run under the freestanding emulation and build bare-metal
 	tsan      string // tsan: clean | race — build natively with ThreadSanitizer and expect no report, or a report
+	target    string // target: aarch64 | x86_64 — a freestanding fixture tied to one machine's devices
 }
 
 func parseHeader(t *testing.T, f *source.File) header {
@@ -86,6 +87,8 @@ func parseHeader(t *testing.T, f *source.File) header {
 			h.env = val
 		case "tsan":
 			h.tsan = val
+		case "target":
+			h.target = val
 		}
 	}
 	return h
@@ -450,35 +453,76 @@ func freestandingRun(t *testing.T, path string, files []*source.File, h header, 
 		t.Log("clang not available: freestanding build skipped")
 		return
 	}
-	img := filepath.Join(t.TempDir(), "image")
-	ds, err := native.Build(files, img, native.Options{Freestanding: true})
-	if err != nil {
-		t.Fatalf("freestanding build: %v", err)
+	for _, triple := range []string{native.FreestandingTriple, native.FreestandingTripleX8664} {
+		if h.target != "" && !strings.HasPrefix(triple, h.target) {
+			continue // the fixture drives a device only this machine has
+		}
+		img := filepath.Join(t.TempDir(), "image")
+		ds, err := native.Build(files, img, native.Options{Freestanding: true, Triple: triple})
+		if err != nil {
+			t.Fatalf("freestanding build for %s: %v", triple, err)
+		}
+		if len(ds) > 0 {
+			t.Fatalf("freestanding build diagnostics for %s: %s", triple, render(ds))
+		}
+		if !native.Linkable() || !native.QEMUAvailable(triple) {
+			t.Logf("ld.lld or QEMU for %s not available: freestanding image compiled, not run", triple)
+			continue
+		}
+		qemuRun(t, triple, img, want)
 	}
-	if len(ds) > 0 {
-		t.Fatalf("freestanding build diagnostics: %s", render(ds))
-	}
-	if !native.Linkable() || !native.QEMUAvailable() {
-		t.Log("ld.lld or qemu-system-aarch64 not available: freestanding image compiled, not run")
-		return
-	}
+}
+
+// qemuRun boots a freestanding image under QEMU and checks the console
+// transcript and the exit status. The AArch64 guest powers off through PSCI
+// SYSTEM_OFF, so QEMU exits 0; the x86-64 guest writes its halt code to the
+// isa-debug-exit device, so QEMU exits with (code << 1) | 1, of which the
+// process status keeps the low eight bits (PLAN.md 3.1).
+func qemuRun(t *testing.T, triple, img string, want []byte) {
+	t.Helper()
+	emu, args := native.QEMUFor(triple)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "qemu-system-aarch64", "-M", "virt", "-cpu", "cortex-a72", "-serial", "stdio", "-display", "none", "-no-reboot", "-kernel", img)
+	cmd := exec.CommandContext(ctx, emu, append(args, "-kernel", img)...)
 	var qout, qerr bytes.Buffer
 	cmd.Stdout = &qout
 	cmd.Stderr = &qerr
-	err = cmd.Run()
+	err := cmd.Run()
 	if ctx.Err() != nil {
-		t.Fatalf("QEMU did not exit within the budget")
+		t.Fatalf("QEMU (%s) did not exit within the budget", triple)
 	}
-	if err != nil {
-		// PSCI SYSTEM_OFF ends QEMU with status 0; anything else is a guest or emulator failure
-		t.Fatalf("QEMU terminated abnormally: %v\n%s", err, qerr.String())
+	wantStatus := 0
+	if strings.HasPrefix(triple, "x86_64") {
+		wantStatus = ((haltCode(t, want) << 1) | 1) & 0xff
+	}
+	status := 0
+	var exitErr *exec.ExitError
+	switch {
+	case errors.As(err, &exitErr):
+		status = exitErr.ExitCode()
+	case err != nil:
+		t.Fatalf("QEMU (%s): %v\n%s", triple, err, qerr.String())
+	}
+	if status != wantStatus {
+		t.Fatalf("QEMU (%s) exited with status %d, want %d\n%s", triple, status, wantStatus, qerr.String())
 	}
 	if !bytes.Equal(bytes.ReplaceAll(qout.Bytes(), []byte("\r\n"), []byte("\n")), want) {
-		t.Fatalf("QEMU console mismatch:\n--- want\n%s\n--- got\n%s", want, qout.String())
+		t.Fatalf("QEMU (%s) console mismatch:\n--- want\n%s\n--- got\n%s", triple, want, qout.String())
 	}
+}
+
+// haltCode is the code on the halt line that ends a freestanding transcript.
+func haltCode(t *testing.T, transcript []byte) int {
+	t.Helper()
+	lines := bytes.Split(bytes.TrimRight(transcript, "\n"), []byte("\n"))
+	last := lines[len(lines)-1]
+	var rec struct {
+		Halt struct{ Code int }
+	}
+	if err := json.Unmarshal(last, &rec); err != nil {
+		t.Fatalf("transcript does not end with a halt line: %q", last)
+	}
+	return rec.Halt.Code
 }
 
 // tsanRun builds the fixture with ThreadSanitizer and checks that a report

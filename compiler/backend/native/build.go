@@ -53,15 +53,37 @@ type Options struct {
 // FreestandingTriple is the default bare-metal target (QEMU virt).
 const FreestandingTriple = "aarch64-unknown-none-elf"
 
+// FreestandingTripleX8664 is the x86-64 bare-metal target (QEMU q35).
+const FreestandingTripleX8664 = "x86_64-unknown-none-elf"
+
 // Linkable reports whether freestanding images can be linked here (lld).
 func Linkable() bool {
 	_, err := exec.LookPath("ld.lld")
 	return err == nil
 }
 
-// QEMUAvailable reports whether the AArch64 system emulator is installed.
-func QEMUAvailable() bool {
-	_, err := exec.LookPath("qemu-system-aarch64")
+// QEMUFor is the QEMU system emulator and machine arguments for a
+// freestanding triple: the virt machine for AArch64, q35 with the
+// isa-debug-exit device for x86-64 (PLAN.md 3.1). The second result is nil
+// for any other triple.
+func QEMUFor(triple string) (string, []string) {
+	switch {
+	case strings.HasPrefix(triple, "aarch64"):
+		return "qemu-system-aarch64", []string{"-M", "virt", "-cpu", "cortex-a72", "-serial", "stdio", "-display", "none", "-no-reboot"}
+	case strings.HasPrefix(triple, "x86_64"):
+		return "qemu-system-x86_64", []string{"-M", "q35", "-serial", "stdio", "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"}
+	}
+	return "", nil
+}
+
+// QEMUAvailable reports whether the system emulator for the triple is
+// installed.
+func QEMUAvailable(triple string) bool {
+	emu, _ := QEMUFor(triple)
+	if emu == "" {
+		return false
+	}
+	_, err := exec.LookPath(emu)
 	return err == nil
 }
 
@@ -258,9 +280,12 @@ func withProgramName(text, name string, freestanding bool) string {
 
 // buildFreestanding compiles the program, the freestanding runtime and the
 // startup code for a bare-metal triple. With ld.lld on the PATH the result
-// is a linked ELF image (the QEMU virt layout for AArch64); otherwise it is
-// an archive of the three objects, which the user links with the
-// `virt.ld` script shipped in runtime/freestanding/src.
+// is a linked image: an ELF laid out for QEMU's virt machine on AArch64, and
+// on x86-64 a Multiboot 1 image for q35 laid out by q35.ld and rewritten to
+// the 32-bit ELF class with llvm-objcopy, since QEMU's Multiboot loader
+// rejects a 64-bit ELF. Without ld.lld the result is an archive of the
+// three objects, which the user links with the script shipped in
+// runtime/freestanding/src.
 func buildFreestanding(text, out, triple string) error {
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -271,11 +296,11 @@ func buildFreestanding(text, out, triple string) error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
-	start := freestanding.StartAArch64
+	start, script, x86 := freestanding.StartAArch64, freestanding.VirtLinkerScript, false
 	if strings.HasPrefix(triple, "x86_64") {
-		start = freestanding.StartX8664
+		start, script, x86 = freestanding.StartX8664, freestanding.Q35LinkerScript, true
 	}
-	files := map[string]string{"prog.ll": text, "rt.c": freestanding.RuntimeC, "start.S": start, "virt.ld": freestanding.VirtLinkerScript}
+	files := map[string]string{"prog.ll": text, "rt.c": freestanding.RuntimeC, "start.S": start, "image.ld": script}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			return err
@@ -292,9 +317,23 @@ func buildFreestanding(text, out, triple string) error {
 		objs = append(objs, obj)
 	}
 	if lld, err := exec.LookPath("ld.lld"); err == nil {
-		args := append([]string{"-nostdlib", "-static", "-T", filepath.Join(dir, "virt.ld"), "-o", out}, objs...)
+		args := append([]string{"-nostdlib", "-static", "-T", filepath.Join(dir, "image.ld"), "-o", out}, objs...)
 		if msg, err := exec.Command(lld, args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("ld.lld: %v: %s", err, msg)
+		}
+		if !x86 {
+			return nil
+		}
+		objcopy, err := exec.LookPath("llvm-objcopy")
+		if err != nil {
+			// clang's own toolchain directory, when the PATH lacks it
+			objcopy = filepath.Join(filepath.Dir(clang), "llvm-objcopy")
+			if _, err := os.Stat(objcopy); err != nil {
+				return fmt.Errorf("llvm-objcopy not found: an x86-64 Multiboot image needs the 32-bit ELF class")
+			}
+		}
+		if msg, err := exec.Command(objcopy, "-O", "elf32-i386", out).CombinedOutput(); err != nil {
+			return fmt.Errorf("llvm-objcopy: %v: %s", err, msg)
 		}
 		return nil
 	}

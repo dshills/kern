@@ -2,7 +2,8 @@
 // allocator, no threads. Output goes to a console device (the QEMU virt
 // PL011 UART on AArch64, the 16550 at port 0x3F8 on x86-64); traps run the
 // handler once and halt; exit and halt write a final `{"halt": {"code": n}}`
-// line and power the machine off.
+// line and power the machine off. trunc/truncf and the memory routines are
+// the libc symbols LLVM may call for in compiled code.
 #include <stdint.h>
 #include <stddef.h>
 
@@ -98,6 +99,32 @@ void kern_trap(int32_t kind, int64_t start, int64_t end) {
         h(&info);
     }
     kern_halt(134);
+}
+
+// trunc/truncf back the float-to-integer conversion's range check
+// (llvm.trunc): AArch64 lowers it to frintz, baseline x86-64 (no SSE4.1)
+// to a libm call, which a bare-metal image must supply itself. Round toward
+// zero by clearing the fraction bits (musl's algorithm); NaN and infinity
+// pass through.
+double trunc(double x) {
+    union { double f; uint64_t i; } u = {x};
+    int e = (int)(u.i >> 52 & 0x7ff) - 0x3ff + 12;
+    if (e >= 52 + 12) return x;      // no fraction bits, inf or NaN
+    if (e < 12) e = 1;               // |x| < 1: keep only the sign
+    uint64_t m = ~0ULL >> e;
+    if ((u.i & m) == 0) return x;
+    u.i &= ~m;
+    return u.f;
+}
+float truncf(float x) {
+    union { float f; uint32_t i; } u = {x};
+    int e = (int)(u.i >> 23 & 0xff) - 0x7f + 9;
+    if (e >= 23 + 9) return x;
+    if (e < 9) e = 1;
+    uint32_t m = ~0U >> e;
+    if ((u.i & m) == 0) return x;
+    u.i &= ~m;
+    return u.f;
 }
 
 // memcpy/memset/memmove may be emitted by LLVM for aggregate moves
