@@ -141,9 +141,11 @@ go run ./bench/harness
 
 regenerates `bench/REPORT.md` from five runs per row with 95% confidence
 intervals, checking that the C, Rust and kern implementations agree on their
-checksums. In the latest report user-level kern code is within 10% of the best
-of C and Rust on four of the thirteen workloads and between 0.2× and 0.9× on
-the rest; peak memory meets the 10% target on eleven.
+checksums. In the latest report user-level kern code matches the best of C
+and Rust on the ring-buffer and run-queue workloads, reaches 0.74× to 0.88× on
+vector, hash_table, buffer_pool and page_frame_allocator, and 0.2× to 0.7× on
+the remaining seven; peak memory meets the 10% target on eleven of the
+thirteen.
 
 ## Status
 
