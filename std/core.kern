@@ -350,7 +350,14 @@ impl Pool[T] {
         return Pool[T] { data: zero(), slots: zero(), free_list: zero(), count: 0usize, cap: 0usize, nfree: 0usize, live: 0usize, identity: container_identity() }
     }
     // grow doubles the three buffers transactionally: nothing changes
-    // unless every new buffer was obtained. Indices must fit a u32.
+    // unless every new buffer was obtained. The two small buffers are
+    // allocated first and the element buffer is then resized in place
+    // (heap_try_realloc), so a failure leaves the old buffers untouched and
+    // a success never holds two copies of the elements: the system
+    // allocator extends or remaps a large block instead of allocating a
+    // second one, copying and freeing, which kept every outgrown element
+    // buffer resident and tripled the peak RSS of the btree workload.
+    // Indices must fit a u32.
     contract { requires "the three buffers hold cap entries; the first count slots are initialized" }
     func grow(edit self) -> bool {
         n := 8usize
@@ -364,23 +371,29 @@ impl Pool[T] {
             None => return false
         }
         unsafe {
-            nd := heap_try_alloc(bytes, align_of[T]())
             ns := heap_try_alloc(n * size_of[PoolSlotMeta](), align_of[PoolSlotMeta]())
             nf := heap_try_alloc(n * 4usize, 4usize)
-            if ptr_addr(nd) == 0usize || ptr_addr(ns) == 0usize || ptr_addr(nf) == 0usize {
-                if ptr_addr(nd) != 0usize { heap_free(nd, bytes, align_of[T]()) }
+            var nd: RawPtr[u8] = zero()
+            if ptr_addr(ns) != 0usize && ptr_addr(nf) != 0usize {
+                if self.cap > 0usize {
+                    var old: usize = 0usize
+                    match elems_bytes[T](self.cap) {
+                        Some(b) => old = b
+                        None => trap_kind(unreachable)
+                    }
+                    nd = heap_try_realloc(ptr_cast[u8, T](self.data), old, bytes, align_of[T]())
+                } else {
+                    nd = heap_try_alloc(bytes, align_of[T]())
+                }
+            }
+            if ptr_addr(nd) == 0usize {
                 if ptr_addr(ns) != 0usize { heap_free(ns, n * size_of[PoolSlotMeta](), align_of[PoolSlotMeta]()) }
                 if ptr_addr(nf) != 0usize { heap_free(nf, n * 4usize, 4usize) }
                 return false
             }
-            ptr_copy(ptr_cast[T, u8](nd), self.data, self.count)
             ptr_copy(ptr_cast[PoolSlotMeta, u8](ns), self.slots, self.count)
             ptr_copy(ptr_cast[u32, u8](nf), self.free_list, self.nfree)
             if self.cap > 0usize {
-                match elems_bytes[T](self.cap) {
-                    Some(old) => heap_free(ptr_cast[u8, T](self.data), old, align_of[T]())
-                    None => trap_kind(unreachable)
-                }
                 heap_free(ptr_cast[u8, PoolSlotMeta](self.slots), self.cap * size_of[PoolSlotMeta](), align_of[PoolSlotMeta]())
                 heap_free(ptr_cast[u8, u32](self.free_list), self.cap * 4usize, 4usize)
             }

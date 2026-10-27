@@ -61,21 +61,21 @@ Targets: kern release throughput 15.9 Mops/s vs best 20.5 (c), ratio 0.78, does 
 
 Checksums: agree across 4 row(s) (13433169380067381159).
 
-Targets: kern release throughput 4.1 Mops/s vs best 5.9 (c), ratio 0.71, does not meet the 10% target; peak RSS 195.8 MiB vs lowest 60.9 (c), ratio 3.21, does not meet the 10% target.
+Targets: kern release throughput 3.8 Mops/s vs best 5.3 (rust), ratio 0.71, does not meet the 10% target; peak RSS 88.1 MiB vs lowest 60.9 (c), ratio 1.45, does not meet the 10% target.
 
 ### release
 
 | language | threads | throughput (Mops/s) | p50 ns | p99 ns | peak RSS (MiB) | text bytes | compile time | unsafe lines | allocs | copies | ownership places | reserved ext | failure path | checksum |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| c | 1 | 5.9 ± 0.5 | 133 ± 23 | 467 ± 43 | 60.9 ± 0.0 | 2356 | 107ms | 0 | n/a | n/a | n/a | no | n/a | 13433169380067381159 |
-| rust | 1 | 5.9 ± 0.2 | 125 ± 0 | 458 ± 63 | 62.7 ± 0.0 | 224700 | 230ms | 0 | n/a | n/a | n/a | no | n/a | 13433169380067381159 |
-| kern | 1 | 4.1 ± 0.2 | 183 ± 28 | 609 ± 28 | 195.8 ± 0.6 | 15900 | 203ms | 0 | 6 | 48 | n/a | no | n/a | 13433169380067381159 |
+| c | 1 | 5.1 ± 0.5 | 150 ± 46 | 550 ± 68 | 60.9 ± 0.0 | 2356 | 107ms | 0 | n/a | n/a | n/a | no | n/a | 13433169380067381159 |
+| rust | 1 | 5.3 ± 0.2 | 167 ± 1 | 508 ± 43 | 62.7 ± 0.0 | 224700 | 570ms | 0 | n/a | n/a | n/a | no | n/a | 13433169380067381159 |
+| kern | 1 | 3.8 ± 0.3 | 233 ± 46 | 700 ± 93 | 88.1 ± 0.5 | 15800 | 412ms | 0 | 6 | 48 | n/a | no | n/a | 13433169380067381159 |
 
 ### debug
 
 | language | threads | throughput (Mops/s) | p50 ns | p99 ns | peak RSS (MiB) | text bytes | compile time | unsafe lines | allocs | copies | ownership places | reserved ext | failure path | checksum |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| kern | 1 | 3.9 ± 0.2 | 208 ± 1 | 650 ± 46 | 195.9 ± 0.0 | 14916 | 180ms | 0 | 6 | 48 | n/a | no | n/a | 13433169380067381159 |
+| kern | 1 | 3.7 ± 0.1 | 250 ± 0 | 658 ± 23 | 87.6 ± 0.6 | 14948 | 205ms | 0 | 6 | 48 | n/a | no | n/a | 13433169380067381159 |
 
 ## arena_ast
 
@@ -319,7 +319,7 @@ The result is marked [unproven]: it measures whether LLVM uses the aliasing attr
 
 | workload | release (Mops/s) | debug | tag cost |
 |---|---|---|---|
-| btree | 4.1 | 3.9 | 7% |
+| btree | 3.8 | 3.7 | 3% |
 | arena_ast | 76.6 | 74.7 | 2% |
 | buffer_pool | 30.1 | 29.8 | 1% |
 | intrusive_run_queue | 71.2 | 70.2 | 1% |
