@@ -88,10 +88,10 @@ is unchanged on every workload (realloc growth).
 
 ## Deviations and follow-ups
 
-- Freestanding programs still have no containers natively: the containers
-  allocate through `SystemAllocator`, which the freestanding mode does not
-  provide (Rule 6.8). The interpreter's freestanding emulation now traps
-  `explicit` on a container, where it previously ran a Go-level vector.
+- Freestanding programs have the containers natively since 2026-10-27: the
+  freestanding runtime serves `SystemAllocator` from a static 1 MiB arena
+  (Rule 6.8, ADR-011 amendment), and the interpreter's freestanding emulation
+  uses its raw heap as hosted mode does (`tests/freestanding/containers.kern`).
 - `release`, `grow`, `reserve`, `check` and `seed_generation` are visible like
   every core declaration; they keep the container valid (`release` leaves an
   empty container with a fresh identity; `seed_generation` is gated by

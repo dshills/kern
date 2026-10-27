@@ -156,7 +156,7 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 		}
 	}
 	if opts.Freestanding {
-		return nil, buildFreestanding(text, out, triple)
+		return nil, buildFreestanding(text, out, triple, opts.Opt == "release")
 	}
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -287,7 +287,7 @@ func withProgramName(text, name string, freestanding bool) string {
 // rejects a 64-bit ELF. Without ld.lld the result is an archive of the
 // three objects, which the user links with the script shipped in
 // runtime/freestanding/src.
-func buildFreestanding(text, out, triple string) error {
+func buildFreestanding(text, out, triple string, release bool) error {
 	clang, err := exec.LookPath("clang")
 	if err != nil {
 		return ErrNoClang
@@ -308,6 +308,15 @@ func buildFreestanding(text, out, triple string) error {
 		}
 	}
 	common := []string{"-target", triple, "-ffreestanding", "-nostdlib", "-fno-builtin", "-O1", "-Wno-override-module", "-ffp-model=strict", "-c"}
+	if release {
+		common = append(common, "-DKERN_RELEASE") // identity tags off (PLAN.md 2.2), as in a hosted release build
+	}
+	if !x86 {
+		// the image runs with the MMU off, where every access is to Device
+		// memory and must be aligned to its size: no unaligned (vector-widened)
+		// loads and stores
+		common = append(common, "-mstrict-align")
+	}
 	var objs []string
 	for _, src := range []string{"prog.ll", "rt.c", "start.S"} {
 		obj := filepath.Join(dir, src+".o")
