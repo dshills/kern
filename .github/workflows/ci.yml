@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      KERN_REQUIRE_QEMU: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install toolchain (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-20 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y clang-20 lld-20 libclang-rt-20-dev qemu-system-arm qemu-system-x86
+          sudo update-alternatives --install /usr/local/bin/clang clang /usr/bin/clang-20 100
+          sudo update-alternatives --install /usr/local/bin/ld.lld ld.lld /usr/bin/ld.lld-20 100
+
+      - name: Install toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm lld qemu
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain versions
+        run: |
+          clang --version
+          ld.lld --version
+          qemu-system-aarch64 --version
+          qemu-system-x86_64 --version
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+      - name: Test
+        run: go test ./...

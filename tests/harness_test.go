@@ -428,6 +428,7 @@ func execute(t *testing.T, path string, files []*source.File, h header) {
 // the PATH the image runs under `qemu-system-aarch64 -M virt -cpu cortex-a72
 // -serial stdio -display none -no-reboot` and its console must match too;
 // otherwise the build is an object archive and only compilation is checked.
+// Setting KERN_REQUIRE_QEMU turns that fallback into a failure (CI sets it).
 func freestandingRun(t *testing.T, path string, files []*source.File, h header, mod *ir.Module) {
 	t.Helper()
 	var out, errb bytes.Buffer
@@ -533,6 +534,9 @@ func tsanRun(t *testing.T, files []*source.File, h header) {
 		t.Skip("clang not available")
 	}
 	if !tsanSupported(t) {
+		if os.Getenv("KERN_REQUIRE_QEMU") != "" {
+			t.Fatal("KERN_REQUIRE_QEMU is set but ThreadSanitizer is not supported by this toolchain")
+		}
 		t.Skip("ThreadSanitizer is not supported by this toolchain")
 	}
 	exe := filepath.Join(t.TempDir(), "prog")
