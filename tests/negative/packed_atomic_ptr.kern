@@ -1,0 +1,6 @@
+//! expect: reject TYPE_PACKED_ATOMIC rule=4.1.5
+//! twin: packed_atomic_ptr_ok
+module t
+struct Cell[T] packed { tag: u8; v: T }
+struct Holder[T] { p: RawPtr[Cell[T]] }
+func f(h: view[Holder[Atomic[u32]]]) -> u8 { return 1u8 }

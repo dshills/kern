@@ -84,7 +84,7 @@ are met by the C runtime (`runtime/hosted/src/kern_rt.c`) and the interpreter:
 
 | Declaration | Obligation | Exercised by |
 |---|---|---|
-| `unsafe assert Interior for Atomic` | every `Atomic` operation through a `view` is an atomic read-modify-write with the stated ordering (runtime `kern_atomic_*`, interpreter `atomicMu`) | `tests/concurrency/atomic_counter.kern` (two threads, 10,000 `fetch_add`), the litmus fixtures under `tests/concurrency/litmus/` |
+| `unsafe assert Interior for Atomic` | every `Atomic` operation through a `view` is an atomic read-modify-write with the stated ordering (an LLVM atomic instruction on the inline cell natively, `atomicMu` in the interpreter) | `tests/concurrency/atomic_counter.kern` (two threads, 10,000 `fetch_add`), the litmus fixtures under `tests/concurrency/litmus/` |
 | `unsafe assert Interior for Mutex` | `lock` is runtime-exclusive escalation (Rule 5.3.6): one holder at a time, recursive acquisition traps `explicit` (`PTHREAD_MUTEX_ERRORCHECK` natively, the owner thread identifier in the interpreter) | `tests/concurrency/mutex_counter.kern`, `tests/native_test.go` (`TestNativeStackTrapUnderMutexWithHandler`) |
 | `unsafe assert Interior for Shared` | clones and drops update the count atomically (compare-exchange loop natively); overflow traps `overflow` | `tests/trap/overflow.kern` family (`testing.seed_shared_count`), `tests/concurrency/shared_handoff.kern` |
 

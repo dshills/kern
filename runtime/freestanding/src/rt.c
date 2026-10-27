@@ -80,7 +80,6 @@ void kern_start(void) {}
 void kern_yield(void) {}
 void kern_set_file(const char *name) { kern_file = name; }
 void *kern_set_handler(void *fn) { void *old = kern_handler; kern_handler = fn; return old; }
-void kern_fence(uint8_t o) { (void)o; __atomic_thread_fence(__ATOMIC_SEQ_CST); }
 
 static const char *kern_trap_names[] = {"bounds", "overflow", "div_zero", "shift", "conversion", "generation", "vacant", "identity", "disjoint", "oom", "stack", "explicit", "unreachable"};
 

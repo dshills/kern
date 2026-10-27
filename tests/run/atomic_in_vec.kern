@@ -1,0 +1,54 @@
+//! phase: 3
+//! expect: output atomic_in_vec
+// Atomics as container elements: a Vec[Atomic[u64]] and a Box[Atomic[u32]]
+// keep their cells in raw memory (the containers are kern code over the
+// raw-pointer core), so the interpreter must write every update back
+// through the element access, and natively each cell is an inline word in
+// the container's buffer.
+module av
+func main() -> i32 {
+    v := Vec[Atomic[u64]].new()
+    v.push(Atomic[u64].new(1u64))
+    v.push(Atomic[u64].new(10u64))
+    v.push(Atomic[u64].new(100u64))
+    i := 0usize
+    while i < 3usize {
+        with e := v.at(i) {
+            old := e.fetch_add(5u64, relaxed)
+            print_u64(old)
+            println()
+        }
+        i = i + 1usize
+    }
+    with e := v.at(1usize) {
+        match e.compare_exchange(15u64, 42u64, acq_rel, acquire) {
+            Ok(old) => {
+                print_str("ok ")
+                print_u64(old)
+            }
+            Err(cur) => {
+                print_str("err ")
+                print_u64(cur)
+            }
+        }
+        println()
+    }
+    with e := v.at(2usize) {
+        print_u64(e.swap(7u64, seq_cst))
+        println()
+        e.store(8u64, release)
+    }
+    i = 0usize
+    while i < 3usize {
+        print_u64(v.get(i).load(acquire))
+        println()
+        i = i + 1usize
+    }
+    b := Box[Atomic[u32]].new(Atomic[u32].new(3u32))
+    old := b.get().fetch_add(4u32, seq_cst)
+    print_u64(u64(old))
+    println()
+    print_u64(u64(b.get().load(relaxed)))
+    println()
+    return 0i32
+}

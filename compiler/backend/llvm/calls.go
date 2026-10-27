@@ -230,15 +230,60 @@ func asmEscape(b []byte) string {
 	return sb.String()
 }
 
-// ord renders a memory-ordering argument as the i8 tag the runtime takes
-// (Ordering is a payload-free union: a struct of its tag).
-func (fe *fnEmit) ord(v *ir.Value) string {
-	if _, named := v.Type.(*resolve.Named); !named {
-		return "i8 " + fe.v(v)
+// llvmOrderings maps the variants of Ordering (relaxed, acquire, release,
+// acq_rel, seq_cst, in declaration order) to the LLVM ordering keywords.
+var llvmOrderings = [...]string{"monotonic", "acquire", "release", "acq_rel", "seq_cst"}
+
+// ordering renders a memory-ordering argument as its LLVM keyword. The
+// checker requires every ordering to be a compile-time constant (spec §5.5),
+// so the argument is a payload-free union literal whose tag the emitter
+// recorded; the checker has also rejected the combinations LLVM forbids
+// (a release or acq_rel failure ordering, a failure stronger than success).
+func (fe *fnEmit) ordering(v *ir.Value) string {
+	tag, ok := fe.tags[v]
+	if !ok || tag < 0 || tag >= len(llvmOrderings) {
+		fe.fail("memory ordering is not a constant")
 	}
-	r := fe.next("t")
-	fe.emit("%s = extractvalue %s %s, 0", r, fe.e.lty(v.Type), fe.v(v))
-	return "i8 " + r
+	return llvmOrderings[tag]
+}
+
+// cell is the address of an Atomic's cell: the access itself (the struct's
+// only field is at offset 0), or a spill of an owned value.
+func (fe *fnEmit) cell(v *ir.Value) string {
+	if fe.isAccess(v) {
+		if fe.packed[v] {
+			// the resolver rejects an Atomic inside a packed struct
+			// (TYPE_PACKED_ATOMIC); an access that reaches here anyway must
+			// not promise the alignment the instruction requires
+			fe.fail("atomic operation on a cell inside a packed struct")
+		}
+		return fe.v(v)
+	}
+	return fe.spill(v)
+}
+
+// memVal renders a value in its in-memory type (bool as i8), as an atomic
+// instruction on the cell takes it.
+func (fe *fnEmit) memVal(v *ir.Value) string {
+	if resolve.IsBool(v.Type) {
+		r := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", r, fe.v(v))
+		return r
+	}
+	return fe.v(v)
+}
+
+// fromMem gives dst the register form of an atomic instruction's result
+// (bool back to i1).
+func (fe *fnEmit) fromMem(dst *ir.Value, t resolve.Type, r string) {
+	if dst == nil {
+		return
+	}
+	if resolve.IsBool(t) {
+		fe.emit("%s = trunc i8 %s to i1", fe.v(dst), r)
+		return
+	}
+	fe.vals[dst] = r
 }
 
 // isAccessType reports whether t is an access type (a spawned argument of
@@ -441,7 +486,7 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	case "container_identity":
 		setDst(fe.rt("kern_next_identity", "i32 ()", ""))
 	case "fence":
-		fe.rt("kern_fence", "void (i8)", fe.ord(a[0]))
+		fe.emit("fence %s", fe.ordering(a[0]))
 	case "clone":
 		et := fe.elemType(c, 0)
 		if n, ok := et.(*resolve.Named); ok && layout.Opaque(n) {
@@ -468,29 +513,51 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		setDst(fe.rt("kern_mutex_lock", "ptr (ptr, i64, i64)", "ptr "+fe.handle(a[0])+", "+fe.span(c.Pos)))
 	case "Mutex.unlock":
 		fe.rt("kern_mutex_unlock", "void (ptr)", "ptr "+fe.handle(a[0]))
+	// Atomic[T] is a struct of its cell (layout.Opaque excludes it): every
+	// operation is an LLVM atomic instruction on the cell, in T's in-memory
+	// type, with the ordering the checker required to be a constant
 	case "Atomic.new":
-		setDst(fe.rt("kern_atomic_new", "ptr (i64, ptr)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])))
+		d := dst()
+		et := fe.elemType(c, 0)
+		fe.emit("%s = insertvalue %s zeroinitializer, %s %s, 0", fe.v(d), e.namedType(d.Type.(*resolve.Named)), e.mty(et), fe.memVal(a[0]))
 	case "Atomic.load":
 		et := fe.elemType(c, 0)
-		r := fe.rt("kern_atomic_load", "i64 (ptr, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", "+fe.ord(a[1]))
-		fe.narrow(dst(), r)
+		r := fe.next("t")
+		fe.emit("%s = load atomic %s, ptr %s %s, align %d", r, e.mty(et), fe.cell(a[0]), fe.ordering(a[1]), layout.Of(et).Size)
+		fe.fromMem(dst(), et, r)
 	case "Atomic.store":
 		et := fe.elemType(c, 0)
-		fe.rt("kern_atomic_store", "void (ptr, i64, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fe.widen(a[1])+", "+fe.ord(a[2]))
-	case "Atomic.swap":
+		fe.emit("store atomic %s %s, ptr %s %s, align %d", e.mty(et), fe.memVal(a[1]), fe.cell(a[0]), fe.ordering(a[2]), layout.Of(et).Size)
+	case "Atomic.swap", "Atomic.fetch_add", "Atomic.fetch_sub", "Atomic.fetch_and", "Atomic.fetch_or", "Atomic.fetch_xor":
 		et := fe.elemType(c, 0)
-		r := fe.rt("kern_atomic_swap", "i64 (ptr, i64, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fe.widen(a[1])+", "+fe.ord(a[2]))
-		fe.narrow(dst(), r)
-	case "Atomic.fetch_add", "Atomic.fetch_sub", "Atomic.fetch_and", "Atomic.fetch_or", "Atomic.fetch_xor":
-		et := fe.elemType(c, 0)
-		op := map[string]int{"Atomic.fetch_add": 0, "Atomic.fetch_sub": 1, "Atomic.fetch_and": 2, "Atomic.fetch_or": 3, "Atomic.fetch_xor": 4}[c.Intrinsic]
-		r := fe.rt("kern_atomic_rmw", "i64 (ptr, i64, i64, i64, i8)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fmt.Sprintf("%d", op)+", i64 "+fe.widen(a[1])+", "+fe.ord(a[2]))
-		fe.narrow(dst(), r)
+		op := map[string]string{"Atomic.swap": "xchg", "Atomic.fetch_add": "add", "Atomic.fetch_sub": "sub", "Atomic.fetch_and": "and", "Atomic.fetch_or": "or", "Atomic.fetch_xor": "xor"}[c.Intrinsic]
+		r := fe.next("t")
+		fe.emit("%s = atomicrmw %s ptr %s, %s %s %s, align %d", r, op, fe.cell(a[0]), e.mty(et), fe.memVal(a[1]), fe.ordering(a[2]), layout.Of(et).Size)
+		fe.fromMem(dst(), et, r)
 	case "Atomic.compare_exchange", "Atomic.compare_exchange_weak":
+		// Result[T, T]: Ok(old) on success, Err(current) on failure; both
+		// variants carry the cell's prior value at the union's payload offset
 		et := fe.elemType(c, 0)
+		mt := e.mty(et)
+		weak := ""
+		if c.Intrinsic == "Atomic.compare_exchange_weak" {
+			weak = "weak "
+		}
+		p := fe.next("t")
+		fe.emit("%s = cmpxchg %sptr %s, %s %s, %s %s %s %s, align %d", p, weak, fe.cell(a[0]), mt, fe.memVal(a[1]), mt, fe.memVal(a[2]), fe.ordering(a[3]), fe.ordering(a[4]), layout.Of(et).Size)
+		old := fe.next("t")
+		ok := fe.next("t")
+		fe.emit("%s = extractvalue { %s, i1 } %s, 0", old, mt, p)
+		fe.emit("%s = extractvalue { %s, i1 } %s, 1", ok, mt, p)
 		d := dst()
 		out, off := fe.unionOut(d)
-		fe.rt("kern_atomic_cmpxchg", "void (ptr, i64, i64, i64, i8, i8, ptr, i64)", "ptr "+fe.handle(a[0])+", i64 "+sz(et)+", i64 "+fe.widen(a[1])+", i64 "+fe.widen(a[2])+", "+fe.ord(a[3])+", "+fe.ord(a[4])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		tag := fe.next("t")
+		fe.emit("store %s zeroinitializer, ptr %s", e.namedType(d.Type.(*resolve.Named)), out)
+		fe.emit("%s = select i1 %s, i8 0, i8 1", tag, ok)
+		fe.emit("store i8 %s, ptr %s", tag, out)
+		pp := fe.next("t")
+		fe.emit("%s = getelementptr i8, ptr %s, i64 %d", pp, out, off)
+		fe.emit("store %s %s, ptr %s", mt, old, pp)
 		fe.loadResult(d, out)
 	// threads
 	case "thread.scope":
@@ -534,43 +601,6 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	default:
 		fe.fail("intrinsic %s is not supported natively", c.Intrinsic)
 	}
-}
-
-// widen renders an integer value as i64.
-func (fe *fnEmit) widen(v *ir.Value) string {
-	bits, signed := intBits(v.Type)
-	if resolve.IsBool(v.Type) {
-		r := fe.next("t")
-		fe.emit("%s = zext i1 %s to i64", r, fe.v(v))
-		return r
-	}
-	if bits == 64 {
-		return fe.v(v)
-	}
-	r := fe.next("t")
-	if signed {
-		fe.emit("%s = sext %s %s to i64", r, fe.e.lty(v.Type), fe.v(v))
-	} else {
-		fe.emit("%s = zext %s %s to i64", r, fe.e.lty(v.Type), fe.v(v))
-	}
-	return r
-}
-
-// narrow converts an i64 runtime result to dst's type.
-func (fe *fnEmit) narrow(dst *ir.Value, r string) {
-	if dst == nil {
-		return
-	}
-	if resolve.IsBool(dst.Type) {
-		fe.emit("%s = trunc i64 %s to i1", fe.v(dst), r)
-		return
-	}
-	bits, _ := intBits(dst.Type)
-	if bits == 64 {
-		fe.vals[dst] = r
-		return
-	}
-	fe.emit("%s = trunc i64 %s to %s", fe.v(dst), r, fe.e.lty(dst.Type))
 }
 
 // spawn packs the spawned function's arguments into a struct, emits a thunk

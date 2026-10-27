@@ -1,0 +1,19 @@
+u8 fetch_add 250
+u8 load 4
+i8 fetch_sub -120
+i8 load 116
+i16 fetch_add 32767
+i16 load -32768
+u32 fetch_and 61680
+u32 fetch_or 61440
+u32 fetch_xor 61455
+u32 load 4080
+u16 swap 7
+u16 cas err 9
+u16 cas ok 9
+u16 load 1
+bool load true
+bool swap true
+bool load false
+i64 fetch_add -1
+i64 load -42

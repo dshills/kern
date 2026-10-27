@@ -1,0 +1,33 @@
+//! phase: 3
+//! expect: output atomic
+//! env: freestanding
+// Atomics on bare metal: Atomic[T] is an inline cell and every operation an
+// LLVM atomic instruction, so a freestanding program needs no runtime
+// support for them (ADR-011). Single-threaded, so every value is exact.
+module fa
+struct Counters { hits: Atomic[u64]; flag: Atomic[bool]; small: Atomic[u8] }
+func bump(c: view[Counters], n: u64) -> u64 {
+    i := 0u64
+    while i < n {
+        old := c.hits.fetch_add(1u64, relaxed)
+        i = i + 1u64
+    }
+    return c.hits.load(acquire)
+}
+func main() -> i32 {
+    c := Counters { hits: Atomic[u64].new(0u64), flag: Atomic[bool].new(false), small: Atomic[u8].new(200u8) }
+    print_u64(bump(c, 1000u64))
+    println()
+    match c.flag.compare_exchange(false, true, acq_rel, acquire) {
+        Ok(v) => { print_bool(c.flag.load(seq_cst)) }
+        Err(v) => { print_str("cas failed") }
+    }
+    println()
+    old := c.small.fetch_add(100u8, seq_cst)
+    print_u64(u64(old))
+    println()
+    print_u64(u64(c.small.load(relaxed)))
+    println()
+    fence(release)
+    return 0i32
+}

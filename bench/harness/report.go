@@ -286,7 +286,7 @@ func separations(root, buildDir, kernBin string, runs int, rows []*row) string {
 	}
 	// library unsafe code (§2.3(b)): the containers are kern code in the
 	// prelude whose raw operations sit in contracted unsafe blocks; the
-	// runtime-provided objects (Shared, Mutex, Atomic, threads, the system
+	// runtime-provided objects (Shared, Mutex, threads, the system
 	// allocator, traps and output) remain C, outside the language's checks
 	rtLines := 0
 	if bts, err := os.ReadFile(filepath.Join(root, "runtime", "hosted", "src", "kern_rt.c")); err == nil {

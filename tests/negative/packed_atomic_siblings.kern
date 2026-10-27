@@ -1,0 +1,6 @@
+//! expect: reject TYPE_PACKED_ATOMIC rule=4.1.5
+//! twin: packed_atomic_siblings_ok
+module t
+struct W[T] { v: T }
+struct Many { a: W[u8]; b: W[u16]; c: W[u32]; d: W[u64]; e: W[i8]; f: W[i16]; g: W[i32]; h: W[i64]; i: W[bool]; j: W[usize]; k: W[Atomic[u32]] }
+struct Frame packed { tag: u8; m: Many }

@@ -107,13 +107,15 @@ func Of(t resolve.Type) Info {
 }
 
 // Opaque reports whether a named type is a runtime-provided container whose
-// in-memory representation is an opaque pointer-sized handle.
+// in-memory representation is an opaque pointer-sized handle. Atomic[T] is
+// not one: it is a struct of its cell, laid out as T, so that every atomic
+// operation is an instruction on the cell itself.
 func Opaque(n *resolve.Named) bool {
 	if n.Decl.Module != "core" {
 		return false
 	}
 	switch n.Decl.Name {
-	case "Slab", "Shared", "Mutex", "Atomic", "Scope", "Thread", "Join", "SystemAllocator", "thread", "trap", "testing":
+	case "Slab", "Shared", "Mutex", "Scope", "Thread", "Join", "SystemAllocator", "thread", "trap", "testing":
 		return true
 	}
 	return false

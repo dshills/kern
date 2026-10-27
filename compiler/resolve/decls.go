@@ -329,6 +329,15 @@ type resolver struct {
 	deferConstraints bool
 	pending          []pendingConstraint
 	pendingFFI       []pendingFFI
+	pendingPacked    []pendingPacked
+}
+
+// pendingPacked is an instantiation of a packed generic struct whose fields
+// are checked for an inline Atomic once every declaration is resolved.
+type pendingPacked struct {
+	file string
+	pos  ast.Pos
+	n    *Named
 }
 
 type pendingFFI struct {
@@ -573,6 +582,29 @@ func (r *resolver) collect(m *Module) {
 		r.checkConstraints(pc.file, pc.pos, pc.t, pc.tp)
 	}
 	r.pending = nil
+	// a packed struct lays its fields out without padding, so an Atomic held
+	// inline would lose the natural alignment its instructions need (§4.1)
+	for _, f := range m.Files {
+		for _, d := range f.Decls {
+			sd, ok := d.(*ast.StructDecl)
+			if !ok || !sd.Packed {
+				continue
+			}
+			td := m.Types[sd.Name]
+			if td == nil || td.AST != sd {
+				continue
+			}
+			for _, fl := range td.Fields {
+				if containsAtomic(fl.Type, map[string]bool{}) {
+					r.errorf("TYPE_PACKED_ATOMIC", f.Name, fl.Pos, "field %s of packed struct %s holds an Atomic, which must keep its natural alignment", fl.Name, sd.Name)
+				}
+			}
+		}
+	}
+	for _, pp := range r.pendingPacked {
+		r.checkPacked(pp.file, pp.pos, pp.n)
+	}
+	r.pendingPacked = nil
 	for _, pf := range r.pendingFFI {
 		r.checkFFI(pf.file, pf.fd)
 	}
@@ -758,7 +790,157 @@ func (r *resolver) instantiate(m *Module, file string, sc *scope, td *TypeDecl, 
 		n.Args = append(n.Args, at)
 		r.checkConstraints(file, a.Span(), at, td.TypeParams[i])
 	}
+	if len(n.Args) > 0 {
+		if r.deferConstraints {
+			r.pendingPacked = append(r.pendingPacked, pendingPacked{file, t.Pos, n})
+		} else {
+			r.checkPacked(file, t.Pos, n)
+		}
+	}
 	return n
+}
+
+// checkPacked reports TYPE_PACKED_ATOMIC for a generic instantiation whose
+// arguments put an Atomic inline in a packed struct it holds inline: the
+// instantiated type itself, or a packed struct reachable through its
+// fields (a non-packed wrapper around a packed generic). The declaration
+// check covers fields whose types name an Atomic directly, so only
+// Atomics that arrive through substitution are reported here.
+func (r *resolver) checkPacked(file string, pos ast.Pos, n *Named) {
+	if p, field := packedAtomic(n, map[string]bool{}); p != nil {
+		r.errorf("TYPE_PACKED_ATOMIC", file, pos, "%s holds an Atomic in field %s of packed struct %s, which must keep its natural alignment", n, field, p)
+	}
+}
+
+// packedAtomic finds a packed struct reachable from t (inline, behind a
+// raw pointer or access, or as the contents of an out-of-line library
+// object: a packed value on the heap is no better aligned) whose
+// substituted fields hold an Atomic inline
+// while its declared field types do not, returning it and the field.
+func packedAtomic(t Type, visiting map[string]bool) (*Named, string) {
+	switch x := t.(type) {
+	case *Array:
+		return packedAtomic(x.Elem, visiting)
+	case *Slice:
+		return packedAtomic(x.Elem, visiting)
+	case *Access:
+		return packedAtomic(x.Elem, visiting) // the referent's layout is the pointee's
+	case *RawPtr:
+		return packedAtomic(x.Elem, visiting)
+	case *Tuple:
+		for _, e := range x.Elems {
+			if p, f := packedAtomic(e, visiting); p != nil {
+				return p, f
+			}
+		}
+	case *Named:
+		if outOfLine(x) {
+			for _, a := range x.Args {
+				if p, f := packedAtomic(a, visiting); p != nil {
+					return p, f
+				}
+			}
+			return nil, ""
+		}
+		if x.Decl.Kind != KindStruct && x.Decl.Kind != KindUnion {
+			return nil, ""
+		}
+		key := x.String()
+		if visiting[key] || expansionDepth(visiting, x.Decl) > maxExpansion {
+			// a cycle, or an expanding recursive instantiation (rejected at
+			// declaration time, TYPE_RECURSIVE_EXPANSION): stop as markerOf does
+			return nil, ""
+		}
+		visiting[key] = true
+		defer delete(visiting, key) // visiting is the active path: siblings do not count as nesting
+		args := typeArgs(x)
+		if x.Decl.Packed {
+			for _, f := range x.Decl.Fields {
+				if !containsAtomic(f.Type, map[string]bool{}) && containsAtomic(Subst(f.Type, args), map[string]bool{}) {
+					return x, f.Name
+				}
+			}
+		}
+		switch x.Decl.Kind {
+		case KindStruct:
+			for _, f := range x.Decl.Fields {
+				if p, fn := packedAtomic(Subst(f.Type, args), visiting); p != nil {
+					return p, fn
+				}
+			}
+		case KindUnion:
+			for _, v := range x.Decl.Variants {
+				for _, ft := range VariantFieldTypes(x, v) {
+					if p, fn := packedAtomic(ft, visiting); p != nil {
+						return p, fn
+					}
+				}
+			}
+		}
+	}
+	return nil, ""
+}
+
+// outOfLine reports the library objects that keep their contents out of
+// line (the containers, Shared, Mutex and the runtime handles): nothing
+// inside them is laid out in the holding struct. Every other named type,
+// the prelude's Option and Result included, holds its fields inline.
+func outOfLine(n *Named) bool {
+	if n.Decl.Module != "core" {
+		return false
+	}
+	switch n.Decl.Name {
+	case "Box", "Vec", "Pool", "Arena", "Shared", "Mutex", "Slab", "Thread", "Join", "Scope", "SystemAllocator":
+		return true
+	}
+	return false
+}
+
+// containsAtomic reports whether a value of type t holds an Atomic cell
+// inline: directly, or through arrays, tuples and the fields of structs and
+// unions; the out-of-line library objects do not count.
+func containsAtomic(t Type, visiting map[string]bool) bool {
+	switch x := t.(type) {
+	case *Array:
+		return containsAtomic(x.Elem, visiting)
+	case *Tuple:
+		for _, e := range x.Elems {
+			if containsAtomic(e, visiting) {
+				return true
+			}
+		}
+	case *Named:
+		if x.Decl.Module == "core" && x.Decl.Name == "Atomic" {
+			return true
+		}
+		if outOfLine(x) {
+			return false
+		}
+		key := x.String()
+		if visiting[key] || expansionDepth(visiting, x.Decl) > maxExpansion {
+			return false // a cycle or an expanding recursive instantiation, as in markerOf
+		}
+		visiting[key] = true
+		defer delete(visiting, key) // the active path only
+		args := typeArgs(x)
+		switch x.Decl.Kind {
+		case KindStruct:
+			for _, f := range x.Decl.Fields {
+				if containsAtomic(Subst(f.Type, args), visiting) {
+					return true
+				}
+			}
+		case KindUnion:
+			for _, v := range x.Decl.Variants {
+				for _, ft := range VariantFieldTypes(x, v) {
+					if containsAtomic(ft, visiting) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // checkConstraints reports CONSTRAINT_UNSATISFIED when at does not satisfy tp.

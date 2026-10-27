@@ -60,6 +60,7 @@ var Registry = map[Code]Info{
 	"ATOMIC_INVALID_ORDERING": {"5.5.5", CatLang, 0, "memory ordering not permitted for this atomic operation"},
 	// §4.1 layout
 	"TYPE_TOO_MANY_VARIANTS": {"4.1.5", CatLang, 0, "union has more than 65,536 variants"},
+	"TYPE_PACKED_ATOMIC":     {"4.1.5", CatLang, 3, "packed struct holds an Atomic, whose cell must keep its natural alignment"},
 	// §6 unsafe
 	"UNSAFE_OP_OUTSIDE_UNSAFE": {"6.4", CatLang, 0, "unsafe operation outside an unsafe block"},
 	"UNSAFE_MISSING_CONTRACT":  {"6.4", CatLang, 0, "function containing unsafe has no contract block"},

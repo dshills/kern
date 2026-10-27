@@ -59,6 +59,7 @@ Rule identifiers are `section.bullet` into the specification (`T.n` = spec/types
 | `TYPE_ARITY` | T.4 | lang | 0 | wrong number of type arguments |
 | `TYPE_INFER_FAILED` | T.4 | lang | 0 | type arguments could not be inferred |
 | `TYPE_MISMATCH` | T.5 | lang | 0 | expression type does not match the required type |
+| `TYPE_PACKED_ATOMIC` | 4.1.5 | lang | 3 | packed struct holds an Atomic, whose cell must keep its natural alignment |
 | `TYPE_QUESTION_MISMATCH` | T.5 | lang | 0 | ? used with a mismatched Result error type |
 | `TYPE_TOO_MANY_VARIANTS` | 4.1.5 | lang | 0 | union has more than 65,536 variants |
 | `UNSAFE_MISSING_CONTRACT` | 6.4 | lang | 0 | function containing unsafe has no contract block |

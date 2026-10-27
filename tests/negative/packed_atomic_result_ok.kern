@@ -1,0 +1,11 @@
+//! phase: 3
+//! expect: accept
+module t
+struct Cell[T] packed { tag: u8; v: T }
+struct Wrap[T] { r: Result[Cell[T], u8] }
+func f(w: view[Wrap[u32]]) -> bool {
+    match w.r {
+        Ok(c) => { return true }
+        Err(e) => { return false }
+    }
+}

@@ -147,13 +147,15 @@ and the startup code provide, and nothing else:
 | `kern_set_handler`, `kern_set_file` | the `trap.set_handler` exchange and the program name for records |
 | `kern_start`, `kern_exit` | startup hook (empty) and the halt protocol: `{"halt": {"code": n}}` on the console, then PSCI `SYSTEM_OFF` (AArch64) or `isa-debug-exit` (x86-64) |
 | `print_u64`, `print_i64`, `print_bool`, `print_str`, `println` | console output through the device (`0x0900_0000` PL011 on `virt`, port `0x3F8` on `q35`) |
-| `kern_fence` | `fence` lowered to a compiler fence |
 | `memcpy`, `memmove`, `memset` | required by LLVM for aggregate moves |
 | `trunc`, `truncf` | the float-to-integer conversion's `llvm.trunc`, a libm call on baseline x86-64 (added 2026-10-27 when the q35 images first ran) |
 | `kern_sysalloc_new`, `kern_sysalloc_alloc`, `kern_sysalloc_realloc`, `kern_sysalloc_free` | the `SystemAllocator` behind the library containers: a first-fit free list over a static 1 MiB arena (`KERN_HEAP_SIZE`) in `.bss`, with the hosted signatures and the §6 obligations (alignment a power of two at most 4096, size a multiple of it, `realloc` keeps the common prefix and leaves the old block on failure, `free` with one allocation's values); exhaustion returns `Err(OutOfMemory)`, never a trap (added 2026-10-27, amendment below) |
 | `kern_next_identity` | the container identity tag counter (spec §5.6): from 1 in debug builds, 0 in a release build (`-DKERN_RELEASE`), as on the hosts (added 2026-10-27) |
 
-No threads, no TLS (none of the three freestanding workloads needs it). The interpreter's
+No threads, no TLS (none of the three freestanding workloads needs it). `Atomic[T]` and `fence`
+need nothing from the runtime: since 2026-10-27 they are LLVM atomic instructions on an inline
+cell (`docs/reports/inline-atomics.md`), so a freestanding program may use them (`kern_fence`,
+the one atomic symbol the runtime used to provide, is gone). The interpreter's
 `--env freestanding` emulation implements exactly this contract. The undefined-symbol experiment
 was run by building `tests/freestanding/*.kern` against the empty runtime: the set above is what
 the images demand. QEMU execution is wired in the harness and ran nowhere in this phase (no

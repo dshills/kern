@@ -5,17 +5,21 @@
 // lock_free_queue: a bounded single-producer single-consumer ring of 4096
 // u64 slots stored inline with monotonically increasing head (consumer)
 // and tail (producer) Atomic[u64] indices, padded apart so they sit on
-// separate cache lines. push: when tail - head == 4096 by the producer's
-// cached head, re-read head with acquire and return false if still full;
-// write slots[tail & 4095]; tail.store(tail + 1, release). pop: when
-// head == tail by the consumer's cached tail, re-read tail with acquire and
-// return None if still empty; read slots[head & 4095]; head.store(head + 1,
-// release). The slot write and read go through a view of the ring inside
-// unsafe: the audited interior accesses whose discipline is the contract on
-// push and pop. The main thread is the producer: element i is the LCG's
-// i-th value (seed 42), N = 8,000,000 elements, each pushed until push
-// succeeds (spinning). The consumer thread, released by a gate after the
-// producer's setup, pops every element (spinning while empty) and chains
+// separate cache lines. Each side keeps its own index privately (pos) plus
+// a cached copy of the other side's published index, and publishes its own
+// with a release store every B = 64 elements and before waiting (B-Queue
+// style batching, as bench/CHECKSUMS.md specifies and bench/c does: with a
+// store per element the two threads fall into lock step, every release
+// store stalling on the line the other thread polls). push: when
+// pos - head == 4096 by the cached head, re-read head with acquire and
+// return false if still full; write slots[pos & 4095]; pos += 1; publish
+// tail when pos % 64 == 0. pop mirrors it with head and tail swapped. The
+// slot write and read go through a view of the ring inside unsafe: the
+// audited interior accesses whose discipline is the contract on push and
+// pop. The main thread is the producer: element i is the LCG's i-th value
+// (seed 42), N = 8,000,000 elements, each pushed until push succeeds
+// (publish, retry). The consumer thread, released by a gate after the
+// producer's setup, pops every element (publish, retry while empty) and chains
 // cs = (cs XOR v) * 0x100000001b3 (wrapping) from 0. Timed: spawn through
 // join; threads = 2.
 // ops = N; sampled operation: the consumer's i-th pop (including any spin).
@@ -45,8 +49,10 @@ struct Spsc {
 unsafe assert Interior for Spsc
 unsafe assert Share for Spsc
 
-// Cursor is one thread's cached copy of the other thread's index.
-struct Cursor { cache: u64 }
+// Cursor is one side's private state: its own index (it is the sole
+// writer; published to the ring every B = 64 elements and before a wait)
+// and its cached copy of the other side's published index.
+struct Cursor { pos: u64; cache: u64 }
 
 func new_spsc() -> Spsc {
     var slots: [4096]u64 = zero()
@@ -56,34 +62,44 @@ func new_spsc() -> Spsc {
 }
 
 contract {
-    invariant "slot (tail & 4095) is written only by the single producer and only while tail - head < 4096, head being the consumer's release-stored value read here with acquire, so the consumer's last read of that slot happens-before the write; the release store of tail publishes the slot"
+    invariant "slot (pos & 4095) is written only by the single producer and only while pos - head < 4096, head being the consumer's release-stored value read here with acquire, so the consumer's last read of that slot happens-before the write; the release store of tail (every 64 elements, and publish_tail before a wait) publishes the slots written so far"
     ensures "true: v is the newest element of the ring; false: the ring was full and v was not stored"
 }
 func push(q: view[Spsc], c: edit[Cursor], v: u64) -> bool {
-    t := q.tail.load(relaxed)
-    if t - c.cache == 4096u64 {
+    if c.pos - c.cache == 4096u64 {
         c.cache = q.head.load(acquire)
-        if t - c.cache == 4096u64 { return false }
+        if c.pos - c.cache == 4096u64 { return false }
     }
-    unsafe { q.slots[usize(t & 4095u64)] = v }
-    q.tail.store(t + 1u64, release)
+    unsafe { q.slots[usize(c.pos & 4095u64)] = v }
+    c.pos = c.pos + 1u64
+    if (c.pos & 63u64) == 0u64 { q.tail.store(c.pos, release) }
     return true
 }
 
+// publish_tail makes every element pushed so far visible to the consumer.
+func publish_tail(q: view[Spsc], c: view[Cursor]) {
+    q.tail.store(c.pos, release)
+}
+
 contract {
-    invariant "slot (head & 4095) is read only by the single consumer and only while head < tail, tail being the producer's release-stored value read here with acquire, so the producer's write of that slot happens-before the read; the release store of head returns the slot to the producer"
+    invariant "slot (pos & 4095) is read only by the single consumer and only while pos < tail, tail being the producer's release-stored value read here with acquire, so the producer's write of that slot happens-before the read; the release store of head (every 64 elements, and publish_head before a wait) returns the slots read so far to the producer"
     ensures "Some(v): v was the oldest element and head advanced; None: the ring was empty"
 }
 func pop(q: view[Spsc], c: edit[Cursor]) -> Option[u64] {
-    h := q.head.load(relaxed)
-    if h == c.cache {
+    if c.pos == c.cache {
         c.cache = q.tail.load(acquire)
-        if h == c.cache { return None }
+        if c.pos == c.cache { return None }
     }
     var v: u64
-    unsafe { v = q.slots[usize(h & 4095u64)] }
-    q.head.store(h + 1u64, release)
+    unsafe { v = q.slots[usize(c.pos & 4095u64)] }
+    c.pos = c.pos + 1u64
+    if (c.pos & 63u64) == 0u64 { q.head.store(c.pos, release) }
     return Some(v)
+}
+
+// publish_head returns every slot popped so far to the producer.
+func publish_head(q: view[Spsc], c: view[Cursor]) {
+    q.head.store(c.pos, release)
 }
 
 struct COut { cs: u64; popped: u64; s: Sampler }
@@ -93,7 +109,7 @@ struct COut { cs: u64; popped: u64; s: Sampler }
 func consumer(q: view[Spsc], expected: u64, ops: u64) -> COut {
     while q.go.load(acquire) == 0u64 {}
     s := new_sampler(ops)
-    c := Cursor { cache: 0u64 }
+    c := Cursor { pos: 0u64, cache: 0u64 }
     cs := 0u64
     for i in 0u64..expected {
         sampled := s.start()
@@ -105,12 +121,13 @@ func consumer(q: view[Spsc], expected: u64, ops: u64) -> COut {
                     v = x
                     got = true
                 }
-                None => {}
+                None => { publish_head(q, c) }
             }
         }
         s.stop(sampled)
         cs = wrapping_mul(cs ^ v, FNV)
     }
+    publish_head(q, c)
     return COut { cs: cs, popped: expected, s: move s }
 }
 
@@ -120,7 +137,7 @@ func run(q: view[Spsc], n: u64) -> Result[i32, SpawnErr] {
     start := now_ns()
     with s := thread.scope() {
         j := s.spawn(consumer, q, expected, n)?
-        c := Cursor { cache: 0u64 }
+        c := Cursor { pos: 0u64, cache: 0u64 }
         x := 42u64
         failures := 0u64
         first := 0u64
@@ -129,13 +146,15 @@ func run(q: view[Spsc], n: u64) -> Result[i32, SpawnErr] {
                 x = lcg(x)
                 if !push(q, c, x) { failures = failures + 1u64 }
             }
+            publish_tail(q, c)
             first = 5120u64
         }
         q.go.store(1u64, release)
         for i in first..n {
             x = lcg(x)
-            while !push(q, c, x) {}
+            while !push(q, c, x) { publish_tail(q, c) }
         }
+        publish_tail(q, c)
         r := j.get()
         ns := now_ns() - start
         if r.popped != expected || (FAIL_MODE && failures != 1024u64) { return Ok(1i32) }

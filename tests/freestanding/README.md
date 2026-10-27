@@ -48,7 +48,10 @@ entering compiled code; `float.kern` checks that on both targets. The AArch64
 image runs with the MMU off, where every access must be aligned to its size,
 so that target is compiled with `-mstrict-align`; `containers.kern` builds a
 `Vec` and a `Pool` through the runtime's allocator and checks both targets
-print the emulation's checksums.
+print the emulation's checksums. `atomic.kern` uses `Atomic[u64]`,
+`Atomic[bool]` and `Atomic[u8]` fields and `fence`: the atomics are LLVM
+instructions on inline cells, so bare-metal programs get them with nothing
+from the runtime (ADR-011).
 
 A fixture that drives one machine's device by address carries
 `//! target: aarch64` (or `x86_64`) and is built and run for that target

@@ -1,0 +1,75 @@
+//! phase: 3
+//! expect: output atomic_widths
+// Atomic operations at every width and on bool (spec §5.5): wrapping
+// fetch_add and fetch_sub on u8, i8 and i16, and/or/xor on u32, swap and the
+// strong and weak compare-exchange on u16 and bool. Natively the cell is the
+// struct's own field and each width is its own LLVM atomic instruction.
+module aw
+func show(label: view[]u8, v: u64) {
+    print_str(label)
+    print_u64(v)
+    println()
+}
+func main() -> i32 {
+    a := Atomic[u8].new(250u8)
+    show("u8 fetch_add ", u64(a.fetch_add(10u8, relaxed)))
+    show("u8 load ", u64(a.load(seq_cst)))
+    b := Atomic[i8].new(-120i8)
+    old_b := b.fetch_sub(20i8, acq_rel)
+    print_str("i8 fetch_sub ")
+    print_i64(i64(old_b))
+    println()
+    print_str("i8 load ")
+    print_i64(i64(b.load(acquire)))
+    println()
+    c := Atomic[i16].new(32767i16)
+    print_str("i16 fetch_add ")
+    print_i64(i64(c.fetch_add(1i16, seq_cst)))
+    println()
+    print_str("i16 load ")
+    print_i64(i64(c.load(relaxed)))
+    println()
+    d := Atomic[u32].new(61680u32)
+    show("u32 fetch_and ", u64(d.fetch_and(65280u32, seq_cst)))
+    show("u32 fetch_or ", u64(d.fetch_or(15u32, seq_cst)))
+    show("u32 fetch_xor ", u64(d.fetch_xor(65535u32, seq_cst)))
+    show("u32 load ", u64(d.load(seq_cst)))
+    e := Atomic[u16].new(7u16)
+    show("u16 swap ", u64(e.swap(9u16, acq_rel)))
+    match e.compare_exchange(7u16, 1u16, seq_cst, relaxed) {
+        Ok(v) => { show("u16 cas ok ", u64(v)) }
+        Err(v) => { show("u16 cas err ", u64(v)) }
+    }
+    match e.compare_exchange(9u16, 1u16, release, relaxed) {
+        Ok(v) => { show("u16 cas ok ", u64(v)) }
+        Err(v) => { show("u16 cas err ", u64(v)) }
+    }
+    show("u16 load ", u64(e.load(acquire)))
+    f := Atomic[bool].new(false)
+    // a weak exchange may fail spuriously: retry until it succeeds
+    spinning := true
+    while spinning {
+        match f.compare_exchange_weak(false, true, acq_rel, acquire) {
+            Ok(v) => { spinning = false }
+            Err(v) => { spinning = true }
+        }
+    }
+    print_str("bool load ")
+    print_bool(f.load(seq_cst))
+    println()
+    print_str("bool swap ")
+    print_bool(f.swap(false, seq_cst))
+    println()
+    print_str("bool load ")
+    print_bool(f.load(relaxed))
+    println()
+    g := Atomic[i64].new(-1i64)
+    fence(seq_cst)
+    print_str("i64 fetch_add ")
+    print_i64(g.fetch_add(-41i64, acq_rel))
+    println()
+    print_str("i64 load ")
+    print_i64(g.load(seq_cst))
+    println()
+    return 0i32
+}

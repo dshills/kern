@@ -1,5 +1,5 @@
 // kern hosted runtime (PLAN.md 2.2): traps, output, the runtime-provided
-// library objects (Shared, Mutex, Atomic), threads, the system allocator and
+// library objects (Shared, Mutex), threads, the system allocator and
 // the test hooks. Linked by `kern build` with every program. The containers
 // (Box, Vec, Pool, Arena) are kern code in std/core.kern.
 #ifndef _GNU_SOURCE
@@ -257,57 +257,6 @@ void *kern_mutex_lock(kern_mutex *mx, int64_t start, int64_t end) {
 }
 void kern_mutex_unlock(kern_mutex *mx) { pthread_mutex_unlock(&mx->m); }
 void kern_mutex_drop(kern_mutex *mx, kern_glue g) { if (mx == NULL) return; if (g) g(mx->data); pthread_mutex_destroy(&mx->m); free(mx); }
-
-// ---- Atomic ----
-
-typedef struct { int64_t size; uint64_t v; } kern_atomic;
-static int kern_order(uint8_t o) {
-    switch (o) { case 0: return __ATOMIC_RELAXED; case 1: return __ATOMIC_ACQUIRE; case 2: return __ATOMIC_RELEASE; case 3: return __ATOMIC_ACQ_REL; default: return __ATOMIC_SEQ_CST; }
-}
-static uint64_t kern_mask(int64_t size, uint64_t v) { return size >= 8 ? v : (v & ((1ULL << (size * 8)) - 1)); }
-void *kern_atomic_new(int64_t size, const void *src) {
-    kern_atomic *a = kern_alloc(sizeof *a, 0, 0);
-    a->size = size; uint64_t v = 0; memcpy(&v, src, (size_t)size); __atomic_store_n(&a->v, v, __ATOMIC_SEQ_CST);
-    return a;
-}
-int64_t kern_atomic_load(kern_atomic *a, int64_t size, uint8_t o) { (void)size; return (int64_t)__atomic_load_n(&a->v, kern_order(o)); }
-void kern_atomic_store(kern_atomic *a, int64_t size, int64_t v, uint8_t o) { __atomic_store_n(&a->v, kern_mask(size, (uint64_t)v), kern_order(o)); }
-int64_t kern_atomic_swap(kern_atomic *a, int64_t size, int64_t v, uint8_t o) { return (int64_t)__atomic_exchange_n(&a->v, kern_mask(size, (uint64_t)v), kern_order(o)); }
-int64_t kern_atomic_rmw(kern_atomic *a, int64_t size, int64_t op, int64_t v, uint8_t o) {
-    uint64_t x = kern_mask(size, (uint64_t)v);
-    int m = kern_order(o);
-    if (size >= 8) {
-        switch (op) {
-            case 0: return (int64_t)__atomic_fetch_add(&a->v, x, m);
-            case 1: return (int64_t)__atomic_fetch_sub(&a->v, x, m);
-            case 2: return (int64_t)__atomic_fetch_and(&a->v, x, m);
-            case 3: return (int64_t)__atomic_fetch_or(&a->v, x, m);
-            default: return (int64_t)__atomic_fetch_xor(&a->v, x, m);
-        }
-    }
-    // a narrow read-modify-write is one atomic update: compute the masked
-    // result and publish it with compare-exchange
-    uint64_t old = __atomic_load_n(&a->v, __ATOMIC_RELAXED);
-    for (;;) {
-        uint64_t nw;
-        switch (op) {
-            case 0: nw = old + x; break;
-            case 1: nw = old - x; break;
-            case 2: nw = old & x; break;
-            case 3: nw = old | x; break;
-            default: nw = old ^ x; break;
-        }
-        nw = kern_mask(size, nw);
-        if (__atomic_compare_exchange_n(&a->v, &old, nw, 1, m, __ATOMIC_RELAXED)) return (int64_t)old;
-    }
-}
-void kern_atomic_cmpxchg(kern_atomic *a, int64_t size, int64_t expected, int64_t desired, uint8_t so, uint8_t fo, char *out, int64_t off) {
-    uint64_t e = kern_mask(size, (uint64_t)expected);
-    int ok = __atomic_compare_exchange_n(&a->v, &e, kern_mask(size, (uint64_t)desired), 0, kern_order(so), kern_order(fo));
-    out[0] = ok ? 0 : 1;
-    memcpy(out + off, &e, (size_t)size);
-}
-void kern_fence(uint8_t o) { __atomic_thread_fence(kern_order(o)); }
 
 // ---- threads (spec §5.5) ----
 

@@ -1,8 +1,9 @@
 // Package interp executes the semantic IR directly (PLAN.md 1.2): the
 // behavioral oracle for spec §4.1 execution semantics, §5.7 destruction and
-// §6 traps. The runtime-provided library objects (Shared, Mutex, Atomic,
-// threads) are Go intrinsics; the containers are the prelude's kern code,
-// run over the interpreter's byte-addressed raw memory.
+// §6 traps. The runtime-provided library objects (Shared, Mutex, threads)
+// are Go intrinsics; an Atomic is a struct of its cell updated under a lock;
+// the containers are the prelude's kern code, run over the interpreter's
+// byte-addressed raw memory.
 package interp
 
 import (
@@ -169,9 +170,6 @@ type Mutex struct {
 	state  sync.Mutex // guards Locked and owner
 	lock   sync.Mutex // the lock itself
 }
-
-// Atomic holds an atomic primitive.
-type Atomic struct{ Val Value }
 
 // Scope is a thread scope.
 type Scope struct{ Joins []*Join }

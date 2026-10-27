@@ -183,6 +183,8 @@ type fnEmit struct {
 	addrs   map[*ir.Value]string // large aggregate values kept in memory: their private copy
 	pstores strings.Builder      // parameter stores into their slots (after the stack check)
 	strs    map[*ir.Value][]byte // string literal values, for inline assembly templates
+	tags    map[*ir.Value]int    // payload-free union literals (memory orderings): their tag
+	packed  map[*ir.Value]bool   // accesses opened inside a packed struct (unaligned places)
 	dbgLoc  string               // the current instruction's !DILocation, "" without debug info
 	align   int                  // alignment override for the next load/store (1 inside packed structs)
 	labels  map[*ir.Block]string
@@ -395,7 +397,7 @@ func (e *emitter) retType(f *ir.Func) string {
 }
 
 func (e *emitter) function(f *ir.Func) {
-	fe := &fnEmit{e: e, f: f, vals: map[*ir.Value]string{}, accs: map[*ir.Value]bool{}, addrs: map[*ir.Value]string{}, strs: map[*ir.Value][]byte{}, labels: map[*ir.Block]string{}}
+	fe := &fnEmit{e: e, f: f, vals: map[*ir.Value]string{}, accs: map[*ir.Value]bool{}, addrs: map[*ir.Value]string{}, strs: map[*ir.Value][]byte{}, tags: map[*ir.Value]int{}, packed: map[*ir.Value]bool{}, labels: map[*ir.Block]string{}}
 	for _, b := range f.Blocks {
 		fe.labels[b] = fmt.Sprintf("bb%d", b.ID)
 	}
@@ -728,6 +730,9 @@ func (fe *fnEmit) instr(in ir.Instr) {
 	case *ir.AccessBegin:
 		fe.accs[i.Dst] = true
 		p := fe.place(i.Place)
+		if p.align == 1 {
+			fe.packed[i.Dst] = true
+		}
 		if seq, _ := accessInfo(i.Dst.Type); seq && !p.seq {
 			// an array place coerced to a sequence access
 			arr, ok := p.ty.(*resolve.Array)
@@ -943,6 +948,9 @@ func (fe *fnEmit) constant(c *ir.Const) {
 
 func (fe *fnEmit) makeUnion(i *ir.MakeUnion) {
 	n := i.Dst.Type.(*resolve.Named)
+	if len(i.Fields) == 0 {
+		fe.tags[i.Dst] = i.Tag // a constant an atomic operation may take as its ordering
+	}
 	ty := fe.e.namedType(n)
 	li := layout.Of(n)
 	tmp := fe.alloca(ty)

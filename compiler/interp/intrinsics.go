@@ -105,43 +105,34 @@ func init() {
 			m.lock.Unlock()
 			return nil
 		},
-		"Atomic.new": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Atomic{Val: a[0]}} },
+		// an Atomic[T] is a struct of its cell (as natively); atomicMu makes
+		// each operation one update of the cell
+		"Atomic.new": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Struct{Fields: []Value{a[0]}}} },
 		"Atomic.load": func(it *Interp, a []Value, _ callCtx) []Value {
 			atomicMu.Lock()
 			defer atomicMu.Unlock()
-			return []Value{atomicOf(a[0]).Val}
+			return []Value{atomicLoad(a[0])}
 		},
 		"Atomic.store": func(it *Interp, a []Value, _ callCtx) []Value {
-			atomicMu.Lock()
-			defer atomicMu.Unlock()
-			atomicOf(a[0]).Val = a[1]
+			atomicUpdate(a[0], func(cell *Value) { *cell = a[1] })
 			return nil
 		},
 		"Atomic.swap": func(it *Interp, a []Value, _ callCtx) []Value {
-			atomicMu.Lock()
-			defer atomicMu.Unlock()
-			at := atomicOf(a[0])
-			old := at.Val
-			at.Val = a[1]
+			var old Value
+			atomicUpdate(a[0], func(cell *Value) {
+				old = *cell
+				*cell = a[1]
+			})
 			return []Value{old}
 		},
-		"Atomic.compare_exchange": func(it *Interp, a []Value, _ callCtx) []Value {
-			atomicMu.Lock()
-			defer atomicMu.Unlock()
-			at := atomicOf(a[0])
-			if equalValues(at.Val, a[1]) {
-				old := at.Val
-				at.Val = a[2]
-				return []Value{&Union{Tag: 0, Fields: []Value{old}}}
-			}
-			return []Value{&Union{Tag: 1, Fields: []Value{at.Val}}}
-		},
-		"Atomic.fetch_add": atomicRMW("+"),
-		"Atomic.fetch_sub": atomicRMW("-"),
-		"Atomic.fetch_and": atomicRMW("&"),
-		"Atomic.fetch_or":  atomicRMW("|"),
-		"Atomic.fetch_xor": atomicRMW("^"),
-		"fence":            func(it *Interp, a []Value, _ callCtx) []Value { return nil },
+		"Atomic.compare_exchange":      atomicCmpxchg,
+		"Atomic.compare_exchange_weak": atomicCmpxchg, // never fails spuriously here, which the spec permits
+		"Atomic.fetch_add":             atomicRMW("+"),
+		"Atomic.fetch_sub":             atomicRMW("-"),
+		"Atomic.fetch_and":             atomicRMW("&"),
+		"Atomic.fetch_or":              atomicRMW("|"),
+		"Atomic.fetch_xor":             atomicRMW("^"),
+		"fence":                        func(it *Interp, a []Value, _ callCtx) []Value { return nil },
 		// threads: goroutines with their own interpreter copy (PLAN.md 3.3)
 		"thread.scope": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Scope{}} },
 		"thread.spawn": func(it *Interp, a []Value, _ callCtx) []Value {
@@ -351,15 +342,44 @@ func init() {
 	}
 }
 
-func atomicOf(v Value) *Atomic { return acc(v).Ref.get().(*Atomic) }
+// atomicLoad reads the cell behind a view of an Atomic (its struct's only
+// field) under atomicMu.
+func atomicLoad(v Value) Value { return acc(v).Ref.get().(*Struct).Fields[0] }
+
+// atomicUpdate applies f to the cell behind a view of an Atomic and writes
+// the struct back through the reference, all under atomicMu: a cell in raw
+// memory (a container element, a boxed value) is decoded afresh by every
+// get, so an update reaches it only through set.
+func atomicUpdate(v Value, f func(cell *Value)) {
+	atomicMu.Lock()
+	defer atomicMu.Unlock()
+	ref := acc(v).Ref
+	s := ref.get().(*Struct)
+	f(&s.Fields[0])
+	ref.set(s)
+}
+
+func atomicCmpxchg(it *Interp, a []Value, _ callCtx) []Value {
+	var r Value
+	atomicUpdate(a[0], func(cell *Value) {
+		if equalValues(*cell, a[1]) {
+			old := *cell
+			*cell = a[2]
+			r = &Union{Tag: 0, Fields: []Value{old}}
+			return
+		}
+		r = &Union{Tag: 1, Fields: []Value{*cell}}
+	})
+	return []Value{r}
+}
 
 func atomicRMW(op string) intrinsicFn {
 	return func(it *Interp, a []Value, _ callCtx) []Value {
-		atomicMu.Lock()
-		defer atomicMu.Unlock()
-		at := atomicOf(a[0])
-		old := at.Val
-		at.Val = it.binary(op, old, a[1], "wrapping")
+		var old Value
+		atomicUpdate(a[0], func(cell *Value) {
+			old = *cell
+			*cell = it.binary(op, old, a[1], "wrapping")
+		})
 		return []Value{old}
 	}
 }

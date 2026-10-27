@@ -1,0 +1,6 @@
+//! phase: 3
+//! expect: accept
+module t
+struct Counter { hits: Atomic[u64] }
+struct Frame { tag: u8; c: Counter }
+struct Raw packed { tag: u8; len: u32 }

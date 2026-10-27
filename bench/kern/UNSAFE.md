@@ -45,16 +45,19 @@ unnoticed.
 
 The two files are the same program with `FAIL_MODE` false/true. `Spsc` is
 the ring: `slots: [4096]u64`, `head`, `tail` and `go` as `Atomic[u64]`
-padded 128 bytes apart. Threads only ever hold a `view[Spsc]`; the slots
-are written and read through that view inside `unsafe`, which Rule 6.4
-permits in the declaring module under `unsafe assert Interior`.
+padded 128 bytes apart (inline cells: every atomic operation is an LLVM
+instruction on the field). Each side keeps its own index in a private
+`Cursor` and publishes it every 64 elements and before a wait, as
+bench/CHECKSUMS.md specifies. Threads only ever hold a `view[Spsc]`; the
+slots are written and read through that view inside `unsafe`, which Rule
+6.4 permits in the declaring module under `unsafe assert Interior`.
 
 | Declaration / function | Contract or obligation | What it does | Failure path exercised by |
 |---|---|---|---|
 | `unsafe assert Interior for Spsc` | obligation (Rule 5.4.6): every write through a `view` of `Spsc` is made data-race-free by the type's own synchronization, here the push/pop index protocol below | lets `push`/`pop` write and read `slots` through a `view` | the consumer's chained checksum (`9933137394116826624`, matching bench/c) in release and debug builds, repeated runs; a torn or stale slot read would change it |
 | `unsafe assert Share for Spsc` | obligation (Rule 5.5.1): a `view` of `Spsc` may be read from several threads; the only interior state is the atomics and the slots covered by the assertion above | lets the scoped consumer receive `view[Spsc]` while the main thread keeps using it | same |
-| `push(q, c, v)` | invariant "slot (tail & 4095) is written only by the single producer and only while tail - head < 4096, head being the consumer's release-stored value read here with acquire, so the consumer's last read of that slot happens-before the write; the release store of tail publishes the slot"; ensures "true: v is the newest element of the ring; false: the ring was full and v was not stored" | `q.slots[t & 4095] = v` between the fullness check and the release store of `tail` | push on a full ring returns `false` before the block runs: `lock_free_queue_fail.kern` (the consumer is gated while 5120 pushes are attempted; exactly 1024 fail and the line ends with ` failures=1024`, checksum `16524715534916428288` as bench/c with `KERN_BENCH_FAIL=1`) |
-| `pop(q, c)` | invariant "slot (head & 4095) is read only by the single consumer and only while head < tail, tail being the producer's release-stored value read here with acquire, so the producer's write of that slot happens-before the read; the release store of head returns the slot to the producer"; ensures "Some(v): v was the oldest element and head advanced; None: the ring was empty" | `v = q.slots[h & 4095]` between the emptiness check and the release store of `head` | pop on an empty ring returns `None` before the block runs: every spin of the consumer in both runs (the sampled pop includes those spins), and the gated start of the fail twin |
+| `push(q, c, v)` | invariant "slot (pos & 4095) is written only by the single producer and only while pos - head < 4096, head being the consumer's release-stored value read here with acquire, so the consumer's last read of that slot happens-before the write; the release store of tail (every 64 elements, and publish_tail before a wait) publishes the slots written so far"; ensures "true: v is the newest element of the ring; false: the ring was full and v was not stored" | `q.slots[pos & 4095] = v` between the fullness check and the batched release store of `tail` | push on a full ring returns `false` before the block runs: `lock_free_queue_fail.kern` (the consumer is gated while 5120 pushes are attempted; exactly 1024 fail and the line ends with ` failures=1024`, checksum `16524715534916428288` as bench/c with `KERN_BENCH_FAIL=1`) |
+| `pop(q, c)` | invariant "slot (pos & 4095) is read only by the single consumer and only while pos < tail, tail being the producer's release-stored value read here with acquire, so the producer's write of that slot happens-before the read; the release store of head (every 64 elements, and publish_head before a wait) returns the slots read so far to the producer"; ensures "Some(v): v was the oldest element and head advanced; None: the ring was empty" | `v = q.slots[pos & 4095]` between the emptiness check and the batched release store of `head` | pop on an empty ring returns `None` before the block runs: every spin of the consumer in both runs (the sampled pop includes those spins), and the gated start of the fail twin |
 
 The acquire/release pairing itself is the subject of the litmus fixtures
 `tests/concurrency/litmus/message_passing.kern` (release store observed by

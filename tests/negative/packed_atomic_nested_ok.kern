@@ -1,0 +1,7 @@
+//! phase: 3
+//! expect: accept
+module t
+struct Cell[T] packed { tag: u8; v: T }
+struct Wrap[T] { c: Cell[T] }
+contract { requires "unaligned access is supported by the target" }
+func f(w: view[Wrap[u32]]) -> u8 { unsafe { return w.c.tag } }

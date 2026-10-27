@@ -26,17 +26,21 @@ This chapter restates spec §5 (and the §4.1, §6 and §7 rules that interact w
 `+ - *` and unary negation on integers trap on overflow (kind `overflow`) in every build configuration; division and remainder by zero trap (`div_zero`); dividing the minimum value of a signed type by `-1` traps (`overflow`). **Accepted decision (spec §13, item 2):** the remainder of the minimum signed value by `-1` also traps with kind `overflow`, matching division. The explicit alternatives are exactly the `wrapping_*`, `saturating_*` and `checked_*` forms of §4.1.
 
 ### Rule 4.1.5 — Layout
-Struct fields are laid out in declaration order with the target C ABI alignment and padding. A union's discriminant is at offset 0, is `u8` when the union has at most 256 variants and `u16` otherwise, and numbers variants from 0 in declaration order; a union with more than 65,536 variants is rejected. The payload begins at the next offset aligned to the maximum alignment of all variant payloads. `[N]T` is `N` contiguous elements; a sequence access is a (pointer, length) pair of two `usize`; a scalar access is one pointer. Reordering is never performed implicitly.
-Diagnostics: `TYPE_TOO_MANY_VARIANTS`
+Struct fields are laid out in declaration order with the target C ABI alignment and padding. A union's discriminant is at offset 0, is `u8` when the union has at most 256 variants and `u16` otherwise, and numbers variants from 0 in declaration order; a union with more than 65,536 variants is rejected. The payload begins at the next offset aligned to the maximum alignment of all variant payloads. `[N]T` is `N` contiguous elements; a sequence access is a (pointer, length) pair of two `usize`; a scalar access is one pointer. Reordering is never performed implicitly. A `packed` struct lays its fields out without padding, so one whose fields hold an `Atomic` inline (directly, or through arrays, tuples, structs or unions) is rejected: an atomic cell keeps its natural alignment.
+Diagnostics: `TYPE_TOO_MANY_VARIANTS`, `TYPE_PACKED_ATOMIC`
 Accepted:
 ```kern
 module m
 union Small { A; B; C }          // discriminant u8, variants numbered 0, 1, 2
+struct Counter { hits: Atomic[u64] }
+struct Frame packed { tag: u8; len: u32 }
 ```
 Rejected:
 ```kern
 module m
 union Huge { V0; V1; V2 }        // TYPE_TOO_MANY_VARIANTS: sketch stands for a union declaring 65,537 variants
+struct Counter { hits: Atomic[u64] }
+struct Frame packed { tag: u8; c: Counter }   // TYPE_PACKED_ATOMIC: c holds an Atomic at an unaligned offset
 ```
 
 ### Rule 4.1.6 — SIMD vectors
