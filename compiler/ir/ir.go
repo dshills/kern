@@ -50,7 +50,10 @@ type Func struct {
 	// Library marks a std/core function with a body: a trap inside it is
 	// attributed to the call that entered the library (the span its
 	// callers pass along), as the runtime's C containers reported it.
-	Library   bool
+	Library bool
+	// Inlined marks a function every call of which was inlined (opt.Inline)
+	// and that nothing references any more: not emitted, run or reported.
+	Inlined   bool
 	Extern    string // C ABI symbol when an extern declaration
 	Contract  *ast.Contract
 	Pos       ast.Pos
