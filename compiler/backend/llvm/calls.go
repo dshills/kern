@@ -475,6 +475,18 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.emit("%s = mul i64 %s, %s", m, fe.v(a[2]), sz(et))
 		e.declare("llvm.memmove.p0.p0.i64", "void (ptr, ptr, i64, i1)")
 		fe.emit("call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)", fe.v(a[0]), fe.v(a[1]), m)
+	case "ptr_store_seq":
+		// the view's elements, len(src) * size_of[T] bytes, into the raw
+		// destination; the ranges are disjoint by the caller's obligation
+		et := fe.elemType(c, 0)
+		p := fe.next("t")
+		fe.emit("%s = extractvalue { ptr, i64 } %s, 0", p, fe.v(a[1]))
+		n := fe.next("t")
+		fe.emit("%s = extractvalue { ptr, i64 } %s, 1", n, fe.v(a[1]))
+		m := fe.next("t")
+		fe.emit("%s = mul i64 %s, %s", m, n, sz(et))
+		e.declare("llvm.memcpy.p0.p0.i64", "void (ptr, ptr, i64, i1)")
+		fe.emit("call void @llvm.memcpy.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)", fe.v(a[0]), p, m)
 	case "ptr_view", "ptr_edit":
 		// an access on raw memory is the pointer itself
 		fe.vals[dst()] = fe.v(a[0])

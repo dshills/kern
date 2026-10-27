@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: vec_extend_copy
+module m
+func f(v: edit[Vec[u64]], src: view[]u64) { v.extend(src) }

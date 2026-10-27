@@ -35,18 +35,19 @@ func crc32(c: view[Crc], data: view[]u8) -> u32 {
 // the buffer is ever live across an append.
 struct Wal { log: Vec[u8]; next_lsn: u64 }
 
-func put_u64(log: edit[Vec[u8]], v: u64) {
+// put_u64 and put_u32 write v little-endian into the header at off.
+func put_u64(hdr: edit[]u8, off: usize, v: u64) {
     x := v
     for i in 0usize..8usize {
-        log.push(truncate[u8](x))
+        hdr[off + i] = truncate[u8](x)
         x = x >> 8u32
     }
 }
 
-func put_u32(log: edit[Vec[u8]], v: u32) {
+func put_u32(hdr: edit[]u8, off: usize, v: u32) {
     x := v
     for i in 0usize..4usize {
-        log.push(truncate[u8](x))
+        hdr[off + i] = truncate[u8](x)
         x = x >> 8u32
     }
 }
@@ -71,14 +72,19 @@ func get_u32(d: view[]u8, off: usize) -> u32 {
     return v
 }
 
-// append writes one record and returns its lsn. w and payload are different
-// roots, so the edit of the log and the view of the payload never conflict.
+// append writes one record and returns its lsn: the 16-byte header is built
+// in a local and the header and the payload reach the log by two block
+// copies (Vec.extend), as the C version does two memcpy calls and the Rust
+// version extend_from_slice. w and payload are different roots, so the edit
+// of the log and the view of the payload never conflict.
 func append(w: edit[Wal], c: view[Crc], payload: view[]u8) -> u64 {
     lsn := w.next_lsn
-    put_u64(w.log, lsn)
-    put_u32(w.log, u32(len(payload)))
-    put_u32(w.log, crc32(c, payload))
-    for b in payload { w.log.push(b) }
+    var hdr: [16]u8 = zero()
+    put_u64(hdr, 0usize, lsn)
+    put_u32(hdr, 8usize, u32(len(payload)))
+    put_u32(hdr, 12usize, crc32(c, payload))
+    w.log.extend(hdr)
+    w.log.extend(payload)
     w.next_lsn = lsn + 1u64
     return lsn
 }

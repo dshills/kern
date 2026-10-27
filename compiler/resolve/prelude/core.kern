@@ -42,6 +42,12 @@ func ptr_edit[T](p: RawPtr[T]) -> edit[T]
 func ptr_view_seq[T](p: RawPtr[T], n: usize) -> view[]T
 func ptr_edit_seq[T](p: RawPtr[T], n: usize) -> edit[]T
 func ptr_edit2[T](a: RawPtr[T], b: RawPtr[T]) -> (edit[T], edit[T])
+// ptr_store_seq writes the len(src) elements of a sequence view into raw
+// memory at p, each in its §4.1 layout (so the elements are duplicated
+// bitwise); the destination must not overlap the source. Vec.extend's block
+// copy: natively one memcpy, in the interpreter an element-wise encode (a
+// view of an array local has no raw address there).
+func ptr_store_seq[T](p: RawPtr[T], src: view[]T)
 // size_of and align_of are the §4.1 size and alignment of T in bytes.
 func size_of[T]() -> usize
 func align_of[T]() -> usize
@@ -290,6 +296,30 @@ impl Vec[T] {
         if self.size == 0usize { return None }
         self.size = self.size - 1usize
         unsafe { return Some(ptr_take(ptr_offset(self.data, truncate[isize](self.size)))) }
+    }
+    // grow_to makes room for at least n elements, doubling the capacity
+    // when that is more, so a run of small extends stays amortized like a
+    // run of pushes.
+    func grow_to(edit self, n: usize) {
+        if self.cap > 9223372036854775807usize { trap_kind(oom) }
+        want := 4usize
+        if self.cap > 0usize { want = self.cap * 2usize }
+        if want < n { want = n }
+        self.reserve(want)
+    }
+    // extend appends the elements of src, whose type must be Copy (the
+    // resolver requires it at the call, CONSTRAINT_UNSATISFIED otherwise):
+    // one reservation for size + len(src) (checked, so the sum cannot wrap),
+    // one block copy of the elements, then the size update. This is the
+    // memcpy / extend_from_slice form of a loop of pushes.
+    contract { requires "data addresses cap elements of which the first size are live; src does not overlap the spare capacity" }
+    func extend(edit self, src: view[]T) {
+        total := self.size + len(src)
+        if total > self.cap { self.grow_to(total) }
+        unsafe {
+            ptr_store_seq(ptr_offset(self.data, truncate[isize](self.size)), src)
+            self.size = total
+        }
     }
     // resize sets the length to n: elements past n are destroyed, and the
     // new elements are copies of x (x itself is destroyed on return). The

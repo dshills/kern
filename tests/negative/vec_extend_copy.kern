@@ -1,0 +1,4 @@
+//! expect: reject CONSTRAINT_UNSATISFIED rule=T.4
+//! twin: vec_extend_copy_ok
+module m
+func f(v: edit[Vec[Vec[u64]]], src: view[]Vec[u64]) { v.extend(src) }   // CONSTRAINT_UNSATISFIED

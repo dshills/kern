@@ -32,9 +32,9 @@ Returning an access opened on raw memory (`ptr_view`, `ptr_edit`,
 rule (Rule 6.6); the resolver classifies these intrinsics as unsafe
 operations like every `ptr_*` function.
 
-34 functions, 35 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
+35 functions, 36 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
 pool and arena elements with destructors, `Box.into`, `copy` of a vector,
-`pop`, `clear`), `tests/run/vec_resize.kern`, `tests/run/pool_handles.kern`, `tests/run/hello.kern`, the
+`pop`, `clear`), `tests/run/vec_resize.kern`, `tests/run/vec_extend.kern`, `tests/run/pool_handles.kern`, `tests/run/hello.kern`, the
 examples and the container benchmarks; the failure paths are the trap
 fixtures `tests/trap/{bounds,vacant,generation,identity,disjoint,oom}.kern`
 (the span reported is the user-level call that entered the library, as the
@@ -58,6 +58,7 @@ executions of every fixture compare the containers' behaviour directly.
 | `Vec.push` | 1 | `ptr_offset`, `ptr_store` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.pop` | 1 | `ptr_offset`, `ptr_take` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.resize` | 2 | `ptr_offset`, `ptr_store`, `ptr_take` | requires "data addresses cap elements of which the first size are live" |
+| `Vec.extend` | 1 | `ptr_offset`, `ptr_store_seq` | requires "data addresses cap elements of which the first size are live; src does not overlap the spare capacity" |
 | `Vec.get` | 1 | `ptr_offset`, `ptr_view` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.at` | 1 | `ptr_edit`, `ptr_offset` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.as_view` | 1 | `ptr_view_seq` | requires "data addresses cap elements of which the first size are live" |

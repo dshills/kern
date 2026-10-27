@@ -30,6 +30,20 @@ type intrinsicFn func(it *Interp, args []Value, c callCtx) []Value
 
 func acc(v Value) *Access { return v.(*Access) }
 
+// seqOf returns the window of a sequence access; an access to a whole array
+// (an array local passed where a sequence view is expected) is opened over
+// its elements, in Go slots or raw memory.
+func seqOf(a *Access) *seqRef {
+	if a.Seq != nil {
+		return a.Seq
+	}
+	if rr, ok := a.Ref.(rawRef); ok {
+		return rr.elems()
+	}
+	arr := a.Ref.get().(*Array)
+	return &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(arr.Elems)}
+}
+
 func u64(v Value) uint64 { return v.(Int).Bits }
 
 // intrinsics is the table of bodyless prelude functions (std/core.kern)
@@ -250,6 +264,19 @@ func init() {
 				it.trap("explicit", c.pos)
 			}
 			copy(dst, src)
+			return nil
+		},
+		// ptr_store_seq writes a sequence view's elements into raw memory
+		// element by element: the source may be Go slots (a view of an array
+		// local or of a Vec) or raw memory, and only the destination is raw
+		"ptr_store_seq": func(it *Interp, a []Value, c callCtx) []Value {
+			s := seqOf(acc(a[1]))
+			t := c.targ(0)
+			size := uint64(layout.Of(t).Size)
+			base := u64(a[0])
+			for i := 0; i < s.length(); i++ {
+				it.encode(it.rawAt(base+uint64(i)*size, t, c.pos), t, s.at(i).get())
+			}
 			return nil
 		},
 		// accesses on raw memory (the kern containers' elements)

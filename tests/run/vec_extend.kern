@@ -1,0 +1,52 @@
+//! phase: 1
+//! expect: output vec_extend
+// Vec.extend (std/core.kern): appends the elements of a view by one
+// reservation and one block copy. Cases: an empty source leaves the vector
+// as it is; a source larger than the spare capacity grows across a reserve
+// boundary and keeps the old elements; a vector is extended from a view of
+// another vector, twice, and from a sub-slice of one; bytes come from an
+// array local the way a record header does; a Copy struct with padding is
+// copied field for field.
+module run
+struct P { a: u8; b: u32 }
+func show(v: view[Vec[u64]]) {
+    print_u64(u64(v.len())); print_str(":")
+    for x in v.as_view() { print_str(" "); print_u64(x) }
+    println()
+}
+func main() -> i32 {
+    v := Vec[u64].new()
+    e := Vec[u64].new()
+    v.extend(e.as_view())
+    show(v)
+    v.reserve(4usize)
+    v.push(1u64); v.push(2u64); v.push(3u64)
+    var more: [6]u64 = zero()
+    for i in 0usize..6usize { more[i] = 10u64 + u64(i) }
+    v.extend(more)
+    show(v)
+    v.extend(e.as_view())
+    show(v)
+    w := Vec[u64].new()
+    w.extend(v.as_view())
+    w.extend(v.as_view())
+    show(w)
+    u := Vec[u64].new()
+    with d := v.as_view() { u.extend(d[2usize:5usize]) }
+    show(u)
+    b := Vec[u8].new()
+    var hdr: [4]u8 = zero()
+    hdr[0] = 7u8; hdr[1] = 8u8; hdr[2] = 9u8; hdr[3] = 10u8
+    b.extend(hdr)
+    b.extend(hdr)
+    for x in b.as_view() { print_u64(u64(x)); print_str(" ") }
+    println()
+    ps := Vec[P].new()
+    var src: [2]P = zero()
+    src[0] = P { a: 1u8, b: 100u32 }
+    src[1] = P { a: 2u8, b: 200u32 }
+    ps.extend(src)
+    for p in ps.as_view() { print_u64(u64(p.a)); print_str("/"); print_u64(u64(p.b)); print_str(" ") }
+    println()
+    return 0i32
+}

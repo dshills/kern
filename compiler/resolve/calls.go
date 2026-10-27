@@ -260,6 +260,15 @@ func (c *fnCtx) callFunc(sc *scope, x *ast.CallExpr, info *CallInfo, f *FuncDecl
 			c.errorf("TYPE_MISMATCH", x.Pos, "%s requires an integer type, found %s", f.Name, typeString(t))
 		}
 	}
+	// Vec.extend duplicates its source elements bitwise, so the element type
+	// must be Copy. A method cannot constrain its owner's type parameter
+	// (conditional implementations are not supported), so the requirement is
+	// checked at the call, like the integer-only forms above.
+	if f.Module == "core" && f.Receiver != nil && f.Receiver.Name == "Vec" && f.Name == "extend" {
+		if t, ok := m["T"]; ok && !c.r.satisfies(t, &Constraint{Marker: "Copy"}) {
+			c.errorf("CONSTRAINT_UNSATISFIED", x.Pos, "Vec.extend requires a Copy element type, found %s", typeString(t))
+		}
+	}
 	// constraints on inferred parameters (the function's own, and the owner's
 	// when they were not bound by the receiver or explicit arguments)
 	for _, tp := range f.TypeParams {
