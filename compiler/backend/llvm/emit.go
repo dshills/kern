@@ -88,8 +88,18 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 	if e.dbg != nil {
 		out.WriteString(e.dbg.metadata())
 	}
-	// every frame is probed page by page so a large frame cannot skip the
-	// guard page (PLAN.md 2.2)
+	if attrs := e.fnAttrs(); attrs != "" {
+		fmt.Fprintf(&out, "attributes #0 = {%s }\n", attrs)
+	}
+	return out.String(), e.errs
+}
+
+// fnAttrs is the attribute group every function carries. Hosted builds probe
+// every frame page by page so a large frame cannot skip the guard page
+// (PLAN.md 2.2); ThreadSanitizer builds instrument every function. A
+// freestanding build without ThreadSanitizer needs neither, and LLVM rejects
+// an empty attribute group, so the group is then omitted altogether.
+func (e *emitter) fnAttrs() string {
 	attrs := ""
 	if !e.opts.StackCheck {
 		attrs += " \"probe-stack\"=\"inline-asm\"" // hosted: the guard page must not be skipped
@@ -97,8 +107,16 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 	if e.opts.TSan {
 		attrs += " sanitize_thread"
 	}
-	fmt.Fprintf(&out, "attributes #0 = {%s }\n", attrs)
-	return out.String(), e.errs
+	return attrs
+}
+
+// attrRef is the reference to the attribute group on a function definition,
+// empty when fnAttrs emits no group.
+func (e *emitter) attrRef() string {
+	if e.fnAttrs() == "" {
+		return ""
+	}
+	return " #0"
 }
 
 func retOrVoid(t string) string {
@@ -437,7 +455,7 @@ func (e *emitter) function(f *ir.Func) {
 	if e.dbg != nil {
 		dbgSuffix = " !dbg " + e.dbg.subprogram(f)
 	}
-	fmt.Fprintf(&e.sb, "define %s %s(%s) #0%s {\nentry:\n%s%s}\n\n", e.retType(f), e.symOf(f), strings.Join(ps, ", "), dbgSuffix, entry, fe.body.String())
+	fmt.Fprintf(&e.sb, "define %s %s(%s)%s%s {\nentry:\n%s%s}\n\n", e.retType(f), e.symOf(f), strings.Join(ps, ", "), e.attrRef(), dbgSuffix, entry, fe.body.String())
 }
 
 func isParam(f *ir.Func, l *ir.Local) bool {

@@ -1,3 +1,3 @@
 before
-{"trap":{"file":"tests/freestanding/trap_bounds.kern","kind":"bounds","span":{"end":331,"start":327},"thread":0}}
+{"trap":{"kind":"bounds","file":"freestanding/trap_bounds.kern","span":{"start":327,"end":331},"thread":0}}
 {"halt":{"code":134}}

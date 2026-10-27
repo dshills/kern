@@ -1,2 +1,2 @@
-{"trap":{"file":"tests/freestanding/stack.kern","kind":"stack","span":{"end":296,"start":239},"thread":0}}
+{"trap":{"kind":"stack","file":"freestanding/stack.kern","span":{"start":239,"end":296},"thread":0}}
 {"halt":{"code":134}}

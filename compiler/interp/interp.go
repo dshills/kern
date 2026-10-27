@@ -240,10 +240,30 @@ func (it *Interp) halt(code int) {
 // exitCode is raised by the exit intrinsic and recovered by Run.
 type exitCode int32
 
+// trapRecordJSON is the default handler's record with the keys in the order
+// the C runtimes write them, so an interpreter transcript and a native one
+// are byte-identical.
+type trapRecordJSON struct {
+	Trap struct {
+		Kind string `json:"kind"`
+		File string `json:"file"`
+		Span struct {
+			Start int `json:"start"`
+			End   int `json:"end"`
+		} `json:"span"`
+		Thread uint64 `json:"thread"`
+	} `json:"trap"`
+}
+
 // trapRecord writes the trap record (the default handler's output, PLAN.md
 // §0) and runs the registered handler once.
 func (it *Interp) trapRecord(tr *Trap) {
-	rec := map[string]any{"trap": map[string]any{"kind": tr.Kind, "file": it.file, "span": map[string]int{"start": tr.Pos.Start, "end": tr.Pos.End}, "thread": it.tid}}
+	var rec trapRecordJSON
+	rec.Trap.Kind = tr.Kind
+	rec.Trap.File = it.file
+	rec.Trap.Span.Start = tr.Pos.Start
+	rec.Trap.Span.End = tr.Pos.End
+	rec.Trap.Thread = it.tid
 	b, _ := json.Marshal(rec)
 	it.sh.mu.Lock()
 	handler := it.sh.handler

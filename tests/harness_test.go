@@ -30,7 +30,7 @@ import (
 
 // Phase is the current implementation phase; fixtures whose executable phase
 // is later are check-only.
-const Phase = 2
+const Phase = 5
 
 type header struct {
 	phase     int
@@ -124,6 +124,16 @@ func fixtures(t *testing.T) []string {
 	out = append(out, ex...)
 	sort.Strings(out)
 	return out
+}
+
+// expectedOutput is the fixture's expected-output file: beside a single-file
+// fixture, inside a directory fixture.
+func expectedOutput(path, name string) string {
+	dir := filepath.Dir(path)
+	if st, err := os.Stat(path); err == nil && st.IsDir() {
+		dir = path
+	}
+	return filepath.Join(dir, name+".out")
 }
 
 // loadFixture loads a single-file or directory fixture.
@@ -388,7 +398,7 @@ func execute(t *testing.T, path string, files []*source.File, h header) {
 		if name == "" {
 			name = strings.TrimSuffix(filepath.Base(path), ".kern")
 		}
-		want, err := os.ReadFile(filepath.Join(filepath.Dir(path), name+".out"))
+		want, err := os.ReadFile(expectedOutput(path, name))
 		if err != nil && h.expect == "output" {
 			t.Fatalf("missing expected-output file for %s", name)
 		}
@@ -426,7 +436,7 @@ func freestandingRun(t *testing.T, path string, files []*source.File, h header, 
 	if name == "" {
 		name = strings.TrimSuffix(filepath.Base(path), ".kern")
 	}
-	want, err := os.ReadFile(filepath.Join(filepath.Dir(path), name+".out"))
+	want, err := os.ReadFile(expectedOutput(path, name))
 	if err != nil {
 		t.Fatalf("missing expected console file for %s", name)
 	}
@@ -576,7 +586,7 @@ func nativeOnly(t *testing.T, path string, files []*source.File, h header) {
 	if name == "" {
 		name = strings.TrimSuffix(filepath.Base(path), ".kern")
 	}
-	want, err := os.ReadFile(filepath.Join(filepath.Dir(path), name+".out"))
+	want, err := os.ReadFile(expectedOutput(path, name))
 	if err != nil {
 		t.Fatalf("missing expected-output file for %s", name)
 	}

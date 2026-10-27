@@ -5,7 +5,9 @@ interpreter's freestanding emulation (`kern run --env freestanding`): the
 console device at `0x0900_0000` is mapped to standard output, there is no
 default allocator (`SystemAllocator.new` traps with kind `explicit`), a trap
 record goes to the console, and the run ends with the halt line
-`{"halt": {"code": n}}`. The `.out` file is the whole console transcript.
+`{"halt": {"code": n}}`. The `.out` file is the whole console transcript; a
+trap record's `file` is the path the harness loads the fixture by, relative
+to `tests/` (`freestanding/stack.kern`), and QEMU must print the same.
 
 Native: `kern build --env freestanding -o image file.kern` compiles the
 program, `runtime/freestanding/src/rt.c` and the startup code for
