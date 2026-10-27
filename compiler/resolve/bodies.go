@@ -48,12 +48,30 @@ func (r *resolver) checkBodies(m *Module) {
 
 func (r *resolver) checkDestructor(m *Module, file string, d *ast.ImplDecl) {
 	sc := r.typeScope(m, nil)
+	// `impl Box[T]` introduces T implicitly: bind the target's arguments to
+	// the type's own parameters before resolving it (a generic type's
+	// destructor). A repeated or non-parameter argument (impl Pair[T, T])
+	// was already rejected when the impl was collected (TYPE_MISMATCH), so
+	// a name is bound at most once here.
+	if tn, ok := d.Target.(*ast.TypeName); ok && tn.Pkg == "" {
+		if td, ok := m.Types[tn.Name]; ok {
+			for i, a := range tn.Args {
+				if an, ok := a.(*ast.TypeName); ok && len(an.Args) == 0 && an.Pkg == "" && i < len(td.TypeParams) {
+					if _, isType := m.Types[an.Name]; !isType && sc.lookup(an.Name) == nil {
+						sc.vars[an.Name] = &Symbol{Kind: SymTypeParam, Name: an.Name, TParam: td.TypeParams[i]}
+					}
+				}
+			}
+		}
+	}
 	target := r.resolveType(m, file, sc, d.Target)
 	fd := &FuncDecl{Name: "destructor", Module: m.Name, Pos: d.Destructor.Pos, Params: []*ParamDecl{{Name: "self", Conv: ast.ConvEdit, Type: target, Self: true, Pos: d.Destructor.Pos}}, Type: &Func{}}
 	if n, ok := target.(*Named); ok {
 		fd.Receiver = n.Decl
 		for _, tp := range n.Decl.TypeParams {
-			sc.vars[tp.Name] = &Symbol{Kind: SymTypeParam, Name: tp.Name, TParam: tp}
+			if sc.lookup(tp.Name) == nil { // the target's own names (impl Pair[B, A]) take precedence
+				sc.vars[tp.Name] = &Symbol{Kind: SymTypeParam, Name: tp.Name, TParam: tp}
+			}
 		}
 	}
 	c := &fnCtx{r: r, m: m, file: file, fd: fd, inDestructor: true, dtor: d.Destructor}

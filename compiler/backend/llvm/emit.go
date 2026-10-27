@@ -43,7 +43,10 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 	if opts.Sources != nil {
 		e.dbg = newDebugInfo(opts.Sources)
 	}
-	e.declare("kern_trap", "void (i32, i64, i64)")
+	// a trap never returns and its block is cold, which keeps the checks
+	// out of the inliner's cost and the hot path's layout
+	e.runtime["kern_trap"] = true
+	e.decls.WriteString("declare void @kern_trap(i32, i64, i64) noreturn cold\n")
 	if opts.StackCheck {
 		e.decls.WriteString("@kern_stack_limit = external global ptr\n")
 		e.declare("llvm.stacksave.p0", "ptr ()")
@@ -400,6 +403,11 @@ func (e *emitter) function(f *ir.Func) {
 	for i, p := range f.Params {
 		ps = append(ps, e.paramDecls(f, p, i)...)
 	}
+	if f.Library {
+		// the span of the user-level call that entered the library: every
+		// trap inside reports it
+		ps = append(ps, "i64 %span.s", "i64 %span.e")
+	}
 	// locals: allocas for every slot; parameters are stored into theirs
 	for _, l := range f.Locals {
 		switch l.Conv {
@@ -455,7 +463,14 @@ func (e *emitter) function(f *ir.Func) {
 	if e.dbg != nil {
 		dbgSuffix = " !dbg " + e.dbg.subprogram(f)
 	}
-	fmt.Fprintf(&e.sb, "define %s %s(%s)%s%s {\nentry:\n%s%s}\n\n", e.retType(f), e.symOf(f), strings.Join(ps, ", "), e.attrRef(), dbgSuffix, entry, fe.body.String())
+	linkage, attrs := "", ""
+	if f.Library {
+		linkage = "internal " // a library instantiation is private to the program: inlined and discarded
+		if coldLibrary[baseName(f.Name)] {
+			attrs = " noinline cold" // a growth or allocation path: kept out of the hot operations that call it
+		}
+	}
+	fmt.Fprintf(&e.sb, "define %s%s %s(%s)%s%s%s {\nentry:\n%s%s}\n\n", linkage, e.retType(f), e.symOf(f), strings.Join(ps, ", "), attrs, e.attrRef(), dbgSuffix, entry, fe.body.String())
 }
 
 func isParam(f *ir.Func, l *ir.Local) bool {
@@ -639,7 +654,7 @@ func (fe *fnEmit) check(cond string, kind string, pos ast.Pos) {
 	c := fmt.Sprintf("ok%d", fe.tmp)
 	fe.emit("br i1 %s, label %%%s, label %%%s", cond, t, c)
 	fmt.Fprintf(&fe.body, "%s:\n", t)
-	fe.emit("call void @kern_trap(i32 %d, i64 %d, i64 %d)", trapKind(kind), pos.Start, pos.End)
+	fe.emit("call void @kern_trap(i32 %d, %s)", trapKind(kind), fe.span(pos))
 	fe.emit("unreachable")
 	fmt.Fprintf(&fe.body, "%s:\n", c)
 }
@@ -843,11 +858,13 @@ func (fe *fnEmit) instr(in ir.Instr) {
 	case *ir.FuncRef:
 		if f := e.mod.Func(i.Name); f != nil && f.Extern != "" {
 			fe.vals[i.Dst] = "@" + bareName(i.Name)
+		} else if f != nil && f.Library {
+			fe.vals[i.Dst] = e.libraryThunk(f)
 		} else {
 			fe.vals[i.Dst] = fnSym(i.Name)
 		}
 	case *ir.Trap:
-		fe.emit("call void @kern_trap(i32 %d, i64 %d, i64 %d)", trapKind(i.Kind), i.Pos.Start, i.Pos.End)
+		fe.emit("call void @kern_trap(i32 %d, %s)", trapKind(i.Kind), fe.span(i.Pos))
 	case *ir.Copy:
 		if a, ok := fe.addrs[i.Src]; ok {
 			fe.loadLarge(i.Dst, a)
@@ -1302,4 +1319,50 @@ func (fe *fnEmit) term(t ir.Term) {
 	case *ir.Unreachable:
 		fe.emit("unreachable")
 	}
+}
+
+// libraryThunk emits, once, a wrapper with the plain signature of a library
+// function (no span parameters) so that it can be taken as a function value;
+// traps inside report an empty span.
+func (e *emitter) libraryThunk(f *ir.Func) string {
+	name := f.Name + ".fnptr"
+	sym := fnSym(name)
+	if e.glue[name] {
+		return sym
+	}
+	e.glue[name] = true
+	var ps, args []string
+	for i, p := range f.Params {
+		decls := e.paramDecls(f, p, i)
+		ps = append(ps, decls...)
+		args = append(args, decls...)
+	}
+	args = append(args, "i64 0", "i64 0")
+	ret := e.retType(f)
+	var b strings.Builder
+	fmt.Fprintf(&b, "define internal %s %s(%s) {\nentry:\n", ret, sym, strings.Join(ps, ", "))
+	if ret == "void" {
+		fmt.Fprintf(&b, "  call void %s(%s)\n  ret void\n}\n", fnSym(f.Name), strings.Join(args, ", "))
+	} else {
+		fmt.Fprintf(&b, "  %%r = call %s %s(%s)\n  ret %s %%r\n}\n", ret, fnSym(f.Name), strings.Join(args, ", "), ret)
+	}
+	e.glueBody.WriteString(b.String())
+	return sym
+}
+
+// coldLibrary names the prelude functions that are the containers' growth
+// and allocation paths (std/core.kern): they run once per doubling or per
+// object, so they are emitted noinline cold, which keeps the hot operations
+// around them (push, alloc) small enough to inline into their callers.
+var coldLibrary = map[string]bool{
+	"heap_alloc": true, "heap_try_alloc": true, "heap_realloc": true, "heap_try_realloc": true, "heap_free": true,
+	"Vec.grow": true, "Vec.reserve": true, "Pool.grow": true, "Arena.grow": true,
+}
+
+// baseName strips the specialization suffix: "Vec.grow[T=u64]" -> "Vec.grow".
+func baseName(name string) string {
+	if i := strings.Index(name, "["); i >= 0 {
+		return name[:i]
+	}
+	return name
 }

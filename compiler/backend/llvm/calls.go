@@ -82,7 +82,11 @@ func (fe *fnEmit) call(c *ir.Call) {
 	if callee.Extern != "" {
 		sym = "@" + bareName(c.Callee)
 	}
-	fe.directCall(c.Dsts, callee.Rets, sym, fe.typedArgs(c.Args))
+	args := fe.typedArgs(c.Args)
+	if callee.Library {
+		args = fe.withSpan(args, c.Pos)
+	}
+	fe.directCall(c.Dsts, callee.Rets, sym, args)
 }
 
 // release calls an accessor's release function with its receiver.
@@ -92,7 +96,11 @@ func (fe *fnEmit) release(i *ir.AccessEnd) {
 		fe.intrinsic(&ir.Call{Intrinsic: i.Release, Args: []*ir.Value{i.Recv}})
 		return
 	}
-	fe.directCall(nil, nil, fnSym(i.Release), fe.typedArgs([]*ir.Value{i.Recv}))
+	args := fe.typedArgs([]*ir.Value{i.Recv})
+	if rel := fe.e.mod.Func(i.Release); rel != nil && rel.Library {
+		args = fe.withSpan(args, ast.Pos{})
+	}
+	fe.directCall(nil, nil, fnSym(i.Release), args)
 }
 
 // ---- runtime intrinsics ----
@@ -251,8 +259,21 @@ func (fe *fnEmit) handle(v *ir.Value) string {
 }
 
 // span renders a source span as the two i64 arguments runtime traps take.
+// Inside a library function the span is the one its caller passed (the
+// user-level call that entered the library), whatever p is.
 func (fe *fnEmit) span(p ast.Pos) string {
+	if fe.f.Library {
+		return "i64 %span.s, i64 %span.e"
+	}
 	return fmt.Sprintf("i64 %d, i64 %d", p.Start, p.End)
+}
+
+// withSpan appends the span arguments a library callee takes.
+func (fe *fnEmit) withSpan(args string, p ast.Pos) string {
+	if args == "" {
+		return fe.span(p)
+	}
+	return args + ", " + fe.span(p)
 }
 
 // spill stores a value to a temporary and returns its address.
@@ -403,6 +424,22 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.emit("%s = mul i64 %s, %s", m, fe.v(a[2]), sz(et))
 		e.declare("llvm.memmove.p0.p0.i64", "void (ptr, ptr, i64, i1)")
 		fe.emit("call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)", fe.v(a[0]), fe.v(a[1]), m)
+	case "ptr_view", "ptr_edit":
+		// an access on raw memory is the pointer itself
+		fe.vals[dst()] = fe.v(a[0])
+	case "ptr_view_seq", "ptr_edit_seq":
+		s1 := fe.next("t")
+		fe.emit("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", s1, fe.v(a[0]))
+		fe.emit("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", fe.v(dst()), s1, fe.v(a[1]))
+	case "ptr_edit2":
+		fe.vals[c.Dsts[0]] = fe.v(a[0])
+		fe.vals[c.Dsts[1]] = fe.v(a[1])
+	case "size_of":
+		fe.vals[dst()] = sz(fe.elemType(c, 0))
+	case "align_of":
+		fe.vals[dst()] = al(fe.elemType(c, 0))
+	case "container_identity":
+		setDst(fe.rt("kern_next_identity", "i32 ()", ""))
 	case "fence":
 		fe.rt("kern_fence", "void (i8)", fe.ord(a[0]))
 	case "clone":
@@ -410,10 +447,6 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		if n, ok := et.(*resolve.Named); ok && layout.Opaque(n) {
 			h := fe.handle(a[0])
 			switch n.Decl.Name {
-			case "Vec":
-				setDst(fe.rt("kern_vec_clone", "ptr (ptr)", "ptr "+h))
-			case "Box":
-				setDst(fe.rt("kern_box_clone", "ptr (ptr)", "ptr "+h))
 			case "Shared":
 				setDst(fe.rt("kern_shared_clone", "ptr (ptr)", "ptr "+h))
 			default:
@@ -422,79 +455,6 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 			return
 		}
 		fe.loadFrom(fe.v(dst()), dst().Type, fe.v(a[0]))
-	// Box
-	case "Box.new":
-		et := a[0].Type
-		setDst(fe.rt("kern_box_new", "ptr (i64, ptr, i64, i64)", "i64 "+sz(et)+", ptr "+fe.spill(a[0])+", "+fe.span(c.Pos)))
-	case "Box.get", "Box.at":
-		setDst(fe.rt("kern_box_get", "ptr (ptr)", "ptr "+fe.handle(a[0])))
-	case "Box.into":
-		d := dst()
-		out := fe.alloca(e.mty(d.Type))
-		fe.rt("kern_box_into", "void (ptr, ptr, i64)", "ptr "+fe.v(a[0])+", ptr "+out+", i64 "+sz(d.Type))
-		fe.loadResult(d, out)
-	// Vec
-	case "Vec.new":
-		et := fe.elemType(c, 0)
-		setDst(fe.rt("kern_vec_new", "ptr (i64, i64, i64)", "i64 "+sz(et)+", i64 "+al(et)+", i64 0"))
-	case "Vec.with_capacity":
-		et := fe.elemType(c, 0)
-		setDst(fe.rt("kern_vec_new", "ptr (i64, i64, i64)", "i64 "+sz(et)+", i64 "+al(et)+", i64 "+fe.v(a[0])))
-	case "Vec.len":
-		setDst(fe.rt("kern_vec_len", "i64 (ptr)", "ptr "+fe.handle(a[0])))
-	case "Vec.push":
-		fe.rt("kern_vec_push", "void (ptr, ptr, i64, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.spill(a[1])+", "+fe.span(c.Pos))
-	case "Vec.pop":
-		d := dst()
-		out, off := fe.unionOut(d)
-		fe.rt("kern_vec_pop", "void (ptr, ptr, i64)", "ptr "+fe.handle(a[0])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
-		fe.loadResult(d, out)
-	case "Vec.get", "Vec.at":
-		setDst(fe.rt("kern_vec_at", "ptr (ptr, i64, i64, i64)", "ptr "+fe.handle(a[0])+", i64 "+fe.v(a[1])+", i64 "+fmt.Sprintf("%d", c.Pos.Start)+", i64 "+fmt.Sprintf("%d", c.Pos.End)))
-	case "Vec.as_view", "Vec.as_edit":
-		h := fe.handle(a[0])
-		p := fe.rt("kern_vec_data", "ptr (ptr)", "ptr "+h)
-		l := fe.rt("kern_vec_len", "i64 (ptr)", "ptr "+h)
-		s1 := fe.next("t")
-		fe.emit("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", s1, p)
-		fe.emit("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", fe.v(dst()), s1, l)
-	case "Vec.clear":
-		et := fe.elemType(c, 0)
-		fe.rt("kern_vec_clear", "void (ptr, ptr)", "ptr "+fe.handle(a[0])+", ptr "+e.glueFor(et))
-	// Pool / Arena
-	case "Pool.new":
-		et := fe.elemType(c, 0)
-		setDst(fe.rt("kern_pool_new", "ptr (i64, i64)", "i64 "+sz(et)+", i64 "+al(et)))
-	case "Pool.alloc":
-		d := dst()
-		out, off := fe.unionOut(d)
-		fe.rt("kern_pool_alloc", "void (ptr, ptr, ptr, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.spill(a[1])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
-		fe.loadResult(d, out)
-	case "Pool.get", "Pool.at":
-		setDst(fe.rt("kern_pool_at", "ptr (ptr, ptr, i64, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.spill(a[1])+", i64 "+fmt.Sprintf("%d", c.Pos.Start)+", i64 "+fmt.Sprintf("%d", c.Pos.End)))
-	case "Pool.get2":
-		h := fe.handle(a[0])
-		x := fe.rt("kern_pool_get2", "ptr (ptr, ptr, ptr, i64, i64)", "ptr "+h+", ptr "+fe.spill(a[1])+", ptr "+fe.spill(a[2])+", i64 "+fmt.Sprintf("%d", c.Pos.Start)+", i64 "+fmt.Sprintf("%d", c.Pos.End))
-		y := fe.rt("kern_pool_at", "ptr (ptr, ptr, i64, i64)", "ptr "+h+", ptr "+fe.spill(a[2])+", i64 "+fmt.Sprintf("%d", c.Pos.Start)+", i64 "+fmt.Sprintf("%d", c.Pos.End))
-		fe.vals[c.Dsts[0]] = x
-		fe.vals[c.Dsts[1]] = y
-	case "Pool.free":
-		et := fe.elemType(c, 0)
-		fe.rt("kern_pool_free", "void (ptr, ptr, ptr, i64, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.spill(a[1])+", ptr "+e.glueFor(et)+", i64 "+fmt.Sprintf("%d", c.Pos.Start)+", i64 "+fmt.Sprintf("%d", c.Pos.End))
-	case "Pool.len":
-		setDst(fe.rt("kern_pool_len", "i64 (ptr)", "ptr "+fe.handle(a[0])))
-	case "Arena.new":
-		et := fe.elemType(c, 0)
-		setDst(fe.rt("kern_arena_new", "ptr (i64, i64)", "i64 "+sz(et)+", i64 "+al(et)))
-	case "Arena.alloc":
-		d := dst()
-		out, off := fe.unionOut(d)
-		fe.rt("kern_arena_alloc", "void (ptr, ptr, ptr, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.spill(a[1])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
-		fe.loadResult(d, out)
-	case "Arena.get", "Arena.at":
-		setDst(fe.rt("kern_arena_at", "ptr (ptr, ptr, i64, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.spill(a[1])+", i64 "+fmt.Sprintf("%d", c.Pos.Start)+", i64 "+fmt.Sprintf("%d", c.Pos.End)))
-	case "Arena.len":
-		setDst(fe.rt("kern_arena_len", "i64 (ptr)", "ptr "+fe.handle(a[0])))
 	// Shared / Mutex / Atomic
 	case "Shared.new":
 		setDst(fe.rt("kern_shared_new", "ptr (i64, ptr)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])))
@@ -505,7 +465,7 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	case "Mutex.new":
 		setDst(fe.rt("kern_mutex_new", "ptr (i64, ptr)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])))
 	case "Mutex.lock":
-		setDst(fe.rt("kern_mutex_lock", "ptr (ptr, i64, i64)", "ptr "+fe.handle(a[0])+", i64 "+fmt.Sprintf("%d", c.Pos.Start)+", i64 "+fmt.Sprintf("%d", c.Pos.End)))
+		setDst(fe.rt("kern_mutex_lock", "ptr (ptr, i64, i64)", "ptr "+fe.handle(a[0])+", "+fe.span(c.Pos)))
 	case "Mutex.unlock":
 		fe.rt("kern_mutex_unlock", "void (ptr)", "ptr "+fe.handle(a[0]))
 	case "Atomic.new":
@@ -557,11 +517,16 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		out, off := fe.unionOut(d)
 		fe.rt("kern_sysalloc_alloc", "void (ptr, i64, i64, ptr, i64)", "ptr "+fe.handle(a[0])+", i64 "+fe.v(a[1])+", i64 "+fe.v(a[2])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
 		fe.loadResult(d, out)
+	case "SystemAllocator.realloc":
+		d := dst()
+		out, off := fe.unionOut(d)
+		fe.rt("kern_sysalloc_realloc", "void (ptr, ptr, i64, i64, i64, ptr, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.v(a[1])+", i64 "+fe.v(a[2])+", i64 "+fe.v(a[3])+", i64 "+fe.v(a[4])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.loadResult(d, out)
 	case "SystemAllocator.free":
 		fe.rt("kern_sysalloc_free", "void (ptr, ptr, i64, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.v(a[1])+", i64 "+fe.v(a[2])+", i64 "+fe.v(a[3]))
 	// test hooks
-	case "testing.seed_generation":
-		fe.rt("kern_test_pool_seed_generation", "void (ptr, i64, i64)", "ptr "+fe.handle(a[0])+", i64 "+fe.widen(a[1])+", i64 "+fe.widen(a[2]))
+	case "testing.require_hooks":
+		fe.rt("kern_test_require_hooks", "void ()", "")
 	case "testing.seed_shared_count":
 		fe.rt("kern_test_shared_seed_count", "void (ptr, i64)", "ptr "+fe.handle(a[0])+", i64 "+fe.v(a[1]))
 	case "testing.fail_next_alloc":

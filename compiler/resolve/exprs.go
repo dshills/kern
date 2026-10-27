@@ -433,7 +433,7 @@ func (c *fnCtx) fieldWant1(sc *scope, x *ast.FieldExpr, want Type) Type {
 		}
 		return &Unit{}
 	}
-	if n.Decl.Module != c.m.Name && n.Decl.Module != "core" && !isExported(x.Name) {
+	if fieldPrivate(n, x.Name, c.m.Name) {
 		c.errorf("NAME_PRIVATE", x.Pos, "field %s is private to module %s", x.Name, n.Decl.Module)
 	}
 	c.r.prog.Info.Fields[x] = fd
@@ -690,7 +690,7 @@ func (c *fnCtx) structLit(sc *scope, x *ast.StructLit) Type {
 			c.errorf("NAME_DUPLICATE", fi.Pos, "field %s initialized twice", fi.Name)
 		}
 		seen[fi.Name] = true
-		if n.Decl.Module != c.m.Name && n.Decl.Module != "core" && !isExported(fi.Name) {
+		if fieldPrivate(n, fi.Name, c.m.Name) {
 			c.errorf("NAME_PRIVATE", fi.Pos, "field %s is private to module %s", fi.Name, n.Decl.Module)
 		}
 		c.exprExpect(sc, fi.Value, ft)
@@ -701,4 +701,18 @@ func (c *fnCtx) structLit(sc *scope, x *ast.StructLit) Type {
 		}
 	}
 	return n
+}
+
+// fieldPrivate reports whether field name of n is private to a module other
+// than from (spec/types.md §1): a lower-case field of a user type, or any
+// field of a nocopy core struct (the containers' unsafe invariants depend on
+// their fields, so only std/core touches them).
+func fieldPrivate(n *Named, name, from string) bool {
+	if n.Decl.Module == from {
+		return false
+	}
+	if n.Decl.Module == "core" {
+		return n.Decl.NoCopy
+	}
+	return !isExported(name)
 }

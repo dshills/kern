@@ -11,7 +11,7 @@ func main() -> i32 {
     v.push(5u64)
     v.push(6u64)
     unsafe {
-        match alloc.alloc(8usize, 8usize) {
+        match alloc.alloc(size_of[Vec[u64]](), align_of[Vec[u64]]()) {
             Ok(raw) => {
                 slot := ptr_cast[Vec[u64], u8](raw)
                 ptr_store(slot, v)
@@ -19,7 +19,7 @@ func main() -> i32 {
                 w.push(7u64)
                 print_u64(u64(w.len()))
                 println()
-                alloc.free(raw, 8usize, 8usize)
+                alloc.free(raw, size_of[Vec[u64]](), align_of[Vec[u64]]())
             }
             Err(e) => { drop(v); print_str("alloc failed"); println() }
         }

@@ -313,6 +313,18 @@ type frame struct {
 	f      *ir.Func
 	locals []Value
 	vals   []Value
+	// span is set for a library (std/core) activation: the position of the
+	// user-level call that entered the library, which every trap inside
+	// reports in place of its own position.
+	span *ast.Pos
+}
+
+// at returns the position a trap at pos reports from this frame.
+func (fr *frame) at(pos ast.Pos) ast.Pos {
+	if fr.span != nil {
+		return *fr.span
+	}
+	return pos
 }
 
 func (it *Interp) callNamed(name string, args []Value) []Value {
@@ -341,7 +353,12 @@ func frameSize(f *ir.Func) int {
 	return n
 }
 
-func (it *Interp) call(f *ir.Func, args []Value) []Value {
+func (it *Interp) call(f *ir.Func, args []Value) []Value { return it.callAt(f, args, nil) }
+
+// callAt runs f; span is the call site a library activation reports its
+// traps at (nil for user code, and for library code reached without a call
+// site, such as a destructor run by drop glue).
+func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
 	if f.Intrinsic {
 		name := intrinsicOf(f.Name)
 		if fn, ok := intrinsics[name]; ok {
@@ -350,12 +367,20 @@ func (it *Interp) call(f *ir.Func, args []Value) []Value {
 		panic(fmt.Sprintf("interp: no intrinsic for %s", f.Name))
 	}
 	frameBytes := frameSize(f)
+	fr := &frame{f: f}
+	if f.Library {
+		if span == nil {
+			span = &ast.Pos{} // no call site (drop glue, a function value): an empty span, as natively
+		}
+		fr.span = span
+	}
 	if it.stackUsed+frameBytes > it.stackBytes {
-		it.trap("stack", f.Pos)
+		it.trap("stack", fr.at(f.Pos))
 	}
 	it.stackUsed += frameBytes
 	defer func() { it.stackUsed -= frameBytes }()
-	fr := &frame{f: f, locals: make([]Value, len(f.Locals)), vals: make([]Value, f.NumValues)}
+	fr.locals = make([]Value, len(f.Locals))
+	fr.vals = make([]Value, f.NumValues)
 	for i, p := range f.Params {
 		if i < len(args) {
 			fr.locals[p.ID] = args[i]
@@ -389,7 +414,7 @@ func (it *Interp) call(f *ir.Func, args []Value) []Value {
 			}
 			return out
 		case *ir.Unreachable:
-			it.trap("unreachable", f.Pos)
+			it.trap("unreachable", fr.at(f.Pos))
 		default:
 			panic("interp: block without terminator")
 		}
@@ -423,21 +448,36 @@ func (it *Interp) resolve(fr *frame, p ir.Place) (ref, *seqRef) {
 		a := fr.vals[p.Access.ID].(*Access)
 		cur, seq = a.Ref, a.Seq
 	}
+	// arrayWindow opens the whole array at cur as a sequence window
+	arrayWindow := func() *seqRef {
+		if rr, ok := cur.(rawRef); ok {
+			return rr.elems()
+		}
+		arr := cur.get().(*Array)
+		return &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(arr.Elems)}
+	}
 	for _, e := range p.Path {
 		switch e.Kind {
 		case ir.PathField:
-			s := cur.get().(*Struct)
-			cur = idxRef{elems: func() []Value { return s.Fields }, i: e.Field}
+			if rr, ok := cur.(rawRef); ok {
+				cur = rr.field(e.Field)
+			} else {
+				s := cur.get().(*Struct)
+				cur = idxRef{elems: func() []Value { return s.Fields }, i: e.Field}
+			}
 			seq = nil
 		case ir.PathVariant:
-			u := cur.get().(*Union)
-			cur = idxRef{elems: func() []Value { return u.Fields }, i: e.Field}
+			if rr, ok := cur.(rawRef); ok {
+				cur = rr.variantField(e.Tag, e.Field)
+			} else {
+				u := cur.get().(*Union)
+				cur = idxRef{elems: func() []Value { return u.Fields }, i: e.Field}
+			}
 			seq = nil
 		case ir.PathIndex:
 			i := int(fr.vals[e.Index.ID].(Int).Bits)
 			if seq == nil {
-				arr := cur.get().(*Array)
-				seq = &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(arr.Elems)}
+				seq = arrayWindow()
 			}
 			cur = seq.at(i)
 			seq = nil
@@ -445,10 +485,9 @@ func (it *Interp) resolve(fr *frame, p ir.Place) (ref, *seqRef) {
 			lo := int(fr.vals[e.Lo.ID].(Int).Bits)
 			hi := int(fr.vals[e.Hi.ID].(Int).Bits)
 			if seq == nil {
-				arr := cur.get().(*Array)
-				seq = &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(arr.Elems)}
+				seq = arrayWindow()
 			}
-			seq = &seqRef{elems: seq.elems, lo: seq.lo + lo, hi: seq.lo + hi}
+			seq = &seqRef{elems: seq.elems, raw: seq.raw, lo: seq.lo + lo, hi: seq.lo + hi}
 			cur = nil
 		}
 	}
@@ -509,11 +548,17 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 			if !ok {
 				panic(fmt.Sprintf("interp: unknown intrinsic %s", i.Intrinsic))
 			}
-			rets = fn(it, args, callCtx{pos: i.Pos, targs: i.TypeArgs})
+			rets = fn(it, args, callCtx{pos: fr.at(i.Pos), targs: i.TypeArgs})
 		case i.Fn != nil:
 			rets = it.callNamed(fr.vals[i.Fn.ID].(FuncVal).Name, args)
 		default:
-			rets = it.callNamed(i.Callee, args)
+			if callee := it.mod.Func(i.Callee); callee != nil && callee.Library {
+				// entering (or staying in) the library: traps report this call
+				pos := fr.at(i.Pos)
+				rets = it.callAt(callee, args, &pos)
+			} else {
+				rets = it.callNamed(i.Callee, args)
+			}
 		}
 		for k, d := range i.Dsts {
 			if k < len(rets) {
@@ -538,22 +583,22 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 	case *ir.Conv:
 		fr.vals[i.Dst.ID] = it.conv(fr.vals[i.X.ID], i.To, i.Truncate, i.Saturate)
 	case *ir.CheckOverflow:
-		it.checkOverflow(i.Op, fr.vals[i.L.ID], fr.vals[i.R.ID], i.Pos)
+		it.checkOverflow(i.Op, fr.vals[i.L.ID], fr.vals[i.R.ID], fr.at(i.Pos))
 	case *ir.CheckBounds:
 		ln := fr.vals[i.Len.ID].(Int).Bits
 		if i.Index != nil {
 			if fr.vals[i.Index.ID].(Int).Bits >= ln {
-				it.trap("bounds", i.Pos)
+				it.trap("bounds", fr.at(i.Pos))
 			}
 			return
 		}
 		lo := fr.vals[i.Lo.ID].(Int).Bits
 		hi := fr.vals[i.Hi.ID].(Int).Bits
 		if lo > hi || hi > ln {
-			it.trap("bounds", i.Pos)
+			it.trap("bounds", fr.at(i.Pos))
 		}
 	case *ir.CheckConv:
-		it.checkConv(fr.vals[i.X.ID], i.To, i.Pos)
+		it.checkConv(fr.vals[i.X.ID], i.To, fr.at(i.Pos))
 	case *ir.Len:
 		fr.vals[i.Dst.ID] = mkInt("usize", uint64(it.length(fr, i.Place)))
 	case *ir.MakeStruct:
@@ -582,7 +627,7 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 	case *ir.FuncRef:
 		fr.vals[i.Dst.ID] = FuncVal{Name: i.Name}
 	case *ir.Trap:
-		it.trap(i.Kind, i.Pos)
+		it.trap(i.Kind, fr.at(i.Pos))
 	case *ir.Copy:
 		fr.vals[i.Dst.ID] = copyValue(fr.vals[i.Src.ID])
 	case *ir.UnsafeBegin, *ir.UnsafeEnd, *ir.Init:
@@ -980,7 +1025,7 @@ func (it *Interp) destroy(v Value, t resolve.Type) {
 			it.destroy(arr.Elems[i], x.Elem)
 		}
 	case *resolve.Named:
-		if x.Decl.Module == "core" {
+		if layout.Opaque(x) {
 			it.destroyLibrary(v, x)
 			return
 		}
@@ -1012,34 +1057,6 @@ func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
 		return &resolve.Unit{}
 	}
 	switch x := v.(type) {
-	case *Box:
-		if !x.Dead {
-			x.Dead = true
-			it.destroy(x.Val, elem(0))
-		}
-	case *Vec:
-		if !x.Dead {
-			x.Dead = true
-			for i := len(x.Items) - 1; i >= 0; i-- {
-				it.destroy(x.Items[i], elem(0))
-			}
-		}
-	case *Pool:
-		if !x.Dead {
-			x.Dead = true
-			for i := len(x.Slots) - 1; i >= 0; i-- {
-				if x.Slots[i].Live {
-					it.destroy(x.Slots[i].Val, elem(0))
-				}
-			}
-		}
-	case *Arena:
-		if !x.Dead {
-			x.Dead = true
-			for i := len(x.Slots) - 1; i >= 0; i-- {
-				it.destroy(x.Slots[i], elem(0))
-			}
-		}
 	case *Shared:
 		x.Count--
 		if x.Count == 0 {
@@ -1063,15 +1080,6 @@ func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
 			it.await(x.done)
 			x.Taken = true
 			it.destroy(x.Result, elem(0))
-		}
-	case *Union, *Struct:
-		// Option/Result and other prelude unions: destroy payloads by type
-		args := typeArgs(n)
-		if u, ok := v.(*Union); ok {
-			vd := n.Decl.Variants[u.Tag]
-			for i := len(vd.Fields) - 1; i >= 0; i-- {
-				it.destroy(u.Fields[i], resolve.Subst(vd.Fields[i].Type, args))
-			}
 		}
 	}
 }

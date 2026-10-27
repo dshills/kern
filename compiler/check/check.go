@@ -9,24 +9,31 @@ import (
 )
 
 // Check runs the ownership checker over every function body of the main
-// module and returns diagnostics.
+// module and of the prelude (the library containers are kern code) and
+// returns diagnostics.
 func Check(prog *resolve.Program) []diag.Diagnostic {
 	c := &checker{prog: prog, info: prog.Info}
-	for _, f := range prog.Main.Files {
+	var files []*ast.File
+	if prog.Core != nil {
+		files = append(files, prog.Core.Files...)
+	}
+	files = append(files, prog.Main.Files...)
+	for _, f := range files {
+		core := prog.Core != nil && f.Module == prog.Core.Name
 		for _, d := range f.Decls {
 			switch d := d.(type) {
 			case *ast.FuncDecl:
 				if fd := c.info.Funcs[d]; fd != nil && d.Body != nil {
 					c.checkFunc(f.Name, fd, d.Body, false)
 				}
-				if d.Body == nil && d.Extern == "" {
+				if d.Body == nil && d.Extern == "" && !core {
 					c.errorf("SYNTAX", f.Name, d.Pos, "function %s has no body", d.Name)
 				}
 			case *ast.ImplDecl:
 				for _, fn := range d.Funcs {
 					if fd := c.info.Funcs[fn]; fd != nil && fn.Body != nil {
 						c.checkFunc(f.Name, fd, fn.Body, false)
-					} else if fn.Body == nil {
+					} else if fn.Body == nil && !core {
 						c.errorf("SYNTAX", f.Name, fn.Pos, "method %s has no body", fn.Name)
 					}
 				}

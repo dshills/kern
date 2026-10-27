@@ -3,8 +3,10 @@
 // alignment and padding; unions as a u8/u16 discriminant at offset 0 followed
 // by the largest payload at the payloads' maximum alignment; arrays as N
 // contiguous elements; scalar accesses as one pointer and sequence accesses
-// as a (pointer, length) pair. Library containers are pointer-sized opaque
-// handles in the hosted runtime.
+// as a (pointer, length) pair. The runtime-provided library objects
+// (Shared, Mutex, Atomic, threads, the system allocator) are pointer-sized
+// opaque handles; Box, Vec, Pool and Arena are kern structs laid out like
+// any other.
 package layout
 
 import (
@@ -111,7 +113,7 @@ func Opaque(n *resolve.Named) bool {
 		return false
 	}
 	switch n.Decl.Name {
-	case "Box", "Vec", "Pool", "Arena", "Slab", "Shared", "Mutex", "Atomic", "Scope", "Thread", "Join", "SystemAllocator", "thread", "trap", "testing":
+	case "Slab", "Shared", "Mutex", "Atomic", "Scope", "Thread", "Join", "SystemAllocator", "thread", "trap", "testing":
 		return true
 	}
 	return false

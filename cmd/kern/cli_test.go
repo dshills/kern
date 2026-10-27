@@ -199,7 +199,10 @@ func TestRunEmitExplain(t *testing.T) {
 	}
 	out.Reset()
 	errb.Reset()
-	if code := run([]string{"run", "--env=freestanding", hello}, strings.NewReader(""), &out, &errb); code != 0 || !strings.HasSuffix(out.String(), "{\"halt\":{\"code\":0}}\n") || errb.Len() != 0 {
+	// the freestanding emulation has no allocator, so no containers (rule 6.8):
+	// a console-only program
+	fsHello := filepath.Join("..", "..", "tests", "freestanding", "hello.kern")
+	if code := run([]string{"run", "--env=freestanding", fsHello}, strings.NewReader(""), &out, &errb); code != 7 || !strings.HasSuffix(out.String(), "{\"halt\":{\"code\":7}}\n") || errb.Len() != 0 {
 		t.Fatalf("freestanding emulation: exit %d out %q err %q", code, out.String(), errb.String())
 	}
 	if code, resp, _ := runWith(t, []string{"run", "--test-hooks", "--opt=release", hello}, ""); code != 2 || resp.Diagnostics[0].Code != "CLI_INVALID_FLAGS" {
@@ -213,7 +216,7 @@ func TestRunEmitExplain(t *testing.T) {
 	if code != 0 || !resp.OK {
 		t.Fatalf("emit-ir: exit %d resp %+v", code, resp)
 	}
-	if irText, _ := resp.Result.(map[string]any)["ir"].(string); !strings.Contains(irText, "call intrinsic Vec.push") {
+	if irText, _ := resp.Result.(map[string]any)["ir"].(string); !strings.Contains(irText, "call Vec.push[T=u64]") {
 		t.Fatalf("emit-ir result lacks IR: %v", resp.Result)
 	}
 	src, _ := os.ReadFile(hello)

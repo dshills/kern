@@ -143,6 +143,7 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 		for _, f := range srcs {
 			lo.Sources[f.Name] = f.Bytes
 		}
+		lo.Sources["std/core.kern"] = resolve.PreludeSource()
 	}
 	text, errs := llvm.EmitWith(mod, lo)
 	if len(errs) > 0 {

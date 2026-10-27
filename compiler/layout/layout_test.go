@@ -39,8 +39,13 @@ struct Handles { p: PoolId[A]; o: Option[u8] }
 	if opt.Size != 2 || opt.Align != 1 {
 		t.Fatalf("Option[u8]: %+v", opt)
 	}
-	if v := Of(&resolve.Named{Decl: prog.Core.Types["Vec"], Args: []resolve.Type{&resolve.Prim{Name: "u8"}}}); v.Size != 8 {
-		t.Fatalf("Vec handle: %+v", v)
+	// Vec is a kern struct {data: RawPtr[T]; size: usize; cap: usize}
+	if v := Of(&resolve.Named{Decl: prog.Core.Types["Vec"], Args: []resolve.Type{&resolve.Prim{Name: "u8"}}}); v.Size != 24 || v.Align != 8 || len(v.Fields) != 3 || v.Fields[2] != 16 {
+		t.Fatalf("Vec: %+v", v)
+	}
+	// the runtime-provided objects stay opaque handles
+	if s := Of(&resolve.Named{Decl: prog.Core.Types["Shared"], Args: []resolve.Type{&resolve.Prim{Name: "u8"}}}); s.Size != 8 {
+		t.Fatalf("Shared handle: %+v", s)
 	}
 	if s := Of(&resolve.Access{Seq: true, Elem: &resolve.Prim{Name: "u8"}}); s.Size != 16 {
 		t.Fatalf("seq access: %+v", s)

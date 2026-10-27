@@ -165,7 +165,12 @@ func (fl *fnLower) expr(e ast.Expr, want resolve.Type) operand {
 		} else {
 			acc := fl.newValue(&resolve.Access{Elem: t})
 			fl.emit(&ir.AccessBegin{Dst: acc, Place: src, Pos: x.Pos})
-			fl.emit(&ir.Call{Dsts: []*ir.Value{v}, Intrinsic: "clone", Args: []*ir.Value{acc}, Pos: x.Pos})
+			if callee := fl.cloneMethod(t); callee != "" {
+				// a prelude container clones itself in kern (Vec.clone, Box.clone)
+				fl.emit(&ir.Call{Dsts: []*ir.Value{v}, Callee: callee, Args: []*ir.Value{acc}, Pos: x.Pos})
+			} else {
+				fl.emit(&ir.Call{Dsts: []*ir.Value{v}, Intrinsic: "clone", Args: []*ir.Value{acc}, Pos: x.Pos})
+			}
 			fl.emit(&ir.AccessEnd{Access: acc})
 		}
 		if r.access != nil && r.ownsAccess {
@@ -263,7 +268,8 @@ func (fl *fnLower) defaultValue(t resolve.Type, pos ast.Pos) *ir.Value {
 			fl.emit(&ir.MakeUnion{Dst: v, Tag: 1})
 			return v
 		case "core.Vec":
-			fl.emit(&ir.Call{Dsts: []*ir.Value{v}, Intrinsic: "Vec.new", Pos: pos})
+			// the empty vector, Vec[T].new()
+			fl.emit(&ir.Call{Dsts: []*ir.Value{v}, Callee: fl.l.request(n.Decl.Methods["new"], typeArgs(n), fl.file), Pos: pos, TypeArgs: n.Args})
 			return v
 		}
 	}
@@ -595,6 +601,13 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 		fl.emit(&ir.Zero{Dst: v})
 		return operand{val: v}
 	}
+	// trap_kind(kind) is the Trap instruction with a literal kind
+	if info.Fn != nil && info.Fn.Module == "core" && info.Fn.Name == "trap_kind" && info.Fn.Receiver == nil {
+		fl.emit(&ir.Trap{Kind: fl.trapKindArg(x), Pos: x.Pos})
+		v := fl.newValue(&resolve.Unit{})
+		fl.emit(&ir.Const{Dst: v, Unit: true})
+		return operand{val: v}
+	}
 	// variant constructor
 	if info.Fn == nil && len(info.Params) == 0 && info.Intrinsic == "" {
 		if n, ok := t.(*resolve.Named); ok && n.Decl.Kind == resolve.KindUnion {
@@ -840,3 +853,51 @@ func (fl *fnLower) spawn(x *ast.CallExpr, info *resolve.CallInfo, t resolve.Type
 }
 
 var _ = strings.HasPrefix
+
+// trapKindArg reads the literal TrapKind variant passed to trap_kind: a bare
+// variant (`bounds`) or a qualified one (`TrapKind.bounds`), checked against
+// the resolver's symbol rather than its spelling.
+func (fl *fnLower) trapKindArg(x *ast.CallExpr) string {
+	isTrapKind := func(id *ast.Ident) bool {
+		sym := fl.l.info.Idents[id]
+		return sym != nil && sym.Kind == resolve.SymType && sym.TDecl != nil && sym.TDecl.Module == "core" && sym.TDecl.Name == "TrapKind"
+	}
+	if len(x.Args) == 1 {
+		switch a := x.Args[0].X.(type) {
+		case *ast.Ident:
+			if isTrapKind(a) {
+				return a.Name
+			}
+		case *ast.FieldExpr:
+			if id, ok := a.X.(*ast.Ident); ok && isTrapKind(id) {
+				return a.Name
+			}
+		}
+	}
+	fl.fail(x.Pos, "trap_kind requires a literal trap kind")
+	return ""
+}
+
+// cloneMethod returns the instantiated clone method of a prelude container
+// type, or "" when t has none.
+func (fl *fnLower) cloneMethod(t resolve.Type) string {
+	n, ok := t.(*resolve.Named)
+	if !ok || n.Decl.Module != "core" {
+		return ""
+	}
+	m := n.Decl.Methods["clone"]
+	if m == nil || m.Intrinsic {
+		return ""
+	}
+	return fl.l.request(m, typeArgs(n), fl.file)
+}
+
+// isTrapKindCall reports a statement-level call to trap_kind, which never returns.
+func (fl *fnLower) isTrapKindCall(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	info := fl.l.info.Calls[call]
+	return info != nil && info.Fn != nil && info.Fn.Module == "core" && info.Fn.Receiver == nil && info.Fn.Name == "trap_kind"
+}

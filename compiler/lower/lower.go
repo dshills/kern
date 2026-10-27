@@ -12,13 +12,17 @@ import (
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/ir"
+	"github.com/dshills/kern/compiler/layout"
 	"github.com/dshills/kern/compiler/resolve"
 )
+
+// preludeFile is the file name the resolver gives the prelude.
+const preludeFile = "std/core.kern"
 
 // Lower lowers a resolved program. Generic functions are lowered once per
 // instantiation reachable from the main module's non-generic functions.
 func Lower(prog *resolve.Program) (mod *ir.Module, diags []diag.Diagnostic) {
-	l := &lowerer{prog: prog, info: prog.Info, mod: &ir.Module{Name: prog.Main.Name}, done: map[string]*ir.Func{}}
+	l := &lowerer{prog: prog, info: prog.Info, mod: &ir.Module{Name: prog.Main.Name}, done: map[string]*ir.Func{}, parent: map[string]string{}, dtorType: map[string]*resolve.Named{}}
 	defer func() {
 		if r := recover(); r != nil {
 			if le, ok := r.(lowerError); ok {
@@ -77,6 +81,12 @@ type lowerer struct {
 	done    map[string]*ir.Func
 	queue   []*pending
 	diags   []diag.Diagnostic
+	// cur is the function being lowered; parent records which function
+	// first requested each instantiation and dtorType the type whose
+	// destructor an instantiation is, for the expanding-recursion check.
+	cur      string
+	parent   map[string]string
+	dtorType map[string]*resolve.Named
 }
 
 type pending struct {
@@ -134,8 +144,13 @@ func (l *lowerer) request(fd *resolve.FuncDecl, subst map[string]resolve.Type, f
 	if _, ok := l.done[name]; ok {
 		return name
 	}
-	f := &ir.Func{Name: name, Release: fd.Release, Contract: fd.Contract, Pos: fd.Pos, File: file, Extern: fd.Extern, Intrinsic: fd.Intrinsic}
+	library := fd.Module == "core" && !fd.Intrinsic
+	if library {
+		file = preludeFile
+	}
+	f := &ir.Func{Name: name, Release: fd.Release, Contract: fd.Contract, Pos: fd.Pos, File: file, Extern: fd.Extern, Intrinsic: fd.Intrinsic, Library: library}
 	l.done[name] = f
+	l.parent[name] = l.cur
 	l.mod.Add(f)
 	for _, p := range fd.Params {
 		f.Params = append(f.Params, &ir.Local{Name: p.Name, Type: resolve.Subst(p.Type, subst), Conv: p.Conv})
@@ -143,7 +158,7 @@ func (l *lowerer) request(fd *resolve.FuncDecl, subst map[string]resolve.Type, f
 	for _, r := range fd.Ret {
 		f.Rets = append(f.Rets, resolve.Subst(r, subst))
 	}
-	if fd.AST != nil && fd.AST.Body != nil && fd.Module == l.prog.Main.Name {
+	if fd.AST != nil && fd.AST.Body != nil && (fd.Module == l.prog.Main.Name || library) {
 		l.queue = append(l.queue, &pending{fd: fd, subst: subst, name: name, file: file})
 	}
 	return name
@@ -161,10 +176,27 @@ func (l *lowerer) requestDestructor(n *resolve.Named, file string) string {
 	f := &ir.Func{Name: name, Pos: n.Decl.Pos}
 	f.Params = []*ir.Local{{Name: "self", Type: n, Conv: ast.ConvEdit}}
 	l.done[name] = f
+	l.parent[name] = l.cur
+	l.dtorType[name] = n
 	l.mod.Add(f)
-	if n.Decl.Destructor != nil && n.Decl.Module == l.prog.Main.Name {
+	switch {
+	case n.Decl.Destructor != nil && hasKernDestructor(n, l.prog.Main.Name) && l.expanding(n):
+		// an expanding recursive instantiation (A[T] whose destructor
+		// reaches A[Option[T]], and so on): the chain is cut after
+		// maxExpansion growing steps, as marker derivation cuts it. The
+		// instantiation beyond the bound is not compiled: destroying a value
+		// nested that deeply traps `unreachable` rather than leaking silently
+		f.Entry = &ir.Block{Name: "entry", Instrs: []ir.Instr{&ir.Trap{Kind: "unreachable", Pos: n.Decl.Pos}}, Term: &ir.Unreachable{}}
+		f.Blocks = []*ir.Block{f.Entry}
+		f.Locals = []*ir.Local{f.Params[0]}
+	case n.Decl.Destructor != nil && hasKernDestructor(n, l.prog.Main.Name):
+		if n.Decl.Module == "core" {
+			file = preludeFile
+			f.File = file
+			f.Library = true
+		}
 		l.queue = append(l.queue, &pending{name: name, subst: subst, file: file, dtor: n})
-	} else {
+	default:
 		f.Intrinsic = true
 	}
 	return name
@@ -175,12 +207,14 @@ func (l *lowerer) drain() {
 		p := l.queue[0]
 		l.queue = l.queue[1:]
 		f := l.done[p.name]
+		l.cur = p.name
 		if p.dtor != nil {
 			l.lowerDestructor(f, p)
 			continue
 		}
 		l.lowerFunc(f, p)
 	}
+	l.cur = ""
 }
 
 // ---- per-function lowering context ----
@@ -446,7 +480,7 @@ func (fl *fnLower) requestDestructors(t resolve.Type, path map[string]bool) {
 		}
 		path[key] = true
 		defer delete(path, key)
-		if x.Decl.Destructor != nil && x.Decl.Module == fl.l.prog.Main.Name {
+		if x.Decl.Destructor != nil && hasKernDestructor(x, fl.l.prog.Main.Name) {
 			fl.l.requestDestructor(x, fl.file)
 		}
 		args := typeArgs(x)
@@ -526,4 +560,60 @@ func expansionDepth(path map[string]bool, decl *resolve.TypeDecl) int {
 		}
 	}
 	return n
+}
+
+// hasKernDestructor reports whether n's destructor is kern code to lower: a
+// destructor of the main module, or of a non-opaque prelude type (the
+// containers); the runtime destroys the opaque library objects.
+func hasKernDestructor(n *resolve.Named, main string) bool {
+	if n.Decl.Destructor == nil {
+		return false
+	}
+	if n.Decl.Module == main {
+		return true
+	}
+	return n.Decl.Module == "core" && !layout.Opaque(n)
+}
+
+// maxExpansion bounds the growing instantiations of one declaration along
+// a destructor request chain (the bound marker derivation uses).
+const maxExpansion = 8
+
+// expanding reports whether requesting n's destructor from the function
+// being lowered continues an expanding recursion: along the chain of
+// functions that requested one another, more than maxExpansion destructors
+// of the same declaration with a strictly smaller type (A[T] before
+// A[Option[T]]). Finite nesting (Box[Box[u64]] destroying Box[u64]) shrinks
+// along the chain and is never cut.
+func (l *lowerer) expanding(n *resolve.Named) bool {
+	depth := nestingDepth(n)
+	grown := 0
+	seen := map[string]bool{}
+	for cur := l.cur; cur != "" && !seen[cur]; cur = l.parent[cur] {
+		seen[cur] = true
+		if t := l.dtorType[cur]; t != nil && t.Decl == n.Decl && nestingDepth(t) < depth {
+			grown++
+			if grown > maxExpansion {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// nestingDepth is the maximum bracket depth of a type's name.
+func nestingDepth(t resolve.Type) int {
+	depth, max := 0, 0
+	for _, c := range t.String() {
+		switch c {
+		case '[':
+			depth++
+			if depth > max {
+				max = depth
+			}
+		case ']':
+			depth--
+		}
+	}
+	return max
 }

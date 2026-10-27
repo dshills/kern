@@ -1,0 +1,81 @@
+//! phase: 1
+//! expect: output containers
+// The kern containers (std/core.kern): nested vectors, pool and arena
+// elements with destructors, Box.into, deep copies, pop and clear; every
+// container destroys its elements from the last to the first.
+module run
+struct Noisy { id: u64 }
+impl Noisy {
+    destructor(edit self) { print_str("drop "); print_u64(self.id); println() }
+}
+func main() -> i32 {
+    // nested vectors: the inner vectors are destroyed with the outer one
+    vv := Vec[Vec[u64]].new()
+    for i in 0u64..3u64 {
+        inner := Vec[u64].with_capacity(1usize)
+        for j in 0u64..i { inner.push(j) }
+        vv.push(inner)
+    }
+    total := 0u64
+    for i in 0usize..vv.len() { total = total + u64(vv.get(i).len()) }
+    print_u64(total); println()
+    with last := vv.at(2usize) { last.push(9u64) }
+    print_u64(vv.get(2usize).get(2usize)); println()
+    // pop and clear
+    with last := vv.at(2usize) {
+        match last.pop() {
+            Some(x) => { print_u64(x); println() }
+            None => { print_str("none"); println() }
+        }
+    }
+    print_u64(u64(vv.get(2usize).len())); println()
+    vv.clear()
+    print_u64(u64(vv.len())); println()
+    // a deep copy shares nothing with its source
+    a := Vec[u64].new()
+    a.push(1u64)
+    a.push(2u64)
+    b := copy(a)
+    with e := b.at(0usize) { e = 10u64 }
+    print_u64(a.get(0usize) + b.get(0usize)); println()
+    // pool: free runs the destructor; dropping the pool destroys the live
+    // elements from the last slot to the first
+    p := Pool[Noisy].new()
+    match p.alloc(Noisy { id: 1u64 }) {
+        Ok(x) => {
+            match p.alloc(Noisy { id: 2u64 }) {
+                Ok(y) => {
+                    p.free(x)
+                    print_u64(u64(p.len())); println()
+                    match p.alloc(Noisy { id: 3u64 }) {
+                        Ok(z) => { print_u64(p.get(z).id + p.get(y).id); println() }
+                        Err(e) => return 1i32
+                    }
+                }
+                Err(e) => return 1i32
+            }
+        }
+        Err(e) => return 1i32
+    }
+    drop(p)
+    // arena: destroyed from the last element to the first
+    ar := Arena[Noisy].new()
+    match ar.alloc(Noisy { id: 4u64 }) {
+        Ok(h) => {
+            match ar.alloc(Noisy { id: 5u64 }) {
+                Ok(k) => { print_u64(ar.get(h).id * ar.get(k).id); println() }
+                Err(e) => return 1i32
+            }
+        }
+        Err(e) => return 1i32
+    }
+    drop(ar)
+    // Box.into moves the value out; the Box frees its storage without destroying it
+    bx := Box.new(Noisy { id: 6u64 })
+    n := bx.into()
+    print_str("out "); print_u64(n.id); println()
+    drop(n)
+    bx2 := Box.new(Noisy { id: 7u64 })
+    print_str("end"); println()
+    return 0i32
+}

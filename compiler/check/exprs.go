@@ -15,6 +15,7 @@ type result struct {
 	owned     bool    // an owned move-only temporary or `move x`
 	ownedRoot *resolve.Symbol
 	release   bool
+	rawAccess bool // an access opened on raw memory (ptr_view and its kin): returnable from unsafe code
 	t         resolve.Type
 }
 
@@ -488,7 +489,7 @@ func (f *fn) call(st *flow, x *ast.CallExpr) *result {
 	}
 	if sourcePlace == nil {
 		// intrinsic without a place source (e.g. String literal slices): fresh root
-		return &result{t: t, isAccess: true, acc: &access{kind: accView, start: start, end: forever}}
+		return &result{t: t, isAccess: true, acc: &access{kind: accView, start: start, end: forever}, rawAccess: isRawAccessOp(info.Fn)}
 	}
 	kind := accView
 	if anyEdit {
@@ -631,4 +632,27 @@ func (f *fn) checkAtomicOrdering(x *ast.CallExpr, info *resolve.CallInfo) {
 			}
 		}
 	}
+}
+
+// isRawAccessOp reports the prelude intrinsics that open an access on raw
+// memory (ptr_view, ptr_edit, ptr_view_seq, ptr_edit_seq, ptr_edit2).
+func isRawAccessOp(fd *resolve.FuncDecl) bool {
+	if fd == nil || fd.Module != "core" || fd.Receiver != nil {
+		return false
+	}
+	switch fd.Name {
+	case "ptr_view", "ptr_edit", "ptr_view_seq", "ptr_edit_seq", "ptr_edit2":
+		return true
+	}
+	return false
+}
+
+// isTrapKindCall reports a call to the prelude's trap_kind, which never returns.
+func (f *fn) isTrapKindCall(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	info := f.c.info.Calls[call]
+	return info != nil && info.Fn != nil && info.Fn.Module == "core" && info.Fn.Receiver == nil && info.Fn.Name == "trap_kind"
 }

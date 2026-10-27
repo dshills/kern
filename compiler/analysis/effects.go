@@ -10,14 +10,16 @@ import (
 )
 
 // trapping lists the intrinsics that may trap at runtime (checks the
-// lowering does not emit as instructions: library validation, allocator
-// obligations, recursive locking, reference-count overflow).
+// lowering does not emit as instructions: allocator obligations, recursive
+// locking, reference-count overflow, raw memory in the interpreter). The
+// containers' checks are Trap instructions in their kern bodies and reach
+// callers through propagation.
 var trapping = map[string]bool{
-	"Vec.at": true, "Vec.get": true, "Pool.get": true, "Pool.at": true, "Pool.free": true, "Pool.get2": true,
-	"Arena.get": true, "Arena.at": true, "Mutex.lock": true, "Shared.clone": true, "Box.new": true, "Vec.push": true,
-	"SystemAllocator.alloc": true, "SystemAllocator.free": true, "simd_shuffle": true, "asm": true,
+	"Mutex.lock": true, "Shared.clone": true,
+	"SystemAllocator.alloc": true, "SystemAllocator.realloc": true, "SystemAllocator.free": true, "simd_shuffle": true, "asm": true,
 	"ptr_load": true, "ptr_store": true, "ptr_take": true, "ptr_load_volatile": true, "ptr_store_volatile": true, "ptr_copy": true,
-	"testing.seed_generation": true, "testing.seed_shared_count": true,
+	"ptr_view": true, "ptr_edit": true, "ptr_view_seq": true, "ptr_edit_seq": true, "ptr_edit2": true,
+	"testing.require_hooks": true, "testing.seed_shared_count": true,
 }
 
 // spawning lists the thread-creating intrinsics.
@@ -25,7 +27,7 @@ var spawning = map[string]bool{"thread.spawn": true, "scope.spawn": true}
 
 // unsafeIntrinsics are the enumerated unsafe operations among intrinsics.
 func unsafeIntrinsic(name string) bool {
-	return strings.HasPrefix(name, "ptr_") || name == "asm" || name == "SystemAllocator.alloc" || name == "SystemAllocator.free"
+	return strings.HasPrefix(name, "ptr_") || name == "asm" || name == "SystemAllocator.alloc" || name == "SystemAllocator.realloc" || name == "SystemAllocator.free"
 }
 
 type effects struct {

@@ -90,6 +90,34 @@ func (h *rawHeap) free(addr uint64) bool {
 	return true
 }
 
+// realloc moves a live allocation to a new block of size bytes at align,
+// keeping the common prefix; it returns 0 (and leaves the old block) when
+// the new block cannot be obtained, and false when addr is not live.
+func (h *rawHeap) realloc(addr, oldSize, size, align uint64) (uint64, bool) {
+	h.mu.Lock()
+	live, ok := h.allocs[addr]
+	h.mu.Unlock()
+	if !ok {
+		return 0, false
+	}
+	if live < oldSize {
+		oldSize = live
+	}
+	n := h.alloc(size, align)
+	if n == 0 {
+		return 0, true
+	}
+	keep := oldSize
+	if size < keep {
+		keep = size
+	}
+	if keep > 0 {
+		copy(h.bytes(n, keep), h.bytes(addr, keep))
+	}
+	h.free(addr)
+	return n, true
+}
+
 // bytes returns the n bytes at addr, or nil when the range is not mapped.
 // Chunks are never reallocated, so the slice stays valid after the lock is
 // released; concurrent access to one allocation is the program's data race.

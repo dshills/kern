@@ -218,7 +218,7 @@ func hardwareDetails() string {
 func separations(root, buildDir, kernBin string, runs int, rows []*row) string {
 	var b strings.Builder
 	b.WriteString("## §9 separations\n\n")
-	b.WriteString("- **Backend immaturity**: the `[unproven]` aliasing experiment above isolates what LLVM gains from the §5.4 attributes; the remaining gap to C and Rust on container workloads is the out-of-line C runtime (every container operation is a call that reloads its handle).\n")
+	b.WriteString("- **Backend immaturity**: the `[unproven]` aliasing experiment above isolates what LLVM gains from the §5.4 attributes. The containers are kern code that LLVM inlines (docs/reports/containers-in-kern.md); the remaining gap to C and Rust on container workloads is the checks (next row), the benchmark plumbing's calls that LLVM leaves out of line, and the hashing and tree code itself.\n")
 	// intrinsic overhead: checks elided
 	type pair struct{ normal, elided float64 }
 	results := map[string]pair{}
@@ -284,13 +284,17 @@ func separations(root, buildDir, kernBin string, runs int, rows []*row) string {
 		d, _ := meanCI(mapRuns(dbg.runs, func(r runResult) float64 { return float64(r.ops) / float64(r.ns) * 1e3 }))
 		fmt.Fprintf(&b, "| %s | %.1f | %.1f | %.0f%% |\n", w, a, d, (a/d-1)*100)
 	}
-	// library unsafe code: the runtime is C; every line of it is outside the language's safety
+	// library unsafe code (§2.3(b)): the containers are kern code in the
+	// prelude whose raw operations sit in contracted unsafe blocks; the
+	// runtime-provided objects (Shared, Mutex, Atomic, threads, the system
+	// allocator, traps and output) remain C, outside the language's checks
 	rtLines := 0
 	if bts, err := os.ReadFile(filepath.Join(root, "runtime", "hosted", "src", "kern_rt.c")); err == nil {
 		rtLines = strings.Count(string(bts), "\n")
 	}
+	preludeUnsafe := unsafeLines([]string{filepath.Join(root, "std", "core.kern")})
 	kernUnsafe := unsafeLines(globFiles(filepath.Join(root, "bench", "kern"), "*/*.kern"))
-	fmt.Fprintf(&b, "\n- **Library unsafe code**: the hosted runtime is %d lines of C (all of it outside the language's checks, §2.3(b)); the thirteen kern workloads contain %d lines inside `unsafe` blocks (§2.3(a)), listed in docs/unsafe-audit.md.\n", rtLines, kernUnsafe)
+	fmt.Fprintf(&b, "\n- **Library unsafe code**: the containers (Box, Vec, Pool, Arena) are kern code in std/core.kern with %d lines containing `unsafe` (§2.3(b), each block under a contract, listed in docs/unsafe-audit.md); the hosted runtime is %d lines of C for the runtime-provided objects, traps, output and threads (all of it outside the language's checks); the thirteen kern workloads contain %d lines inside `unsafe` blocks (§2.3(a)).\n", preludeUnsafe, rtLines, kernUnsafe)
 	b.WriteString("- **Profiles**: every row is `--env hosted`; the freestanding profile of the page-frame allocator, ring buffer and intrusive run queue needs QEMU and is not measured here (docs/reports/phase-3.md).\n\n")
 	return b.String()
 }

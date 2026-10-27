@@ -47,6 +47,10 @@ type Func struct {
 	Blocks    []*Block
 	Release   string // release function name for accessor functions
 	Intrinsic bool   // provided by the runtime (std prelude without body)
+	// Library marks a std/core function with a body: a trap inside it is
+	// attributed to the call that entered the library (the span its
+	// callers pass along), as the runtime's C containers reported it.
+	Library   bool
 	Extern    string // C ABI symbol when an extern declaration
 	Contract  *ast.Contract
 	Pos       ast.Pos

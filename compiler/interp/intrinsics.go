@@ -32,8 +32,8 @@ func acc(v Value) *Access { return v.(*Access) }
 
 func u64(v Value) uint64 { return v.(Int).Bits }
 
-// intrinsics is the table of prelude functions (std/core.kern) provided by
-// the interpreter in Phase 1.
+// intrinsics is the table of bodyless prelude functions (std/core.kern)
+// provided by the interpreter.
 var intrinsics = map[string]intrinsicFn{}
 
 func init() {
@@ -61,138 +61,6 @@ func init() {
 		"zero": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{Unit{}} },
 		"clone": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{deepClone(it, acc(a[0]).Ref.get(), c.pos)}
-		},
-		// Box
-		"Box.new": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
-			it.allocOrTrap(pos)
-			return []Value{&Box{Val: a[0]}}
-		},
-		"Box.get": func(it *Interp, a []Value, _ callCtx) []Value {
-			b := acc(a[0]).Ref.get().(*Box)
-			return []Value{&Access{Ref: slotRef{&b.Val}}}
-		},
-		"Box.at": func(it *Interp, a []Value, _ callCtx) []Value {
-			b := acc(a[0]).Ref.get().(*Box)
-			return []Value{&Access{Ref: slotRef{&b.Val}, Edit: true}}
-		},
-		"Box.into": func(it *Interp, a []Value, _ callCtx) []Value { b := a[0].(*Box); b.Dead = true; return []Value{b.Val} },
-		// Vec
-		"Vec.new": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Vec{}} },
-		"Vec.with_capacity": func(it *Interp, a []Value, _ callCtx) []Value {
-			return []Value{&Vec{Items: make([]Value, 0, u64(a[0]))}}
-		},
-		"Vec.len": func(it *Interp, a []Value, _ callCtx) []Value {
-			return []Value{mkInt("usize", uint64(len(vecOf(a[0]).Items)))}
-		},
-		"Vec.push": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
-			it.allocOrTrap(pos)
-			v := vecOf(a[0])
-			v.Items = append(v.Items, a[1])
-			return nil
-		},
-		"Vec.pop": func(it *Interp, a []Value, _ callCtx) []Value {
-			v := vecOf(a[0])
-			if len(v.Items) == 0 {
-				return []Value{&Union{Tag: 1}}
-			}
-			last := v.Items[len(v.Items)-1]
-			v.Items[len(v.Items)-1] = nil
-			v.Items = v.Items[:len(v.Items)-1]
-			return []Value{&Union{Tag: 0, Fields: []Value{last}}}
-		},
-		"Vec.get": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
-			v := vecOf(a[0])
-			if u64(a[1]) >= uint64(len(v.Items)) {
-				it.trap("bounds", pos)
-			}
-			i := int(u64(a[1]))
-			return []Value{&Access{Ref: idxRef{elems: func() []Value { return v.Items }, i: i}}}
-		},
-		"Vec.at": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
-			v := vecOf(a[0])
-			if u64(a[1]) >= uint64(len(v.Items)) {
-				it.trap("bounds", pos)
-			}
-			i := int(u64(a[1]))
-			return []Value{&Access{Ref: idxRef{elems: func() []Value { return v.Items }, i: i}, Edit: true}}
-		},
-		"Vec.as_view": func(it *Interp, a []Value, _ callCtx) []Value {
-			v := vecOf(a[0])
-			return []Value{&Access{Seq: &seqRef{elems: func() []Value { return v.Items }, lo: 0, hi: len(v.Items)}}}
-		},
-		"Vec.as_edit": func(it *Interp, a []Value, _ callCtx) []Value {
-			v := vecOf(a[0])
-			return []Value{&Access{Seq: &seqRef{elems: func() []Value { return v.Items }, lo: 0, hi: len(v.Items)}, Edit: true}}
-		},
-		"Vec.clear": func(it *Interp, a []Value, _ callCtx) []Value {
-			v := vecOf(a[0])
-			for i := len(v.Items) - 1; i >= 0; i-- {
-				it.destroy(v.Items[i], v.Elem)
-				v.Items[i] = nil
-			}
-			v.Items = v.Items[:0]
-			return nil
-		},
-		// Pool
-		"Pool.new": func(it *Interp, a []Value, c callCtx) []Value {
-			p := it.newPool()
-			p.Elem = c.targ(0)
-			return []Value{p}
-		},
-		"Pool.alloc": poolAlloc,
-		"Pool.get": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
-			return []Value{poolRef(it, a[0], a[1], false, pos)}
-		},
-		"Pool.at": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
-			return []Value{poolRef(it, a[0], a[1], true, pos)}
-		},
-		"Pool.get2": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
-			x := poolRef(it, a[0], a[1], true, pos)
-			y := poolRef(it, a[0], a[2], true, pos)
-			if handleIndex(a[1]) == handleIndex(a[2]) {
-				it.trap("disjoint", pos)
-			}
-			return []Value{x, y}
-		},
-		"Pool.free": poolFree,
-		"Pool.len": func(it *Interp, a []Value, _ callCtx) []Value {
-			p := acc(a[0]).Ref.get().(*Pool)
-			n := 0
-			for _, s := range p.Slots {
-				if s.Live {
-					n++
-				}
-			}
-			return []Value{mkInt("usize", uint64(n))}
-		},
-		// Arena
-		"Arena.new": func(it *Interp, a []Value, _ callCtx) []Value {
-			ar := &Arena{Identity: it.newIdentity()}
-			return []Value{ar}
-		},
-		"Arena.alloc": func(it *Interp, a []Value, _ callCtx) []Value {
-			ar := acc(a[0]).Ref.get().(*Arena)
-			ar.Slots = append(ar.Slots, a[1])
-			id := &Struct{Fields: []Value{mkInt("u32", uint64(len(ar.Slots)-1)), mkInt("u32", uint64(ar.Identity))}}
-			return []Value{&Union{Tag: 0, Fields: []Value{id}}}
-		},
-		"Arena.get": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
-			return []Value{arenaRef(it, a[0], a[1], false, pos)}
-		},
-		"Arena.at": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
-			return []Value{arenaRef(it, a[0], a[1], true, pos)}
-		},
-		"Arena.len": func(it *Interp, a []Value, _ callCtx) []Value {
-			return []Value{mkInt("usize", uint64(len(acc(a[0]).Ref.get().(*Arena).Slots)))}
 		},
 		// Shared / Mutex / Atomic
 		"Shared.new": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Shared{Val: a[0], Count: 1}} },
@@ -333,6 +201,23 @@ func init() {
 			}
 			return []Value{&Union{Tag: 0, Fields: []Value{mkInt("usize", addr)}}}
 		},
+		"SystemAllocator.realloc": func(it *Interp, a []Value, c callCtx) []Value {
+			addr, oldSize, size, align := u64(a[1]), u64(a[2]), u64(a[3]), u64(a[4])
+			if align == 0 || align&(align-1) != 0 || align > 4096 || size%align != 0 {
+				it.trap("explicit", c.pos)
+			}
+			if it.takeFailNextAlloc() {
+				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}}
+			}
+			n, live := it.heap.realloc(addr, oldSize, size, align)
+			if !live {
+				it.trap("explicit", c.pos) // not a live allocation of this allocator
+			}
+			if n == 0 {
+				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}}
+			}
+			return []Value{&Union{Tag: 0, Fields: []Value{mkInt("usize", n)}}}
+		},
 		"SystemAllocator.free": func(it *Interp, a []Value, c callCtx) []Value {
 			if !it.heap.free(u64(a[1])) {
 				it.trap("explicit", c.pos) // not a live allocation of this allocator
@@ -379,6 +264,31 @@ func init() {
 			copy(dst, src)
 			return nil
 		},
+		// accesses on raw memory (the kern containers' elements)
+		"ptr_view": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}}}
+		},
+		"ptr_edit": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}}
+		},
+		"ptr_view_seq": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{&Access{Seq: &seqRef{raw: &rawSeq{it: it, base: u64(a[0]), elem: c.targ(0)}, lo: 0, hi: int(u64(a[1]))}}}
+		},
+		"ptr_edit_seq": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{&Access{Seq: &seqRef{raw: &rawSeq{it: it, base: u64(a[0]), elem: c.targ(0)}, lo: 0, hi: int(u64(a[1]))}, Edit: true}}
+		},
+		"ptr_edit2": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}, &Access{Ref: rawRef{it: it, addr: u64(a[1]), t: c.targ(0)}, Edit: true}}
+		},
+		"size_of": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{mkInt("usize", uint64(layout.Of(c.targ(0)).Size))}
+		},
+		"align_of": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{mkInt("usize", uint64(layout.Of(c.targ(0)).Align))}
+		},
+		"container_identity": func(it *Interp, a []Value, _ callCtx) []Value {
+			return []Value{mkInt("u32", uint64(it.newIdentity()))}
+		},
 		"asm": func(it *Interp, a []Value, c callCtx) []Value { it.trap("explicit", c.pos); return nil },
 		// SIMD: lane-wise over arrays, wrapping
 		"simd_add": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{it.lanes("+", a[0], a[1])} },
@@ -415,18 +325,10 @@ func init() {
 		"exit":      func(it *Interp, a []Value, _ callCtx) []Value { panic(exitCode(signedOf(a[0].(Int)))) },
 		"yield_now": func(it *Interp, a []Value, _ callCtx) []Value { runtime.Gosched(); return nil },
 		// test hooks
-		"testing.seed_generation": func(it *Interp, a []Value, c callCtx) []Value {
-			pos := c.pos
+		"testing.require_hooks": func(it *Interp, a []Value, c callCtx) []Value {
 			if !it.TestHooks {
-				it.trap("explicit", pos)
+				it.trap("explicit", c.pos)
 			}
-			p := acc(a[0]).Ref.get().(*Pool)
-			slot := int(u64(a[1]))
-			for len(p.Slots) <= slot {
-				p.Slots = append(p.Slots, &PoolSlot{})
-				p.Free = append(p.Free, len(p.Slots)-1)
-			}
-			p.Slots[slot].Gen = uint32(u64(a[2]))
 			return nil
 		},
 		"testing.fail_next_alloc": func(it *Interp, a []Value, c callCtx) []Value {
@@ -452,7 +354,6 @@ func init() {
 	}
 }
 
-func vecOf(v Value) *Vec       { return acc(v).Ref.get().(*Vec) }
 func atomicOf(v Value) *Atomic { return acc(v).Ref.get().(*Atomic) }
 
 func atomicRMW(op string) intrinsicFn {
@@ -466,18 +367,11 @@ func atomicRMW(op string) intrinsicFn {
 	}
 }
 
-// deepClone duplicates a value including library objects (the `clone`
-// intrinsic behind copy(x) for move-only types).
+// deepClone duplicates a value including the runtime-provided library
+// objects (the `clone` intrinsic behind copy(x) for move-only types; the
+// kern containers clone themselves through their clone methods).
 func deepClone(it *Interp, v Value, pos ast.Pos) Value {
 	switch x := v.(type) {
-	case *Box:
-		return &Box{Val: deepClone(it, x.Val, pos)}
-	case *Vec:
-		n := &Vec{Items: make([]Value, len(x.Items)), Elem: x.Elem}
-		for i, e := range x.Items {
-			n.Items[i] = deepClone(it, e, pos)
-		}
-		return n
 	case *Shared:
 		// a clone of a Shared is another owner of the same value
 		if x.Count == math.MaxUint64 {
@@ -509,88 +403,6 @@ func deepClone(it *Interp, v Value, pos ast.Pos) Value {
 		}
 	}
 	return v
-}
-
-// ---- Pool (spec §5.6) ----
-
-func (it *Interp) newPool() *Pool {
-	p := &Pool{Identity: it.newIdentity()}
-	return p
-}
-
-func handleIndex(h Value) int    { return int(h.(*Struct).Fields[0].(Int).Bits) }
-func handleGen(h Value) uint32   { return uint32(h.(*Struct).Fields[1].(Int).Bits) }
-func handleIdent(h Value) uint32 { return uint32(h.(*Struct).Fields[2].(Int).Bits) }
-
-func poolAlloc(it *Interp, a []Value, _ callCtx) []Value {
-	p := acc(a[0]).Ref.get().(*Pool)
-	var idx int
-	if len(p.Free) > 0 {
-		idx = p.Free[len(p.Free)-1]
-		p.Free = p.Free[:len(p.Free)-1]
-	} else {
-		p.Slots = append(p.Slots, &PoolSlot{})
-		idx = len(p.Slots) - 1
-	}
-	s := p.Slots[idx]
-	s.Val = a[1]
-	s.Live = true
-	id := &Struct{Fields: []Value{mkInt("u32", uint64(idx)), mkInt("u32", uint64(s.Gen)), mkInt("u32", uint64(p.Identity))}}
-	return []Value{&Union{Tag: 0, Fields: []Value{id}}}
-}
-
-// poolCheck validates a handle in the §5.6 order and returns the slot.
-func poolCheck(it *Interp, p *Pool, h Value, pos ast.Pos) *PoolSlot {
-	idx := handleIndex(h)
-	if idx >= len(p.Slots) {
-		it.trap("bounds", pos)
-	}
-	if hi, pi := handleIdent(h), p.Identity; hi != 0 && pi != 0 && hi != pi {
-		it.trap("identity", pos)
-	}
-	s := p.Slots[idx]
-	if !s.Live {
-		it.trap("vacant", pos)
-	}
-	if s.Gen != handleGen(h) {
-		it.trap("generation", pos)
-	}
-	return s
-}
-
-func poolRef(it *Interp, pool, h Value, edit bool, pos ast.Pos) Value {
-	p := acc(pool).Ref.get().(*Pool)
-	s := poolCheck(it, p, h, pos)
-	return &Access{Ref: slotRef{&s.Val}, Edit: edit}
-}
-
-func poolFree(it *Interp, a []Value, c callCtx) []Value {
-	pos := c.pos
-	p := acc(a[0]).Ref.get().(*Pool)
-	s := poolCheck(it, p, a[1], pos)
-	elem := Value(s.Val)
-	s.Live = false
-	s.Val = nil
-	it.destroy(elem, p.Elem)
-	if s.Gen == math.MaxUint32 {
-		s.Retired = true // never reused: stale handles stay detectable
-	} else {
-		s.Gen++
-		p.Free = append(p.Free, handleIndex(a[1]))
-	}
-	return nil
-}
-
-func arenaRef(it *Interp, arena, h Value, edit bool, pos ast.Pos) Value {
-	ar := acc(arena).Ref.get().(*Arena)
-	idx := handleIndex(h)
-	if idx >= len(ar.Slots) {
-		it.trap("bounds", pos)
-	}
-	if hi := uint32(h.(*Struct).Fields[1].(Int).Bits); hi != 0 && ar.Identity != 0 && hi != ar.Identity {
-		it.trap("identity", pos)
-	}
-	return &Access{Ref: idxRef{elems: func() []Value { return ar.Slots }, i: idx}, Edit: edit}
 }
 
 // lanes applies a wrapping binary operation lane by lane.
@@ -657,13 +469,4 @@ func (it *Interp) spawned(name string, args []Value, finish func(Value, *Trap)) 
 		}
 		finish(result, trapped)
 	}()
-}
-
-// allocOrTrap models allocation failure for convenience constructors: with
-// the fail_next_alloc test hook armed, the next allocation traps with kind
-// oom (spec §6).
-func (it *Interp) allocOrTrap(pos ast.Pos) {
-	if it.takeFailNextAlloc() {
-		it.trap("oom", pos)
-	}
 }

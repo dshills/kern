@@ -92,7 +92,7 @@ func (e *emitter) mty(t resolve.Type) string {
 }
 
 // namedType returns the LLVM identified struct for a named type, emitting
-// its definition once. Library containers are opaque pointers.
+// its definition once. The runtime-provided library objects are opaque pointers.
 func (e *emitter) namedType(n *resolve.Named) string {
 	if layout.Opaque(n) {
 		return "ptr"
@@ -206,9 +206,10 @@ func (e *emitter) glueFor(t resolve.Type) string {
 	return sym
 }
 
-// namedGlue emits the body of a named type's glue: user destructor, then
-// fields in reverse declaration order; library containers call the runtime
-// with their element glue.
+// namedGlue emits the body of a named type's glue: the kern destructor
+// (the type's own or a prelude container's), then fields in reverse
+// declaration order; the opaque library objects call the runtime with their
+// element glue.
 func (e *emitter) namedGlue(b *strings.Builder, n *resolve.Named) {
 	args := typeArgs(n)
 	elem := func(i int) resolve.Type {
@@ -221,18 +222,6 @@ func (e *emitter) namedGlue(b *strings.Builder, n *resolve.Named) {
 		li := layout.Of(elem(0))
 		eg := e.glueFor(elem(0))
 		switch n.Decl.Name {
-		case "Box":
-			e.declare("kern_box_drop", "void (ptr, ptr)")
-			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_box_drop(ptr %%h, ptr %s)\n", eg)
-		case "Vec":
-			e.declare("kern_vec_drop", "void (ptr, ptr)")
-			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_vec_drop(ptr %%h, ptr %s)\n", eg)
-		case "Pool":
-			e.declare("kern_pool_drop", "void (ptr, ptr)")
-			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_pool_drop(ptr %%h, ptr %s)\n", eg)
-		case "Arena":
-			e.declare("kern_arena_drop", "void (ptr, ptr)")
-			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_arena_drop(ptr %%h, ptr %s)\n", eg)
 		case "Shared":
 			e.declare("kern_shared_drop", "void (ptr, ptr)")
 			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_shared_drop(ptr %%h, ptr %s)\n", eg)
@@ -253,8 +242,14 @@ func (e *emitter) namedGlue(b *strings.Builder, n *resolve.Named) {
 		return
 	}
 	ty := e.namedType(n)
-	if n.Decl.Destructor != nil && n.Decl.Module != "core" {
-		fmt.Fprintf(b, "  call void %s(ptr %%p)\n", fnSym(n.String()+".destructor"))
+	if df := e.mod.Func(n.String() + ".destructor"); df != nil && !df.Intrinsic {
+		// a kern destructor: the type's own, or a prelude container's (a
+		// library function, with no call site to report: an empty span)
+		span := ""
+		if df.Library {
+			span = ", i64 0, i64 0"
+		}
+		fmt.Fprintf(b, "  call void %s(ptr %%p%s)\n", fnSym(n.String()+".destructor"), span)
 	}
 	switch n.Decl.Kind {
 	case resolve.KindStruct:

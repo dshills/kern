@@ -88,8 +88,7 @@ func (f *fn) stmt(st *flow, s ast.Stmt) *flow {
 			f.closeAccess(r)
 		}
 		f.finish(st, s)
-		if t, ok := s.X.(*ast.TrapExpr); ok {
-			_ = t
+		if _, ok := s.X.(*ast.TrapExpr); ok || f.isTrapKindCall(s.X) {
 			out := st.clone()
 			out.dead = true
 			return out
@@ -695,6 +694,12 @@ func (f *fn) returnAccess(st *flow, s *ast.Return) {
 			f.errorf("ACC_ESCAPE_RETURN", s.Value.Span(), "returned expression is not an access")
 			return
 		}
+	}
+	if r.isAccess && r.rawAccess && f.unsafe > 0 {
+		// an access opened on raw memory (spec §6): its validity is the
+		// contract's obligation, not derived from a parameter
+		f.closeAccess(r)
+		return
 	}
 	if len(f.accessParams) == 0 {
 		f.errorf("ACC_ESCAPE_RETURN", s.Value.Span(), "function has no view/edit parameter to derive the returned access from")

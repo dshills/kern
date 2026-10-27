@@ -1,6 +1,7 @@
-// kern hosted runtime (PLAN.md 2.2): traps, output, the standard library's
-// containers as opaque objects, threads, the system allocator and the
-// test hooks. Linked by `kern build` with every program.
+// kern hosted runtime (PLAN.md 2.2): traps, output, the runtime-provided
+// library objects (Shared, Mutex, Atomic), threads, the system allocator and
+// the test hooks. Linked by `kern build` with every program. The containers
+// (Box, Vec, Pool, Arena) are kern code in std/core.kern.
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -176,9 +177,15 @@ void kern_start(void) {
 
 // ---- allocation failure injection ----
 
+// kern_fail_next is armed by testing.fail_next_alloc: the next allocation
+// (a runtime object's, or the system allocator's, which the kern containers
+// use) fails.
 static _Atomic int kern_fail_next = 0;
 #ifdef KERN_TEST_HOOKS
 void kern_test_fail_next_alloc(void) { atomic_store(&kern_fail_next, 1); }
+// kern_test_require_hooks exists only in a --test-hooks build: a program
+// using the kern-side test hooks without it fails to link.
+void kern_test_require_hooks(void) {}
 #endif
 static void *kern_alloc(size_t n, int64_t start, int64_t end) {
     if (atomic_exchange(&kern_fail_next, 0)) kern_trap(9, start, end);
@@ -187,212 +194,18 @@ static void *kern_alloc(size_t n, int64_t start, int64_t end) {
     return p;
 }
 
-// ---- Box ----
+// ---- container identity tags (spec §5.6) ----
 
-typedef struct { int64_t size; char data[]; } kern_box;
-void *kern_box_new(int64_t size, const void *src, int64_t start, int64_t end) {
-    kern_box *b = kern_alloc(sizeof *b + (size_t)size, start, end);
-    b->size = size;
-    memcpy(b->data, src, (size_t)size);
-    return b;
-}
-void *kern_box_get(kern_box *b) { return b->data; }
-void kern_box_into(kern_box *b, void *dst, int64_t size) { memcpy(dst, b->data, (size_t)size); free(b); }
-void kern_box_drop(kern_box *b, kern_glue g) { if (b == NULL) return; if (g) g(b->data); free(b); }
-void *kern_box_clone(kern_box *b) { return kern_box_new(b->size, b->data, 0, 0); }
-
-// ---- Vec ----
-
-typedef struct { char *data; int64_t len, cap, esize, align; } kern_vec;
-// kern_bytes computes count * esize, trapping oom when it is unrepresentable
-static size_t kern_bytes(int64_t count, int64_t esize, int64_t start, int64_t end) {
-    if (count < 0 || esize < 0) kern_trap(9, start, end);
-    if (esize == 0) return (size_t)count;
-    if ((uint64_t)count > SIZE_MAX / (uint64_t)esize) kern_trap(9, start, end);
-    return (size_t)count * (size_t)esize;
-}
-void *kern_vec_new(int64_t esize, int64_t align, int64_t cap) {
-    kern_vec *v = kern_alloc(sizeof *v, 0, 0);
-    v->data = NULL; v->len = 0; v->cap = 0; v->esize = esize; v->align = align;
-    if (cap > 0) { v->data = kern_alloc(kern_bytes(cap, esize, 0, 0), 0, 0); v->cap = cap; }
-    return v;
-}
-int64_t kern_vec_len(kern_vec *v) { return v->len; }
-void *kern_vec_data(kern_vec *v) { return v->data; }
-void kern_vec_push(kern_vec *v, const void *src, int64_t start, int64_t end) {
-    if (atomic_exchange(&kern_fail_next, 0)) kern_trap(9, start, end);
-    if (v->len == v->cap) {
-        if (v->cap > INT64_MAX / 2) kern_trap(9, start, end);
-        int64_t ncap = v->cap ? v->cap * 2 : 4;
-        char *nd = realloc(v->data, kern_bytes(ncap, v->esize ? v->esize : 1, start, end));
-        if (nd == NULL) kern_trap(9, start, end);
-        v->data = nd; v->cap = ncap;
-    }
-    memcpy(v->data + v->len * v->esize, src, (size_t)v->esize);
-    v->len++;
-}
-void kern_vec_pop(kern_vec *v, char *out, int64_t off) {
-    if (v->len == 0) { out[0] = 1; return; }
-    out[0] = 0;
-    v->len--;
-    memcpy(out + off, v->data + v->len * v->esize, (size_t)v->esize);
-}
-void *kern_vec_at(kern_vec *v, int64_t i, int64_t start, int64_t end) {
-    if ((uint64_t)i >= (uint64_t)v->len) kern_trap(0, start, end);
-    return v->data + i * v->esize;
-}
-void kern_vec_clear(kern_vec *v, kern_glue g) {
-    if (g) for (int64_t i = v->len - 1; i >= 0; i--) g(v->data + i * v->esize);
-    v->len = 0;
-}
-void kern_vec_drop(kern_vec *v, kern_glue g) { if (v == NULL) return; kern_vec_clear(v, g); free(v->data); free(v); }
-void *kern_vec_clone(kern_vec *v) {
-    kern_vec *n = kern_vec_new(v->esize, v->align, v->len);
-    memcpy(n->data, v->data, (size_t)(v->len * v->esize));
-    n->len = v->len;
-    return n;
-}
-
-// ---- Pool (spec §5.6) ----
-
-typedef struct { uint32_t gen; uint8_t live, retired; } kern_slot;
-typedef struct { char *data; kern_slot *slots; int64_t count, cap, esize, align; int64_t *free_list; int64_t nfree; uint32_t identity; } kern_pool;
-typedef struct { uint32_t index, gen, tag; } kern_poolid;
+// kern_next_identity issues the next container identity tag. Tags are a
+// debug-build feature (PLAN.md 2.2): a release build issues identity 0,
+// which disables the check; so does the counter once it wraps to 0.
 static _Atomic uint32_t kern_identity = 1;
-
-// identity tags are a debug-build feature (PLAN.md 2.2): a release build
-// issues identity 0, which disables the check
-static uint32_t kern_next_identity(void) {
+uint32_t kern_next_identity(void) {
 #ifdef KERN_RELEASE
     return 0;
 #else
-    uint32_t id = atomic_fetch_add(&kern_identity, 1);
-    return id; // 0 after wrap-around: unchecked
+    return atomic_fetch_add(&kern_identity, 1); // 0 after wrap-around: unchecked
 #endif
-}
-
-void *kern_pool_new(int64_t esize, int64_t align) {
-    kern_pool *p = kern_alloc(sizeof *p, 0, 0);
-    memset(p, 0, sizeof *p);
-    p->esize = esize; p->align = align; p->identity = kern_next_identity();
-    return p;
-}
-void kern_pool_alloc(kern_pool *p, const void *src, char *out, int64_t off) {
-    int64_t idx;
-    if (p->nfree > 0) idx = p->free_list[--p->nfree];
-    else {
-        if (p->count == p->cap) {
-            // grow transactionally: commit only when every buffer was obtained
-            if (p->cap > INT64_MAX / 2 || (p->esize > 0 && (uint64_t)(p->cap ? p->cap * 2 : 8) > SIZE_MAX / (uint64_t)p->esize)) { out[0] = 1; return; }
-            int64_t ncap = p->cap ? p->cap * 2 : 8;
-            char *nd = malloc((size_t)ncap * (size_t)(p->esize ? p->esize : 1));
-            kern_slot *ns = malloc((size_t)ncap * sizeof *p->slots);
-            int64_t *nf = malloc((size_t)ncap * sizeof *p->free_list);
-            if (!nd || !ns || !nf) { free(nd); free(ns); free(nf); out[0] = 1; return; }
-            if (p->count > 0) {
-                memcpy(nd, p->data, (size_t)p->count * (size_t)p->esize);
-                memcpy(ns, p->slots, (size_t)p->count * sizeof *p->slots);
-            }
-            if (p->nfree > 0) memcpy(nf, p->free_list, (size_t)p->nfree * sizeof *p->free_list);
-            memset(ns + p->cap, 0, (size_t)(ncap - p->cap) * sizeof *p->slots);
-            free(p->data); free(p->slots); free(p->free_list);
-            p->data = nd; p->slots = ns; p->free_list = nf; p->cap = ncap;
-        }
-        idx = p->count++;
-    }
-    kern_slot *s = &p->slots[idx];
-    memcpy(p->data + idx * p->esize, src, (size_t)p->esize);
-    s->live = 1;
-    out[0] = 0;
-    kern_poolid id = { (uint32_t)idx, s->gen, p->identity };
-    memcpy(out + off, &id, sizeof id);
-}
-static kern_slot *kern_pool_check(kern_pool *p, const kern_poolid *id, int64_t start, int64_t end) {
-    if (id->index >= (uint64_t)p->count) kern_trap(0, start, end);
-    if (id->tag != 0 && p->identity != 0 && id->tag != p->identity) kern_trap(7, start, end);
-    kern_slot *s = &p->slots[id->index];
-    if (!s->live) kern_trap(6, start, end);
-    if (s->gen != id->gen) kern_trap(5, start, end);
-    return s;
-}
-void *kern_pool_at(kern_pool *p, const kern_poolid *id, int64_t start, int64_t end) {
-    kern_pool_check(p, id, start, end);
-    return p->data + (int64_t)id->index * p->esize;
-}
-void *kern_pool_get2(kern_pool *p, const kern_poolid *a, const kern_poolid *b, int64_t start, int64_t end) {
-    kern_pool_check(p, a, start, end);
-    kern_pool_check(p, b, start, end);
-    if (a->index == b->index) kern_trap(8, start, end);
-    return p->data + (int64_t)a->index * p->esize;
-}
-void kern_pool_free(kern_pool *p, const kern_poolid *id, kern_glue g, int64_t start, int64_t end) {
-    kern_slot *s = kern_pool_check(p, id, start, end);
-    s->live = 0;
-    if (g) g(p->data + (int64_t)id->index * p->esize);
-    if (s->gen == UINT32_MAX) s->retired = 1;
-    else { s->gen++; p->free_list[p->nfree++] = id->index; }
-}
-int64_t kern_pool_len(kern_pool *p) { int64_t n = 0; for (int64_t i = 0; i < p->count; i++) n += p->slots[i].live; return n; }
-void kern_pool_drop(kern_pool *p, kern_glue g) {
-    if (p == NULL) return;
-    if (g) for (int64_t i = p->count - 1; i >= 0; i--) if (p->slots[i].live) g(p->data + i * p->esize);
-    free(p->data); free(p->slots); free(p->free_list); free(p);
-}
-#ifdef KERN_TEST_HOOKS
-void kern_test_pool_seed_generation(kern_pool *p, int64_t slot, int64_t gen) {
-    // allocate slots until the requested one exists, keeping them live so
-    // the count advances, then free them in reverse order
-    kern_poolid *ids = NULL; int64_t n = 0;
-    char *tmp = calloc(1, p->esize > 0 ? (size_t)p->esize : 1);
-    if (!tmp) kern_trap(9, 0, 0);
-    while (p->count <= slot) {
-        char out[16];
-        kern_pool_alloc(p, tmp, out, 4);
-        if (out[0] != 0) kern_trap(9, 0, 0);
-        kern_poolid *nids = realloc(ids, (size_t)(n + 1) * sizeof *ids);
-        if (!nids) kern_trap(9, 0, 0);
-        ids = nids;
-        memcpy(&ids[n++], out + 4, sizeof(kern_poolid));
-    }
-    for (int64_t i = n - 1; i >= 0; i--) kern_pool_free(p, &ids[i], NULL, 0, 0);
-    free(ids); free(tmp);
-    p->slots[slot].gen = (uint32_t)gen;
-}
-#endif
-
-// ---- Arena ----
-
-typedef struct { char *data; int64_t len, cap, esize, align; uint32_t identity; } kern_arena;
-typedef struct { uint32_t index, tag; } kern_arenaid;
-void *kern_arena_new(int64_t esize, int64_t align) {
-    kern_arena *a = kern_alloc(sizeof *a, 0, 0);
-    memset(a, 0, sizeof *a);
-    a->esize = esize; a->align = align; a->identity = kern_next_identity();
-    return a;
-}
-void kern_arena_alloc(kern_arena *a, const void *src, char *out, int64_t off) {
-    if (a->len == a->cap) {
-        int64_t ncap = a->cap ? a->cap * 2 : 8;
-        char *nd = realloc(a->data, (size_t)(ncap * (a->esize ? a->esize : 1)));
-        if (!nd) { out[0] = 1; return; }
-        a->data = nd; a->cap = ncap;
-    }
-    memcpy(a->data + a->len * a->esize, src, (size_t)a->esize);
-    kern_arenaid id = { (uint32_t)a->len, a->identity };
-    a->len++;
-    out[0] = 0;
-    memcpy(out + off, &id, sizeof id);
-}
-void *kern_arena_at(kern_arena *a, const kern_arenaid *id, int64_t start, int64_t end) {
-    if (id->index >= (uint64_t)a->len) kern_trap(0, start, end);
-    if (id->tag != 0 && a->identity != 0 && id->tag != a->identity) kern_trap(7, start, end);
-    return a->data + (int64_t)id->index * a->esize;
-}
-int64_t kern_arena_len(kern_arena *a) { return a->len; }
-void kern_arena_drop(kern_arena *a, kern_glue g) {
-    if (a == NULL) return;
-    if (g) for (int64_t i = a->len - 1; i >= 0; i--) g(a->data + i * a->esize);
-    free(a->data); free(a);
 }
 
 // ---- Shared ----
@@ -590,10 +403,38 @@ typedef struct { int unused; } kern_sysalloc;
 void *kern_sysalloc_new(void) { static kern_sysalloc a; return &a; }
 void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off) {
     (void)a;
-    if (align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0);
-    void *p = aligned_alloc((size_t)align, size ? (size_t)size : (size_t)align);
+    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0);
+    if (atomic_exchange(&kern_fail_next, 0)) { out[0] = 1; return; } // the armed failure: Err(OutOfMemory)
+    // aligned_alloc needs an alignment of at least sizeof(void *) and a size
+    // that is a multiple of it (macOS rejects smaller alignments): the
+    // request is rounded up; the §6 obligations above are the caller's values
+    size_t al = (size_t)align < sizeof(void *) ? sizeof(void *) : (size_t)align;
+    if ((uint64_t)size > SIZE_MAX - (al - 1)) { out[0] = 1; return; } // unrepresentable after rounding
+    size_t sz = ((size_t)size + al - 1) / al * al;
+    void *p = aligned_alloc(al, sz ? sz : al);
     if (p == NULL) { out[0] = 1; return; }
     out[0] = 0;
     memcpy(out + off, &p, sizeof p);
+}
+// kern_sysalloc_realloc resizes an allocation in place when the allocator
+// can (realloc, whose result is 16-byte aligned on every supported host),
+// else by aligned_alloc, copy and free; on failure the old allocation stays.
+void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t size, int64_t align, char *out, int64_t off) {
+    (void)a;
+    if (old_size < 0 || size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0);
+    if (atomic_exchange(&kern_fail_next, 0)) { out[0] = 1; return; }
+    size_t al = (size_t)align < sizeof(void *) ? sizeof(void *) : (size_t)align;
+    if ((uint64_t)size > SIZE_MAX - (al - 1)) { out[0] = 1; return; }
+    size_t sz = ((size_t)size + al - 1) / al * al;
+    if (sz == 0) sz = al;
+    void *np;
+    if (al <= 16) np = realloc(p, sz);
+    else {
+        np = aligned_alloc(al, sz);
+        if (np) { memcpy(np, p, (size_t)(old_size < size ? old_size : size)); free(p); }
+    }
+    if (np == NULL) { out[0] = 1; return; }
+    out[0] = 0;
+    memcpy(out + off, &np, sizeof np);
 }
 void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align) { (void)a; (void)size; (void)align; free(p); }

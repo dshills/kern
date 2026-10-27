@@ -1,12 +1,16 @@
 // Package interp executes the semantic IR directly (PLAN.md 1.2): the
 // behavioral oracle for spec §4.1 execution semantics, §5.7 destruction and
-// §6 traps, with the standard library's types provided as Go intrinsics.
+// §6 traps. The runtime-provided library objects (Shared, Mutex, Atomic,
+// threads) are Go intrinsics; the containers are the prelude's kern code,
+// run over the interpreter's byte-addressed raw memory.
 package interp
 
 import (
 	"fmt"
 	"sync"
 
+	"github.com/dshills/kern/compiler/ast"
+	"github.com/dshills/kern/compiler/layout"
 	"github.com/dshills/kern/compiler/resolve"
 )
 
@@ -77,53 +81,79 @@ type idxRef struct {
 func (r idxRef) get() Value  { return r.elems()[r.i] }
 func (r idxRef) set(v Value) { r.elems()[r.i] = v }
 
-// seqRef is a window [lo, hi) over a sequence of slots.
+// seqRef is a window [lo, hi) over a sequence of slots: Go slots reached
+// through their owner, or raw memory (an access opened by ptr_view_seq).
 type seqRef struct {
 	elems  func() []Value
+	raw    *rawSeq
 	lo, hi int
 }
 
-func (s *seqRef) length() int  { return s.hi - s.lo }
-func (s *seqRef) at(i int) ref { return idxRef{elems: s.elems, i: s.lo + i} }
-
-// ---- library objects ----
-
-// Box owns one heap value.
-type Box struct {
-	Val  Value
-	Dead bool
+func (s *seqRef) length() int { return s.hi - s.lo }
+func (s *seqRef) at(i int) ref {
+	if s.raw != nil {
+		return s.raw.at(s.lo + i)
+	}
+	return idxRef{elems: s.elems, i: s.lo + i}
 }
 
-// Vec is a growable vector.
-type Vec struct {
-	Items []Value
-	Elem  resolve.Type
-	Dead  bool
+// rawSeq is a run of elements of one type in the interpreter's raw memory.
+type rawSeq struct {
+	it   *Interp
+	base uint64
+	elem resolve.Type
 }
 
-// PoolSlot is one Pool slot.
-type PoolSlot struct {
-	Val     Value
-	Gen     uint32
-	Live    bool
-	Retired bool
+func (r *rawSeq) at(i int) ref {
+	return rawRef{it: r.it, addr: r.base + uint64(i)*uint64(layout.Of(r.elem).Size), t: r.elem}
 }
 
-// Pool is a slot pool with generation counters (spec §5.6).
-type Pool struct {
-	Slots    []*PoolSlot
-	Free     []int
-	Identity uint32
-	Elem     resolve.Type
-	Dead     bool
+// rawRef is a place in raw memory: a value of type t at addr in its §4.1
+// layout, decoded on read and encoded on write (ptr_view, ptr_edit and the
+// kern containers' elements). Moving out leaves the bytes in place.
+type rawRef struct {
+	it   *Interp
+	addr uint64
+	t    resolve.Type
 }
 
-// Arena is an append-only slot container.
-type Arena struct {
-	Slots    []Value
-	Identity uint32
-	Dead     bool
+func (r rawRef) get() Value { return r.it.decode(r.it.rawAt(r.addr, r.t, ast.Pos{}), r.t) }
+func (r rawRef) set(v Value) {
+	if v == nil {
+		return // a move or drop out of raw memory: the bytes are dead, nothing to write
+	}
+	r.it.encode(r.it.rawAt(r.addr, r.t, ast.Pos{}), r.t, v)
 }
+
+// field returns the place of struct field i (or tuple element i) of a raw aggregate.
+func (r rawRef) field(i int) ref {
+	switch x := r.t.(type) {
+	case *resolve.Named:
+		li := layout.Of(x)
+		return rawRef{it: r.it, addr: r.addr + uint64(li.Fields[i]), t: resolve.Subst(x.Decl.Fields[i].Type, typeArgs(x))}
+	case *resolve.Tuple:
+		li := layout.Of(x)
+		return rawRef{it: r.it, addr: r.addr + uint64(li.Fields[i]), t: x.Elems[i]}
+	}
+	panic("interp: field of non-aggregate raw place")
+}
+
+// variantField returns the place of payload field i of variant tag.
+func (r rawRef) variantField(tag, i int) ref {
+	n := r.t.(*resolve.Named)
+	vd := n.Decl.Variants[tag]
+	offs := layout.VariantLayout(n, vd)
+	fts := resolve.VariantFieldTypes(n, vd)
+	return rawRef{it: r.it, addr: r.addr + uint64(offs[i]), t: fts[i]}
+}
+
+// elems returns the window over a raw array place.
+func (r rawRef) elems() *seqRef {
+	arr := r.t.(*resolve.Array)
+	return &seqRef{raw: &rawSeq{it: r.it, base: r.addr, elem: arr.Elem}, lo: 0, hi: arr.Len}
+}
+
+// ---- library objects (runtime-provided) ----
 
 // Shared is an atomically reference-counted immutable value.
 type Shared struct {

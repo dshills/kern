@@ -347,6 +347,15 @@ func (r *resolver) errorf(code diag.Code, file string, pos ast.Pos, format strin
 	r.prog.Diags = append(r.prog.Diags, diag.New(code, file, diag.Span{Start: pos.Start, End: pos.End}, format, args...))
 }
 
+// PreludeSource returns the text of the embedded prelude (std/core.kern).
+func PreludeSource() []byte {
+	b, err := preludeFS.ReadFile("prelude/core.kern")
+	if err != nil {
+		panic("prelude missing: " + err.Error())
+	}
+	return b
+}
+
 func (r *resolver) loadPrelude() *Module {
 	b, err := preludeFS.ReadFile("prelude/core.kern")
 	if err != nil {
@@ -363,6 +372,12 @@ func (r *resolver) loadPrelude() *Module {
 	r.collect(core)
 	if len(r.prog.Diags) > 0 {
 		panic("prelude does not resolve: " + r.prog.Diags[0].Message)
+	}
+	// the library containers have bodies (kern code over the raw-pointer core)
+	r.checkBodies(core)
+	if len(r.prog.Diags) > 0 {
+		d := r.prog.Diags[0]
+		panic(fmt.Sprintf("prelude does not resolve: %s (%s at %d-%d)", d.Message, d.Code, d.Span.Start, d.Span.End))
 	}
 	return core
 }
@@ -1224,6 +1239,16 @@ func namedMarker(n *Named, mk marker, visiting map[string]bool) bool {
 		switch mk {
 		case markerShare, markerSend, markerInterior:
 			return true
+		case markerCopy:
+			return false
+		}
+	case "core.Box", "core.Vec", "core.Pool", "core.Arena":
+		// the containers own their elements through a raw pointer: their
+		// Send, Share and Interior markers are the element's (a RawPtr field
+		// alone would make them neither Send nor Share)
+		switch mk {
+		case markerSend, markerShare, markerInterior:
+			return markerOf(arg(0), mk, visiting)
 		case markerCopy:
 			return false
 		}

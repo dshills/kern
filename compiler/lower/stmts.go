@@ -78,6 +78,11 @@ func (fl *fnLower) stmt(s ast.Stmt) {
 			fl.terminate(&ir.Unreachable{})
 			return
 		}
+		if fl.isTrapKindCall(s.X) {
+			fl.emit(&ir.Trap{Kind: fl.trapKindArg(s.X.(*ast.CallExpr)), Pos: s.Pos})
+			fl.terminate(&ir.Unreachable{})
+			return
+		}
 		r := fl.expr(s.X, nil)
 		fl.discard(r)
 	}

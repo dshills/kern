@@ -75,6 +75,9 @@ func loc(f *ir.Func, p ast.Pos) diag.Loc {
 func Copies(mod *ir.Module, target string) diag.ShowCopiesResult {
 	res := diag.ShowCopiesResult{Target: target, Copies: []diag.Copy{}}
 	for _, f := range mod.Funcs {
+		if f.Library {
+			continue // user-level facts only (§2.3(a)); the library's internals are not the program's copies
+		}
 		for _, b := range f.Blocks {
 			for _, in := range b.Instrs {
 				switch i := in.(type) {
@@ -83,7 +86,7 @@ func Copies(mod *ir.Module, target string) diag.ShowCopiesResult {
 						res.Copies = append(res.Copies, diag.Copy{Loc: loc(f, i.Pos), Type: i.Dst.Type.String(), Bytes: layout.Of(i.Dst.Type).Size, Kind: diag.CopyBitwise, Heap: false, Label: diag.LabelProven})
 					}
 				case *ir.Call:
-					if i.Intrinsic == "clone" && len(i.Dsts) == 1 {
+					if (i.Intrinsic == "clone" || isCloneCall(mod, i)) && len(i.Dsts) == 1 {
 						t := i.Dsts[0].Type
 						res.Copies = append(res.Copies, diag.Copy{Loc: loc(f, i.Pos), Type: t.String(), Bytes: layout.Of(t).Size, Kind: diag.CopyExplicitDeep, Heap: !resolve.IsCopy(t), Label: diag.LabelProven})
 					}
@@ -108,13 +111,15 @@ func isAggregateCopy(t resolve.Type) bool {
 	return false
 }
 
-// allocating maps allocating intrinsics to whether the allocation is
-// unconditional (a constructor) or conditional (growth, pooled slots).
+// allocating maps allocating library operations (intrinsics, or the kern
+// containers' methods by their unspecialized name) to whether the
+// allocation is unconditional (a constructor) or conditional (growth,
+// pooled slots).
 var allocating = map[string]bool{
 	"Box.new": true, "Vec.new": true, "Vec.with_capacity": true, "Pool.new": true, "Arena.new": true,
 	"Shared.new": true, "Mutex.new": true, "Atomic.new": true, "thread.scope": true,
 	"Vec.push": false, "Pool.alloc": false, "Arena.alloc": false, "thread.spawn": false, "scope.spawn": false,
-	"SystemAllocator.alloc": false, "clone": false,
+	"SystemAllocator.alloc": false, "SystemAllocator.realloc": false, "clone": false,
 }
 
 // Allocations reports every allocation site: library constructors and the
@@ -124,17 +129,28 @@ var allocating = map[string]bool{
 func Allocations(mod *ir.Module) diag.ShowAllocationsResult {
 	res := diag.ShowAllocationsResult{Sites: []diag.AllocationSite{}}
 	for _, f := range mod.Funcs {
+		if f.Library {
+			continue // the library's own allocations are attributed to the user-level call
+		}
 		for _, b := range f.Blocks {
 			for _, in := range b.Instrs {
 				c, ok := in.(*ir.Call)
 				if !ok {
 					continue
 				}
-				always, known := allocating[c.Intrinsic]
+				key := c.Intrinsic
+				if key == "" {
+					if isCloneCall(mod, c) {
+						key = "clone"
+					} else if lib := mod.Func(c.Callee); lib != nil && lib.Library {
+						key = baseName(c.Callee)
+					}
+				}
+				always, known := allocating[key]
 				if !known {
 					continue
 				}
-				if c.Intrinsic == "clone" && (len(c.Dsts) != 1 || resolve.IsCopy(c.Dsts[0].Type)) {
+				if key == "clone" && (len(c.Dsts) != 1 || resolve.IsCopy(c.Dsts[0].Type)) {
 					continue
 				}
 				site := diag.AllocationSite{Loc: loc(f, c.Pos), Allocator: "system", Label: diag.LabelUnknown}
@@ -158,6 +174,8 @@ func Allocations(mod *ir.Module) diag.ShowAllocationsResult {
 
 // checking maps intrinsics that perform a runtime generation or disjointness
 // check to the check kind.
+// checking maps the library operations that perform a generation or
+// disjointness check (by their unspecialized name) to the check kind.
 var checking = map[string]string{
 	"Pool.get": diag.CheckGeneration, "Pool.at": diag.CheckGeneration, "Pool.free": diag.CheckGeneration,
 	"Pool.get2": diag.CheckDisjoint, "Pool.at2": diag.CheckDisjoint,
@@ -176,6 +194,9 @@ func BoundsChecks(mod *ir.Module) diag.ShowBoundsChecksResult {
 		res.Checks = append(res.Checks, c)
 	}
 	for _, f := range mod.Funcs {
+		if f.Library {
+			continue // the library's checks are reported at the user-level call that performs them
+		}
 		for _, b := range f.Blocks {
 			for _, in := range b.Instrs {
 				switch i := in.(type) {
@@ -184,7 +205,13 @@ func BoundsChecks(mod *ir.Module) diag.ShowBoundsChecksResult {
 				case *ir.CheckOverflow:
 					add(f, i.Pos, diag.CheckOverflow, i.Prov)
 				case *ir.Call:
-					if kind, ok := checking[i.Intrinsic]; ok {
+					key := i.Intrinsic
+					if key == "" {
+						if lib := mod.Func(i.Callee); lib != nil && lib.Library {
+							key = baseName(i.Callee)
+						}
+					}
+					if kind, ok := checking[key]; ok {
 						add(f, i.Pos, kind, ir.RuntimeChecked)
 					}
 				}
@@ -206,4 +233,22 @@ func sortByLoc[T any](xs []T, key func(T) diag.Loc) {
 		}
 		return a.Span.End < b.Span.End
 	})
+}
+
+// baseName strips the specialization suffix: "Vec.push[T=u64]" -> "Vec.push".
+func baseName(name string) string {
+	if i := strings.Index(name, "["); i >= 0 {
+		return name[:i]
+	}
+	return name
+}
+
+// isCloneCall reports a call to a container's kern clone method (the deep
+// copy behind copy(x)); a user method named clone is an ordinary call.
+func isCloneCall(mod *ir.Module, c *ir.Call) bool {
+	if c.Intrinsic != "" || c.Callee == "" {
+		return false
+	}
+	lib := mod.Func(c.Callee)
+	return lib != nil && lib.Library && strings.HasSuffix(baseName(c.Callee), ".clone")
 }

@@ -1,6 +1,7 @@
-// kern standard-library prelude: declarations only (Phase 0 is check-only).
-// Functions without bodies are intrinsics implemented by the compiler or, from
-// Phase 1, by the interpreter and the kern standard library.
+// kern standard-library prelude. Functions without bodies are intrinsics
+// implemented by the compiler, the interpreter and the hosted runtime; the
+// library containers (Box, Vec, Pool, Arena) are kern code over the
+// raw-pointer core and are compiled with every program.
 module core
 
 // zero() yields the all-zero value of any Copy type (the only way to
@@ -24,6 +25,27 @@ func ptr_take[T](p: RawPtr[T]) -> T
 func ptr_load_volatile[T: Copy](p: RawPtr[T]) -> T
 func ptr_store_volatile[T: Copy](p: RawPtr[T], v: T)
 func ptr_copy[T](dst: RawPtr[T], src: RawPtr[T], n: usize)
+// ptr_view, ptr_edit and their sequence forms open an access on raw memory:
+// the pointee (or the n elements from p) must be a live, initialized value
+// for the access's whole lifetime. A function that returns such an access
+// must contain unsafe and carry a contract stating that obligation (rule
+// 6.4); the containers below are the library's uses. ptr_edit2 opens two
+// edits at once (the caller has checked that a and b are disjoint).
+func ptr_view[T](p: RawPtr[T]) -> view[T]
+func ptr_edit[T](p: RawPtr[T]) -> edit[T]
+func ptr_view_seq[T](p: RawPtr[T], n: usize) -> view[]T
+func ptr_edit_seq[T](p: RawPtr[T], n: usize) -> edit[]T
+func ptr_edit2[T](a: RawPtr[T], b: RawPtr[T]) -> (edit[T], edit[T])
+// size_of and align_of are the §4.1 size and alignment of T in bytes.
+func size_of[T]() -> usize
+func align_of[T]() -> usize
+// trap_kind terminates with the given trap kind, written as a literal
+// variant (trap_kind(bounds)); the span reported is the call that entered
+// the library, as for every trap raised inside std/core.
+func trap_kind(kind: TrapKind)
+// container_identity issues the next 32-bit identity tag (spec §5.6): a
+// process-global counter starting at 1 in debug builds, 0 in release builds.
+func container_identity() -> u32
 // SIMD (PLAN.md 3.2): T is a fixed-width vector [N]E with N in 2, 4, 8, 16
 // and E a number; lanes wrap on overflow. simd_shuffle selects lanes from
 // the concatenation of a and b by index (traps bounds when out of range);
@@ -56,7 +78,12 @@ func now_ns() -> u64
 // Test hooks (PLAN.md 2.3): available only under --test-hooks.
 struct testing { phantom: u8 }
 impl testing {
-    func seed_generation[T](p: edit[Pool[T]], slot: u32, gen: u32)
+    // require_hooks traps (interpreter) or fails to link (native) unless the
+    // program was built with --test-hooks.
+    func require_hooks()
+    func seed_generation[T](p: edit[Pool[T]], slot: u32, gen: u32) {
+        p.seed_generation(slot, gen) // gated by require_hooks inside
+    }
     func seed_shared_count[T](s: view[Shared[T]], count: u64)
     // the next allocation by a convenience constructor fails (oom trap)
     func fail_next_alloc()
@@ -80,55 +107,511 @@ impl Allocator for SystemAllocator {
 }
 impl SystemAllocator {
     func new() -> SystemAllocator
+    // realloc resizes an allocation of alloc or realloc to new_size bytes
+    // at the same alignment, keeping the first min(old_size, new_size)
+    // bytes (in place when the allocator can); on failure the old
+    // allocation is untouched. An unsafe operation with alloc's obligations.
+    func realloc(edit self, ptr: RawPtr[u8], old_size: usize, new_size: usize, align: usize) -> Result[RawPtr[u8], AllocErr]
 }
 
-struct Box[T] nocopy { inner: T }
+// ---- Library containers (spec §5.6), written in kern over the raw-pointer
+// core. Every raw operation sits in a small contracted method; the rest is
+// ordinary kern that the backend inlines. Fields of a nocopy core struct are
+// private to this module (the unsafe invariants below depend on them). The
+// helper methods (reserve, grow, check, release) are visible like every core
+// declaration and keep the container valid: release leaves an empty
+// container (with a fresh identity where handles exist).
+// The storage of every container comes from the system allocator.
+
+// heap_alloc allocates size bytes at align from the system allocator and
+// traps oom on failure: the convenience constructors' allocation.
+contract { requires "align is a power of two at most 4096 and size is a multiple of it" }
+func heap_alloc(size: usize, align: usize) -> RawPtr[u8] {
+    p := heap_try_alloc(size, align)
+    unsafe { if ptr_addr(p) == 0usize { trap_kind(oom) } }
+    return p
+}
+// heap_try_alloc is heap_alloc that yields a null pointer on failure.
+contract { requires "align is a power of two at most 4096 and size is a multiple of it" }
+func heap_try_alloc(size: usize, align: usize) -> RawPtr[u8] {
+    a := SystemAllocator.new()
+    unsafe {
+        match a.alloc(size, align) {
+            Ok(p) => return p
+            Err(e) => return ptr_null[u8]()
+        }
+    }
+}
+// heap_realloc resizes an allocation, trapping oom on failure.
+contract { requires "p, old_size and align are those of one live allocation; new_size is a multiple of align" }
+func heap_realloc(p: RawPtr[u8], old_size: usize, new_size: usize, align: usize) -> RawPtr[u8] {
+    q := heap_try_realloc(p, old_size, new_size, align)
+    unsafe { if ptr_addr(q) == 0usize { trap_kind(oom) } }
+    return q
+}
+// heap_try_realloc is heap_realloc that yields null on failure (the old
+// allocation stays valid).
+contract { requires "p, old_size and align are those of one live allocation; new_size is a multiple of align" }
+func heap_try_realloc(p: RawPtr[u8], old_size: usize, new_size: usize, align: usize) -> RawPtr[u8] {
+    a := SystemAllocator.new()
+    unsafe {
+        match a.realloc(p, old_size, new_size, align) {
+            Ok(q) => return q
+            Err(e) => return ptr_null[u8]()
+        }
+    }
+}
+// heap_free releases an allocation of heap_alloc or heap_try_alloc.
+contract { requires "p, size and align are those of one live allocation" }
+func heap_free(p: RawPtr[u8], size: usize, align: usize) {
+    a := SystemAllocator.new()
+    unsafe { a.free(p, size, align) }
+}
+// elems_bytes is n * size_of[T], or None when the product is unrepresentable.
+func elems_bytes[T](n: usize) -> Option[usize] {
+    esize := size_of[T]()
+    if esize == 0usize { return Some(0usize) }
+    if n > 18446744073709551615usize / esize { return None }
+    return Some(n * esize)
+}
+
+struct Box[T] nocopy { p: RawPtr[T] }
 impl Box[T] {
-    func new(v: own T) -> Box[T]
-    func get(view self) -> view[T]
-    func at(edit self) -> edit[T]
-    func into(own self) -> T
-    destructor(edit self) { }
+    contract { requires "the allocation holds one T until into or the destructor takes it" }
+    func new(v: own T) -> Box[T] {
+        unsafe {
+            p := ptr_cast[T, u8](heap_alloc(size_of[T](), align_of[T]()))
+            ptr_store(p, v)
+            return Box[T] { p: p }
+        }
+    }
+    // get, at and into trap explicit on a Box emptied by release.
+    contract { requires "p is null or addresses the live T owned by this Box" }
+    func get(view self) -> view[T] {
+        unsafe {
+            if ptr_addr(self.p) == 0usize { trap_kind(explicit) }
+            return ptr_view(self.p)
+        }
+    }
+    contract { requires "p is null or addresses the live T owned by this Box" }
+    func at(edit self) -> edit[T] {
+        unsafe {
+            if ptr_addr(self.p) == 0usize { trap_kind(explicit) }
+            return ptr_edit(self.p)
+        }
+    }
+    contract { requires "p is null or addresses the live T owned by this Box; the Box is consumed" }
+    func into(own self) -> T {
+        unsafe {
+            if ptr_addr(self.p) == 0usize { trap_kind(explicit) }
+            v := ptr_take(self.p)
+            heap_free(ptr_cast[u8, T](self.p), size_of[T](), align_of[T]())
+            self.p = zero()
+            return v
+        }
+    }
+    // clone deep-copies the boxed value (the clone behind copy(b)).
+    func clone(view self) -> Box[T] {
+        return Box[T].new(copy(self.get()))
+    }
+    contract { requires "p is null (after into) or addresses the live T owned by this Box" }
+    func release(edit self) {
+        unsafe {
+            if ptr_addr(self.p) != 0usize {
+                v := ptr_take(self.p)
+                drop(v)
+                heap_free(ptr_cast[u8, T](self.p), size_of[T](), align_of[T]())
+                self.p = zero()
+            }
+        }
+    }
+    destructor(edit self) { self.release() }
 }
 
-struct Vec[T] nocopy { phantom: T }
+struct Vec[T] nocopy { data: RawPtr[T]; size: usize; cap: usize }
 impl Vec[T] {
-    func new() -> Vec[T]
-    func with_capacity(n: usize) -> Vec[T]
-    func len(view self) -> usize
-    func push(edit self, v: own T)
-    func pop(edit self) -> Option[T]
-    func get(view self, i: usize) -> view[T]
-    func at(edit self, i: usize) -> edit[T]
-    func as_view(view self) -> view[]T
-    func as_edit(edit self) -> edit[]T
-    func clear(edit self)
-    destructor(edit self) { }
+    func new() -> Vec[T] {
+        return Vec[T] { data: zero(), size: 0usize, cap: 0usize }
+    }
+    func with_capacity(n: usize) -> Vec[T] {
+        v := Vec[T].new()
+        v.reserve(n)
+        return v
+    }
+    func len(view self) -> usize { return self.size }
+    // reserve makes room for at least n elements, trapping oom when the
+    // allocator fails or the byte size is unrepresentable.
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func reserve(edit self, n: usize) {
+        if n <= self.cap { return }
+        var bytes: usize = 0usize
+        match elems_bytes[T](n) {
+            Some(b) => bytes = b
+            None => trap_kind(oom)
+        }
+        unsafe {
+            if self.cap > 0usize {
+                var old: usize = 0usize
+                match elems_bytes[T](self.cap) {
+                    Some(b) => old = b
+                    None => trap_kind(unreachable)
+                }
+                self.data = ptr_cast[T, u8](heap_realloc(ptr_cast[u8, T](self.data), old, bytes, align_of[T]()))
+            } else {
+                self.data = ptr_cast[T, u8](heap_alloc(bytes, align_of[T]()))
+            }
+            self.cap = n
+        }
+    }
+    // grow doubles the capacity (4 elements at first).
+    func grow(edit self) {
+        if self.cap > 9223372036854775807usize { trap_kind(oom) }
+        n := 4usize
+        if self.cap > 0usize { n = self.cap * 2usize }
+        self.reserve(n)
+    }
+    // push appends v, growing the buffer when it is full. size < cap after
+    // grow and cap never exceeds half the address space, so the increment
+    // cannot wrap: the wrapping form keeps the hot path free of a check.
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func push(edit self, v: own T) {
+        if self.size == self.cap { self.grow() }
+        unsafe { ptr_store(ptr_offset(self.data, truncate[isize](self.size)), v) }
+        self.size = wrapping_add(self.size, 1usize)
+    }
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func pop(edit self) -> Option[T] {
+        if self.size == 0usize { return None }
+        self.size = self.size - 1usize
+        unsafe { return Some(ptr_take(ptr_offset(self.data, truncate[isize](self.size)))) }
+    }
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func get(view self, i: usize) -> view[T] {
+        if i >= self.size { trap_kind(bounds) }
+        unsafe { return ptr_view(ptr_offset(self.data, truncate[isize](i))) }
+    }
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func at(edit self, i: usize) -> edit[T] {
+        if i >= self.size { trap_kind(bounds) }
+        unsafe { return ptr_edit(ptr_offset(self.data, truncate[isize](i))) }
+    }
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func as_view(view self) -> view[]T {
+        unsafe { return ptr_view_seq(self.data, self.size) }
+    }
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func as_edit(edit self) -> edit[]T {
+        unsafe { return ptr_edit_seq(self.data, self.size) }
+    }
+    // clear destroys the elements from the last to the first; the capacity stays.
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func clear(edit self) {
+        while self.size > 0usize {
+            self.size = self.size - 1usize
+            unsafe {
+                v := ptr_take(ptr_offset(self.data, truncate[isize](self.size)))
+                drop(v)
+            }
+        }
+    }
+    // clone deep-copies every element (the clone behind copy(v)).
+    func clone(view self) -> Vec[T] {
+        res := Vec[T].with_capacity(self.size)
+        for i in 0usize..self.size { res.push(copy(self.get(i))) }
+        return res
+    }
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func release(edit self) {
+        self.clear()
+        unsafe {
+            if self.cap > 0usize {
+                match elems_bytes[T](self.cap) {
+                    Some(b) => heap_free(ptr_cast[u8, T](self.data), b, align_of[T]())
+                    None => trap_kind(unreachable)
+                }
+                self.data = zero()
+                self.cap = 0usize
+            }
+        }
+    }
+    destructor(edit self) { self.release() }
 }
 
+// PoolSlotMeta is the bookkeeping of one Pool slot: its generation, whether
+// it holds a live element, and whether it was retired at generation wrap.
+struct PoolSlotMeta { gen: u32; live: bool; retired: bool }
 struct PoolId[T] { index: u32; gen: u32; phantom_tag: u32 }
-struct Pool[T] nocopy { phantom: T }
+// Pool keeps count slots (cap allocated) in data with their metadata in
+// slots, a stack of nfree vacant slot indices in free_list, the number of
+// live elements, and its identity tag.
+struct Pool[T] nocopy { data: RawPtr[T]; slots: RawPtr[PoolSlotMeta]; free_list: RawPtr[u32]; count: usize; cap: usize; nfree: usize; live: usize; identity: u32 }
 impl Pool[T] {
-    func new() -> Pool[T]
-    func alloc(edit self, v: own T) -> Result[PoolId[T], AllocErr]
-    func get(view self, id: PoolId[T]) -> view[T]
-    func at(edit self, id: PoolId[T]) -> edit[T]
+    func new() -> Pool[T] {
+        return Pool[T] { data: zero(), slots: zero(), free_list: zero(), count: 0usize, cap: 0usize, nfree: 0usize, live: 0usize, identity: container_identity() }
+    }
+    // grow doubles the three buffers transactionally: nothing changes
+    // unless every new buffer was obtained. Indices must fit a u32.
+    contract { requires "the three buffers hold cap entries; the first count slots are initialized" }
+    func grow(edit self) -> bool {
+        n := 8usize
+        if self.cap > 0usize {
+            if self.cap > 2147483648usize { return false }
+            n = self.cap * 2usize
+        }
+        var bytes: usize = 0usize
+        match elems_bytes[T](n) {
+            Some(b) => bytes = b
+            None => return false
+        }
+        unsafe {
+            nd := heap_try_alloc(bytes, align_of[T]())
+            ns := heap_try_alloc(n * size_of[PoolSlotMeta](), align_of[PoolSlotMeta]())
+            nf := heap_try_alloc(n * 4usize, 4usize)
+            if ptr_addr(nd) == 0usize || ptr_addr(ns) == 0usize || ptr_addr(nf) == 0usize {
+                if ptr_addr(nd) != 0usize { heap_free(nd, bytes, align_of[T]()) }
+                if ptr_addr(ns) != 0usize { heap_free(ns, n * size_of[PoolSlotMeta](), align_of[PoolSlotMeta]()) }
+                if ptr_addr(nf) != 0usize { heap_free(nf, n * 4usize, 4usize) }
+                return false
+            }
+            ptr_copy(ptr_cast[T, u8](nd), self.data, self.count)
+            ptr_copy(ptr_cast[PoolSlotMeta, u8](ns), self.slots, self.count)
+            ptr_copy(ptr_cast[u32, u8](nf), self.free_list, self.nfree)
+            if self.cap > 0usize {
+                match elems_bytes[T](self.cap) {
+                    Some(old) => heap_free(ptr_cast[u8, T](self.data), old, align_of[T]())
+                    None => trap_kind(unreachable)
+                }
+                heap_free(ptr_cast[u8, PoolSlotMeta](self.slots), self.cap * size_of[PoolSlotMeta](), align_of[PoolSlotMeta]())
+                heap_free(ptr_cast[u8, u32](self.free_list), self.cap * 4usize, 4usize)
+            }
+            self.data = ptr_cast[T, u8](nd)
+            self.slots = ptr_cast[PoolSlotMeta, u8](ns)
+            self.free_list = ptr_cast[u32, u8](nf)
+            self.cap = n
+        }
+        return true
+    }
+    contract { requires "the three buffers hold cap entries; the first count slots are initialized" }
+    func alloc(edit self, v: own T) -> Result[PoolId[T], AllocErr] {
+        var idx: usize = 0usize
+        var gen: u32 = 0u32
+        unsafe {
+            if self.nfree > 0usize {
+                self.nfree = self.nfree - 1usize
+                idx = usize(ptr_load(ptr_offset(self.free_list, truncate[isize](self.nfree))))
+                m := ptr_load(ptr_offset(self.slots, truncate[isize](idx)))
+                m.live = true
+                gen = m.gen
+                ptr_store(ptr_offset(self.slots, truncate[isize](idx)), m)
+            } else {
+                if self.count == self.cap {
+                    if !self.grow() { drop(v); return Err(OutOfMemory) }
+                }
+                idx = self.count
+                self.count = self.count + 1usize
+                ptr_store(ptr_offset(self.slots, truncate[isize](idx)), PoolSlotMeta { gen: 0u32, live: true, retired: false })
+            }
+            ptr_store(ptr_offset(self.data, truncate[isize](idx)), v)
+        }
+        self.live = self.live + 1usize
+        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen, phantom_tag: self.identity })
+    }
+    // check validates a handle in the §5.6 order (bounds, identity, vacant,
+    // generation) and returns its slot index.
+    contract { requires "the three buffers hold cap entries; the first count slots are initialized" }
+    func check(view self, id: PoolId[T]) -> usize {
+        idx := usize(id.index)
+        if idx >= self.count { trap_kind(bounds) }
+        if id.phantom_tag != 0u32 && self.identity != 0u32 && id.phantom_tag != self.identity { trap_kind(identity) }
+        unsafe {
+            m := ptr_load(ptr_offset(self.slots, truncate[isize](idx)))
+            if !m.live { trap_kind(vacant) }
+            if m.gen != id.gen { trap_kind(generation) }
+        }
+        return idx
+    }
+    contract { requires "data addresses cap slots; slot idx holds a live element after check" }
+    func get(view self, id: PoolId[T]) -> view[T] {
+        idx := self.check(id)
+        unsafe { return ptr_view(ptr_offset(self.data, truncate[isize](idx))) }
+    }
+    contract { requires "data addresses cap slots; slot idx holds a live element after check" }
+    func at(edit self, id: PoolId[T]) -> edit[T] {
+        idx := self.check(id)
+        unsafe { return ptr_edit(ptr_offset(self.data, truncate[isize](idx))) }
+    }
     contract { invariant "a != b is checked at runtime; the two accesses are disjoint" }
-    func get2(edit self, a: PoolId[T], b: PoolId[T]) -> (edit[T], edit[T])
-    func free(edit self, id: PoolId[T])
-    func len(view self) -> usize
-    destructor(edit self) { }
+    func get2(edit self, a: PoolId[T], b: PoolId[T]) -> (edit[T], edit[T]) {
+        ia := self.check(a)
+        ib := self.check(b)
+        if ia == ib { trap_kind(disjoint) }
+        unsafe { return ptr_edit2(ptr_offset(self.data, truncate[isize](ia)), ptr_offset(self.data, truncate[isize](ib))) }
+    }
+    // free validates the handle, destroys the element and bumps the slot's
+    // generation; a slot whose generation would wrap is retired.
+    contract { requires "data addresses cap slots; slot idx holds a live element after check" }
+    func free(edit self, id: PoolId[T]) {
+        idx := self.check(id)
+        unsafe {
+            sp := ptr_offset(self.slots, truncate[isize](idx))
+            m := ptr_load(sp)
+            m.live = false
+            ptr_store(sp, m)
+            v := ptr_take(ptr_offset(self.data, truncate[isize](idx)))
+            drop(v)
+            if m.gen == 4294967295u32 {
+                m.retired = true
+            } else {
+                m.gen = m.gen + 1u32
+                ptr_store(ptr_offset(self.free_list, truncate[isize](self.nfree)), id.index)
+                self.nfree = self.nfree + 1usize
+            }
+            ptr_store(sp, m)
+        }
+        self.live = self.live - 1usize
+    }
+    func len(view self) -> usize { return self.live }
+    // seed_generation (test hook): makes slot exist as a vacant slot with
+    // the given generation, keeping every slot below it allocated.
+    contract { requires "the three buffers hold cap entries; the first count slots are initialized" }
+    func seed_generation(edit self, slot: u32, gen: u32) {
+        testing.require_hooks()
+        s := usize(slot)
+        while self.cap <= s { if !self.grow() { trap_kind(oom) } }
+        unsafe {
+            i := self.count
+            while i <= s {
+                ptr_store(ptr_offset(self.slots, truncate[isize](i)), PoolSlotMeta { gen: 0u32, live: false, retired: false })
+                ptr_store(ptr_offset(self.free_list, truncate[isize](self.nfree)), truncate[u32](i))
+                self.nfree = self.nfree + 1usize
+                i = i + 1usize
+            }
+            if self.count <= s { self.count = s + 1usize }
+            sp := ptr_offset(self.slots, truncate[isize](s))
+            m := ptr_load(sp)
+            m.gen = gen
+            ptr_store(sp, m)
+        }
+    }
+    contract { requires "the three buffers hold cap entries; the first count slots are initialized" }
+    func release(edit self) {
+        unsafe {
+            i := self.count
+            while i > 0usize {
+                i = i - 1usize
+                m := ptr_load(ptr_offset(self.slots, truncate[isize](i)))
+                if m.live {
+                    v := ptr_take(ptr_offset(self.data, truncate[isize](i)))
+                    drop(v)
+                }
+            }
+            if self.cap > 0usize {
+                match elems_bytes[T](self.cap) {
+                    Some(b) => heap_free(ptr_cast[u8, T](self.data), b, align_of[T]())
+                    None => trap_kind(unreachable)
+                }
+                heap_free(ptr_cast[u8, PoolSlotMeta](self.slots), self.cap * size_of[PoolSlotMeta](), align_of[PoolSlotMeta]())
+                heap_free(ptr_cast[u8, u32](self.free_list), self.cap * 4usize, 4usize)
+                self.data = zero()
+                self.slots = zero()
+                self.free_list = zero()
+                self.cap = 0usize
+            }
+            self.count = 0usize
+            self.nfree = 0usize
+            self.live = 0usize
+            // a released pool is an empty one with a new identity: handles
+            // issued before cannot name its slots (debug builds check it)
+            self.identity = container_identity()
+        }
+    }
+    destructor(edit self) { self.release() }
 }
 
 struct ArenaId[T] { index: u32; phantom_tag: u32 }
-struct Arena[T] nocopy { phantom: T }
+struct Arena[T] nocopy { data: RawPtr[T]; size: usize; cap: usize; identity: u32 }
 impl Arena[T] {
-    func new() -> Arena[T]
-    func alloc(edit self, v: own T) -> Result[ArenaId[T], AllocErr]
-    func get(view self, id: ArenaId[T]) -> view[T]
-    func at(edit self, id: ArenaId[T]) -> edit[T]
-    func len(view self) -> usize
-    destructor(edit self) { }
+    func new() -> Arena[T] {
+        return Arena[T] { data: zero(), size: 0usize, cap: 0usize, identity: container_identity() }
+    }
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func grow(edit self) -> bool {
+        n := 8usize
+        if self.cap > 0usize {
+            if self.cap > 2147483648usize { return false }
+            n = self.cap * 2usize
+        }
+        var bytes: usize = 0usize
+        match elems_bytes[T](n) {
+            Some(b) => bytes = b
+            None => return false
+        }
+        unsafe {
+            var nd: RawPtr[u8] = zero()
+            if self.cap > 0usize {
+                var old: usize = 0usize
+                match elems_bytes[T](self.cap) {
+                    Some(b) => old = b
+                    None => return false
+                }
+                nd = heap_try_realloc(ptr_cast[u8, T](self.data), old, bytes, align_of[T]())
+            } else {
+                nd = heap_try_alloc(bytes, align_of[T]())
+            }
+            if ptr_addr(nd) == 0usize { return false }
+            self.data = ptr_cast[T, u8](nd)
+            self.cap = n
+        }
+        return true
+    }
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func alloc(edit self, v: own T) -> Result[ArenaId[T], AllocErr] {
+        if self.size == self.cap {
+            if !self.grow() { drop(v); return Err(OutOfMemory) }
+        }
+        unsafe { ptr_store(ptr_offset(self.data, truncate[isize](self.size)), v) }
+        id := ArenaId[T] { index: truncate[u32](self.size), phantom_tag: self.identity }
+        self.size = self.size + 1usize
+        return Ok(id)
+    }
+    // check validates a handle (bounds, then identity) and returns its index.
+    func check(view self, id: ArenaId[T]) -> usize {
+        idx := usize(id.index)
+        if idx >= self.size { trap_kind(bounds) }
+        if id.phantom_tag != 0u32 && self.identity != 0u32 && id.phantom_tag != self.identity { trap_kind(identity) }
+        return idx
+    }
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func get(view self, id: ArenaId[T]) -> view[T] {
+        idx := self.check(id)
+        unsafe { return ptr_view(ptr_offset(self.data, truncate[isize](idx))) }
+    }
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func at(edit self, id: ArenaId[T]) -> edit[T] {
+        idx := self.check(id)
+        unsafe { return ptr_edit(ptr_offset(self.data, truncate[isize](idx))) }
+    }
+    func len(view self) -> usize { return self.size }
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func release(edit self) {
+        unsafe {
+            while self.size > 0usize {
+                self.size = self.size - 1usize
+                v := ptr_take(ptr_offset(self.data, truncate[isize](self.size)))
+                drop(v)
+            }
+            if self.cap > 0usize {
+                match elems_bytes[T](self.cap) {
+                    Some(b) => heap_free(ptr_cast[u8, T](self.data), b, align_of[T]())
+                    None => trap_kind(unreachable)
+                }
+                self.data = zero()
+                self.cap = 0usize
+            }
+            self.identity = container_identity()
+        }
+    }
+    destructor(edit self) { self.release() }
 }
 
 struct Shared[T] nocopy { inner: T }
