@@ -1,0 +1,31 @@
+//! phase: 1
+//! expect: output vec_resize
+// Vec.resize (std/core.kern): growing fills with copies of the value (the
+// explicit field-wise copy, so a struct with a destructor is duplicated and
+// every duplicate is destroyed), shrinking destroys the elements past the new
+// length from the last to the first, and the fill value itself is destroyed
+// on return.
+module run
+struct Noisy { id: u64 }
+impl Noisy {
+    destructor(edit self) { print_str("drop "); print_u64(self.id); println() }
+}
+func main() -> i32 {
+    v := Vec[u64].new()
+    v.resize(5usize, 7u64)
+    total := 0u64
+    for x in v.as_view() { total = total + x }
+    print_u64(u64(v.len())); print_str(" "); print_u64(total); println()
+    v.resize(2usize, 9u64)
+    v.resize(4usize, 9u64)
+    for x in v.as_view() { print_u64(x); print_str(" ") }
+    println()
+    w := Vec[Noisy].new()
+    w.push(Noisy { id: 1u64 })
+    w.resize(3usize, Noisy { id: 2u64 })
+    for n in w.as_view() { print_u64(n.id); print_str(" ") }
+    println()
+    w.resize(1usize, Noisy { id: 3u64 })
+    print_str("end"); println()
+    return 0i32
+}

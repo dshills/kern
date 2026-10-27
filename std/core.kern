@@ -12,6 +12,12 @@ func zero[T: Copy]() -> T
 func wrapping_add[T: Copy](a: T, b: T) -> T
 func wrapping_sub[T: Copy](a: T, b: T) -> T
 func wrapping_mul[T: Copy](a: T, b: T) -> T
+// count_trailing_zeros, count_leading_zeros and count_ones are the bit-count
+// operations on integers; the count of a zero operand's trailing or leading
+// zeros is the operand width. They never trap.
+func count_trailing_zeros[T: Copy](x: T) -> u32
+func count_leading_zeros[T: Copy](x: T) -> u32
+func count_ones[T: Copy](x: T) -> u32
 // Raw pointers (spec §6): every operation below is an unsafe operation and
 // requires an unsafe block; the pointee's representation is the §4.1 layout.
 func ptr_null[T]() -> RawPtr[T]
@@ -284,6 +290,30 @@ impl Vec[T] {
         if self.size == 0usize { return None }
         self.size = self.size - 1usize
         unsafe { return Some(ptr_take(ptr_offset(self.data, truncate[isize](self.size)))) }
+    }
+    // resize sets the length to n: elements past n are destroyed, and the
+    // new elements are copies of x (x itself is destroyed on return). The
+    // fill runs over a local index so the backend can turn it into a block
+    // store.
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func resize(edit self, n: usize, x: own T) {
+        while self.size > n {
+            self.size = self.size - 1usize
+            unsafe {
+                v := ptr_take(ptr_offset(self.data, truncate[isize](self.size)))
+                drop(v)
+            }
+        }
+        self.reserve(n)
+        unsafe {
+            d := self.data
+            i := self.size
+            while i < n {
+                ptr_store(ptr_offset(d, truncate[isize](i)), copy(x))
+                i = wrapping_add(i, 1usize)
+            }
+            self.size = n
+        }
     }
     contract { requires "data addresses cap elements of which the first size are live" }
     func get(view self, i: usize) -> view[T] {

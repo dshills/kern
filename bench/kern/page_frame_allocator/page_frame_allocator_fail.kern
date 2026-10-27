@@ -36,19 +36,6 @@ func new_alloc(nfree: usize) -> FrameAlloc {
     return a
 }
 
-// ctz64 is the index of the lowest set bit of w (w != 0).
-func ctz64(w: u64) -> u32 {
-    x := w
-    n := 0u32
-    if (x & 4294967295u64) == 0u64 { n = n + 32u32; x = x >> 32u32 }
-    if (x & 65535u64) == 0u64 { n = n + 16u32; x = x >> 16u32 }
-    if (x & 255u64) == 0u64 { n = n + 8u32; x = x >> 8u32 }
-    if (x & 15u64) == 0u64 { n = n + 4u32; x = x >> 4u32 }
-    if (x & 3u64) == 0u64 { n = n + 2u32; x = x >> 2u32 }
-    if (x & 1u64) == 0u64 { n = n + 1u32 }
-    return n
-}
-
 impl FrameAlloc {
     // alloc_frame hands out the lowest free frame of the first nonzero word
     // at or after the hint; Err(OutOfFrames) when nothing is free.
@@ -58,7 +45,7 @@ impl FrameAlloc {
         for step in 0usize..1024usize {
             word := self.bits[w]
             if word != 0u64 {
-                bit := ctz64(word)
+                bit := count_trailing_zeros(word)
                 self.bits[w] = word & (word - 1u64)
                 self.free = self.free - 1usize
                 self.hint = w

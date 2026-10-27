@@ -143,9 +143,9 @@ regenerates `bench/REPORT.md` from five runs per row with 95% confidence
 intervals, checking that the C, Rust and kern implementations agree on their
 checksums. In the latest report user-level kern code meets the 10% throughput
 target on three of the thirteen workloads (ring_buffer, intrusive_run_queue and
-buffer_pool), reaches 0.72× to 0.87× of the best of C and Rust on vector,
-hash_table, btree and page_frame_allocator, and 0.2× to 0.7× on the other six;
-peak memory meets the 10% target on eleven of the thirteen.
+page_frame_allocator), reaches 0.84× to 0.87× of the best of C and Rust on
+vector, hash_table and buffer_pool, and 0.2× to 0.73× on the other seven; peak
+memory meets the 10% target on eleven of the thirteen.
 
 ## Status
 

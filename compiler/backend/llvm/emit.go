@@ -753,6 +753,25 @@ func (fe *fnEmit) instr(in ir.Instr) {
 		t := e.lty(i.X.Type)
 		if i.Op == "!" {
 			fe.emit("%s = xor i1 %s, true", fe.v(i.Dst), fe.v(i.X))
+		} else if intr, ok := bitCountIntrinsics[i.Op]; ok {
+			// ctz/clz of zero is the width (is_zero_poison false); the result is u32
+			bits := layout.Of(i.X.Type).Size * 8
+			r := fe.next("t")
+			if i.Op == "popcount" {
+				fe.e.declare(intr+"."+t, t+" ("+t+")")
+				fe.emit("%s = call %s @%s.%s(%s %s)", r, t, intr, t, t, fe.v(i.X))
+			} else {
+				fe.e.declare(intr+"."+t, t+" ("+t+", i1)")
+				fe.emit("%s = call %s @%s.%s(%s %s, i1 false)", r, t, intr, t, t, fe.v(i.X))
+			}
+			switch {
+			case bits < 32:
+				fe.emit("%s = zext %s %s to i32", fe.v(i.Dst), t, r)
+			case bits > 32:
+				fe.emit("%s = trunc %s %s to i32", fe.v(i.Dst), t, r)
+			default:
+				fe.vals[i.Dst] = r
+			}
 		} else if resolve.IsFloat(i.X.Type) {
 			fe.emit("%s = fneg %s %s", fe.v(i.Dst), t, fe.v(i.X))
 		} else {
@@ -1034,6 +1053,9 @@ func (fe *fnEmit) binary(i *ir.Binary) {
 		fe.emit("%s = %s %s %s, %s", dst, intOps[i.Op], lt, l, r)
 	}
 }
+
+// bitCountIntrinsics maps the bit-count unary operations to LLVM intrinsics.
+var bitCountIntrinsics = map[string]string{"ctz": "llvm.cttz", "clz": "llvm.ctlz", "popcount": "llvm.ctpop"}
 
 // shiftCount converts a u32 shift count to the operand width (wrapping
 // shifts mask it to width-1).

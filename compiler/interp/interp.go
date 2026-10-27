@@ -572,6 +572,8 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 		switch i.Op {
 		case "!":
 			fr.vals[i.Dst.ID] = !x.(Bool)
+		case "ctz", "clz", "popcount":
+			fr.vals[i.Dst.ID] = bitCount(i.Op, x.(Int))
 		default:
 			switch v := x.(type) {
 			case Int:
@@ -1082,4 +1084,24 @@ func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
 			it.destroy(x.Result, elem(0))
 		}
 	}
+}
+
+// bitCount evaluates the bit-count unary operations on an integer of its
+// declared width: trailing or leading zeros (the width for a zero operand)
+// or the number of set bits, as a u32.
+func bitCount(op string, v Int) Int {
+	w := width(v.Ty)
+	var n int
+	switch op {
+	case "ctz":
+		n = bits.TrailingZeros64(v.Bits)
+		if n > int(w) {
+			n = int(w)
+		}
+	case "clz":
+		n = bits.LeadingZeros64(v.Bits) - (64 - int(w))
+	default:
+		n = bits.OnesCount64(v.Bits)
+	}
+	return mkInt("u32", uint64(n))
 }

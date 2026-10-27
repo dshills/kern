@@ -1,0 +1,7 @@
+//! expect: reject TYPE_MISMATCH
+//! twin: bitcount_type_ok
+module t
+func main() -> i32 {
+    n := count_ones(true)
+    return i32(n)
+}

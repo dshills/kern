@@ -595,6 +595,15 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 			return operand{val: v}
 		}
 	}
+	// the bit-count operations are unary operations on the operand's type
+	if info.Fn != nil && info.Fn.Module == "core" && info.Fn.Receiver == nil {
+		if op, ok := map[string]string{"count_trailing_zeros": "ctz", "count_leading_zeros": "clz", "count_ones": "popcount"}[info.Fn.Name]; ok {
+			xv := fl.value(x.Args[0].X, fl.typeOf(x.Args[0].X))
+			v := fl.newValue(t)
+			fl.emit(&ir.Unary{Dst: v, Op: op, X: xv})
+			return operand{val: v}
+		}
+	}
 	// zero[T]() is the Zero instruction
 	if info.Fn != nil && info.Fn.Module == "core" && info.Fn.Name == "zero" && info.Fn.Receiver == nil {
 		v := fl.newValue(t)

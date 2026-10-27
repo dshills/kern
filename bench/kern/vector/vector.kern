@@ -7,10 +7,11 @@
 module vector_bench
 
 // sum reads the whole vector through one sequence view; u64 is Copy, so
-// each iteration yields a value and no access outlives the loop.
+// each iteration yields a value and no access outlives the loop. The sum
+// wraps, as in the C and Rust versions (and the checksum it feeds).
 func sum(v: view[Vec[u64]]) -> u64 {
     total := 0u64
-    for x in v.as_view() { total = total + x }
+    for x in v.as_view() { total = wrapping_add(total, x) }
     return total
 }
 

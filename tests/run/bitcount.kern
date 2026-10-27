@@ -1,0 +1,24 @@
+//! phase: 1
+//! expect: output bitcount
+// The bit-count intrinsics (std/core.kern): trailing zeros, leading zeros
+// and set bits at several widths, including the zero operand, whose
+// trailing and leading zero counts are the width.
+module run
+func main() -> i32 {
+    print_u64(u64(count_trailing_zeros(40u64))); println()
+    print_u64(u64(count_trailing_zeros(0u64))); println()
+    print_u64(u64(count_trailing_zeros(0u8))); println()
+    print_u64(u64(count_trailing_zeros(128u8))); println()
+    print_u64(u64(count_trailing_zeros(65536u32))); println()
+    print_u64(u64(count_leading_zeros(1u64))); println()
+    print_u64(u64(count_leading_zeros(0u16))); println()
+    print_u64(u64(count_leading_zeros(255u8))); println()
+    print_u64(u64(count_leading_zeros(1u32))); println()
+    print_u64(u64(count_leading_zeros(-1i32))); println()
+    print_u64(u64(count_ones(0u64))); println()
+    print_u64(u64(count_ones(18446744073709551615u64))); println()
+    print_u64(u64(count_ones(170u8))); println()
+    print_u64(u64(count_ones(-1i8))); println()
+    print_u64(u64(count_trailing_zeros(-8i64))); println()
+    return 0i32
+}

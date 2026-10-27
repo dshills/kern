@@ -17,14 +17,12 @@ struct Map { states: Vec[u8]; keys: Vec[u64]; vals: Vec[u64]; cap: usize; count:
 // new_map builds an empty table of 2^bits slots.
 func new_map(bits: u32) -> Map {
     cap := 1usize << bits
-    states := Vec[u8].with_capacity(cap)
-    keys := Vec[u64].with_capacity(cap)
-    vals := Vec[u64].with_capacity(cap)
-    for i in 0usize..cap {
-        states.push(0u8)
-        keys.push(0u64)
-        vals.push(0u64)
-    }
+    states := Vec[u8].new()
+    keys := Vec[u64].new()
+    vals := Vec[u64].new()
+    states.resize(cap, 0u8)
+    keys.resize(cap, 0u64)
+    vals.resize(cap, 0u64)
     return Map { states: move states, keys: move keys, vals: move vals, cap: cap, count: 0usize, bits: bits }
 }
 

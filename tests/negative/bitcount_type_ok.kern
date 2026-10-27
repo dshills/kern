@@ -1,0 +1,8 @@
+//! phase: 1
+//! expect: accept
+//! twin: bitcount_type
+module t
+func main() -> i32 {
+    n := count_ones(255u8)
+    return i32(n)
+}
