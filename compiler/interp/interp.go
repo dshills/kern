@@ -385,6 +385,14 @@ func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
 		if i < len(args) {
 			fr.locals[p.ID] = args[i]
 		}
+		if p.Conv == ast.ConvOut {
+			// the caller's storage exists before the callee writes it
+			// (natively, its alloca): an uninitialized local's nil slot is
+			// materialized zeroed so that field writes have a place to land
+			if a, ok := fr.locals[p.ID].(*Access); ok && a.Ref != nil && a.Ref.get() == nil {
+				a.Ref.set(zeroOf(p.Type))
+			}
+		}
 	}
 	b := f.Entry
 	for {
@@ -441,7 +449,10 @@ func (it *Interp) resolve(fr *frame, p ir.Place) (ref, *seqRef) {
 		cur = slotRef{&it.globals[p.Global.ID]}
 	} else if p.Local != nil {
 		cur = slotRef{&fr.locals[p.Local.ID]}
-		if a, ok := fr.locals[p.Local.ID].(*Access); ok && (p.Local.Conv == ast.ConvView || p.Local.Conv == ast.ConvEdit) {
+		// an access parameter's slot holds the caller's access: places rooted
+		// at it read and write the referent, as the backend dereferences the
+		// slot. An out parameter is an edit access to the caller's storage.
+		if a, ok := fr.locals[p.Local.ID].(*Access); ok && (p.Local.Conv == ast.ConvView || p.Local.Conv == ast.ConvEdit || p.Local.Conv == ast.ConvOut) {
 			cur, seq = a.Ref, a.Seq
 		}
 	} else {

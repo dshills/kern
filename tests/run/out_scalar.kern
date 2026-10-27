@@ -1,0 +1,25 @@
+//! phase: 1
+//! expect: output out_scalar
+// A scalar out parameter is written as a whole; two out parameters in one
+// call each reach their own local, and an out parameter may be forwarded to
+// another out call.
+module run
+func fill(o: out u64) { o = 7u64 }
+func split(hi: out u32, lo: out u32, v: u64) {
+    hi = u32(v >> 32u32)
+    lo = u32(v & 4294967295u64)
+}
+func forward(o: out u64) { fill(out o) }
+func main() -> i32 {
+    var v: u64
+    fill(out v)
+    print_u64(v); println()
+    var hi: u32
+    var lo: u32
+    split(out hi, out lo, 21474836489u64)
+    print_u64(u64(hi)); print_str(" "); print_u64(u64(lo)); println()
+    var w: u64
+    forward(out w)
+    print_u64(w + 1u64); println()
+    return 0i32
+}

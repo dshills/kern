@@ -1,0 +1,14 @@
+ok 10
+drop 1
+10
+err 2
+0
+drop 3
+propagated 3
+failed 4
+late ok 500
+drop 5
+500
+drop 6
+late err 6
+0

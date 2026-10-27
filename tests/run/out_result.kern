@@ -1,0 +1,63 @@
+//! phase: 1
+//! expect: output out_result
+// A fallible out call (spec §5.2.3): the storage is initialized only on the
+// Ok path; the Err path leaves it uninitialized and the caller never reads
+// or destroys it.
+module run
+struct Noisy { id: u64 }
+impl Noisy {
+    destructor(edit self) { print_str("drop "); print_u64(self.id); println() }
+}
+struct P { n: Noisy; x: u64 }
+func init_p(p: out P, id: u64, ok: bool) -> Result[(), u8] {
+    if !ok { return Err(u8(id)) }
+    p.n = Noisy { id: id }
+    p.x = id * 10u64
+    return Ok(())
+}
+// init_late writes one field before it can fail: on the Err path the
+// checker destroys the fields already initialized (partial out storage).
+func init_late(p: out P, id: u64, ok: bool) -> Result[(), u8] {
+    p.n = Noisy { id: id }
+    if !ok { return Err(u8(id)) }
+    p.x = id * 100u64
+    return Ok(())
+}
+func late(id: u64, ok: bool) -> u64 {
+    var p: P
+    match init_late(out p, id, ok) {
+        Ok(u) => { }
+        Err(e) => { print_str("late err "); print_u64(u64(e)); println(); return 0u64 }
+    }
+    print_str("late ok "); print_u64(p.x); println()
+    return p.x
+}
+func attempt(id: u64, ok: bool) -> u64 {
+    var p: P
+    match init_p(out p, id, ok) {
+        Ok(u) => { }
+        Err(e) => { print_str("err "); print_u64(u64(e)); println(); return 0u64 }
+    }
+    print_str("ok "); print_u64(p.x); println()
+    return p.x
+}
+func propagate(id: u64, ok: bool) -> Result[u64, u8] {
+    var p: P
+    init_p(out p, id, ok)?
+    return Ok(p.n.id)
+}
+func main() -> i32 {
+    print_u64(attempt(1u64, true)); println()
+    print_u64(attempt(2u64, false)); println()
+    match propagate(3u64, true) {
+        Ok(v) => { print_str("propagated "); print_u64(v); println() }
+        Err(e) => { print_str("failed "); print_u64(u64(e)); println() }
+    }
+    match propagate(4u64, false) {
+        Ok(v) => { print_str("propagated "); print_u64(v); println() }
+        Err(e) => { print_str("failed "); print_u64(u64(e)); println() }
+    }
+    print_u64(late(5u64, true)); println()
+    print_u64(late(6u64, false)); println()
+    return 0i32
+}
