@@ -1,0 +1,76 @@
+module merge
+// Sorted views of u32: merging two of them into a destination, counting
+// the values they have in common, and checking that a view is sorted.
+
+// is_sorted reports whether xs is in non-decreasing order.
+func is_sorted(xs: view[[]u32]) -> bool {
+    n := len(xs)
+    i := 1usize
+    while i < n {
+        if xs[i - 1usize] > xs[i] { return false }
+        i = i + 1usize
+    }
+    return true
+}
+
+// merge writes the elements of the sorted views a and b into dst in
+// non-decreasing order, stopping when dst is full, and returns the number
+// of elements written.
+func merge(a: view[[]u32], b: view[[]u32], dst: edit[[]u32]) -> usize {
+    // TODO
+    return 0usize
+}
+
+// common counts the values that occur in both sorted views, each matching
+// pair counted once.
+func common(a: view[[]u32], b: view[[]u32]) -> u64 {
+    // TODO
+    return 0u64
+}
+
+// show prints the first n elements of xs on one line.
+func show(xs: view[[]u32], n: usize) {
+    i := 0usize
+    while i < len(xs) {
+        if i >= n { break }
+        print_u64(u64(xs[i]))
+        print_str(" ")
+        i = i + 1usize
+    }
+    println()
+}
+
+func main() -> i32 {
+    a := [1u32, 3u32, 5u32, 7u32, 9u32, 11u32]
+    b := [2u32, 3u32, 6u32, 7u32, 8u32]
+    var dst: [16]u32 = zero()
+    var small: [4]u32 = zero()
+    with av := a[0usize:6usize] {
+        with bv := b[0usize:5usize] {
+            with d := dst[0usize:16usize] {
+                n := merge(av, bv, d)
+                print_u64(u64(n)); println()
+                show(d, n)
+                print_bool(is_sorted(d)); println()
+            }
+            with d := small[0usize:4usize] {
+                n := merge(av, bv, d)
+                print_u64(u64(n)); println()
+                show(d, n)
+            }
+            print_u64(common(av, bv)); println()
+            print_u64(common(bv, av)); println()
+            print_bool(is_sorted(av)); println()
+        }
+        with e := b[0usize:0usize] {
+            print_u64(common(av, e)); println()
+            with d := small[0usize:4usize] {
+                n := merge(e, av, d)
+                print_u64(u64(n)); println()
+                show(d, n)
+                print_bool(is_sorted(d)); println()
+            }
+        }
+    }
+    return 0i32
+}

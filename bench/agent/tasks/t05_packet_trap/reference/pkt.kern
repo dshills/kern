@@ -1,0 +1,77 @@
+module pkt
+// A packet is a 16-bit big-endian payload length, the payload bytes, and
+// one checksum byte: the sum of the payload bytes modulo 256. A buffer
+// holds one packet; bytes after the checksum are ignored.
+
+// rd16 reads the big-endian 16-bit value at `at`, or 0 past the end.
+func rd16(buf: view[[]u8], at: usize) -> usize {
+    if at + 1usize < len(buf) { return usize(buf[at]) * 256usize + usize(buf[at + 1usize]) }
+    return 0usize
+}
+
+// checksum sums the bytes of buf in [start, end) modulo 256.
+func checksum(buf: view[[]u8], start: usize, end: usize) -> u8 {
+    s := 0u64
+    i := start
+    while i < len(buf) {
+        if i >= end { break }
+        s = s + u64(buf[i])
+        i = i + 1usize
+    }
+    return u8(s % 256u64)
+}
+
+// valid reports whether buf holds a complete packet whose checksum matches.
+func valid(buf: view[[]u8]) -> bool {
+    if len(buf) < 2usize { return false }
+    n := rd16(buf, 0usize)
+    end := 2usize + n
+    if end < len(buf) { return buf[end] == checksum(buf, 2usize, end) }
+    return false
+}
+
+// payload_sum is the sum of the payload bytes of a valid packet, else 0.
+func payload_sum(buf: view[[]u8]) -> u64 {
+    if !valid(buf) { return 0u64 }
+    n := rd16(buf, 0usize)
+    end := 2usize + n
+    t := 0u64
+    i := 2usize
+    while i < len(buf) {
+        if i >= end { break }
+        t = t + u64(buf[i])
+        i = i + 1usize
+    }
+    return t
+}
+
+// first_byte is the first payload byte of a valid packet with a payload.
+func first_byte(buf: view[[]u8]) -> Option[u8] {
+    if !valid(buf) { return None }
+    if rd16(buf, 0usize) == 0usize { return None }
+    if 2usize < len(buf) { return Some(buf[2usize]) }
+    return None
+}
+
+func report(buf: view[[]u8]) {
+    print_bool(valid(buf)); println()
+    print_u64(payload_sum(buf)); println()
+    match first_byte(buf) {
+        Some(b) => { print_u64(u64(b)); println() }
+        None => { print_str("none"); println() }
+    }
+}
+
+func main() -> i32 {
+    good := [0u8, 3u8, 10u8, 20u8, 30u8, 60u8, 99u8]
+    bad := [0u8, 2u8, 5u8, 6u8, 12u8]
+    cut := [0u8, 4u8, 1u8, 2u8, 3u8, 4u8]
+    empty := [0u8, 0u8, 0u8]
+    with b := good[0usize:7usize] { report(b) }
+    with b := bad[0usize:5usize] { report(b) }
+    with b := cut[0usize:6usize] { report(b) }
+    with b := empty[0usize:3usize] { report(b) }
+    with b := good[0usize:1usize] { report(b) }
+    with b := good[0usize:6usize] { report(b) }
+    return 0i32
+}

@@ -1,0 +1,99 @@
+module series
+// Smoothing, peak detection and window sums over a series of u32 samples.
+
+// smooth writes the 3-point moving average of xs into dst, which has the
+// length of xs: an interior position gets the mean of its sample and its
+// two neighbours (rounded down), and the two end positions are copied.
+func smooth(xs: view[[]u32], dst: edit[[]u32]) {
+    n := len(xs)
+    if n == 0usize { return }
+    dst[0usize] = xs[0usize]
+    dst[n - 1usize] = xs[n - 1usize]
+    i := 1usize
+    while i + 1usize < n {
+        s := u64(xs[i - 1usize]) + u64(xs[i]) + u64(xs[i + 1usize])
+        dst[i] = u32(s / 3u64)
+        i = i + 1usize
+    }
+}
+
+// peaks counts the interior positions whose sample is greater than both
+// of its neighbours.
+func peaks(xs: view[[]u32]) -> u64 {
+    n := 0u64
+    i := 1usize
+    while i + 1usize < len(xs) {
+        if xs[i - 1usize] < xs[i] && xs[i] > xs[i + 1usize] { n = n + 1u64 }
+        i = i + 1usize
+    }
+    return n
+}
+
+// max_window is the largest sum of w consecutive samples, or 0 when w is
+// 0 or larger than the series.
+func max_window(xs: view[[]u32], w: usize) -> u64 {
+    if w == 0usize || w > len(xs) { return 0u64 }
+    best := 0u64
+    i := 0usize
+    while i + w <= len(xs) {
+        s := 0u64
+        k := 0usize
+        while k < w {
+            s = s + u64(xs[i + k])
+            k = k + 1usize
+        }
+        if s > best { best = s }
+        i = i + 1usize
+    }
+    return best
+}
+
+// longest_rise is the length, in samples, of the longest run of strictly
+// increasing consecutive samples; a single sample is a run of 1.
+func longest_rise(xs: view[[]u32]) -> u64 {
+    if len(xs) == 0usize { return 0u64 }
+    best := 1u64
+    run := 1u64
+    for i in 1usize..len(xs) {
+        if xs[i] > xs[i - 1usize] {
+            run = run + 1u64
+            if run > best { best = run }
+        } else {
+            run = 1u64
+        }
+    }
+    return best
+}
+
+func show(xs: view[[]u32]) {
+    for x in xs {
+        print_u64(u64(x))
+        print_str(" ")
+    }
+    println()
+}
+
+func report(xs: view[[]u32], dst: edit[[]u32]) {
+    smooth(xs, dst)
+    show(dst)
+    print_u64(peaks(xs)); println()
+    print_u64(max_window(xs, 3usize)); println()
+    print_u64(max_window(xs, 1usize)); println()
+    print_u64(max_window(xs, 12usize)); println()
+    print_u64(longest_rise(xs)); println()
+}
+
+func main() -> i32 {
+    s := [3u32, 1u32, 4u32, 1u32, 5u32, 9u32, 2u32, 6u32, 5u32, 3u32, 5u32]
+    var d: [11]u32 = zero()
+    with xs := s[0usize:11usize] {
+        with dst := d[0usize:11usize] { report(xs, dst) }
+    }
+    with xs := s[0usize:2usize] {
+        with dst := d[0usize:2usize] { report(xs, dst) }
+    }
+    with xs := s[0usize:0usize] {
+        with dst := d[0usize:0usize] { report(xs, dst) }
+    }
+    return 0i32
+}

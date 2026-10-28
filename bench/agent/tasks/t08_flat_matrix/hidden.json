@@ -1,0 +1,13 @@
+{
+ "main": "mat.kern",
+ "expected_output": "1 4 7 2 5 8 3 6 9 \n15\n30 24 18 84 69 54 138 114 90 \n189\n9\n0\n0\n1 3 2 4 \n7 10 15 22 \n5\n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 6,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "mat.at",
+  "mat.transpose",
+  "mat.mul",
+  "mat.trace"
+ ]
+}

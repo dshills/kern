@@ -1,0 +1,16 @@
+{
+ "main": "bytes.kern",
+ "expected_output": "8\n104\n111\nnone\n794\nnone\n0\n4\n6\nnone\n0\nnone\n2\n3\n0\n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 0,
+ "required_functions": [
+  "Buf.new",
+  "Buf.push",
+  "Buf.get",
+  "Buf.sum",
+  "Buf.release",
+  "bytes.push_all",
+  "bytes.find",
+  "bytes.count_byte"
+ ]
+}

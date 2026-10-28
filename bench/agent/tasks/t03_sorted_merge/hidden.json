@@ -1,0 +1,12 @@
+{
+ "main": "merge.kern",
+ "expected_output": "11\n1 2 3 3 5 6 7 7 8 9 11 \nfalse\n4\n1 2 3 3 \n2\n2\ntrue\n0\n4\n1 3 5 7 \ntrue\n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 6,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "merge.is_sorted",
+  "merge.merge",
+  "merge.common"
+ ]
+}

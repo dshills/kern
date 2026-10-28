@@ -5,7 +5,10 @@
 report's conclusion that the next experiment needs tasks the plain arm
 fails. **Result:** the matrix on this suite is `bench/agent/REPORT.md`
 and the last section of this report. **Plan:** PLAN.md 4.2, spec §2.3
-and §9.
+and §9. **Location:** this suite moved from `bench/agent/tasks/` to
+`bench/agent/tasks-v2/` on 2026-10-28, when the third suite
+(`docs/reports/agent-tasks-v3.md`) took the default directory; re-scoring
+its records needs `-tasks-dir bench/agent/tasks-v2`.
 
 ## Why the first suite could not separate the arms
 

@@ -1,0 +1,102 @@
+module kv
+// A sorted key table with a parallel value table: keys[i] is the key of
+// vals[i], and keys is in increasing order. Lookups are binary searches
+// over keys; the value functions walk both tables together.
+
+// find returns the value stored under key, or None.
+func find(keys: view[[]u32], vals: view[[]u32], key: u32) -> Option[u32] {
+    lo := 0usize
+    hi := len(keys)
+    while lo < hi {
+        mid := lo + (hi - lo) / 2usize
+        if mid < len(keys) {
+            k := keys[mid]
+            if k == key {
+                if mid < len(vals) { return Some(vals[mid]) }
+                return None
+            }
+            if k < key { lo = mid + 1usize } else { hi = mid }
+        } else {
+            return None
+        }
+    }
+    return None
+}
+
+// sum_range adds the values whose keys are in [lo, hi].
+func sum_range(keys: view[[]u32], vals: view[[]u32], lo: u32, hi: u32) -> u64 {
+    t := 0u64
+    i := 0usize
+    while i < len(keys) {
+        if i < len(vals) {
+            k := keys[i]
+            v := vals[i]
+            if k >= lo && k <= hi { t = t + u64(v) }
+        }
+        i = i + 1usize
+    }
+    return t
+}
+
+// max_value returns the largest value, or None when the tables are empty.
+func max_value(keys: view[[]u32], vals: view[[]u32]) -> Option[u32] {
+    have := false
+    best := 0u32
+    i := 0usize
+    while i < len(keys) {
+        if i < len(vals) {
+            v := vals[i]
+            if !have || v > best { best = v; have = true }
+        }
+        i = i + 1usize
+    }
+    if have { return Some(best) }
+    return None
+}
+
+// key_of returns the key stored at position i, clamped to the last
+// position, or None when there are no keys.
+func key_of(keys: view[[]u32], i: usize) -> Option[u32] {
+    if len(keys) == 0usize { return None }
+    j := i
+    if j >= len(keys) { j = len(keys) - 1usize }
+    if j < len(keys) { return Some(keys[j]) }
+    return None
+}
+
+func show(o: Option[u32]) {
+    match o {
+        Some(v) => { print_u64(u64(v)); println() }
+        None => { print_str("none"); println() }
+    }
+}
+
+func report(keys: view[[]u32], vals: view[[]u32]) {
+    show(find(keys, vals, 30u32))
+    show(find(keys, vals, 5u32))
+    show(find(keys, vals, 90u32))
+    show(find(keys, vals, 31u32))
+    print_u64(sum_range(keys, vals, 20u32, 60u32)); println()
+    show(max_value(keys, vals))
+    show(key_of(keys, 2usize))
+    show(key_of(keys, 9usize))
+}
+
+func main() -> i32 {
+    keys := [5u32, 10u32, 20u32, 30u32, 45u32, 60u32, 75u32, 90u32]
+    vals := [500u32, 7u32, 1200u32, 33u32, 4u32, 61u32, 8u32, 900u32]
+    with k := keys[0usize:8usize] {
+        with v := vals[0usize:8usize] {
+            report(k, v)
+        }
+        with v := vals[0usize:3usize] {
+            report(k, v)
+        }
+    }
+    with k := keys[0usize:0usize] {
+        with v := vals[0usize:0usize] {
+            report(k, v)
+        }
+    }
+    return 0i32
+}

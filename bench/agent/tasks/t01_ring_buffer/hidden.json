@@ -1,0 +1,14 @@
+{
+ "main": "ring.kern",
+ "expected_output": "40\n110\nnone\n600\n40\n3\n19\n3\nnone\nnone\n0\n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 0,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "Ring.slot",
+  "Ring.push",
+  "Ring.get",
+  "Ring.sum",
+  "Ring.min"
+ ]
+}

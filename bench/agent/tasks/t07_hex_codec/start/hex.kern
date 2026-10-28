@@ -1,0 +1,107 @@
+module hex
+// Hex encoding of bytes: encode writes two lower-case hex digits per source
+// byte into dst, and decode reads pairs of digits back into dst; both stop
+// when either buffer runs enc.
+
+// digit is the lower-case hex digit of a value below 16.
+func digit(x: u8) -> u8 {
+    if x < 10u8 { return 48u8 + x }
+    return 87u8 + x
+}
+
+// value is the value of a hex digit, or None for any other byte.
+func value(c: u8) -> Option[u8] {
+    if c >= 48u8 && c <= 57u8 { return Some(c - 48u8) }
+    if c >= 97u8 && c <= 102u8 { return Some(c - 87u8) }
+    if c >= 65u8 && c <= 70u8 { return Some(c - 55u8) }
+    return None
+}
+
+// encode writes the digits of the bytes of src into dst and returns the
+// number of digits written.
+func encode(src: view[[]u8], dst: edit[[]u8]) -> usize {
+    i := 0usize
+    while i < len(src) && 2usize * i + 1usize < len(dst) {
+        b := src[i]
+        dst[2usize * i] = digit(b >> 4u32)
+        dst[2usize * i + 1usize] = digit(b & 15u8)
+        i = i + 1usize
+    }
+    return i * 2usize
+}
+
+// decode reads pairs of digits from src into dst and returns the number of
+// bytes written, or None when a pair is not two hex digits.
+func decode(src: view[[]u8], dst: edit[[]u8]) -> Option[usize] {
+    pairs := len(src) / 2usize
+    i := 0usize
+    while i < pairs && i < len(dst) {
+        hv := value(src[2usize * i])
+        lv := value(src[2usize * i + 1usize])
+        match hv {
+            Some(h) => {
+                match lv {
+                    Some(l) => { dst[i] = h * 16u8 + l }
+                    None => { return None }
+                }
+            }
+            None => { return None }
+        }
+        i = i + 1usize
+    }
+    return Some(i)
+}
+
+// show prints the first n bytes of xs as characters.
+func show(xs: view[[]u8], n: usize) {
+    i := 0usize
+    while i < len(xs) {
+        if i >= n { break }
+        print_u64(u64(xs[i]))
+        print_str(" ")
+        i = i + 1usize
+    }
+    println()
+}
+
+func main() -> i32 {
+    var enc: [16]u8 = zero()
+    var back: [8]u8 = zero()
+    with d := enc[0usize:16usize] {
+        n := encode("kern!", d)
+        print_u64(u64(n)); println()
+        show(d, n)
+        with b := back[0usize:8usize] {
+            match decode(d, b) {
+                Some(m) => { print_u64(u64(m)); println(); show(b, m) }
+                None => { print_str("bad digit"); println() }
+            }
+        }
+        with b := back[0usize:2usize] {
+            match decode(d, b) {
+                Some(m) => { print_u64(u64(m)); println(); show(b, m) }
+                None => { print_str("bad digit"); println() }
+            }
+        }
+    }
+    with d := enc[0usize:5usize] {
+        n := encode("kern!", d)
+        print_u64(u64(n)); println()
+        show(d, n)
+    }
+    with b := back[0usize:8usize] {
+        match decode("4a4B4c", b) {
+            Some(m) => { print_u64(u64(m)); println(); show(b, m) }
+            None => { print_str("bad digit"); println() }
+        }
+        match decode("4a4g", b) {
+            Some(m) => { print_u64(u64(m)); println(); show(b, m) }
+            None => { print_str("bad digit"); println() }
+        }
+        match decode("4", b) {
+            Some(m) => { print_u64(u64(m)); println(); show(b, m) }
+            None => { print_str("bad digit"); println() }
+        }
+    }
+    return 0i32
+}

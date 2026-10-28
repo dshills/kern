@@ -1,0 +1,100 @@
+module mat
+// Square matrices of u32 stored row-major in flat views: the element at
+// row r and column c of an n-by-n matrix is at index r * n + c.
+
+// at returns the element of the n-by-n matrix m at row r and column c, or
+// 0 when (r, c) is outside the matrix.
+func at(m: view[[]u32], n: usize, r: usize, c: usize) -> u32 {
+    if r >= n || c >= n { return 0u32 }
+    i := r * n + c
+    if i < len(m) { return m[i] }
+    return 0u32
+}
+
+// transpose writes the transpose of the n-by-n matrix src into dst.
+func transpose(src: view[[]u32], n: usize, dst: edit[[]u32]) {
+    r := 0usize
+    while r < n {
+        c := 0usize
+        while c < n {
+            v := at(src, n, r, c)
+            d := c * n + r
+            if d < len(dst) { dst[d] = v }
+            c = c + 1usize
+        }
+        r = r + 1usize
+    }
+}
+
+// mul writes the product of the n-by-n matrices a and b into dst.
+func mul(a: view[[]u32], b: view[[]u32], n: usize, dst: edit[[]u32]) {
+    r := 0usize
+    while r < n {
+        c := 0usize
+        while c < n {
+            acc := 0u64
+            k := 0usize
+            while k < n {
+                acc = acc + u64(at(a, n, r, k)) * u64(at(b, n, k, c))
+                k = k + 1usize
+            }
+            d := r * n + c
+            if d < len(dst) { dst[d] = u32(acc) }
+            c = c + 1usize
+        }
+        r = r + 1usize
+    }
+}
+
+// trace is the sum of the diagonal of the n-by-n matrix m.
+func trace(m: view[[]u32], n: usize) -> u64 {
+    t := 0u64
+    i := 0usize
+    while i < n {
+        t = t + u64(at(m, n, i, i))
+        i = i + 1usize
+    }
+    return t
+}
+
+func show(xs: view[[]u32]) {
+    for x in xs {
+        print_u64(u64(x))
+        print_str(" ")
+    }
+    println()
+}
+
+func main() -> i32 {
+    a := [1u32, 2u32, 3u32, 4u32, 5u32, 6u32, 7u32, 8u32, 9u32]
+    b := [9u32, 8u32, 7u32, 6u32, 5u32, 4u32, 3u32, 2u32, 1u32]
+    var t: [9]u32 = zero()
+    var p: [9]u32 = zero()
+    with av := a[0usize:9usize] {
+        with bv := b[0usize:9usize] {
+            with d := t[0usize:9usize] {
+                transpose(av, 3usize, d)
+                show(d)
+                print_u64(trace(d, 3usize)); println()
+            }
+            with d := p[0usize:9usize] {
+                mul(av, bv, 3usize, d)
+                show(d)
+                print_u64(trace(d, 3usize)); println()
+            }
+        }
+        print_u64(u64(at(av, 3usize, 2usize, 2usize))); println()
+        print_u64(u64(at(av, 3usize, 3usize, 0usize))); println()
+        print_u64(u64(at(av, 3usize, 0usize, 3usize))); println()
+    }
+    with av := a[0usize:4usize] {
+        with d := t[0usize:4usize] {
+            transpose(av, 2usize, d)
+            show(d)
+            mul(av, av, 2usize, d)
+            show(d)
+            print_u64(trace(av, 2usize)); println()
+        }
+    }
+    return 0i32
+}

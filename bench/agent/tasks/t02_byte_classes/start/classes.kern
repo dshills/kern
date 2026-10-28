@@ -1,0 +1,83 @@
+module classes
+// Bytes are classified through a 256-entry table (0 other, 1 lower-case
+// letter, 2 digit, 3 space) and each class is weighted through a 4-entry
+// table; both tables are built in main and passed as views.
+
+// fill_classes writes the class of every byte value into tab, which has
+// 256 entries.
+func fill_classes(tab: edit[[]u8]) {
+    b := 0usize
+    while b < 256usize {
+        c := 0u8
+        if b >= 97usize && b <= 122usize { c = 1u8 }
+        if b >= 48usize && b <= 57usize { c = 2u8 }
+        if b == 32usize { c = 3u8 }
+        tab[b] = c
+        b = b + 1usize
+    }
+}
+
+// class_of looks a byte up in the class table.
+func class_of(tab: view[[]u8], b: u8) -> u8 {
+    return tab[usize(b)]
+}
+
+// weight_of looks a class up in the weight table.
+func weight_of(w: view[[]u32], c: u8) -> u32 {
+    return w[usize(c)]
+}
+
+// score sums the weights of the classes of the bytes of text.
+func score(text: view[[]u8], tab: view[[]u8], w: view[[]u32]) -> u64 {
+    t := 0u64
+    for b in text { t = t + u64(weight_of(w, class_of(tab, b))) }
+    return t
+}
+
+// count_class counts the bytes of text whose class is c.
+func count_class(text: view[[]u8], tab: view[[]u8], c: u8) -> u64 {
+    n := 0u64
+    for b in text { if class_of(tab, b) == c { n = n + 1u64 } }
+    return n
+}
+
+// longest_run is the length of the longest run of consecutive bytes of
+// class c in text.
+func longest_run(text: view[[]u8], tab: view[[]u8], c: u8) -> u64 {
+    best := 0u64
+    run := 0u64
+    n := len(text)
+    i := 0usize
+    while i < n {
+        if class_of(tab, text[i]) == c {
+            run = run + 1u64
+            if run > best { best = run }
+        } else {
+            run = 0u64
+        }
+        i = i + 1usize
+    }
+    return best
+}
+
+func report(text: view[[]u8], tab: view[[]u8], w: view[[]u32]) {
+    print_u64(score(text, tab, w)); println()
+    print_u64(count_class(text, tab, 1u8)); println()
+    print_u64(count_class(text, tab, 2u8)); println()
+    print_u64(longest_run(text, tab, 1u8)); println()
+    print_u64(longest_run(text, tab, 0u8)); println()
+}
+
+func main() -> i32 {
+    var tab: [256]u8 = zero()
+    weights := [1u32, 10u32, 100u32, 1000u32]
+    with t := tab[0usize:256usize] {
+        fill_classes(t)
+        with w := weights[0usize:4usize] {
+            report("the quick brown fox 42", t, w)
+            report("a1b22c333 --- dddd!", t, w)
+            report("", t, w)
+        }
+    }
+    return 0i32
+}

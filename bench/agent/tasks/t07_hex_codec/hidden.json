@@ -1,0 +1,15 @@
+{
+ "main": "hex.kern",
+ "expected_output": "10\n54 98 54 53 55 50 54 101 50 49 \nbad digit\n2\n107 101 \n4\n54 98 54 53 \n3\n74 75 76 \nbad digit\n0\n\n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 5,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "hex.digit",
+  "hex.value",
+  "hex.put_byte",
+  "hex.get_byte",
+  "hex.encode",
+  "hex.decode"
+ ]
+}

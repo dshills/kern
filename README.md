@@ -162,7 +162,7 @@ variables, byte-order reads and writes, `where` clauses, non-escaping
 closures, `std/str`, `std/map` and `std/io`; `docs/reports/`). The agent
 experiment's full matrix has been run on two task suites. On the first
 (`bench/agent/tasks-v1/`) every trial succeeds in both arms and the tasks
-do not separate them. On the second (`bench/agent/tasks/`,
+do not separate them. On the second (`bench/agent/tasks-v2/`,
 `docs/reports/agent-tasks-v2.md`, results in `bench/agent/REPORT.md`),
 whose requirements are stated in terms of what the compiler's analyses
 report, the structured arm succeeds in all 100 trials and the plain arm in
@@ -170,7 +170,10 @@ report, the structured arm succeeds in all 100 trials and the plain arm in
 carry; the queries cost iterations elsewhere. The primary metric, revised
 on 2026-10-28 to weigh successes before median iterations
 (`docs/reports/agent-metric-revision.md`), records 0 wins of 10 on the
-first suite and 1 on the second, below its threshold of 8. Open items are
+first suite and 1 on the second, below its threshold of 8. A third suite
+(`bench/agent/tasks/`, `docs/reports/agent-tasks-v3.md`), built entirely on
+the one requirement the plain arm failed, a bound on runtime-checked bounds
+checks, is written and validated but has not been run. Open items are
 recorded in the reports and ADRs rather than in an issue tracker.
 
 Specification documents, the language reference and the ADRs are the

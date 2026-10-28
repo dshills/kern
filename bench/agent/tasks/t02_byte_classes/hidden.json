@@ -1,0 +1,15 @@
+{
+ "main": "classes.kern",
+ "expected_output": "4360\n16\n2\n5\n0\n2674\n7\n6\n4\n3\n0\n0\n0\n0\n0\n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 2,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "classes.fill_classes",
+  "classes.class_of",
+  "classes.weight_of",
+  "classes.score",
+  "classes.count_class",
+  "classes.longest_run"
+ ]
+}

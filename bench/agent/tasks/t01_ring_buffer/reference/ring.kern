@@ -1,0 +1,91 @@
+module ring
+// A ring buffer of eight u32 slots. head is the index in buf of the oldest
+// element and count the number of elements held, at most eight; pushing
+// into a full ring overwrites the oldest element and advances head.
+struct Ring { buf: [8]u32; head: usize; count: usize }
+
+impl Ring {
+    // slot is the index in buf of the i-th oldest element.
+    func slot(view self, i: usize) -> usize {
+        return (self.head + i) % len(self.buf)
+    }
+
+    // push appends v; when the ring is full it overwrites the oldest
+    // element and the next oldest becomes the oldest.
+    func push(edit self, v: u32) {
+        k := self.slot(self.count)
+        if k < len(self.buf) { self.buf[k] = v }
+        if self.count < len(self.buf) {
+            self.count = self.count + 1usize
+        } else {
+            self.head = (self.head + 1usize) % len(self.buf)
+        }
+    }
+
+    // get returns the i-th oldest element, or None when i is not below count.
+    func get(view self, i: usize) -> Option[u32] {
+        if i >= self.count { return None }
+        k := self.slot(i)
+        if k < len(self.buf) { return Some(self.buf[k]) }
+        return None
+    }
+
+    // sum adds up the elements held.
+    func sum(view self) -> u64 {
+        t := 0u64
+        i := 0usize
+        while i < self.count {
+            k := self.slot(i)
+            if k < len(self.buf) { t = t + u64(self.buf[k]) }
+            i = i + 1usize
+        }
+        return t
+    }
+
+    // min returns the smallest element held, or None when the ring is empty.
+    func min(view self) -> Option[u32] {
+        have := false
+        best := 0u32
+        i := 0usize
+        while i < self.count {
+            k := self.slot(i)
+            if k < len(self.buf) {
+                v := self.buf[k]
+                if !have || v < best { best = v; have = true }
+            }
+            i = i + 1usize
+        }
+        if have { return Some(best) }
+        return None
+    }
+}
+
+func show(o: Option[u32]) {
+    match o {
+        Some(v) => { print_u64(u64(v)); println() }
+        None => { print_str("none"); println() }
+    }
+}
+
+func main() -> i32 {
+    var r: Ring = zero()
+    i := 1u32
+    while i <= 11u32 { r.push(i * 10u32); i = i + 1u32 }
+    show(r.get(0usize))
+    show(r.get(7usize))
+    show(r.get(8usize))
+    print_u64(r.sum()); println()
+    show(r.min())
+    var q: Ring = zero()
+    q.push(9u32)
+    q.push(3u32)
+    q.push(7u32)
+    show(q.get(1usize))
+    print_u64(q.sum()); println()
+    show(q.min())
+    show(q.get(3usize))
+    var e: Ring = zero()
+    show(e.min())
+    print_u64(e.sum()); println()
+    return 0i32
+}

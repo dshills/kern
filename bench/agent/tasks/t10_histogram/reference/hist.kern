@@ -1,0 +1,89 @@
+module hist
+// A byte histogram: counts[b] is the number of times the byte b occurred
+// in the texts counted so far. The table has 256 entries.
+
+// bump adds one to the count of b.
+func bump(counts: edit[[]u32], b: u8) {
+    k := usize(b)
+    if k < len(counts) { counts[k] = counts[k] + 1u32 }
+}
+
+// count adds the bytes of text to the histogram.
+func count(text: view[[]u8], counts: edit[[]u32]) {
+    for b in text { bump(counts, b) }
+}
+
+// reset sets every count to zero.
+func reset(counts: edit[[]u32]) {
+    i := 0usize
+    while i < len(counts) {
+        counts[i] = 0u32
+        i = i + 1usize
+    }
+}
+
+// total is the sum of the counts.
+func total(counts: view[[]u32]) -> u64 {
+    t := 0u64
+    for c in counts { t = t + u64(c) }
+    return t
+}
+
+// mode is the byte with the highest count, the smallest such byte when
+// several share it, or None when every count is zero.
+func mode(counts: view[[]u32]) -> Option[u8] {
+    best := 0u32
+    have := false
+    arg := 0u8
+    i := 0usize
+    while i < len(counts) {
+        c := counts[i]
+        if c > best {
+            best = c
+            arg = u8(i)
+            have = true
+        }
+        i = i + 1usize
+    }
+    if have { return Some(arg) }
+    return None
+}
+
+// share is the count of b in parts per thousand of the total, or 0 when
+// the total is zero.
+func share(counts: view[[]u32], b: u8) -> u64 {
+    t := total(counts)
+    if t == 0u64 { return 0u64 }
+    k := usize(b)
+    if k < len(counts) { return u64(counts[k]) * 1000u64 / t }
+    return 0u64
+}
+
+func show(o: Option[u8]) {
+    match o {
+        Some(v) => { print_u64(u64(v)); println() }
+        None => { print_str("none"); println() }
+    }
+}
+
+func report(counts: view[[]u32]) {
+    show(mode(counts))
+    print_u64(total(counts)); println()
+    print_u64(share(counts, 108u8)); println()
+    print_u64(share(counts, 122u8)); println()
+}
+
+func main() -> i32 {
+    var counts: [256]u32 = zero()
+    with c := counts[0usize:256usize] {
+        count("hello world", c)
+        report(c)
+        count("zzz", c)
+        report(c)
+        reset(c)
+        report(c)
+        count("aab", c)
+        report(c)
+    }
+    return 0i32
+}

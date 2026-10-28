@@ -1,0 +1,134 @@
+module bytes
+// A byte buffer over a raw allocation, which a text is pushed into byte by
+// byte, and search helpers over a view of a text. The raw-pointer
+// operations are wrapped in the Buf methods; the rest of the program calls
+// the wrappers.
+struct Buf nocopy { base: RawPtr[u8]; cap: usize; len: usize; alloc: SystemAllocator }
+
+impl Buf {
+    contract { requires "cap > 0 and the allocator obligations of §6 hold" }
+    func new(cap: usize) -> Option[Buf] {
+        a := SystemAllocator.new()
+        unsafe {
+            match a.alloc(cap, 1usize) {
+                Ok(raw) => return Some(Buf { base: raw, cap: cap, len: 0usize, alloc: a })
+                Err(e) => return None
+            }
+        }
+    }
+
+    contract { requires "base addresses cap bytes and len <= cap; the byte at len is written only when len < cap" }
+    func push(edit self, b: u8) -> bool {
+        if self.len == self.cap { return false }
+        unsafe { ptr_store(ptr_offset(self.base, isize(self.len)), b) }
+        self.len = self.len + 1usize
+        return true
+    }
+
+    contract { requires "base addresses cap bytes and the len bytes below len are initialized" }
+    func get(view self, i: usize) -> Option[u8] {
+        if i >= self.len { return None }
+        unsafe { return Some(ptr_load(ptr_offset(self.base, isize(i)))) }
+    }
+
+    contract { requires "base addresses cap bytes and the len bytes below len are initialized" }
+    func sum(view self) -> u64 {
+        t := 0u64
+        i := 0usize
+        unsafe {
+            while i < self.len {
+                t = t + u64(ptr_load(ptr_offset(self.base, isize(i))))
+                i = i + 1usize
+            }
+        }
+        return t
+    }
+
+    contract { requires "base was obtained from alloc with cap bytes and is freed exactly once" }
+    func release(edit self) {
+        if self.cap > 0usize {
+            unsafe { self.alloc.free(self.base, self.cap, 1usize) }
+            self.cap = 0usize
+            self.len = 0usize
+        }
+    }
+}
+
+// push_all pushes the bytes of src until the buffer is full and returns
+// the number pushed.
+func push_all(b: edit[Buf], src: view[[]u8]) -> usize {
+    n := 0usize
+    for x in src {
+        if b.push(x) { n = n + 1usize }
+    }
+    return n
+}
+
+// find returns the position of the first occurrence of pat in src.
+func find(src: view[[]u8], pat: view[[]u8]) -> Option[usize] {
+    if len(pat) > len(src) { return None }
+    i := 0usize
+    while i + len(pat) <= len(src) {
+        k := 0usize
+        ok := true
+        while k < len(pat) {
+            idx := i + k
+            if idx < len(src) {
+                if src[idx] != pat[k] { ok = false; break }
+            } else {
+                ok = false
+                break
+            }
+            k = k + 1usize
+        }
+        if ok { return Some(i) }
+        i = i + 1usize
+    }
+    return None
+}
+
+// count_byte counts the occurrences of b in src.
+func count_byte(src: view[[]u8], b: u8) -> u64 {
+    n := 0u64
+    for x in src { if x == b { n = n + 1u64 } }
+    return n
+}
+
+func show(o: Option[u8]) {
+    match o {
+        Some(v) => { print_u64(u64(v)); println() }
+        None => { print_str("none"); println() }
+    }
+}
+
+func show_pos(o: Option[usize]) {
+    match o {
+        Some(v) => { print_u64(u64(v)); println() }
+        None => { print_str("none"); println() }
+    }
+}
+
+func main() -> i32 {
+    match Buf.new(8usize) {
+        Some(b) => {
+            print_u64(u64(push_all(b, "hello world"))); println()
+            show(b.get(0usize))
+            show(b.get(7usize))
+            show(b.get(8usize))
+            print_u64(b.sum()); println()
+            b.release()
+            show(b.get(0usize))
+            print_u64(b.sum()); println()
+        }
+        None => { print_str("alloc failed"); println() }
+    }
+    show_pos(find("hello world", "o w"))
+    show_pos(find("hello world", "world"))
+    show_pos(find("hello world", "worlds"))
+    show_pos(find("hello world", ""))
+    show_pos(find("", "a"))
+    show_pos(find("aaab", "ab"))
+    print_u64(count_byte("hello world", 108u8)); println()
+    print_u64(count_byte("", 108u8)); println()
+    return 0i32
+}
