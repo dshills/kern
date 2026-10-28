@@ -27,6 +27,9 @@ var wrappingIntrinsics = map[string]bool{"wrapping_add": true, "wrapping_sub": t
 // like the wrapping forms.
 var bitCountIntrinsics = map[string]bool{"count_trailing_zeros": true, "count_leading_zeros": true, "count_ones": true}
 
+// loadIntrinsics are the prelude's byte-order reads, integer-only too.
+var loadIntrinsics = map[string]bool{"load_be": true, "load_le": true}
+
 func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 	info := &CallInfo{}
 	c.r.prog.Info.Calls[x] = info
@@ -260,7 +263,7 @@ func (c *fnCtx) callFunc(sc *scope, x *ast.CallExpr, info *CallInfo, f *FuncDecl
 	if strings.HasPrefix(f.Name, "simd_") && f.Module == "core" {
 		c.checkSIMD(x, f, m)
 	}
-	if (wrappingIntrinsics[f.Name] || bitCountIntrinsics[f.Name]) && f.Module == "core" {
+	if (wrappingIntrinsics[f.Name] || bitCountIntrinsics[f.Name] || loadIntrinsics[f.Name]) && f.Module == "core" {
 		if t, ok := m["T"]; ok && !IsInteger(t) {
 			c.errorf("TYPE_MISMATCH", x.Pos, "%s requires an integer type, found %s", f.Name, typeString(t))
 		}

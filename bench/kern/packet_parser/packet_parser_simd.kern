@@ -33,13 +33,9 @@ struct Header {
 
 union ParseErr { Short; BadMagic; BadHeaderLen; BadCsum; BadPayload }
 
-func rd16(p: view[]u8, at: usize) -> u16 {
-    return (u16(p[at]) << 8u32) | u16(p[at + 1usize])
-}
+func rd16(p: view[]u8, at: usize) -> u16 { return load_be[u16](p, at) }
 
-func rd32(p: view[]u8, at: usize) -> u32 {
-    return (u32(p[at]) << 24u32) | (u32(p[at + 1usize]) << 16u32) | (u32(p[at + 2usize]) << 8u32) | u32(p[at + 3usize])
-}
+func rd32(p: view[]u8, at: usize) -> u32 { return load_be[u32](p, at) }
 
 func wr16(h: edit[]u8, at: usize, v: u16) {
     h[at] = truncate[u8](v >> 8u32)

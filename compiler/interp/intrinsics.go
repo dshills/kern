@@ -259,6 +259,8 @@ func init() {
 		"ptr_edit": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}}
 		},
+		"load_be": func(it *Interp, a []Value, c callCtx) []Value { return []Value{it.loadWide(a, c, true)} },
+		"load_le": func(it *Interp, a []Value, c callCtx) []Value { return []Value{it.loadWide(a, c, false)} },
 		"ptr_view_seq": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{&Access{Seq: &seqRef{raw: &rawSeq{it: it, base: u64(a[0]), elem: c.targ(0)}, lo: 0, hi: int(u64(a[1]))}}}
 		},
@@ -486,4 +488,35 @@ func (it *Interp) spawned(name string, args []Value, finish func(Value, *Trap)) 
 		}
 		finish(result, trapped)
 	}()
+}
+
+// loadWide reads the bytes of an integer of the call's type argument from a
+// sequence access at an offset, in big- or little-endian order, and decodes
+// them as the interpreter's memory representation (little-endian); the
+// bounds check on the last byte precedes the call.
+func (it *Interp) loadWide(a []Value, c callCtx, be bool) Value {
+	t := c.targ(0)
+	acc := a[0].(*Access)
+	seq := acc.Seq
+	if seq == nil {
+		// an access opened on an array: in raw memory, or a local
+		if rr, ok := acc.Ref.(rawRef); ok {
+			seq = rr.elems()
+		} else {
+			arr := acc.Ref.get().(*Array)
+			seq = &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(arr.Elems)}
+		}
+	}
+	at := int(u64(a[1]))
+	n := layout.Of(t).Size
+	buf := make([]byte, n)
+	for i := range n {
+		b := byte(u64(seq.at(at + i).get()))
+		if be {
+			buf[n-1-i] = b
+		} else {
+			buf[i] = b
+		}
+	}
+	return it.decode(buf, t)
 }

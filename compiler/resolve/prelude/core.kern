@@ -18,6 +18,11 @@ func wrapping_mul[T: Copy](a: T, b: T) -> T
 func count_trailing_zeros[T: Copy](x: T) -> u32
 func count_leading_zeros[T: Copy](x: T) -> u32
 func count_ones[T: Copy](x: T) -> u32
+// load_be and load_le read an integer T from the bytes of a view at offset
+// at, big- or little-endian, one bounds check (at + size_of[T] - 1 < len)
+// the proof pass can discharge and one wide load natively; T is explicit.
+func load_be[T: Copy](p: view[]u8, at: usize) -> T
+func load_le[T: Copy](p: view[]u8, at: usize) -> T
 // Raw pointers (spec §6): every operation below is an unsafe operation and
 // requires an unsafe block; the pointee's representation is the §4.1 layout.
 func ptr_null[T]() -> RawPtr[T]

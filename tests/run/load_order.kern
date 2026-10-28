@@ -1,0 +1,42 @@
+//! phase: 3
+//! expect: output
+// load_be and load_le read an integer from the bytes of a view in either
+// byte order: an array local, a view of a vector, a sub-slice, signed
+// types, and the eight-byte width, in both engines.
+module t
+func main() -> i32 {
+    var b: [8]u8 = zero()
+    b[0usize] = 1u8
+    b[1usize] = 2u8
+    b[2usize] = 3u8
+    b[3usize] = 4u8
+    b[7usize] = 255u8
+    print_u64(u64(load_be[u16](b, 0usize)))
+    println()
+    print_u64(u64(load_le[u16](b, 0usize)))
+    println()
+    print_u64(u64(load_be[u32](b, 0usize)))
+    println()
+    print_u64(u64(load_le[u32](b, 0usize)))
+    println()
+    print_u64(load_be[u64](b, 0usize))
+    println()
+    print_i64(i64(load_be[i8](b, 7usize)))
+    println()
+    print_i64(i64(load_le[i16](b, 6usize)))
+    println()
+    v := Vec[u8].new()
+    v.push(16u8)
+    v.push(32u8)
+    v.push(48u8)
+    v.push(64u8)
+    with d := v.as_view() {
+        print_u64(u64(load_be[u16](d, 1usize)))
+        println()
+        with s := d[2usize : 4usize] {
+            print_u64(u64(load_le[u16](s, 0usize)))
+            println()
+        }
+    }
+    return 0i32
+}

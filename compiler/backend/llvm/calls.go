@@ -478,6 +478,23 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	case "ptr_view", "ptr_edit":
 		// an access on raw memory is the pointer itself
 		fe.vals[dst()] = fe.v(a[0])
+	case "load_be", "load_le":
+		// one load of the integer's width at byte offset a[1] of the view,
+		// unaligned, byte-swapped for big-endian (the targets are little-endian)
+		t := fe.elemType(c, 0)
+		ty := e.mty(t)
+		p := fe.next("t")
+		fe.emit("%s = extractvalue { ptr, i64 } %s, 0", p, fe.v(a[0]))
+		q := fe.next("t")
+		fe.emit("%s = getelementptr i8, ptr %s, i64 %s", q, p, fe.v(a[1]))
+		if c.Intrinsic == "load_le" || layout.Of(t).Size == 1 {
+			fe.emit("%s = load %s, ptr %s, align 1", fe.v(dst()), ty, q)
+		} else {
+			r := fe.next("t")
+			fe.emit("%s = load %s, ptr %s, align 1", r, ty, q)
+			e.declare("llvm.bswap."+ty, ty+" ("+ty+")")
+			fe.emit("%s = call %s @llvm.bswap.%s(%s %s)", fe.v(dst()), ty, ty, ty, r)
+		}
 	case "ptr_view_seq", "ptr_edit_seq":
 		s1 := fe.next("t")
 		fe.emit("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", s1, fe.v(a[0]))

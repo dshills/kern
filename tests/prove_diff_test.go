@@ -134,7 +134,7 @@ func main() -> i32 {
 	stmts := 2 + r.Intn(6)
 	for k := 0; k < stmts; k++ {
 		idx := func() int { return r.Intn(live + 2) } // 0..live+1: past the end about a third of the time
-		switch r.Intn(13) {
+		switch r.Intn(14) {
 		case 0:
 			fmt.Fprintf(&b, "    with d := v.as_view() { print_u64(rd(d, %dusize)) }\n", idx())
 		case 1:
@@ -171,6 +171,13 @@ func main() -> i32 {
 			// a fixed array: reads at literal indexes are proven by the
 			// constant length, or trap past it
 			fmt.Fprintf(&b, "    {\n        var a: [4]u64 = zero()\n        a[%dusize] = %du64\n        print_u64(wrapping_add(a[%dusize], rd(a, %dusize)))\n    }\n", r.Intn(4), r.Intn(100), r.Intn(6), r.Intn(6))
+		case 13:
+			// byte-order reads of two, four or eight bytes at an offset of a
+			// byte array: one check on the last byte, past the end about half
+			// the time
+			w := []string{"u16", "u32", "u64"}[r.Intn(3)]
+			order := []string{"load_be", "load_le"}[r.Intn(2)]
+			fmt.Fprintf(&b, "    {\n        var y: [8]u8 = zero()\n        y[%dusize] = %du8\n        y[7usize] = %du8\n        print_u64(u64(%s[%s](y, %dusize)))\n    }\n", r.Intn(8), r.Intn(256), r.Intn(256), order, w, r.Intn(9))
 		}
 		b.WriteString("    println()\n")
 	}

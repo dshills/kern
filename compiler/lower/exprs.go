@@ -1,6 +1,7 @@
 package lower
 
 import (
+	"github.com/dshills/kern/compiler/layout"
 	"strings"
 
 	"github.com/dshills/kern/compiler/ast"
@@ -604,6 +605,11 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 			return operand{val: v}
 		}
 	}
+	// load_be[T] and load_le[T] are one bounds check on the last byte read,
+	// then an intrinsic call the backends turn into one wide load
+	if info.Fn != nil && info.Fn.Module == "core" && info.Fn.Receiver == nil && (info.Fn.Name == "load_be" || info.Fn.Name == "load_le") {
+		return fl.loadWide(x, info.Fn.Name, t)
+	}
 	// zero[T]() is the Zero instruction
 	if info.Fn != nil && info.Fn.Module == "core" && info.Fn.Name == "zero" && info.Fn.Receiver == nil {
 		v := fl.newValue(t)
@@ -768,6 +774,57 @@ func (fl *fnLower) callSubst(info *resolve.CallInfo) map[string]resolve.Type {
 
 // intrinsicName names a runtime-provided prelude function: "Type.method" or
 // the bare function name.
+// loadWide lowers load_be[T](p, at) and load_le[T](p, at): the view
+// argument as for any view parameter, the index, a check that the last
+// byte read is in range (at + size - 1, a checked addition like the
+// source's own `at + k` so the proof pass reads it as base + offset), then
+// the intrinsic call reading the bytes at the index.
+func (fl *fnLower) loadWide(x *ast.CallExpr, name string, t resolve.Type) operand {
+	usize := &resolve.Prim{Name: "usize"}
+	r := fl.expr(x.Args[0].X, nil)
+	var acc *ir.Value
+	var opened []*ir.Value
+	pt := &resolve.Access{Seq: true, Elem: &resolve.Prim{Name: "u8"}}
+	switch {
+	case r.access != nil && !r.isPlace():
+		acc = r.access
+		if r.ownsAccess {
+			opened = append(opened, acc)
+		}
+	case r.isPlace():
+		if r.access != nil && r.ownsAccess {
+			opened = append(opened, r.access)
+		}
+		acc = fl.newValue(pt)
+		fl.emit(&ir.AccessBegin{Dst: acc, Place: r.pl, Pos: x.Args[0].Pos})
+		opened = append(opened, acc)
+	default:
+		tmp := fl.newTemp(r.val.Type)
+		fl.emit(&ir.Store{Place: ir.Place{Local: tmp}, Src: r.val})
+		fl.emit(&ir.Init{Place: ir.Place{Local: tmp}})
+		acc = fl.newValue(pt)
+		fl.emit(&ir.AccessBegin{Dst: acc, Place: ir.Place{Local: tmp}, Pos: x.Args[0].Pos})
+		opened = append(opened, acc)
+	}
+	idx := fl.value(x.Args[1].X, usize)
+	last := idx
+	if size := layout.Of(t).Size; size > 1 {
+		k := fl.constInt(usize, uint64(size-1))
+		fl.emit(&ir.CheckOverflow{Op: "+", L: idx, R: k, Type: "usize", Prov: ir.RuntimeChecked, Pos: x.Pos})
+		last = fl.newValue(usize)
+		fl.emit(&ir.Binary{Dst: last, Op: "+", L: idx, R: k})
+	}
+	ln := fl.newValue(usize)
+	fl.emit(&ir.Len{Dst: ln, Place: ir.Place{Access: acc}})
+	fl.emit(&ir.CheckBounds{Index: last, Len: ln, Prov: ir.RuntimeChecked, Pos: x.Pos})
+	v := fl.newValue(t)
+	fl.emit(&ir.Call{Dsts: []*ir.Value{v}, Intrinsic: name, Args: []*ir.Value{acc, idx}, Pos: x.Pos, TypeArgs: []resolve.Type{t}})
+	for i := len(opened) - 1; i >= 0; i-- {
+		fl.emit(&ir.AccessEnd{Access: opened[i]})
+	}
+	return operand{val: v}
+}
+
 func intrinsicName(fd *resolve.FuncDecl) string {
 	if fd.Receiver != nil {
 		return fd.Receiver.Name + "." + fd.Name
