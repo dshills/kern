@@ -40,7 +40,7 @@ by value and a `Result` returned by value for every node.
   bound a chain of functions each calling its predecessor once is copied
   level by level into its last member, quadratic work in the chain's
   length (a Prism finding); with it the work is linear in the module.
-- The other rules are unchanged: no loops, no `out` parameters, no
+- The other rules are unchanged (loops were later admitted, `docs/reports/inliner-loops.md`): no loops, no `out` parameters, no
   returned accesses, no recursion, same file, not library.
 
 Both decisions read state recorded at the start of the pass, so the

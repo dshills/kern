@@ -287,16 +287,44 @@ func main() -> i32 {
 	}
 }
 
-func TestInlineStaysCall(t *testing.T) {
-	cases := map[string]struct{ src, callee string }{
-		"loop": {`module t
+// TestInlineLoopCallee: a callee with a loop is inlined like any other
+// within MaxCalleeSize; the copied loop runs as the call did (the first
+// inliner excluded loops, docs/reports/inliner-loops.md).
+func TestInlineLoopCallee(t *testing.T) {
+	src := `module t
 func count(n: u64) -> u64 {
     i := 0u64
     while i < n { i = i + 1u64 }
     return i
 }
 func main() -> i32 {
-    print_u64(count(3u64))
+    print_u64(count(3u64) + count(5u64))
+    println()
+    return 0i32
+}
+`
+	_, inl := same(t, src)
+	if got := calls(inl.Func("t.main")); len(got) != 0 {
+		t.Fatalf("main still calls %v", got)
+	}
+	if !hasLoop(inl.Func("t.main")) {
+		t.Fatal("the copied loop should be in main")
+	}
+}
+
+func TestInlineStaysCall(t *testing.T) {
+	cases := map[string]struct{ src, callee string }{
+		"loop into loop": {`module t
+func count(n: u64) -> u64 {
+    i := 0u64
+    while i < n { i = i + 1u64 }
+    return i
+}
+func main() -> i32 {
+    total := 0u64
+    k := 0u64
+    while k < 3u64 { total = total + count(k); k = k + 1u64 }
+    print_u64(total)
     println()
     return 0i32
 }

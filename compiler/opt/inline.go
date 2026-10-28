@@ -22,8 +22,14 @@ import (
 // set for, and what its copies cost the caller is bounded by MaxGrowth.
 // Counting blocks keeps a chain of empty functions that call their
 // predecessor twice from doubling the caller's control flow at every
-// step.
-var MaxCalleeSize = 48
+// step. A callee with a loop is judged like any other, except that it is
+// not copied into a call site that lies inside a loop of the caller: a
+// loop nested by the copy ran slower than clang's own inlining of the
+// same function (page_frame_allocator's alloc_frame), while a loop copied
+// into straight-line code let clang see through it (hash_table's probe,
+// 61, which the first inliner's limit of 48 and loop exclusion kept out;
+// docs/reports/inliner-loops.md).
+var MaxCalleeSize = 64
 
 // MaxGrowth bounds the net instruction growth of one function through
 // inlining, measured on the callee as it is when copied; a site whose
@@ -37,8 +43,8 @@ var MaxGrowth = 512
 // charged against the caller's MaxGrowth: charging it would starve the
 // small helpers at the sites after it (docs/reports/inliner-sizing.md
 // has the measurement). The callee is otherwise judged like any other
-// (no loops, no out parameters, no returned accesses, not recursive,
-// same file, not library).
+// (no out parameters, no returned accesses, not recursive, same file,
+// not library).
 var InlineSingleSite = true
 
 // MaxCallerSize bounds a function's size through single-site copies: a
@@ -153,9 +159,6 @@ func (in *inliner) eligible(f, g *ir.Func) bool {
 			return false // a returned projection is tied to the caller's AccessEnd
 		}
 	}
-	if hasLoop(g) {
-		return false
-	}
 	if in.sizes[g] > MaxCalleeSize {
 		return InlineSingleSite && in.sites[g] == 1 // the copy replaces the body
 	}
@@ -169,6 +172,26 @@ func size(f *ir.Func) int {
 		n += len(b.Instrs) + 1
 	}
 	return n
+}
+
+// onCycle reports whether block b lies inside a loop: some path through
+// its successors leads back to it.
+func onCycle(b *ir.Block) bool {
+	seen := map[*ir.Block]bool{}
+	stack := successors(b.Term)
+	for len(stack) > 0 {
+		s := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if s == b {
+			return true
+		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		stack = append(stack, successors(s.Term)...)
+	}
+	return false
 }
 
 // hasLoop reports a back edge in the function's control-flow graph.
@@ -350,6 +373,9 @@ func (in *inliner) inlineInto(f *ir.Func) {
 			g := in.mod.Func(c.Callee)
 			if !in.eligible(f, g) {
 				continue
+			}
+			if hasLoop(g) && onCycle(b) {
+				continue // a loop is not nested into the caller's loop by a copy
 			}
 			delta := growthOf(c, g)
 			single := InlineSingleSite && in.sites[g] == 1 && size(f)+delta <= MaxCallerSize
