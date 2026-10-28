@@ -627,6 +627,17 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		setDst(fe.rt("kern_mutex_lock", "ptr (ptr, i64, i64)", "ptr "+fe.handle(a[0])+", "+fe.span(c.Pos)))
 	case "Mutex.unlock":
 		fe.rt("kern_mutex_unlock", "void (ptr)", "ptr "+fe.handle(a[0]))
+	// Condvar: wait is given the guard (the Mutex's data pointer, which the
+	// checker requires to be the edit bound by a Mutex lock); the runtime
+	// recovers the Mutex from it
+	case "Condvar.new":
+		setDst(fe.rt("kern_condvar_new", "ptr ()", ""))
+	case "Condvar.wait":
+		fe.rt("kern_condvar_wait", "void (ptr, ptr, i64, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.v(a[1])+", "+fe.span(c.Pos))
+	case "Condvar.notify_one":
+		fe.rt("kern_condvar_notify_one", "void (ptr)", "ptr "+fe.handle(a[0]))
+	case "Condvar.notify_all":
+		fe.rt("kern_condvar_notify_all", "void (ptr)", "ptr "+fe.handle(a[0]))
 	// Atomic[T] is a struct of its cell (layout.Opaque excludes it): every
 	// operation is an LLVM atomic instruction on the cell, in T's in-memory
 	// type, with the ordering the checker required to be a constant

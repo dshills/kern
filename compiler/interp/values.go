@@ -171,6 +171,24 @@ type Mutex struct {
 	lock   sync.Mutex // the lock itself
 }
 
+// mutexRef is the slot of a Mutex's value: the ref behind the edit that
+// lock returns, so that Condvar.wait can find the Mutex behind its guard.
+type mutexRef struct{ m *Mutex }
+
+func (r mutexRef) get() Value  { return r.m.Val }
+func (r mutexRef) set(v Value) { r.m.Val = v }
+
+// Condvar is a condition variable. Waiters block on the channel of the
+// generation current when they released the lock; a notify closes it and
+// opens the next one, so notify_one wakes every waiter, which the spurious
+// wakeups the spec permits allow. mutex is the Mutex the first wait used:
+// every later wait must use the same one (as the hosted runtime requires).
+type Condvar struct {
+	state sync.Mutex
+	gen   chan struct{}
+	mutex *Mutex
+}
+
 // Scope is a thread scope.
 type Scope struct{ Joins []*Join }
 

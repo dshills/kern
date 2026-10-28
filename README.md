@@ -66,7 +66,7 @@ observable only as termination with a structured `TrapInfo` record.
 | Language reference | `docs/ownership.md` | Normative restatement of the ownership rules, one rule per diagnostic code |
 | Decisions | `docs/decisions/ADR-*.md` | Thirteen architecture decision records with the alternatives considered |
 | Compiler | `compiler/` | Lexer and parser, resolver, ownership checker, lowering to a semantic IR, LLVM text backend, interpreter, formatter, incremental driver |
-| Standard library | `std/core.kern` | Implicitly imported prelude: `Box`, `Vec`, `Pool`, `Arena`, `Mutex`, `Atomic`, scoped threads, raw pointers. The containers are written in kern over audited `unsafe` blocks (`docs/unsafe-audit.md`) |
+| Standard library | `std/core.kern` | Implicitly imported prelude: `Box`, `Vec`, `Pool`, `Arena`, `Mutex`, `Condvar`, `Atomic`, scoped threads, raw pointers. The containers are written in kern over audited `unsafe` blocks (`docs/unsafe-audit.md`) |
 | Runtimes | `runtime/hosted/`, `runtime/freestanding/` | A small C runtime for Linux/macOS, and a freestanding one for bare-metal x86-64 and AArch64 images that boot under QEMU |
 | Machine API | `tools/agent-api/schema.{json,md}` | JSON request/response schema for every command, with stable diagnostic codes and machine-applicable fixes |
 | Tests | `tests/` | Positive, negative and adversarial fixtures (one rejecting fixture and one accepting twin per rule), trap fixtures, concurrency and FFI fixtures, freestanding images |

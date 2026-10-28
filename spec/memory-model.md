@@ -34,7 +34,8 @@ operations kern exposes.
   crosses to another thread only as an `own` argument of a `Send` type (the source no
   longer has it), as a `view` of a `Share` type (readers only), or as an `edit` argument of
   a scoped spawn (exclusive until the scope joins, rule 5.5.3); mutation shared between
-  threads happens only inside `Mutex` (one holder, rule 5.5.4) or through `Atomic`
+  threads happens only inside `Mutex` (one holder, rule 5.5.4; a `Condvar` wait
+  releases and reacquires that one holder's lock) or through `Atomic`
   (rule 5.5.5). `Interior` types are the only values whose `view` admits mutation, and
   every prelude `Interior` type synchronizes internally; a user `Interior` type
   (`unsafe assert Interior`) takes on that obligation (rule 6.7, `docs/unsafe-audit.md`).
@@ -59,7 +60,7 @@ ADR-012); writes of other threads that did not happen before the trap are not ob
 afterwards. The interpreter (`kern run`) implements this model with sequentially
 consistent atomics (a global lock), which is a valid implementation of every ordering;
 the native backend lowers each operation to the LLVM atomic of the same ordering and the
-hosted runtime's `pthread` mutexes.
+hosted runtime's `pthread` mutexes and condition variables.
 
 ## 5. Evidence
 

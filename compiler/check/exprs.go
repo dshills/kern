@@ -396,6 +396,14 @@ func (f *fn) call(st *flow, x *ast.CallExpr) *result {
 		// call through a function value: evaluate the callee expression first (spec §4)
 		f.consumeValue(st, x.Fn)
 	}
+	if isCoreMethod(info, "Condvar", "wait") && len(x.Args) == 1 {
+		// the guard must be the edit a Mutex lock bound, unprojected: the
+		// runtime recovers the Mutex from it (spec §5.5)
+		id, _ := x.Args[0].X.(*ast.Ident)
+		if id == nil || !f.guards[f.c.info.Idents[id]] {
+			f.errorf("CONDVAR_NOT_GUARD", x.Args[0].Pos, "Condvar.wait takes the edit bound by a Mutex lock")
+		}
+	}
 	var argAccs []*access
 	var sourceAcc *access
 	var sourcePlace *place
@@ -500,6 +508,13 @@ func (f *fn) call(st *flow, x *ast.CallExpr) *result {
 	_ = sourceAcc
 	f.accs = append(f.accs, acc)
 	return &result{pl: *sourcePlace, isAccess: true, acc: acc, release: info.Release || (srcResult != nil && srcResult.release), t: t}
+}
+
+// isCoreMethod reports whether info resolves to the prelude method
+// recv.name.
+func isCoreMethod(info *resolve.CallInfo, recv, name string) bool {
+	return info != nil && info.Fn != nil && info.Fn.Module == "core" && info.Fn.Receiver != nil &&
+		info.Fn.Receiver.Name == recv && info.Fn.Name == name
 }
 
 // spawnCall applies the §5.5 rules for thread.spawn and Scope.spawn.

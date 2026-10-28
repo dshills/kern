@@ -1,0 +1,7 @@
+//! expect: reject CONDVAR_NOT_GUARD rule=5.5.4
+//! twin: condvar_guard_ok
+module m
+struct Cell { ready: bool }
+func f(cv: view[Condvar], c: edit[Cell]) {
+    cv.wait(c)   // CONDVAR_NOT_GUARD: c is an edit parameter, not the edit bound by a Mutex lock
+}

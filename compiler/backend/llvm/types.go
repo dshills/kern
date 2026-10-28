@@ -218,6 +218,9 @@ func (e *emitter) namedGlue(b *strings.Builder, n *resolve.Named) {
 		case "Mutex":
 			e.declare("kern_mutex_drop", "void (ptr, ptr)")
 			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_mutex_drop(ptr %%h, ptr %s)\n", eg)
+		case "Condvar":
+			e.declare("kern_condvar_drop", "void (ptr)")
+			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_condvar_drop(ptr %%h)\n")
 		case "Scope":
 			e.declare("kern_scope_drop", "void (ptr)")
 			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_scope_drop(ptr %%h)\n")

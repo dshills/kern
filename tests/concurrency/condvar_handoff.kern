@@ -1,0 +1,71 @@
+//! phase: 3
+//! expect: output condvar_handoff
+//! tsan: clean
+// A bounded queue of capacity 4 behind a Mutex, with two Condvars as a C
+// producer/consumer would use them: the consumer waits on `ready` while the
+// queue is empty, the producer waits on `space` while it is full, and each
+// notifies the other after changing the queue. Both wait in a loop, as the
+// spec permits spurious wakeups. The producer sends 1..=1000 and then sets
+// done; the consumer sums what it receives. The consumer is spawned first;
+// were the producer's spawn then to fail, the `?` would leave the scope to
+// join a consumer that nothing wakes (main cannot lock `c.q` while the
+// scope views `c`), which the harness never exercises.
+module cc
+struct Queue { ring: [4]u64; head: usize; len: usize; done: bool }
+struct Chan { q: Mutex[Queue]; ready: Condvar; space: Condvar }
+
+func producer(c: view[Chan], n: u64) -> u64 {
+    i := 1u64
+    while i <= n {
+        with g := c.q.lock() {
+            while g.len == 4usize { c.space.wait(g) }
+            g.ring[(g.head + g.len) & 3usize] = i
+            g.len = g.len + 1usize
+        }
+        c.ready.notify_one()
+        i = i + 1u64
+    }
+    with g := c.q.lock() { g.done = true }
+    c.ready.notify_all()
+    return n
+}
+
+func consumer(c: view[Chan]) -> u64 {
+    sum := 0u64
+    while true {
+        var got: Option[u64] = None
+        finished := false
+        with g := c.q.lock() {
+            while g.len == 0usize && !g.done { c.ready.wait(g) }
+            if g.len == 0usize {
+                finished = true
+            } else {
+                got = Some(g.ring[g.head])
+                g.head = (g.head + 1usize) & 3usize
+                g.len = g.len - 1usize
+            }
+        }
+        match got {
+            Some(v) => { sum = sum + v; c.space.notify_one() }
+            None => { if finished { return sum } }
+        }
+    }
+    return sum
+}
+
+func run(c: view[Chan]) -> Result[u64, SpawnErr] {
+    with s := thread.scope() {
+        k := s.spawn(consumer, c)?
+        p := s.spawn(producer, c, 1000u64)?
+        return Ok(k.get() + p.get())
+    }
+}
+
+func main() -> i32 {
+    c := Chan { q: Mutex[Queue].new(Queue { ring: zero(), head: 0usize, len: 0usize, done: false }), ready: Condvar.new(), space: Condvar.new() }
+    match run(c) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}

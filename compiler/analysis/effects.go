@@ -15,7 +15,7 @@ import (
 // containers' checks are Trap instructions in their kern bodies and reach
 // callers through propagation.
 var trapping = map[string]bool{
-	"Mutex.lock": true, "Shared.clone": true,
+	"Mutex.lock": true, "Condvar.wait": true, "Shared.clone": true,
 	"SystemAllocator.alloc": true, "SystemAllocator.realloc": true, "SystemAllocator.alloc_zeroed": true, "SystemAllocator.free": true, "simd_shuffle": true, "asm": true,
 	"ptr_load": true, "ptr_store": true, "ptr_take": true, "ptr_load_volatile": true, "ptr_store_volatile": true, "ptr_copy": true, "ptr_store_seq": true,
 	"ptr_view": true, "ptr_edit": true, "ptr_view_seq": true, "ptr_edit_seq": true, "ptr_edit2": true,

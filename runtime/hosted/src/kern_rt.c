@@ -5,6 +5,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE // pthread_getattr_np on glibc
 #endif
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -270,6 +271,34 @@ void kern_mutex_unlock(kern_mutex *mx) {
     pthread_mutex_unlock(&mx->m);
 }
 void kern_mutex_drop(kern_mutex *mx, kern_glue g) { if (mx == NULL) return; if (g) g(mx->data); pthread_mutex_destroy(&mx->m); free(mx); }
+
+// ---- Condvar (spec §5.5) ----
+
+// wait is given the guard a Mutex lock returned (the checker requires it to
+// be that edit, unprojected), which is the Mutex's data pointer. A wait by a
+// thread that does not hold the lock, or with a different Mutex from the
+// one the Condvar's first wait used (POSIX leaves that undefined), traps
+// with kind explicit, as the interpreter does.
+typedef struct { pthread_cond_t c; _Atomic(uintptr_t) mutex; } kern_condvar;
+void *kern_condvar_new(void) {
+    kern_condvar *cv = kern_alloc(sizeof *cv, 0, 0);
+    if (pthread_cond_init(&cv->c, NULL) != 0) { free(cv); kern_trap(11, 0, 0); } // no resources: an uninitialized condition variable must not be published
+    atomic_init(&cv->mutex, 0);
+    return cv;
+}
+void kern_condvar_wait(kern_condvar *cv, void *data, int64_t start, int64_t end) {
+    kern_mutex *mx = (kern_mutex *)((char *)data - offsetof(kern_mutex, data));
+    uintptr_t self = (uintptr_t)&kern_mutex_self;
+    if (atomic_load_explicit(&mx->owner, memory_order_relaxed) != self) kern_trap(11, start, end); // the lock is not held by this thread
+    uintptr_t want = 0;
+    if (!atomic_compare_exchange_strong(&cv->mutex, &want, (uintptr_t)mx) && want != (uintptr_t)mx) kern_trap(11, start, end); // a second Mutex on one Condvar
+    atomic_store_explicit(&mx->owner, 0, memory_order_relaxed);
+    if (pthread_cond_wait(&cv->c, &mx->m) != 0) kern_trap(11, start, end);
+    atomic_store_explicit(&mx->owner, self, memory_order_relaxed);
+}
+void kern_condvar_notify_one(kern_condvar *cv) { pthread_cond_signal(&cv->c); }
+void kern_condvar_notify_all(kern_condvar *cv) { pthread_cond_broadcast(&cv->c); }
+void kern_condvar_drop(kern_condvar *cv) { if (cv == NULL) return; pthread_cond_destroy(&cv->c); free(cv); }
 
 // ---- threads (spec §5.5) ----
 

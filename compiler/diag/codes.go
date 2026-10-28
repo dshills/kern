@@ -57,6 +57,7 @@ var Registry = map[Code]Info{
 	"SEND_NOT_SEND":           {"5.5.2", CatLang, 0, "value moved to another thread is not Send"},
 	"ACC_LIVE_ACROSS_SPAWN":   {"5.5.3", CatLang, 0, "access live across a thread spawn"},
 	"SHARE_NOT_SHARE":         {"5.5.3", CatLang, 0, "value viewed from another thread is not Share"},
+	"CONDVAR_NOT_GUARD":       {"5.5.4", CatLang, 0, "Condvar.wait argument is not the edit bound by a Mutex lock"},
 	"ATOMIC_INVALID_ORDERING": {"5.5.5", CatLang, 0, "memory ordering not permitted for this atomic operation"},
 	// §4.1 layout
 	"TYPE_TOO_MANY_VARIANTS": {"4.1.5", CatLang, 0, "union has more than 65,536 variants"},

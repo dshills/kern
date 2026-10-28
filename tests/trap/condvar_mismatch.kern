@@ -1,0 +1,50 @@
+//! phase: 3
+//! expect: trap explicit
+//! twin: condvar_mismatch_ok
+
+// Every wait on one Condvar must use the same Mutex. The worker announces
+// under the first Mutex that it is about to wait, and wait releases that
+// Mutex only once the Condvar is bound to it; so when main, holding the
+// same Mutex, sees the announcement, the binding exists. Main wakes the
+// worker, joins it, and then waits with the second Mutex, which traps
+// instead of leaving the condition variable's state undefined. Main and
+// the worker are different Shared owners, so main may lock while the
+// worker runs.
+module t
+struct Flags { waiting: bool; woken: bool }
+struct Both { a: Mutex[Flags]; b: Mutex[u64]; cv: Condvar }
+func worker(x: own Shared[Both]) -> u64 {
+    with p := x.get() {
+        with g := p.a.lock() {
+            g.waiting = true
+            while !g.woken { p.cv.wait(g) }
+        }
+    }
+    return 1u64
+}
+func run(x: view[Shared[Both]]) -> Result[u64, SpawnErr] {
+    t := thread.spawn(worker, x.clone())?
+    with p := x.get() {
+        pending := true
+        while pending {
+            with g := p.a.lock() {
+                if g.waiting { g.woken = true; pending = false }
+            }
+            yield_now()
+        }
+        p.cv.notify_all()
+    }
+    r := t.join()
+    with p := x.get() {
+        with h := p.b.lock() { p.cv.wait(h) }   // trap explicit: a second Mutex on the Condvar
+    }
+    return Ok(r)
+}
+func main() -> i32 {
+    x := Shared[Both].new(Both { a: Mutex[Flags].new(Flags { waiting: false, woken: false }), b: Mutex[u64].new(0u64), cv: Condvar.new() })
+    match run(x) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}

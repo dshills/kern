@@ -1,9 +1,10 @@
 // thread_pool: 4 worker threads pull jobs from a FIFO ring of 2048 job
-// indices behind one Mutex (no condition variables in kern: an empty ring
-// and a full one are spun on). The main thread feeds N = 1,000,000 jobs in
-// batches of 1024 (the last batch has 576): it waits until the ring holds
-// at most 1024 jobs, then pushes the batch under the lock. Job b sums the
-// 64 words of block b & 4095 of a 4096-block input (word k of the whole
+// indices behind one Mutex, with two Condvars as the C version has: workers
+// wait on `ready` while the ring is empty, the main thread waits on `space`
+// while it holds more than 1024 jobs. The main thread feeds N = 1,000,000
+// jobs in batches of 1024 (the last batch has 576): it waits until the ring
+// holds at most 1024 jobs, then pushes the batch under the lock. Job b sums
+// the 64 words of block b & 4095 of a 4096-block input (word k of the whole
 // input = k * 0x9E3779B97F4A7C15, wrapping) and yields sum XOR b. A worker
 // adds its previous job's result to the shared total under the queue's
 // mutex when it takes its next job (or before exiting). Timed: feeding
@@ -15,9 +16,10 @@
 module thread_pool_bench
 
 struct Queue { ring: [2048]u64; head: usize; len: usize; total: u64; done_jobs: u64; done: bool }
-// Pool is shared through Shared[Pool]: the queue is behind its Mutex and
-// the input words are only ever viewed.
-struct Pool { q: Mutex[Queue]; words: Vec[u64] }
+// Pool is shared through Shared[Pool]: the queue is behind its Mutex, the
+// condition variables are Interior, and the input words are only ever
+// viewed.
+struct Pool { q: Mutex[Queue]; ready: Condvar; space: Condvar; words: Vec[u64] }
 
 func run_job(words: view[Vec[u64]], b: u64) -> u64 {
     blk := usize(b & 4095u64) * 64usize
@@ -29,40 +31,43 @@ func run_job(words: view[Vec[u64]], b: u64) -> u64 {
 }
 
 // worker owns one Shared count on the pool. It takes a job index under the
-// lock (first accumulating the previous result), computes with the lock
-// released, and returns its samples once the ring is empty and done.
+// lock (first accumulating the previous result), waiting on `ready` while
+// the ring is empty, computes with the lock released, and returns its
+// samples once the ring is empty and done.
 func worker(p: own Shared[Pool], sample: bool, ops: u64) -> Sampler {
     s := new_sampler(ops)
     pending := 0u64
     have := false
-    while true {
-        sampled := false
-        if sample { sampled = s.start() }
-        var job: Option[u64] = None
-        finished := false
-        with g := p.get().q.lock() {
-            if have {
-                g.total = wrapping_add(g.total, pending)
-                g.done_jobs = g.done_jobs + 1u64
-                have = false
+    with pl := p.get() {
+        while true {
+            sampled := false
+            if sample { sampled = s.start() }
+            var job: Option[u64] = None
+            with g := pl.q.lock() {
+                if have {
+                    g.total = wrapping_add(g.total, pending)
+                    g.done_jobs = g.done_jobs + 1u64
+                    have = false
+                }
+                while g.len == 0usize && !g.done { pl.ready.wait(g) }
+                if g.len > 0usize {
+                    job = Some(g.ring[g.head])
+                    g.head = (g.head + 1usize) & 2047usize
+                    g.len = g.len - 1usize
+                    if g.len == 1024usize { pl.space.notify_one() }
+                }
             }
-            if g.len == 0usize {
-                finished = g.done
-            } else {
-                job = Some(g.ring[g.head])
-                g.head = (g.head + 1usize) & 2047usize
-                g.len = g.len - 1usize
+            match job {
+                Some(b) => {
+                    pending = run_job(pl.words, b)
+                    have = true
+                    if sample { s.stop(sampled) }
+                }
+                None => { return s }
             }
-        }
-        match job {
-            Some(b) => {
-                with pl := p.get() { pending = run_job(pl.words, b) }
-                have = true
-                if sample { s.stop(sampled) }
-            }
-            None => { if finished { return s } }
         }
     }
+    return s
 }
 
 func run(sh: view[Shared[Pool]], n: u64) -> Result[i32, SpawnErr] {
@@ -71,25 +76,23 @@ func run(sh: view[Shared[Pool]], n: u64) -> Result[i32, SpawnErr] {
     t2 := thread.spawn(worker, sh.clone(), false, n)?
     t3 := thread.spawn(worker, sh.clone(), false, n)?
     t4 := thread.spawn(worker, sh.clone(), false, n)?
-    b := 0u64
-    while b < n {
-        count := n - b
-        if count > 1024u64 { count = 1024u64 }
-        pushed := false
-        while !pushed {
-            with g := sh.get().q.lock() {
-                if g.len <= 1024usize {
-                    for k in 0u64..count {
-                        g.ring[(g.head + g.len) & 2047usize] = b + k
-                        g.len = g.len + 1usize
-                    }
-                    pushed = true
+    with pl := sh.get() {
+        b := 0u64
+        while b < n {
+            count := n - b
+            if count > 1024u64 { count = 1024u64 }
+            with g := pl.q.lock() {
+                while g.len > 1024usize { pl.space.wait(g) }
+                for k in 0u64..count {
+                    g.ring[(g.head + g.len) & 2047usize] = b + k
+                    g.len = g.len + 1usize
                 }
+                pl.ready.notify_all()
             }
+            b = b + count
         }
-        b = b + count
+        with g := pl.q.lock() { g.done = true; pl.ready.notify_all() }
     }
-    with g := sh.get().q.lock() { g.done = true }
     s := t1.join()
     s2 := t2.join()
     s3 := t3.join()
@@ -113,7 +116,7 @@ func main() -> i32 {
     for k in 0u64..262144u64 { words.push(wrapping_mul(k, 11_400_714_819_323_198_485u64)) }
     var ring: [2048]u64 = zero()
     q := Queue { ring: ring, head: 0usize, len: 0usize, total: 0u64, done_jobs: 0u64, done: false }
-    sh := Shared[Pool].new(Pool { q: Mutex[Queue].new(q), words: move words })
+    sh := Shared[Pool].new(Pool { q: Mutex[Queue].new(q), ready: Condvar.new(), space: Condvar.new(), words: move words })
     match run(sh, n) {
         Ok(code) => return code
         Err(e) => return 2i32

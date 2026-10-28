@@ -1096,6 +1096,8 @@ func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
 		}
 	case *Mutex:
 		it.destroy(x.Val, elem(0))
+	case *Condvar:
+		// nothing is owned: waiters, if any, hold their own reference
 	case *Scope:
 		// the scope's end joins every thread it spawned
 		for _, j := range x.Joins {

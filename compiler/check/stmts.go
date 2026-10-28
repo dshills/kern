@@ -308,6 +308,12 @@ func (f *fn) with(st *flow, s *ast.With) *flow {
 			if n, ok := single.Type.(*resolve.Named); ok && n.Decl.Name == "Scope" && n.Decl.Module == "core" {
 				sc.scopeSym = single
 			}
+			if call, ok := s.Subject.(*ast.CallExpr); ok && isCoreMethod(f.c.info.Calls[call], "Mutex", "lock") {
+				if f.guards == nil {
+					f.guards = map[*resolve.Symbol]bool{}
+				}
+				f.guards[single] = true
+			}
 		}
 		for i := range s.NamePos {
 			if sym := f.c.info.Decls[&s.NamePos[i]]; sym != nil {

@@ -26,6 +26,7 @@ Rule identifiers are `section.bullet` into the specification (`T.n` = spec/types
 | `ATOMIC_INVALID_ORDERING` | 5.5.5 | lang | 0 | memory ordering not permitted for this atomic operation |
 | `CALL_ARITY` | T.5 | lang | 0 | wrong number of arguments |
 | `CLI_INVALID_FLAGS` | P.0 | cli | 0 | invalid or incompatible command-line flags |
+| `CONDVAR_NOT_GUARD` | 5.5.4 | lang | 0 | Condvar.wait argument is not the edit bound by a Mutex lock |
 | `CONSTRAINT_REQUIRED` | T.4 | lang | 0 | method call on a type parameter without the interface constraint |
 | `CONSTRAINT_UNSATISFIED` | T.4 | lang | 0 | type argument does not satisfy a constraint |
 | `EDIT_INVALID_SPAN` | 16.2 | edit | 4 | structured-edit span or offset is invalid |

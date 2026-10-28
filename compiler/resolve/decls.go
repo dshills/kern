@@ -919,7 +919,7 @@ func outOfLine(n *Named) bool {
 		return false
 	}
 	switch n.Decl.Name {
-	case "Box", "Vec", "Pool", "Arena", "Shared", "Mutex", "Slab", "Thread", "Join", "Scope", "SystemAllocator":
+	case "Box", "Vec", "Pool", "Arena", "Shared", "Mutex", "Condvar", "Slab", "Thread", "Join", "Scope", "SystemAllocator":
 		return true
 	}
 	return false
@@ -1446,7 +1446,7 @@ func namedMarker(n *Named, mk marker, visiting map[string]bool) bool {
 		case markerCopy:
 			return false
 		}
-	case "core.Atomic":
+	case "core.Atomic", "core.Condvar":
 		switch mk {
 		case markerShare, markerSend, markerInterior:
 			return true

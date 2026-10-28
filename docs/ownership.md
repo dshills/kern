@@ -383,6 +383,26 @@ func par_sum(data: view[]u64, raw: Raw) -> Result[u64, SpawnErr] {
 
 ### Rule 5.5.4 — Shared ownership and `Mutex`
 `Shared[T]` is an atomically reference-counted immutable value; it is `Share` iff `T: Share`, and `Send` iff `T: Send` and `T: Share` (the last owner, on any thread, destroys `T`). The count is a `usize`; `clone` when the count equals the maximum `usize` traps with kind `overflow`, so the count never wraps and destruction is never premature. `Mutex[T]` is `Send` and `Share` iff `T: Send`; `with g := m.lock() { ... }` binds `g: edit[T]` for the block, and the lock is released when the bound `edit` ends, including on every early exit of the `with` block (Rules 5.3.5, 5.3.6). An allocator shared between threads is `Shared[Mutex[A]]` or an `Interior` allocator with internal synchronization (§6).
+`Condvar` is a `Send`, `Share`, `Interior` type: `wait(view self, g)` takes the `edit` bound by `with g := m.lock()`, unprojected, releases `m`, blocks until `notify_one` or `notify_all` (spurious wakeups are permitted, so the condition is re-tested in a loop), reacquires `m` and returns with `g` still live; every `wait` on one `Condvar` must use the same `Mutex`, and a `wait` with a different `Mutex` or by a thread that does not hold the lock traps with kind `explicit`.
+Diagnostics: `CONDVAR_NOT_GUARD`
+Accepted:
+```kern
+module m
+struct Cell { ready: bool }
+func f(cv: view[Condvar], m: view[Mutex[Cell]]) {
+    with g := m.lock() {
+        while !g.ready { cv.wait(g) }
+    }
+}
+```
+Rejected:
+```kern
+module m
+struct Cell { ready: bool }
+func f(cv: view[Condvar], c: edit[Cell]) {
+    cv.wait(c)   // CONDVAR_NOT_GUARD: c is an edit parameter, not the edit bound by a Mutex lock
+}
+```
 
 ### Rule 5.5.5 — Atomics
 `Atomic[T]` for `T` in `u8 u16 u32 u64 usize i8 i16 i32 i64 isize bool` is an `Interior` type. Every ordering argument is a compile-time constant of `Ordering { relaxed, acquire, release, acq_rel, seq_cst }`: `load(view self, ord)` with `ord` in `relaxed | acquire | seq_cst`; `store(view self, v, ord)` with `ord` in `relaxed | release | seq_cst`; `swap`, `fetch_add`, `fetch_sub`, `fetch_and`, `fetch_or`, `fetch_xor` (integer `T` only, wrapping) accept every ordering; `compare_exchange` (strong) and `compare_exchange_weak` `(view self, expected, desired, success, failure) -> Result[T, T]` permit `failure` orderings of `relaxed` for `success = relaxed`; `relaxed, acquire` for `acquire`; `relaxed` for `release`; `relaxed, acquire` for `acq_rel`; `relaxed, acquire, seq_cst` for `seq_cst`; `fence(ord)` with `ord` in `acquire | release | acq_rel | seq_cst`. Any other ordering argument is an error. The memory model is the ISO C++ 2020 memory model. Volatile MMIO is a separate unsafe operation and is never conflated with atomics.

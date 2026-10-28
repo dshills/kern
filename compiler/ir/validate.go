@@ -277,23 +277,39 @@ func (v *validator) transfer(b *Block, st *vstate) *vstate {
 			}
 			st.open[i.Dst] = oa
 		case *AccessEnd:
-			if _, ok := st.open[i.Access]; !ok {
+			ended, ok := st.open[i.Access]
+			if !ok {
 				v.errorf("%s: access_end of %s which is not open", blockName(b), v2(i.Access))
+			}
+			// accesses derived from the ended one (a call's returned
+			// projection whose receiver access was a temporary) stay
+			// derived from its ancestors
+			for val, oa := range st.open {
+				if oa.parent == i.Access {
+					oa.parent = ended.parent
+					st.open[val] = oa
+				}
 			}
 			delete(st.open, i.Access)
 		case *Call:
 			for _, d := range i.Dsts {
 				if _, isAcc := d.Type.(*resolve.Access); isAcc {
-					// a returned projection: rooted at the single access argument
+					// a returned projection: rooted at the single access
+					// argument, and derived from it (a reborrow of the result
+					// while that argument stays open, as with a lock guard
+					// taken through a with-bound view, is exempt from the
+					// conflict check as any other reborrow of a derived
+					// access is)
 					var root *Local
 					var path []PathElem
+					var parent *Value
 					for _, a := range i.Args {
 						if oa, ok := st.open[a]; ok {
-							root, path = oa.root, oa.path
+							root, path, parent = oa.root, oa.path, a
 							break
 						}
 					}
-					st.open[d] = openAccess{edit: d.Type.(*resolve.Access).Edit, root: root, path: path}
+					st.open[d] = openAccess{edit: d.Type.(*resolve.Access).Edit, root: root, path: path, parent: parent}
 				}
 			}
 			if fn := v.calleeExtern(i); fn && st.unsafe == 0 {

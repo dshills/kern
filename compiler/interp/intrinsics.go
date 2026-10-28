@@ -109,7 +109,7 @@ func init() {
 			m.Locked = true
 			m.owner = it.tid
 			m.state.Unlock()
-			return []Value{&Access{Ref: slotRef{&m.Val}, Edit: true}}
+			return []Value{&Access{Ref: mutexRef{m}, Edit: true}}
 		},
 		"Mutex.unlock": func(it *Interp, a []Value, _ callCtx) []Value {
 			m := acc(a[0]).Ref.get().(*Mutex)
@@ -117,6 +117,54 @@ func init() {
 			m.Locked = false
 			m.state.Unlock()
 			m.lock.Unlock()
+			return nil
+		},
+		"Condvar.new": func(it *Interp, a []Value, _ callCtx) []Value {
+			return []Value{&Condvar{gen: make(chan struct{})}}
+		},
+		"Condvar.wait": func(it *Interp, a []Value, c callCtx) []Value {
+			cv := acc(a[0]).Ref.get().(*Condvar)
+			// the guard is the edit a Mutex lock bound (the checker requires
+			// it): its ref is the Mutex's slot
+			mr, ok := acc(a[1]).Ref.(mutexRef)
+			if !ok {
+				it.trap("explicit", c.pos) // not a lock guard
+			}
+			m := mr.m
+			m.state.Lock()
+			held := m.Locked && m.owner == it.tid
+			m.state.Unlock()
+			if !held {
+				it.trap("explicit", c.pos) // the calling thread does not hold the lock
+			}
+			cv.state.Lock()
+			if cv.mutex == nil {
+				cv.mutex = m
+			}
+			same := cv.mutex == m
+			gen := cv.gen
+			cv.state.Unlock()
+			if !same {
+				it.trap("explicit", c.pos) // a second Mutex on one Condvar
+			}
+			m.state.Lock()
+			m.Locked = false
+			m.state.Unlock()
+			m.lock.Unlock()
+			it.await(gen)
+			m.lock.Lock()
+			m.state.Lock()
+			m.Locked = true
+			m.owner = it.tid
+			m.state.Unlock()
+			return nil
+		},
+		"Condvar.notify_one": func(it *Interp, a []Value, _ callCtx) []Value {
+			notifyAll(acc(a[0]).Ref.get().(*Condvar))
+			return nil
+		},
+		"Condvar.notify_all": func(it *Interp, a []Value, _ callCtx) []Value {
+			notifyAll(acc(a[0]).Ref.get().(*Condvar))
 			return nil
 		},
 		// an Atomic[T] is a struct of its cell (as natively); atomicMu makes
@@ -505,6 +553,15 @@ const ConsoleAddr = 0x0900_0000
 
 // atomicMu serializes the interpreter's atomic and reference-count updates.
 var atomicMu sync.Mutex
+
+// notifyAll wakes every thread waiting on cv: the current generation's
+// channel is closed and a fresh one opened for later waiters.
+func notifyAll(cv *Condvar) {
+	cv.state.Lock()
+	close(cv.gen)
+	cv.gen = make(chan struct{})
+	cv.state.Unlock()
+}
 
 // spawned starts a thread: a goroutine running the function on a copy of
 // the interpreter with fresh thread-locals. A trap on the thread writes its

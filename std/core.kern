@@ -808,6 +808,23 @@ impl Mutex[T] {
 }
 unsafe assert Interior for Mutex
 
+// Condvar is a condition variable (spec §5.5). wait takes the edit bound by
+// a Mutex lock: it releases that lock, blocks until a notify (spurious
+// wakeups are permitted, so callers re-test their condition in a loop),
+// reacquires the lock and returns with the binding still live. Every wait on
+// one Condvar must use the same Mutex; a wait with a different Mutex traps
+// with kind explicit, as does a wait whose guard is not held by the calling
+// thread.
+struct Condvar nocopy { phantom: u8 }
+impl Condvar {
+    func new() -> Condvar
+    func wait[T](view self, g: edit[T])
+    func notify_one(view self)
+    func notify_all(view self)
+    destructor(edit self) { }
+}
+unsafe assert Interior for Condvar
+
 struct Atomic[T] { inner: T }
 impl Atomic[T] {
     func new(v: T) -> Atomic[T]

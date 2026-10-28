@@ -115,7 +115,7 @@ func Opaque(n *resolve.Named) bool {
 		return false
 	}
 	switch n.Decl.Name {
-	case "Slab", "Shared", "Mutex", "Scope", "Thread", "Join", "SystemAllocator", "thread", "trap", "testing":
+	case "Slab", "Shared", "Mutex", "Condvar", "Scope", "Thread", "Join", "SystemAllocator", "thread", "trap", "testing":
 		return true
 	}
 	return false

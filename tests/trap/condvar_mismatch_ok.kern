@@ -1,0 +1,47 @@
+//! phase: 3
+//! expect: output condvar_mismatch_ok
+//! twin: condvar_mismatch
+
+// The same Condvar used with one Mutex throughout: the worker announces
+// that it is about to wait and waits; main sees the announcement under the
+// lock, wakes it, and then waits itself with the same Mutex until the
+// worker has set the second flag, so nothing traps.
+module t
+struct Flags { waiting: bool; woken: bool; again: bool }
+struct Both { a: Mutex[Flags]; cv: Condvar }
+func worker(x: own Shared[Both]) -> u64 {
+    with p := x.get() {
+        with g := p.a.lock() {
+            g.waiting = true
+            while !g.woken { p.cv.wait(g) }
+            g.again = true
+        }
+        p.cv.notify_all()
+    }
+    return 1u64
+}
+func run(x: view[Shared[Both]]) -> Result[u64, SpawnErr] {
+    t := thread.spawn(worker, x.clone())?
+    with p := x.get() {
+        pending := true
+        while pending {
+            with g := p.a.lock() {
+                if g.waiting { g.woken = true; pending = false }
+            }
+            yield_now()
+        }
+        p.cv.notify_all()
+        with h := p.a.lock() {
+            while !h.again { p.cv.wait(h) }
+        }
+    }
+    return Ok(t.join())
+}
+func main() -> i32 {
+    x := Shared[Both].new(Both { a: Mutex[Flags].new(Flags { waiting: false, woken: false, again: false }), cv: Condvar.new() })
+    match run(x) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}
