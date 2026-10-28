@@ -1,0 +1,8 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: fix_literal_suffix_ok
+//! fix: clean
+module m
+func f() -> u64 {
+    var x: u64 = 5u32   // TYPE_MISMATCH: the fix rewrites the suffix
+    return x
+}

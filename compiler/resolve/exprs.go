@@ -1,6 +1,7 @@
 package resolve
 
 import (
+	"github.com/dshills/kern/compiler/diag"
 	"math"
 	"strings"
 
@@ -13,8 +14,42 @@ func (c *fnCtx) exprExpect(sc *scope, e ast.Expr, want Type) Type {
 	got := c.expr(sc, e, want)
 	if !c.assignable(got, want, e) {
 		c.errorf("TYPE_MISMATCH", e.Span(), "expected %s, found %s", typeString(want), typeString(got))
+		c.literalFix(e, want)
 	}
 	return got
+}
+
+// literalFix offers the literal written with the expected type's suffix when
+// the mismatch is a suffixed numeric literal against a numeric type.
+func (c *fnCtx) literalFix(e ast.Expr, want Type) {
+	p, ok := want.(*Prim)
+	if !ok {
+		return
+	}
+	// a negative float is a unary minus over the literal (the parser folds
+	// the sign into integer literals only): the fix rewrites the literal
+	// and leaves the sign where it is
+	if u, ok := e.(*ast.Unary); ok && u.Op == "-" {
+		if fl, ok := u.X.(*ast.FloatLit); ok {
+			e = fl
+		}
+	}
+	switch x := e.(type) {
+	case *ast.IntLit:
+		if x.Suffix == "" || x.Text == "" || !IsInteger(want) || !fits(x, p.Name) {
+			return
+		}
+		text := strings.TrimSuffix(x.Text, x.Suffix) + p.Name
+		if x.Neg {
+			text = "-" + text
+		}
+		c.fix(diag.Replace(c.file, span(x.Pos), text))
+	case *ast.FloatLit:
+		if x.Suffix == "" || x.Text == "" || !IsFloat(want) || (p.Name == "f32" && math.Abs(x.Value) > math.MaxFloat32) {
+			return
+		}
+		c.fix(diag.Replace(c.file, span(x.Pos), strings.TrimSuffix(x.Text, x.Suffix)+p.Name))
+	}
 }
 
 // assignable reports whether a value of type got can be used where want is
@@ -190,11 +225,21 @@ func (c *fnCtx) intLit(x *ast.IntLit, want Type) Type {
 			name = "i64"
 		}
 	}
-	lim := intLimits[name]
-	if (!x.Neg && x.Value > lim[0]) || (x.Neg && x.Value > lim[1]) || (x.Neg && x.Value != 0 && lim[1] == 0) {
+	if !fits(x, name) {
 		c.errorf("TYPE_MISMATCH", x.Pos, "literal does not fit in %s", name)
 	}
 	return &Prim{Name: name}
+}
+
+// fits reports whether the literal's value is representable in the integer
+// type name: within its positive limit, or within its negative limit when
+// negated (a negative literal of an unsigned type fits only as zero).
+func fits(x *ast.IntLit, name string) bool {
+	lim := intLimits[name]
+	if !x.Neg {
+		return x.Value <= lim[0]
+	}
+	return x.Value <= lim[1] && (x.Value == 0 || lim[1] != 0)
 }
 
 // globalSym is the one symbol of a thread_local in this resolver (places are
@@ -229,6 +274,9 @@ func (c *fnCtx) ident(sc *scope, x *ast.Ident, want Type) Type {
 			return vt
 		} else {
 			c.errorf("NAME_UNRESOLVED", x.Pos, "unknown name %s", x.Name)
+			if s := nearest(x.Name, c.visibleNames(sc)); s != "" {
+				c.fix(diag.Replace(c.file, span(x.Pos), s))
+			}
 			return &Bad{}
 		}
 	}

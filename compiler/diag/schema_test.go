@@ -152,7 +152,7 @@ func fieldsOf(t reflect.Type) []string {
 func sampleCheckResponse() Response {
 	d := New("OWN_USE_AFTER_MOVE", "main.kern", Span{Start: 128, End: 134}, "value used after move")
 	d.Related = []Related{{Label: "moved here", Start: 91, End: 97}}
-	d.Fix = &Edit{Ops: []EditOp{{Op: OpReplaceSpan, File: "main.kern", Span: &Span{Start: 128, End: 134}, Text: "y"}}}
+	d.Fix = &StructuredEdit{Ops: []StructuredEditOp{{Op: OpReplaceSpan, File: "main.kern", Span: &Span{Start: 128, End: 134}, Text: "y"}}}
 	return Response{
 		SchemaVersion: SchemaVersion,
 		OK:            false,
@@ -231,9 +231,9 @@ func TestSchemaRejects(t *testing.T) {
 		"wrong schema_version":        func(r *Response) { r.SchemaVersion = "0.1" },
 		"foreign result":              func(r *Response) { r.Result = EmitIRResult{IR: ""} },
 		"extra result field":          func(r *Response) { r.Result = map[string]any{"files": []string{}, "extra": 1} },
-		"fix op without text": func(r *Response) {
+		"fix op without span": func(r *Response) {
 			r.Diagnostics[0].Fix.Ops[0].Op = OpDeleteSpan
-			r.Diagnostics[0].Fix.Ops[0].Text = "x"
+			r.Diagnostics[0].Fix.Ops[0].Span = nil
 		},
 	}
 	for name, mutate := range cases {
@@ -243,10 +243,9 @@ func TestSchemaRejects(t *testing.T) {
 			t.Errorf("%s: expected validation failure", name)
 		}
 	}
-	// Note: EditOp (diag.go) tags text as omitempty, so a Phase 0 replace_span
-	// fix with an empty replacement would omit the required text property;
-	// such a fix must be emitted as delete_span. StructuredEditOp marshals the
-	// exact §16 shape (see TestRequestSchema).
+	// a fix is a StructuredEdit, so its ops marshal the exact §16 shape of
+	// their kind (see TestRequestSchema): an empty replacement is a
+	// replace_span with text "" and never a delete_span
 }
 
 // TestRequestSchema validates requests built from Request against schema.json.

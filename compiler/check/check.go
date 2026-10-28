@@ -91,6 +91,15 @@ func (c *checker) errorf(code diag.Code, file string, pos ast.Pos, format string
 	c.diags = append(c.diags, diag.New(code, file, diag.Span{Start: pos.Start, End: pos.End}, format, args...))
 }
 
+// fix attaches a machine-applicable edit to the diagnostic just reported.
+func (c *checker) fix(ops ...diag.StructuredEditOp) {
+	if n := len(c.diags); n > 0 {
+		c.diags[n-1].Fix = &diag.StructuredEdit{Ops: ops}
+	}
+}
+
+func span(p ast.Pos) diag.Span { return diag.Span{Start: p.Start, End: p.End} }
+
 // fn is the per-function checking context.
 type fn struct {
 	c            *checker
@@ -190,6 +199,8 @@ func (f *fn) errorf(code diag.Code, pos ast.Pos, format string, args ...any) {
 	f.c.errorf(code, f.file, pos, format, args...)
 }
 
+func (f *fn) fix(ops ...diag.StructuredEditOp) { f.c.fix(ops...) }
+
 func (f *fn) tick() int { f.now++; return f.now }
 
 func (c *checker) checkFunc(file string, fd *resolve.FuncDecl, body *ast.Block, isDtor bool) {
@@ -228,6 +239,7 @@ func (c *checker) checkFunc(file string, fd *resolve.FuncDecl, body *ast.Block, 
 	f.popScope()
 	if f.hasUnsafe && fd.Contract == nil {
 		f.errorf("UNSAFE_MISSING_CONTRACT", fd.Pos, "function %s contains unsafe but has no contract block", fd.Name)
+		f.fix(diag.InsertAt(f.file, fd.Pos.Start, "contract { requires \"TODO: state what the unsafe code relies on\" }\n"))
 	}
 	if len(fd.Ret) > 1 && !f.hasUnsafe && !fd.Intrinsic {
 		f.errorf("ACC_MULTI_ACCESS_SAFE", fd.Pos, "function %s returns several accesses but is not implemented inside unsafe", fd.Name)

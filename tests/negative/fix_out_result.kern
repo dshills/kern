@@ -1,0 +1,11 @@
+//! expect: reject INIT_OUT_RESULT_UNHANDLED rule=5.2.3
+//! twin: fix_out_result_ok
+//! fix: clean
+module m
+struct P { x: u64 }
+func init_p(p: out P) -> Result[(), u8] { p.x = 1u64; return Ok(()) }
+func g() -> Result[u64, u8] {
+    var p: P
+    init_p(out p)   // INIT_OUT_RESULT_UNHANDLED: the fix appends ?
+    return Ok(7u64)
+}

@@ -2,6 +2,7 @@ package check
 
 import (
 	"github.com/dshills/kern/compiler/ast"
+	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/resolve"
 )
 
@@ -592,6 +593,28 @@ var cmpxchgFailure = map[string]map[string]bool{
 }
 
 // checkAtomicOrdering enforces the permitted orderings of §5.5.
+// shadows reports whether a bare name would resolve to something other
+// than a prelude variant in this function: a local, parameter or binding
+// declared in the file, or a module-level name (the resolver looks those up
+// before bare variants).
+func (f *fn) shadows(name string) bool {
+	for _, sym := range f.c.info.Decls {
+		if sym != nil && sym.Name == name && sym.File == f.file {
+			return true
+		}
+	}
+	m := f.c.prog.Modules[f.fd.Module]
+	if m == nil {
+		return false
+	}
+	_, fn := m.Funcs[name]
+	_, k := m.Consts[name]
+	_, g := m.Globals[name]
+	_, t := m.Types[name]
+	_, i := m.Imports[name]
+	return fn || k || g || t || i
+}
+
 func (f *fn) checkAtomicOrdering(x *ast.CallExpr, info *resolve.CallInfo) {
 	if info.Fn == nil {
 		return
@@ -610,25 +633,44 @@ func (f *fn) checkAtomicOrdering(x *ast.CallExpr, info *resolve.CallInfo) {
 		}
 		return ""
 	}
+	// orderFix replaces the ordering with o when the argument is a bare
+	// name that resolved as a variant of the core Ordering union (not a
+	// local or a constant), so the replacement, another of its variants,
+	// resolves the same way
+	orderFix := func(a *ast.Arg, o string) {
+		id, ok := a.X.(*ast.Ident)
+		if !ok || f.shadows(o) {
+			return
+		}
+		if sym := f.c.info.Idents[id]; sym != nil && sym.Kind == resolve.SymType && sym.TDecl != nil && sym.TDecl.Name == "Ordering" && sym.TDecl.Module == "core" {
+			f.fix(diag.Replace(f.file, span(a.Pos), o))
+		}
+	}
 	args := x.Args
 	switch info.Fn.Name {
 	case "load":
 		if len(args) == 1 && !loadOrders[name(args[0].X)] {
 			f.errorf("ATOMIC_INVALID_ORDERING", args[0].Pos, "load permits relaxed, acquire or seq_cst")
+			orderFix(args[0], "acquire")
 		}
 	case "store":
 		if len(args) == 2 && !storeOrders[name(args[1].X)] {
 			f.errorf("ATOMIC_INVALID_ORDERING", args[1].Pos, "store permits relaxed, release or seq_cst")
+			orderFix(args[1], "release")
 		}
 	case "fence":
 		if len(args) == 1 && !fenceOrders[name(args[0].X)] {
 			f.errorf("ATOMIC_INVALID_ORDERING", args[0].Pos, "fence permits acquire, release, acq_rel or seq_cst")
+			orderFix(args[0], "seq_cst")
 		}
 	case "compare_exchange", "compare_exchange_weak":
 		if len(args) == 4 {
 			s, fl := name(args[2].X), name(args[3].X)
 			if allowed, ok := cmpxchgFailure[s]; !ok || !allowed[fl] {
 				f.errorf("ATOMIC_INVALID_ORDERING", args[3].Pos, "failure ordering %s is not permitted with success ordering %s", fl, s)
+				if ok {
+					orderFix(args[3], "relaxed")
+				}
 			}
 		}
 	}

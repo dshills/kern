@@ -2,7 +2,9 @@ package check
 
 import (
 	"github.com/dshills/kern/compiler/ast"
+	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/resolve"
+	"reflect"
 )
 
 // block checks a block, returning the state at its end. Owned locals
@@ -110,6 +112,13 @@ func (f *fn) checkOutCallUse(e ast.Expr) {
 	}
 	if n, ok := f.c.info.Types[call].(*resolve.Named); ok && n.Decl.Name == "Result" && n.Decl.Module == "core" {
 		f.errorf("INIT_OUT_RESULT_UNHANDLED", call.Pos, "the result of a fallible out call must be consumed by ? or match")
+		// ? is the fix when the enclosing function returns a Result with the
+		// same error type, so the propagated error type-checks
+		if len(f.fd.Ret) == 1 {
+			if r, ok := f.fd.Ret[0].(*resolve.Named); ok && r.Decl == n.Decl && len(r.Args) == 2 && len(n.Args) == 2 && reflect.DeepEqual(r.Args[1], n.Args[1]) {
+				f.fix(diag.InsertAt(f.file, call.End, "?"))
+			}
+		}
 	}
 }
 

@@ -26,30 +26,25 @@ type Related struct {
 // Diagnostic is one §16 diagnostic. Message is not part of the wire format
 // (the schema has no message field); it is kept for human renderings only.
 type Diagnostic struct {
-	Code     Code      `json:"code"`
-	Severity string    `json:"severity"`
-	Rule     string    `json:"rule"`
-	File     string    `json:"file"`
-	Span     Span      `json:"span"`
-	Related  []Related `json:"related"`
-	Fix      *Edit     `json:"fix"`
-	OpIndex  *int      `json:"op_index"`
-	Message  string    `json:"-"`
+	Code     Code            `json:"code"`
+	Severity string          `json:"severity"`
+	Rule     string          `json:"rule"`
+	File     string          `json:"file"`
+	Span     Span            `json:"span"`
+	Related  []Related       `json:"related"`
+	Fix      *StructuredEdit `json:"fix"`
+	OpIndex  *int            `json:"op_index"`
+	Message  string          `json:"-"`
 }
 
-// Edit is a structured edit (§16); only the operations Phase 0 can emit as
-// machine-applicable fixes are modelled.
-type Edit struct {
-	Ops []EditOp `json:"ops"`
+// Replace is a replace_span fix operation on file.
+func Replace(file string, span Span, text string) StructuredEditOp {
+	return StructuredEditOp{Op: OpReplaceSpan, File: file, Span: &span, Text: text}
 }
 
-// EditOp is one structured-edit operation.
-type EditOp struct {
-	Op   string `json:"op"`
-	File string `json:"file"`
-	Span *Span  `json:"span,omitempty"`
-	At   *int   `json:"at,omitempty"`
-	Text string `json:"text,omitempty"`
+// InsertAt is an insert fix operation at byte offset at of file.
+func InsertAt(file string, at int, text string) StructuredEditOp {
+	return StructuredEditOp{Op: OpInsert, File: file, At: &at, Text: text}
 }
 
 // Response is the §7 machine-API response envelope.

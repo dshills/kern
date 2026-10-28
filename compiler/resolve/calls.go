@@ -2,6 +2,7 @@ package resolve
 
 import (
 	"github.com/dshills/kern/compiler/ast"
+	"github.com/dshills/kern/compiler/diag"
 	"strings"
 )
 
@@ -162,6 +163,10 @@ func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 				return c.callValue(sc, x, info, valueOf(ft))
 			}
 			c.errorf("NAME_UNRESOLVED", fn.Pos, "%s has no method %s", td.Name, fn.Name)
+			if s := nearest(fn.Name, keys(td.Methods)); s != "" {
+				// the field expression spans the receiver too; the name is its tail
+				c.fix(diag.Replace(c.file, diag.Span{Start: fn.End - len(fn.Name), End: fn.End}, s))
+			}
 			return &Bad{}
 		}
 		if len(m.Params) == 0 || !m.Params[0].Self {

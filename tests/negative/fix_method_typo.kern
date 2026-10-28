@@ -1,0 +1,7 @@
+//! expect: reject NAME_UNRESOLVED rule=T.1
+//! twin: fix_method_typo_ok
+//! fix: clean
+module m
+func f(v: view[Vec[u64]]) -> usize {
+    return v.lenn()   // NAME_UNRESOLVED: the fix names the method one edit away
+}

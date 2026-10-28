@@ -1,0 +1,8 @@
+//! phase: 1
+//! expect: accept
+//! twin: fix_name_typo
+module m
+func f() -> u64 {
+    total := 1u64
+    return total
+}

@@ -47,7 +47,7 @@ func tools(arm string) []toolDef {
 	ts := []toolDef{
 		{Name: "read_file", Description: "Read one of the task's files.", Params: map[string]string{"file": "file name"}},
 		{Name: "write_file", Description: "Replace the whole content of one of the task's files.", Params: map[string]string{"file": "file name", "content": "new content"}},
-		{Name: "check", Description: "Run the kern checker on the task's files and return its diagnostics.", Params: map[string]string{}},
+		{Name: "check", Description: "Run the kern checker on the task's files and return its diagnostics; a diagnostic may carry a machine-applicable fix (a structured edit) that write_file can apply.", Params: map[string]string{}},
 		{Name: "run", Description: "Run the program and return its standard output, standard error and exit status.", Params: map[string]string{}},
 	}
 	if arm == "structured" {

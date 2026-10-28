@@ -1,0 +1,8 @@
+//! expect: reject NAME_UNRESOLVED rule=T.1
+//! twin: fix_name_typo_ok
+//! fix: clean
+module m
+func f() -> u64 {
+    total := 1u64
+    return totl   // NAME_UNRESOLVED: the fix names the local one edit away
+}

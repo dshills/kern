@@ -1,0 +1,8 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: fix_literal_range_ok
+//! fix: none
+module m
+func f() -> u8 {
+    var x: u8 = 300u64   // TYPE_MISMATCH: no fix, 300 does not fit in u8
+    return x
+}

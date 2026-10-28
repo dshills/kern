@@ -75,8 +75,8 @@ type Request struct {
 }
 
 // StructuredEdit is the §16 structured edit: the edit of an
-// apply-structured-edit request. (A fix carried by a diagnostic uses the same
-// wire format; Diagnostic.Fix is the Phase 0 subset Edit.)
+// apply-structured-edit request, and the fix a diagnostic carries, which an
+// apply-structured-edit request can send back as it is.
 type StructuredEdit struct {
 	Ops []StructuredEditOp `json:"ops"`
 }
@@ -419,7 +419,6 @@ func RenderSchemaMarkdown() string {
 	r.section(reflect.TypeFor[Response]())
 	r.section(reflect.TypeFor[Diagnostic]())
 	r.section(reflect.TypeFor[Related]())
-	r.section(reflect.TypeFor[Edit]())
 
 	r.p("## Commands\n\n")
 	r.p("| Command | `result` type | `target` in result | `label` |\n|---|---|---|---|\n")

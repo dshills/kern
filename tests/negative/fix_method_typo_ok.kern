@@ -1,0 +1,7 @@
+//! phase: 1
+//! expect: accept
+//! twin: fix_method_typo
+module m
+func f(v: view[Vec[u64]]) -> usize {
+    return v.len()
+}

@@ -21,6 +21,7 @@ import (
 	"github.com/dshills/kern/compiler/backend/native"
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
+	"github.com/dshills/kern/compiler/edit"
 	"github.com/dshills/kern/compiler/interp"
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/lower"
@@ -39,6 +40,7 @@ type header struct {
 	code      string
 	rule      string
 	twin      string
+	fix       string
 	testHooks bool
 	config    string // config: opt=debug|release — the fixture is valid in that configuration only
 	noRecord  bool   // trap-record: none — a custom handler writes no default record
@@ -77,6 +79,8 @@ func parseHeader(t *testing.T, f *source.File) header {
 			}
 		case "twin":
 			h.twin = val
+		case "fix":
+			h.fix = val
 		case "test-hooks":
 			h.testHooks = val == "true"
 		case "config":
@@ -96,6 +100,32 @@ func parseHeader(t *testing.T, f *source.File) header {
 		}
 	}
 	return h
+}
+
+func fixText(fix *diag.StructuredEdit) string {
+	b, _ := json.Marshal(fix)
+	return string(b)
+}
+
+// applyFix applies a diagnostic's fix to the fixture's files and checks the
+// result, which must be free of diagnostics.
+func applyFix(t *testing.T, all []*source.File, fix *diag.StructuredEdit) {
+	t.Helper()
+	out, fail := edit.Apply(all, fix.Ops)
+	if fail != nil {
+		t.Fatalf("fix does not apply: %+v", fail)
+	}
+	var fixed []*source.File
+	for _, f := range all {
+		b := f.Bytes
+		if nb, ok := out[f.Name]; ok {
+			b = nb
+		}
+		fixed = append(fixed, &source.File{Name: f.Name, Bytes: b})
+	}
+	if ds := checkFiles(fixed); len(ds) != 0 {
+		t.Fatalf("fix left %d diagnostics:\n%s\n--- fixed source\n%s", len(ds), render(ds), out[all[0].Name])
+	}
 }
 
 func checkFiles(fs []*source.File) []diag.Diagnostic {
@@ -206,6 +236,16 @@ func TestFixtures(t *testing.T) {
 				}
 				if h.rule != "" && ds[0].Rule != h.rule {
 					t.Fatalf("expected rule %s, got %s", h.rule, ds[0].Rule)
+				}
+				// a fix the diagnostic carries must apply and leave the
+				// program clean, unless the fixture says it is partial
+				switch {
+				case ds[0].Fix != nil && h.fix == "none":
+					t.Fatalf("expected %s to carry no fix, got %s", h.code, fixText(ds[0].Fix))
+				case ds[0].Fix != nil && h.fix != "partial":
+					applyFix(t, all, ds[0].Fix)
+				case h.fix == "clean":
+					t.Fatalf("expected %s to carry a fix", h.code)
 				}
 			default:
 				t.Fatalf("unknown expect %q", h.expect)

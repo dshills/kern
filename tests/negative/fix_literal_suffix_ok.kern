@@ -1,0 +1,8 @@
+//! phase: 1
+//! expect: accept
+//! twin: fix_literal_suffix
+module m
+func f() -> u64 {
+    var x: u64 = 5u64
+    return x
+}
