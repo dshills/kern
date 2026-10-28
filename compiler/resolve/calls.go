@@ -17,7 +17,7 @@ func isUnsafeOp(f *FuncDecl) bool {
 	if f.Receiver == nil {
 		return strings.HasPrefix(f.Name, "ptr_") || f.Name == "asm"
 	}
-	return f.Receiver.Name == "SystemAllocator" && (f.Name == "alloc" || f.Name == "realloc" || f.Name == "free")
+	return f.Receiver.Name == "SystemAllocator" && (f.Name == "alloc" || f.Name == "realloc" || f.Name == "alloc_zeroed" || f.Name == "free")
 }
 
 // wrappingIntrinsics are the prelude's wrapping arithmetic forms (§4.1).

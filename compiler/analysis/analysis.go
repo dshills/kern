@@ -139,7 +139,7 @@ var allocating = map[string]bool{
 	"Box.new": true, "Vec.new": true, "Vec.with_capacity": true, "Pool.new": true, "Arena.new": true,
 	"Shared.new": true, "Mutex.new": true, "thread.scope": true,
 	"Vec.push": false, "Pool.alloc": false, "Arena.alloc": false, "thread.spawn": false, "scope.spawn": false,
-	"SystemAllocator.alloc": false, "SystemAllocator.realloc": false, "clone": false,
+	"SystemAllocator.alloc": false, "SystemAllocator.realloc": false, "SystemAllocator.alloc_zeroed": false, "clone": false,
 }
 
 // Allocations reports every allocation site: library constructors and the

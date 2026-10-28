@@ -16,7 +16,7 @@ import (
 // callers through propagation.
 var trapping = map[string]bool{
 	"Mutex.lock": true, "Shared.clone": true,
-	"SystemAllocator.alloc": true, "SystemAllocator.realloc": true, "SystemAllocator.free": true, "simd_shuffle": true, "asm": true,
+	"SystemAllocator.alloc": true, "SystemAllocator.realloc": true, "SystemAllocator.alloc_zeroed": true, "SystemAllocator.free": true, "simd_shuffle": true, "asm": true,
 	"ptr_load": true, "ptr_store": true, "ptr_take": true, "ptr_load_volatile": true, "ptr_store_volatile": true, "ptr_copy": true, "ptr_store_seq": true,
 	"ptr_view": true, "ptr_edit": true, "ptr_view_seq": true, "ptr_edit_seq": true, "ptr_edit2": true,
 	"testing.require_hooks": true, "testing.seed_shared_count": true,
@@ -27,7 +27,7 @@ var spawning = map[string]bool{"thread.spawn": true, "scope.spawn": true}
 
 // unsafeIntrinsics are the enumerated unsafe operations among intrinsics.
 func unsafeIntrinsic(name string) bool {
-	return strings.HasPrefix(name, "ptr_") || name == "asm" || name == "SystemAllocator.alloc" || name == "SystemAllocator.realloc" || name == "SystemAllocator.free"
+	return strings.HasPrefix(name, "ptr_") || name == "asm" || name == "SystemAllocator.alloc" || name == "SystemAllocator.realloc" || name == "SystemAllocator.alloc_zeroed" || name == "SystemAllocator.free"
 }
 
 type effects struct {

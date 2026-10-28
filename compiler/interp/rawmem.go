@@ -118,6 +118,14 @@ func (h *rawHeap) realloc(addr, oldSize, size, align uint64) (uint64, bool) {
 	return n, true
 }
 
+// zero clears the n bytes at addr (alloc_zeroed: chunks start zeroed and
+// are never reused today, but the guarantee belongs to the call).
+func (h *rawHeap) zero(addr, n uint64) {
+	if n > 0 {
+		clear(h.bytes(addr, n))
+	}
+}
+
 // bytes returns the n bytes at addr, or nil when the range is not mapped.
 // Chunks are never reallocated, so the slice stays valid after the lock is
 // released; concurrent access to one allocation is the program's data race.

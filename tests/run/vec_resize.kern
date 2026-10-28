@@ -4,7 +4,8 @@
 // explicit field-wise copy, so a struct with a destructor is duplicated and
 // every duplicate is destroyed), shrinking destroys the elements past the new
 // length from the last to the first, and the fill value itself is destroyed
-// on return.
+// on return. Growing a vector with nothing allocated by an all-zero value
+// takes zeroed storage and skips the fill; the elements are the same.
 module run
 struct Noisy { id: u64 }
 impl Noisy {
@@ -26,6 +27,15 @@ func main() -> i32 {
     for n in w.as_view() { print_u64(n.id); print_str(" ") }
     println()
     w.resize(1usize, Noisy { id: 3u64 })
+    z := Vec[u64].new()
+    z.resize(6usize, 0u64)
+    with e := z.at(4usize) { e = 5u64 }
+    z.resize(8usize, 0u64)
+    for x in z.as_view() { print_u64(x); print_str(" ") }
+    println()
+    q := Vec[Noisy].new()
+    q.resize(2usize, Noisy { id: 0u64 })
+    print_u64(u64(q.len())); println()
     print_str("end"); println()
     return 0i32
 }

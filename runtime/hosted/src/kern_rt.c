@@ -389,4 +389,25 @@ void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t 
     out[0] = 0;
     memcpy(out + off, &np, sizeof np);
 }
+// kern_sysalloc_alloc_zeroed is kern_sysalloc_alloc with zeroed bytes:
+// calloc (16-byte aligned on every supported host, and a large block comes
+// from fresh zero pages without a memset), else aligned_alloc and memset.
+void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off) {
+    (void)a;
+    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0);
+    if (atomic_exchange(&kern_fail_next, 0)) { out[0] = 1; return; }
+    size_t al = (size_t)align < sizeof(void *) ? sizeof(void *) : (size_t)align;
+    if ((uint64_t)size > SIZE_MAX - (al - 1)) { out[0] = 1; return; }
+    size_t sz = ((size_t)size + al - 1) / al * al;
+    if (sz == 0) sz = al;
+    void *p;
+    if (al <= 16) p = calloc(1, sz);
+    else {
+        p = aligned_alloc(al, sz);
+        if (p) memset(p, 0, sz);
+    }
+    if (p == NULL) { out[0] = 1; return; }
+    out[0] = 0;
+    memcpy(out + off, &p, sizeof p);
+}
 void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align) { (void)a; (void)size; (void)align; free(p); }

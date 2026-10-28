@@ -16,8 +16,8 @@ raw-pointer core (spec §6, Rule 6.6): every raw operation sits in an `unsafe`
 block inside a method that carries a contract, and the rest of each container
 is ordinary checked kern. The destructors only call the contracted `release`
 methods (a destructor cannot carry a contract). The allocation helpers
-`heap_alloc`, `heap_try_alloc`, `heap_realloc`, `heap_try_realloc` and
-`heap_free` wrap `SystemAllocator`, whose §6 obligations (alignment a power
+`heap_alloc`, `heap_try_alloc`, `heap_alloc_zeroed`, `heap_realloc`,
+`heap_try_realloc` and `heap_free` wrap `SystemAllocator`, whose §6 obligations (alignment a power
 of two at most 4096, size a multiple of it, `realloc`/`free` with the values
 of one live allocation) they satisfy by construction: every
 request is `n * size_of[T]()` bytes at `align_of[T]()`, and `elems_bytes`
@@ -32,7 +32,7 @@ Returning an access opened on raw memory (`ptr_view`, `ptr_edit`,
 rule (Rule 6.6); the resolver classifies these intrinsics as unsafe
 operations like every `ptr_*` function.
 
-35 functions, 36 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
+36 functions, 38 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
 pool and arena elements with destructors, `Box.into`, `copy` of a vector,
 `pop`, `clear`), `tests/run/vec_resize.kern`, `tests/run/vec_extend.kern`, `tests/run/pool_handles.kern`, `tests/run/hello.kern`, the
 examples and the container benchmarks; the failure paths are the trap
@@ -46,6 +46,7 @@ executions of every fixture compare the containers' behaviour directly.
 |---|---|---|---|
 | `heap_alloc` | 1 | `heap_alloc`, `heap_try_alloc`, `ptr_addr` | requires "align is a power of two at most 4096 and size is a multiple of it" |
 | `heap_try_alloc` | 1 | `a.alloc`, `heap_try_alloc`, `ptr_null` | requires "align is a power of two at most 4096 and size is a multiple of it" |
+| `heap_alloc_zeroed` | 1 | `a.alloc_zeroed` | requires "align is a power of two at most 4096 and size is a multiple of it" |
 | `heap_realloc` | 1 | `ptr_addr` | requires "p, old_size and align are those of one live allocation; new_size is a multiple of align" |
 | `heap_try_realloc` | 1 | `ptr_null` | requires "p, old_size and align are those of one live allocation; new_size is a multiple of align" |
 | `heap_free` | 1 | `a.free`, `heap_free` | requires "p, size and align are those of one live allocation" |
@@ -57,7 +58,7 @@ executions of every fixture compare the containers' behaviour directly.
 | `Vec.reserve` | 1 | `heap_alloc`, `heap_realloc`, `ptr_cast` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.push` | 1 | `ptr_offset`, `ptr_store` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.pop` | 1 | `ptr_offset`, `ptr_take` | requires "data addresses cap elements of which the first size are live" |
-| `Vec.resize` | 2 | `ptr_offset`, `ptr_store`, `ptr_take` | requires "data addresses cap elements of which the first size are live" |
+| `Vec.resize` | 3 | `heap_alloc_zeroed`, `ptr_cast`, `ptr_load`, `ptr_offset`, `ptr_store`, `ptr_take` | requires "data addresses cap elements of which the first size are live; an all-zero copy of x owns nothing" |
 | `Vec.extend` | 1 | `ptr_offset`, `ptr_store_seq` | requires "data addresses cap elements of which the first size are live; src does not overlap the spare capacity" |
 | `Vec.get` | 1 | `ptr_offset`, `ptr_view` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.at` | 1 | `ptr_edit`, `ptr_offset` | requires "data addresses cap elements of which the first size are live" |

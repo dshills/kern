@@ -268,6 +268,14 @@ void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *ou
     out[0] = 0;
     memcpy(out + off, &p, sizeof p);
 }
+// kern_sysalloc_alloc_zeroed is kern_sysalloc_alloc with zeroed bytes.
+void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off) {
+    kern_sysalloc_alloc(a, size, align, out, off);
+    if (out[0] != 0 || size == 0) return;
+    uint8_t *p;
+    memcpy(&p, out + off, sizeof p);
+    memset(p, 0, (size_t)size);
+}
 // kern_sysalloc_realloc shrinks or grows the allocation in place when the
 // arena allows, else takes a new block, copies the common prefix and
 // releases the old one; on failure the old allocation stays.

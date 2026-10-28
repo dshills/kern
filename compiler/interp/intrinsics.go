@@ -203,6 +203,21 @@ func init() {
 			}
 			return []Value{&Union{Tag: 0, Fields: []Value{mkInt("usize", addr)}}}
 		},
+		"SystemAllocator.alloc_zeroed": func(it *Interp, a []Value, c callCtx) []Value {
+			size, align := u64(a[1]), u64(a[2])
+			if align == 0 || align&(align-1) != 0 || align > 4096 || size%align != 0 {
+				it.trap("explicit", c.pos)
+			}
+			if it.takeFailNextAlloc() {
+				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}}
+			}
+			addr := it.heap.alloc(size, align)
+			if addr == 0 {
+				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}} // Err(OutOfMemory)
+			}
+			it.heap.zero(addr, size)
+			return []Value{&Union{Tag: 0, Fields: []Value{mkInt("usize", addr)}}}
+		},
 		"SystemAllocator.realloc": func(it *Interp, a []Value, c callCtx) []Value {
 			addr, oldSize, size, align := u64(a[1]), u64(a[2]), u64(a[3]), u64(a[4])
 			if align == 0 || align&(align-1) != 0 || align > 4096 || size%align != 0 {

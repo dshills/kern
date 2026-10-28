@@ -149,6 +149,10 @@ impl SystemAllocator {
     // bytes (in place when the allocator can); on failure the old
     // allocation is untouched. An unsafe operation with alloc's obligations.
     func realloc(edit self, ptr: RawPtr[u8], old_size: usize, new_size: usize, align: usize) -> Result[RawPtr[u8], AllocErr]
+    // alloc_zeroed is alloc whose bytes are all zero (calloc: a large
+    // block comes from fresh zero pages that are not touched until used).
+    // An unsafe operation with alloc's obligations; freed by free.
+    func alloc_zeroed(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr]
 }
 
 // ---- Library containers (spec §5.6), written in kern over the raw-pointer
@@ -178,6 +182,19 @@ func heap_try_alloc(size: usize, align: usize) -> RawPtr[u8] {
             Err(e) => return ptr_null[u8]()
         }
     }
+}
+// heap_alloc_zeroed is heap_alloc whose bytes are all zero.
+contract { requires "align is a power of two at most 4096 and size is a multiple of it" }
+func heap_alloc_zeroed(size: usize, align: usize) -> RawPtr[u8] {
+    a := SystemAllocator.new()
+    var p: RawPtr[u8] = zero()
+    unsafe {
+        match a.alloc_zeroed(size, align) {
+            Ok(q) => p = q
+            Err(e) => trap_kind(oom)
+        }
+    }
+    return p
 }
 // heap_realloc resizes an allocation, trapping oom on failure.
 contract { requires "p, old_size and align are those of one live allocation; new_size is a multiple of align" }
@@ -349,14 +366,36 @@ impl Vec[T] {
     // resize sets the length to n: elements past n are destroyed, and the
     // new elements are copies of x (x itself is destroyed on return). The
     // fill runs over a local index so the backend can turn it into a block
-    // store.
-    contract { requires "data addresses cap elements of which the first size are live" }
+    // store. A vector with nothing allocated takes zeroed storage first and
+    // writes one copy: when that copy's bytes are all zero the rest of the
+    // storage already holds it, so the fill is skipped and the pages stay
+    // untouched until used (Rust's vec![0; n]). A copy whose bytes are all
+    // zero owns no allocation (Box and Shared copies never are; a Vec copy
+    // is then the empty vector), so bitwise duplicates of it are its copies.
+    contract { requires "data addresses cap elements of which the first size are live; an all-zero copy of x owns nothing" }
     func resize(edit self, n: usize, x: own T) {
         while self.size > n {
             self.size = self.size - 1usize
             unsafe {
                 v := ptr_take(ptr_offset(self.data, truncate[isize](self.size)))
                 drop(v)
+            }
+        }
+        if self.cap == 0usize && n > 0usize {
+            var bytes: usize = 0usize
+            match elems_bytes[T](n) {
+                Some(b) => bytes = b
+                None => trap_kind(oom)
+            }
+            unsafe {
+                self.data = ptr_cast[T, u8](heap_alloc_zeroed(bytes, align_of[T]()))
+                self.cap = n
+                ptr_store(self.data, copy(x))
+                self.size = 1usize
+                b := ptr_cast[u8, T](self.data)
+                k := 0usize
+                while k < size_of[T]() && ptr_load(ptr_offset(b, truncate[isize](k))) == 0u8 { k = wrapping_add(k, 1usize) }
+                if k == size_of[T]() { self.size = n }
             }
         }
         self.reserve(n)

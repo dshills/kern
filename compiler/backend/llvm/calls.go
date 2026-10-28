@@ -698,6 +698,11 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		out, off := fe.unionOut(d)
 		fe.rt("kern_sysalloc_alloc", "void (ptr, i64, i64, ptr, i64)", "ptr "+fe.handle(a[0])+", i64 "+fe.v(a[1])+", i64 "+fe.v(a[2])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
 		fe.loadResult(d, out)
+	case "SystemAllocator.alloc_zeroed":
+		d := dst()
+		out, off := fe.unionOut(d)
+		fe.rt("kern_sysalloc_alloc_zeroed", "void (ptr, i64, i64, ptr, i64)", "ptr "+fe.handle(a[0])+", i64 "+fe.v(a[1])+", i64 "+fe.v(a[2])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.loadResult(d, out)
 	case "SystemAllocator.realloc":
 		d := dst()
 		out, off := fe.unionOut(d)
