@@ -53,7 +53,7 @@ still about 0.8 of C. arena_ast's node falls to Rust's 16 bytes, and its
 RSS moves below C's. The checksums of every release benchmark are
 unchanged. Debug builds are unchanged (same layouts, same text).
 
-## Question for the owner: 4-byte handles
+## Question for the owner: 4-byte handles *(resolved 2026-10-28: ADR-014 keeps the 8-byte release handle)*
 
 Meeting btree's RSS target needs a `PoolId` of four bytes, C's `uint32_t`
 index. With that, a node is 312 bytes like C's, plus the pool's 12 bytes

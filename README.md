@@ -64,7 +64,7 @@ observable only as termination with a structured `TrapInfo` record.
 |---|---|---|
 | Specification | `specs/initial/AI_Native_Systems_Language_SPEC.md`, `spec/` | Grammar (`grammar.ebnf`), type system, memory model, formatting, and `rules.lock` freezing every diagnostic code to its rule number |
 | Language reference | `docs/ownership.md` | Normative restatement of the ownership rules, one rule per diagnostic code |
-| Decisions | `docs/decisions/ADR-*.md` | Thirteen architecture decision records with the alternatives considered |
+| Decisions | `docs/decisions/ADR-*.md` | Fourteen architecture decision records with the alternatives considered |
 | Compiler | `compiler/` | Lexer and parser, resolver, ownership checker, lowering to a semantic IR, LLVM text backend, interpreter, formatter, incremental driver |
 | Standard library | `std/core.kern` | Implicitly imported prelude: `Box`, `Vec`, `Pool`, `Arena`, `Mutex`, `Condvar`, `Atomic`, scoped threads, raw pointers. The containers are written in kern over audited `unsafe` blocks (`docs/unsafe-audit.md`) |
 | Runtimes | `runtime/hosted/`, `runtime/freestanding/` | A small C runtime for Linux/macOS, and a freestanding one for bare-metal x86-64 and AArch64 images that boot under QEMU |
