@@ -51,3 +51,29 @@ struct Handles { p: PoolId[A]; o: Option[u8] }
 		t.Fatalf("seq access: %+v", s)
 	}
 }
+
+// TestHandleLayoutByMode checks the handles' two prelude variants (spec
+// §5.6: identity tags in debug builds only): PoolId is 12 bytes in debug
+// and 8 in release, ArenaId 8 and 4, and the two prelude texts have the
+// same length, so every span means the same in both.
+func TestHandleLayoutByMode(t *testing.T) {
+	if len(resolve.Prelude(false)) != len(resolve.Prelude(true)) {
+		t.Fatal("prelude variants differ in length")
+	}
+	src := []byte("module l\nstruct A { a: u8 }\nstruct H { p: PoolId[A]; r: ArenaId[A] }\n")
+	for _, c := range []struct {
+		release     bool
+		pool, arena int
+	}{{false, 12, 8}, {true, 8, 4}} {
+		prog := resolve.ResolveFor([]*source.File{{Name: "l.kern", Bytes: src}}, c.release)
+		if len(prog.Diags) > 0 {
+			t.Fatal(prog.Diags[0].Message)
+		}
+		a := []resolve.Type{&resolve.Named{Decl: prog.Main.Types["A"]}}
+		p := Of(&resolve.Named{Decl: prog.Core.Types["PoolId"], Args: a})
+		r := Of(&resolve.Named{Decl: prog.Core.Types["ArenaId"], Args: a})
+		if p.Size != c.pool || r.Size != c.arena {
+			t.Fatalf("release=%v: PoolId %d, ArenaId %d; want %d, %d", c.release, p.Size, r.Size, c.pool, c.arena)
+		}
+	}
+}

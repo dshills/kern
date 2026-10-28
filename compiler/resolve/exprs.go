@@ -472,6 +472,11 @@ func (c *fnCtx) fieldWant1(sc *scope, x *ast.FieldExpr, want Type) Type {
 		c.errorf("NAME_UNRESOLVED", x.Pos, "%s has no field %s", typeString(t), x.Name)
 		return &Bad{}
 	}
+	if n.Decl.Module == "core" && x.Name == tagField && c.m.Name != "core" {
+		// reported the same in a release build, whose handles lack the field
+		c.errorf("NAME_PRIVATE", x.Pos, "field %s is private to module %s", x.Name, n.Decl.Module)
+		return &Prim{Name: "u32"}
+	}
 	fd, ft := FieldType(n, x.Name)
 	if fd == nil {
 		if m := n.Decl.Methods[x.Name]; m != nil {
@@ -727,6 +732,16 @@ func (c *fnCtx) structLit(sc *scope, x *ast.StructLit) Type {
 	if n.Decl.View {
 		c.errorf("ACC_ESCAPE_STORE", x.Pos, "view struct %s cannot be constructed as a value", n.Decl.Name)
 	}
+	if isHandle(n) && c.m.Name != "core" {
+		// a handle's fields differ between debug and release builds
+		// (resolve.Prelude), so only its container issues one; the one
+		// diagnostic is the same in both
+		c.errorf("NAME_PRIVATE", x.Pos, "%s is issued by its container and cannot be constructed outside module core", n.Decl.Name)
+		for _, fi := range x.Fields {
+			c.expr(sc, fi.Value, nil)
+		}
+		return n
+	}
 	seen := map[string]bool{}
 	for _, fi := range x.Fields {
 		fd, ft := FieldType(n, fi.Name)
@@ -760,7 +775,15 @@ func fieldPrivate(n *Named, name, from string) bool {
 		return false
 	}
 	if n.Decl.Module == "core" {
-		return n.Decl.NoCopy
+		return n.Decl.NoCopy || name == tagField
 	}
 	return !isExported(name)
+}
+
+// tagField is a handle's identity tag, present in debug builds only.
+const tagField = "phantom_tag"
+
+// isHandle reports the container handle types of the prelude.
+func isHandle(n *Named) bool {
+	return n.Decl.Module == "core" && (n.Decl.Name == "PoolId" || n.Decl.Name == "ArenaId")
 }

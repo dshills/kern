@@ -34,7 +34,7 @@ type BuildOptions struct {
 // Build resolves, checks, lowers and validates a program. Diagnostics are
 // returned for user errors; a validator failure is an internal error.
 func Build(srcs []*source.File, optLevel string) (*ir.Module, []diag.Diagnostic, error) {
-	prog := resolve.Resolve(srcs)
+	prog := resolve.ResolveFor(srcs, optLevel == "release")
 	if len(prog.Diags) > 0 {
 		return nil, prog.Diags, nil
 	}

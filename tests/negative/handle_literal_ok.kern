@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: handle_literal
+module m
+func none() -> ArenaId[u64] { return zero() }

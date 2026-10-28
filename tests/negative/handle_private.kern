@@ -1,0 +1,6 @@
+//! expect: reject NAME_PRIVATE
+//! twin: handle_private_ok
+// A handle's identity tag exists in debug builds only (spec §5.6), so it is
+// private to std/core in both modes, and only a container issues a handle.
+module m
+func tag(id: PoolId[u64]) -> u32 { return id.phantom_tag }   // NAME_PRIVATE

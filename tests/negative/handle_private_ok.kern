@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: handle_private
+module m
+func index(id: PoolId[u64]) -> u32 { return id.index }

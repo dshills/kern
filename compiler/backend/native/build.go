@@ -113,7 +113,7 @@ func Available() bool {
 // Build compiles srcs to the executable at out. Diagnostics are the user's
 // errors; the error is a toolchain or backend failure.
 func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, error) {
-	prog := resolve.Resolve(srcs)
+	prog := resolve.ResolveFor(srcs, opts.Opt == "release")
 	if len(prog.Diags) > 0 {
 		return prog.Diags, nil
 	}
@@ -143,7 +143,7 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 		for _, f := range srcs {
 			lo.Sources[f.Name] = f.Bytes
 		}
-		lo.Sources["std/core.kern"] = resolve.PreludeSource()
+		lo.Sources["std/core.kern"] = resolve.Prelude(opts.Opt == "release")
 	}
 	text, errs := llvm.EmitWith(mod, lo)
 	if len(errs) > 0 {

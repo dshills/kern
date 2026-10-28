@@ -464,7 +464,11 @@ impl Vec[T] {
 // PoolSlotMeta is the bookkeeping of one Pool slot: its generation, whether
 // it holds a live element, and whether it was retired at generation wrap.
 struct PoolSlotMeta { gen: u32; live: bool; retired: bool }
-struct PoolId[T] { index: u32; gen: u32; phantom_tag: u32 }
+// A handle carries its container's identity tag in debug builds only
+// (spec §5.6): a release build has no tags, so its handles are narrower.
+// The //@debug and //@release lines are the two variants (resolve.Prelude).
+struct PoolId[T] { index: u32; gen: u32; phantom_tag: u32 } //@debug
+struct PoolId[T] { index: u32; gen: u32 } //@release
 // Pool keeps count slots (cap allocated) in data with their metadata in
 // slots, a stack of nfree vacant slot indices in free_list, the number of
 // live elements, and its identity tag.
@@ -551,7 +555,8 @@ impl Pool[T] {
             ptr_store(ptr_offset(self.data, truncate[isize](idx)), v)
         }
         self.live = self.live + 1usize
-        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen, phantom_tag: self.identity })
+        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen, phantom_tag: self.identity }) //@debug
+        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen }) //@release
     }
     // check validates a handle in the §5.6 order (bounds, identity, vacant,
     // generation) and returns its slot index.
@@ -559,7 +564,7 @@ impl Pool[T] {
     func check(view self, id: PoolId[T]) -> usize {
         idx := usize(id.index)
         if idx >= self.count { trap_kind(bounds) }
-        if id.phantom_tag != 0u32 && self.identity != 0u32 && id.phantom_tag != self.identity { trap_kind(identity) }
+        if id.phantom_tag != 0u32 && self.identity != 0u32 && id.phantom_tag != self.identity { trap_kind(identity) } //@debug
         unsafe {
             m := ptr_load(ptr_offset(self.slots, truncate[isize](idx)))
             if !m.live { trap_kind(vacant) }
@@ -665,7 +670,8 @@ impl Pool[T] {
     destructor(edit self) { self.release() }
 }
 
-struct ArenaId[T] { index: u32; phantom_tag: u32 }
+struct ArenaId[T] { index: u32; phantom_tag: u32 } //@debug
+struct ArenaId[T] { index: u32 } //@release
 struct Arena[T] nocopy { data: RawPtr[T]; size: usize; cap: usize; identity: u32 }
 impl Arena[T] {
     func new() -> Arena[T] {
@@ -707,7 +713,8 @@ impl Arena[T] {
             if !self.grow() { drop(v); return Err(OutOfMemory) }
         }
         unsafe { ptr_store(ptr_offset(self.data, truncate[isize](self.size)), v) }
-        id := ArenaId[T] { index: truncate[u32](self.size), phantom_tag: self.identity }
+        id := ArenaId[T] { index: truncate[u32](self.size), phantom_tag: self.identity } //@debug
+        id := ArenaId[T] { index: truncate[u32](self.size) } //@release
         self.size = self.size + 1usize
         return Ok(id)
     }
@@ -715,7 +722,7 @@ impl Arena[T] {
     func check(view self, id: ArenaId[T]) -> usize {
         idx := usize(id.index)
         if idx >= self.size { trap_kind(bounds) }
-        if id.phantom_tag != 0u32 && self.identity != 0u32 && id.phantom_tag != self.identity { trap_kind(identity) }
+        if id.phantom_tag != 0u32 && self.identity != 0u32 && id.phantom_tag != self.identity { trap_kind(identity) } //@debug
         return idx
     }
     contract { requires "data addresses cap elements of which the first size are live" }

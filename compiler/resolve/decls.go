@@ -1,6 +1,7 @@
 package resolve
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
 	"path/filepath"
@@ -235,11 +236,16 @@ type Symbol struct {
 	// Access bindings: the root symbol and path they derive from (set by checker).
 }
 
-// Resolve parses the prelude and resolves the given files as one module.
-func Resolve(files []*source.File) *Program {
+// Resolve parses the prelude and resolves the given files as one module,
+// for a debug build.
+func Resolve(files []*source.File) *Program { return ResolveFor(files, false) }
+
+// ResolveFor is Resolve for a debug or a release build: the two differ only
+// in the prelude's mode lines (Prelude).
+func ResolveFor(files []*source.File, release bool) *Program {
 	prog := &Program{Modules: map[string]*Module{}, Info: newInfo()}
 	r := &resolver{prog: prog}
-	core := r.loadPrelude()
+	core := r.loadPrelude(release)
 	prog.Core = core
 	prog.Modules["core"] = core
 	// Files are grouped by module (spec/types.md §1: one directory is one
@@ -363,21 +369,37 @@ func (r *resolver) fix(ops ...diag.StructuredEditOp) {
 	}
 }
 
-// PreludeSource returns the text of the embedded prelude (std/core.kern).
-func PreludeSource() []byte {
+// PreludeSource returns the text of the embedded prelude (std/core.kern)
+// for a debug build.
+func PreludeSource() []byte { return Prelude(false) }
+
+// Prelude returns the prelude text for a debug or a release build. A line
+// ending in //@debug is kept in debug builds only and one ending in
+// //@release in release builds only (handles carry identity tags in debug
+// builds alone, spec §5.6); the other mode's lines become spaces, so every
+// offset, and with it every span, is the same in both texts.
+func Prelude(release bool) []byte {
 	b, err := preludeFS.ReadFile("prelude/core.kern")
 	if err != nil {
 		panic("prelude missing: " + err.Error())
 	}
-	return b
+	drop := []byte("//@release")
+	if release {
+		drop = []byte("//@debug")
+	}
+	lines := bytes.SplitAfter(b, []byte("\n"))
+	for _, ln := range lines {
+		if bytes.HasSuffix(bytes.TrimRight(ln, "\r\n"), drop) {
+			for i := range bytes.TrimRight(ln, "\r\n") {
+				ln[i] = ' '
+			}
+		}
+	}
+	return bytes.Join(lines, nil)
 }
 
-func (r *resolver) loadPrelude() *Module {
-	b, err := preludeFS.ReadFile("prelude/core.kern")
-	if err != nil {
-		panic("prelude missing: " + err.Error())
-	}
-	f := &source.File{Name: "std/core.kern", Bytes: b}
+func (r *resolver) loadPrelude(release bool) *Module {
+	f := &source.File{Name: "std/core.kern", Bytes: Prelude(release)}
 	af, ds := parser.ParseWith(f, parser.Options{AllowBodyless: true})
 	if len(ds) > 0 {
 		panic("prelude does not parse: " + ds[0].Message)

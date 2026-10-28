@@ -1,0 +1,6 @@
+//! expect: reject NAME_PRIVATE
+//! twin: handle_literal_ok
+// A handle's fields differ between debug and release builds, so a handle
+// literal outside std/core is rejected in both; containers issue handles.
+module m
+func forge() -> ArenaId[u64] { return ArenaId[u64] { index: 0u32, phantom_tag: 0u32 } }   // NAME_PRIVATE

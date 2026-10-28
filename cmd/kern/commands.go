@@ -64,7 +64,7 @@ func resolveChecked(srcs []*source.File) (prog *resolve.Program, ds []diag.Diagn
 			err = &InternalError{Err: errorf("%v", r)}
 		}
 	}()
-	prog = resolve.Resolve(srcs)
+	prog = resolve.ResolveFor(srcs, cliOpt == "release")
 	if len(prog.Diags) > 0 {
 		return prog, prog.Diags, nil
 	}
