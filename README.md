@@ -170,3 +170,7 @@ rather than in an issue tracker.
 
 Specification documents, the language reference and the ADRs are the
 authority; where the code disagrees with them, the code is wrong.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
