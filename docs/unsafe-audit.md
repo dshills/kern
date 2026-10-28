@@ -32,7 +32,7 @@ Returning an access opened on raw memory (`ptr_view`, `ptr_edit`,
 rule (Rule 6.6); the resolver classifies these intrinsics as unsafe
 operations like every `ptr_*` function.
 
-36 functions, 38 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
+38 functions, 40 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
 pool and arena elements with destructors, `Box.into`, `copy` of a vector,
 `pop`, `clear`), `tests/run/vec_resize.kern`, `tests/run/vec_extend.kern`, `tests/run/pool_handles.kern`, `tests/run/hello.kern`, the
 examples and the container benchmarks; the failure paths are the trap
@@ -66,15 +66,17 @@ executions of every fixture compare the containers' behaviour directly.
 | `Vec.as_edit` | 1 | `ptr_edit_seq` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.clear` | 1 | `ptr_offset`, `ptr_take` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.release` | 1 | `heap_free`, `ptr_cast` | requires "data addresses cap elements of which the first size are live" |
-| `Pool.grow` | 1 | `heap_free`, `heap_try_alloc`, `heap_try_realloc`, `ptr_addr`, `ptr_cast`, `ptr_copy` | requires "the three buffers hold cap entries; the first count slots are initialized" |
-| `Pool.alloc` | 1 | `ptr_load`, `ptr_offset`, `ptr_store` | requires "the three buffers hold cap entries; the first count slots are initialized" |
-| `Pool.check` | 1 | `ptr_load`, `ptr_offset` | requires "the three buffers hold cap entries; the first count slots are initialized" |
-| `Pool.get` | 1 | `ptr_offset`, `ptr_view` | requires "data addresses cap slots; slot idx holds a live element after check" |
-| `Pool.at` | 1 | `ptr_edit`, `ptr_offset` | requires "data addresses cap slots; slot idx holds a live element after check" |
-| `Pool.get2` | 1 | `ptr_edit2`, `ptr_offset` | invariant "a != b is checked at runtime; the two accesses are disjoint" |
+| `Pool.meta_at` | 1 | `ptr_cast`, `ptr_offset` | requires "i < cap" |
+| `Pool.elem_at` | 1 | `ptr_cast`, `ptr_offset` | requires "i < cap" |
+| `Pool.grow` | 1 | `heap_free`, `heap_try_alloc`, `heap_try_realloc`, `ptr_addr`, `ptr_cast`, `ptr_copy` | requires "the two buffers hold cap entries; the first count slots are initialized" |
+| `Pool.alloc` | 1 | `ptr_load`, `ptr_offset`, `ptr_store` | requires "the two buffers hold cap entries; the first count slots are initialized" |
+| `Pool.check` | 1 | `ptr_load` | requires "the two buffers hold cap entries; the first count slots are initialized" |
+| `Pool.get` | 1 | `ptr_view` | requires "data addresses cap slots; slot idx holds a live element after check" |
+| `Pool.at` | 1 | `ptr_edit` | requires "data addresses cap slots; slot idx holds a live element after check" |
+| `Pool.get2` | 1 | `ptr_edit2` | invariant "a != b is checked at runtime; the two accesses are disjoint" |
 | `Pool.free` | 1 | `ptr_load`, `ptr_offset`, `ptr_store`, `ptr_take` | requires "data addresses cap slots; slot idx holds a live element after check" |
-| `Pool.seed_generation` | 1 | `ptr_load`, `ptr_offset`, `ptr_store` | requires "the three buffers hold cap entries; the first count slots are initialized" |
-| `Pool.release` | 1 | `heap_free`, `ptr_cast`, `ptr_load`, `ptr_offset`, `ptr_take` | requires "the three buffers hold cap entries; the first count slots are initialized" |
+| `Pool.seed_generation` | 1 | `ptr_load`, `ptr_offset`, `ptr_store` | requires "the two buffers hold cap entries; the first count slots are initialized" |
+| `Pool.release` | 1 | `heap_free`, `ptr_cast`, `ptr_load`, `ptr_take` | requires "the two buffers hold cap entries; the first count slots are initialized" |
 | `Arena.grow` | 1 | `heap_try_alloc`, `heap_try_realloc`, `ptr_addr`, `ptr_cast` | requires "data addresses cap elements of which the first size are live" |
 | `Arena.alloc` | 1 | `ptr_offset`, `ptr_store` | requires "data addresses cap elements of which the first size are live" |
 | `Arena.get` | 1 | `ptr_offset`, `ptr_view` | requires "data addresses cap elements of which the first size are live" |

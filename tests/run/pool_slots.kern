@@ -1,0 +1,41 @@
+//! phase: 1
+//! expect: output pool_slots
+// Pool keeps each slot's metadata and element in one buffer (std/core.kern):
+// elements of 1 byte (slot stride 12) and of 40 bytes survive growth past
+// several doublings, a freed slot is reused with a new generation, and every
+// value reads back intact.
+module run
+struct Wide { a: u64; b: u64; c: u64; d: u64; e: u8 }
+func main() -> i32 {
+    p := Pool[u8].new()
+    ids := Vec[PoolId[u8]].new()
+    for i in 0u32..100u32 {
+        match p.alloc(truncate[u8](i)) {
+            Ok(id) => ids.push(id)
+            Err(e) => return 1i32
+        }
+    }
+    sum := 0u64
+    for id in ids.as_view() { with v := p.get(id) { sum = sum + u64(v) } }
+    print_u64(sum); println()
+    p.free(ids.get(7usize))
+    match p.alloc(200u8) {
+        Ok(id) => { print_u64(u64(id.index)); print_str(" "); with v := p.get(id) { print_u64(u64(v)) }; println() }
+        Err(e) => return 1i32
+    }
+    w := Pool[Wide].new()
+    wids := Vec[PoolId[Wide]].new()
+    for i in 0u64..50u64 {
+        match w.alloc(Wide { a: i, b: i * 2u64, c: i * 3u64, d: i * 4u64, e: 9u8 }) {
+            Ok(id) => wids.push(id)
+            Err(e) => return 1i32
+        }
+    }
+    with x := w.at(wids.get(49usize)) { x.d = 1000u64 }
+    total := 0u64
+    for id in wids.as_view() {
+        with v := w.get(id) { total = total + v.a + v.b + v.c + v.d + u64(v.e) }
+    }
+    print_u64(total); print_str(" "); print_u64(u64(w.len())); println()
+    return 0i32
+}

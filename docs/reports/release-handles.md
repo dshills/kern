@@ -74,3 +74,31 @@ carry a 32-bit generation:
   as missing the target by the width of the generation.
 
 Nothing here has been changed in the spec.
+
+## Next: slot metadata beside the element
+
+`Pool` kept each slot's generation and flags (`PoolSlotMeta`, 8 bytes) in an
+array separate from the elements, so every handle access touched two cache
+lines: the metadata for `check`, then the element. A slot is now the
+metadata followed by the element at its alignment, in one buffer
+(`Pool.meta_at`, `Pool.elem_at`; the stride is the two rounded up to the
+larger alignment). For btree's 376-byte node the stride is 384, the same
+bytes per slot as before, and the separate buffer and its growth copy are
+gone. An element aligned above 8 pays padding after the metadata.
+`tests/run/pool_slots.kern` covers a 1-byte element (stride 12) and a
+40-byte one through growth and slot reuse. It agrees in the interpreter and
+both native builds, as does every existing Pool fixture.
+
+btree release, seven runs interleaved with C on a very busy host (one-minute
+load 12.6 to 13.8):
+
+| | C | separate metadata | metadata beside element |
+|---|---|---|---|
+| wall time, ms | 463-499 (median 484) | 543-635 (median 572) | 420-518 (median 465) |
+| p50 insert latency, ns | 208-209 | 250-292 | 166-209 |
+| peak RSS, MiB | 61.3 | 76.2 | 75.3 |
+
+On this host btree's throughput now matches C's, from about 0.85 of it.
+The checksum is unchanged. Memory stays at 1.23 of C: the question above
+still stands, and nothing here changes it. A harness run on a quiet host
+should confirm the throughput before `bench/REPORT.md` reflects it.
