@@ -1,0 +1,18 @@
+//! phase: 3
+//! expect: output
+//! twin: store_order_bounds
+module t
+func word(p: edit[]u8, at: usize, v: u16) {
+    if len(p) < 4usize { return }
+    store_be[u16](p, at, v)
+}
+func main() -> i32 {
+    var b: [4]u8 = zero()
+    word(b, 0usize, 7u16)
+    print_u64(u64(b[1usize]))
+    println()
+    word(b, 2usize, 9u16)
+    print_u64(u64(b[3usize]))
+    println()
+    return 0i32
+}

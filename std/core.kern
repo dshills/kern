@@ -23,6 +23,11 @@ func count_ones[T: Copy](x: T) -> u32
 // the proof pass can discharge and one wide load natively; T is explicit.
 func load_be[T: Copy](p: view[]u8, at: usize) -> T
 func load_le[T: Copy](p: view[]u8, at: usize) -> T
+// store_be and store_le write an integer T into the bytes of an edit at
+// offset at, big- or little-endian: the same one bounds check on the last
+// byte, and one wide store natively.
+func store_be[T: Copy](p: edit[]u8, at: usize, v: T)
+func store_le[T: Copy](p: edit[]u8, at: usize, v: T)
 // Raw pointers (spec §6): every operation below is an unsafe operation and
 // requires an unsafe block; the pointee's representation is the §4.1 layout.
 func ptr_null[T]() -> RawPtr[T]

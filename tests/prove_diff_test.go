@@ -134,7 +134,7 @@ func main() -> i32 {
 	stmts := 2 + r.Intn(6)
 	for k := 0; k < stmts; k++ {
 		idx := func() int { return r.Intn(live + 2) } // 0..live+1: past the end about a third of the time
-		switch r.Intn(14) {
+		switch r.Intn(15) {
 		case 0:
 			fmt.Fprintf(&b, "    with d := v.as_view() { print_u64(rd(d, %dusize)) }\n", idx())
 		case 1:
@@ -178,6 +178,13 @@ func main() -> i32 {
 			w := []string{"u16", "u32", "u64"}[r.Intn(3)]
 			order := []string{"load_be", "load_le"}[r.Intn(2)]
 			fmt.Fprintf(&b, "    {\n        var y: [8]u8 = zero()\n        y[%dusize] = %du8\n        y[7usize] = %du8\n        print_u64(u64(%s[%s](y, %dusize)))\n    }\n", r.Intn(8), r.Intn(256), r.Intn(256), order, w, r.Intn(9))
+		case 14:
+			// a byte-order write followed by a read of the whole array as one
+			// word: the write's check on its last byte, past the end about
+			// half the time
+			w := []string{"u16", "u32", "u64"}[r.Intn(3)]
+			order := []string{"be", "le"}[r.Intn(2)]
+			fmt.Fprintf(&b, "    {\n        var z: [8]u8 = zero()\n        store_%s[%s](z, %dusize, %d%s)\n        print_u64(load_le[u64](z, 0usize))\n    }\n", order, w, r.Intn(9), r.Intn(60000), w)
 		}
 		b.WriteString("    println()\n")
 	}

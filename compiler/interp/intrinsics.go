@@ -361,6 +361,8 @@ func init() {
 		"checked_shr":    checked(">>"),
 		"load_be":        func(it *Interp, a []Value, c callCtx) []Value { return []Value{it.loadWide(a, c, true)} },
 		"load_le":        func(it *Interp, a []Value, c callCtx) []Value { return []Value{it.loadWide(a, c, false)} },
+		"store_be":       func(it *Interp, a []Value, c callCtx) []Value { it.storeWide(a, c, true); return nil },
+		"store_le":       func(it *Interp, a []Value, c callCtx) []Value { it.storeWide(a, c, false); return nil },
 		"ptr_view_seq": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{&Access{Seq: &seqRef{raw: &rawSeq{it: it, base: u64(a[0]), elem: c.targ(0)}, lo: 0, hi: int(u64(a[1]))}}}
 		},
@@ -605,17 +607,7 @@ func (it *Interp) spawned(name string, args []Value, finish func(Value, *Trap)) 
 // bounds check on the last byte precedes the call.
 func (it *Interp) loadWide(a []Value, c callCtx, be bool) Value {
 	t := c.targ(0)
-	acc := a[0].(*Access)
-	seq := acc.Seq
-	if seq == nil {
-		// an access opened on an array: in raw memory, or a local
-		if rr, ok := acc.Ref.(rawRef); ok {
-			seq = rr.elems()
-		} else {
-			arr := acc.Ref.get().(*Array)
-			seq = &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(arr.Elems)}
-		}
-	}
+	seq := byteSeq(a[0].(*Access))
 	at := int(u64(a[1]))
 	n := layout.Of(t).Size
 	buf := make([]byte, n)
@@ -628,6 +620,39 @@ func (it *Interp) loadWide(a []Value, c callCtx, be bool) Value {
 		}
 	}
 	return it.decode(buf, t)
+}
+
+// storeWide writes the bytes of an integer of the call's type argument
+// (a[2]) into a sequence access at an offset, in big- or little-endian
+// order; the bounds check on the last byte precedes the call.
+func (it *Interp) storeWide(a []Value, c callCtx, be bool) {
+	t := c.targ(0)
+	seq := byteSeq(a[0].(*Access))
+	at := int(u64(a[1]))
+	n := layout.Of(t).Size
+	buf := make([]byte, n)
+	it.encode(buf, t, a[2])
+	for i := range n {
+		b := buf[i]
+		if be {
+			b = buf[n-1-i]
+		}
+		seq.at(at + i).set(mkInt("u8", uint64(b)))
+	}
+}
+
+// byteSeq is the sequence window of an access to bytes: the access's own
+// window, or, for an access opened on a whole array (in raw memory or a
+// local), the array's elements.
+func byteSeq(acc *Access) *seqRef {
+	if acc.Seq != nil {
+		return acc.Seq
+	}
+	if rr, ok := acc.Ref.(rawRef); ok {
+		return rr.elems()
+	}
+	arr := acc.Ref.get().(*Array)
+	return &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(arr.Elems)}
 }
 
 // checked is a §4.1 checked form: None where the trapping form would trap,

@@ -29,8 +29,8 @@ var wrappingIntrinsics = map[string]bool{"wrapping_add": true, "wrapping_sub": t
 // like the wrapping forms.
 var bitCountIntrinsics = map[string]bool{"count_trailing_zeros": true, "count_leading_zeros": true, "count_ones": true}
 
-// loadIntrinsics are the prelude's byte-order reads, integer-only too.
-var loadIntrinsics = map[string]bool{"load_be": true, "load_le": true}
+// loadIntrinsics are the prelude's byte-order reads and writes, integer-only too.
+var loadIntrinsics = map[string]bool{"load_be": true, "load_le": true, "store_be": true, "store_le": true}
 
 func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 	info := &CallInfo{}

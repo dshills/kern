@@ -1,0 +1,48 @@
+//! phase: 3
+//! expect: output
+// store_be and store_le write an integer into the bytes of an edit in
+// either byte order: an array local, an edit of a vector, a sub-slice,
+// signed types and the eight-byte width, read back as bytes and as words,
+// in both engines.
+module t
+func main() -> i32 {
+    var b: [8]u8 = zero()
+    store_be[u16](b, 0usize, 258u16)
+    store_le[u16](b, 2usize, 258u16)
+    store_be[u32](b, 4usize, 16909060u32)
+    for i in 0usize..8usize { print_u64(u64(b[i])); print_str(" ") }
+    println()
+    store_le[u64](b, 0usize, 72623859790382856u64)
+    print_u64(load_le[u64](b, 0usize))
+    println()
+    print_u64(load_be[u64](b, 0usize))
+    println()
+    store_be[i16](b, 6usize, -2i16)
+    print_i64(i64(load_be[i16](b, 6usize)))
+    println()
+    print_u64(u64(b[6usize]))
+    println()
+    store_le[i8](b, 0usize, -1i8)
+    print_u64(u64(b[0usize]))
+    println()
+    store_le[u32](b, 0usize, 4294967295u32)
+    store_le[u16](b, 2usize, 0u16)
+    print_u64(u64(load_le[u32](b, 0usize)))
+    println()
+    v := Vec[u8].new()
+    v.push(0u8)
+    v.push(0u8)
+    v.push(0u8)
+    v.push(0u8)
+    with d := v.as_edit() {
+        store_be[u16](d, 1usize, 4660u16)
+        with s := d[2usize : 4usize] {
+            store_le[u16](s, 0usize, 65281u16)
+        }
+    }
+    with d := v.as_view() {
+        for i in 0usize..4usize { print_u64(u64(d[i])); print_str(" ") }
+    }
+    println()
+    return 0i32
+}

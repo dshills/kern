@@ -620,6 +620,10 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 	if info.Fn != nil && info.Fn.Module == "core" && info.Fn.Receiver == nil && (info.Fn.Name == "load_be" || info.Fn.Name == "load_le") {
 		return fl.loadWide(x, info.Fn.Name, t)
 	}
+	// store_be[T] and store_le[T] are the same check, then one wide store
+	if info.Fn != nil && info.Fn.Module == "core" && info.Fn.Receiver == nil && (info.Fn.Name == "store_be" || info.Fn.Name == "store_le") {
+		return fl.storeWide(x, info.Fn.Name, fl.ty(info.TypeArgs["T"]))
+	}
 	// zero[T]() is the Zero instruction
 	if info.Fn != nil && info.Fn.Module == "core" && info.Fn.Name == "zero" && info.Fn.Receiver == nil {
 		v := fl.newValue(t)
@@ -790,11 +794,32 @@ func (fl *fnLower) callSubst(info *resolve.CallInfo) map[string]resolve.Type {
 // source's own `at + k` so the proof pass reads it as base + offset), then
 // the intrinsic call reading the bytes at the index.
 func (fl *fnLower) loadWide(x *ast.CallExpr, name string, t resolve.Type) operand {
+	v, end := fl.wideAccess(x, name, t, false)
+	end()
+	return operand{val: v}
+}
+
+// storeWide lowers store_be[T](p, at, v) and store_le[T](p, at, v): the
+// edit argument, the index and the same last-byte check as loadWide, then
+// the intrinsic call writing v's bytes at the index.
+func (fl *fnLower) storeWide(x *ast.CallExpr, name string, t resolve.Type) operand {
+	_, end := fl.wideAccess(x, name, t, true)
+	end()
+	v := fl.newValue(&resolve.Unit{})
+	fl.emit(&ir.Const{Dst: v, Unit: true})
+	return operand{val: v}
+}
+
+// wideAccess emits the common part of the byte-order intrinsics: the
+// sequence access (a view or an edit), the index, the last-byte check and
+// the call; it returns the call's result (the loaded value, or nil for a
+// store) and the function that ends the accesses it opened.
+func (fl *fnLower) wideAccess(x *ast.CallExpr, name string, t resolve.Type, edit bool) (*ir.Value, func()) {
 	usize := &resolve.Prim{Name: "usize"}
 	r := fl.expr(x.Args[0].X, nil)
 	var acc *ir.Value
 	var opened []*ir.Value
-	pt := &resolve.Access{Seq: true, Elem: &resolve.Prim{Name: "u8"}}
+	pt := &resolve.Access{Seq: true, Elem: &resolve.Prim{Name: "u8"}, Edit: edit}
 	switch {
 	case r.access != nil && !r.isPlace():
 		acc = r.access
@@ -806,14 +831,14 @@ func (fl *fnLower) loadWide(x *ast.CallExpr, name string, t resolve.Type) operan
 			opened = append(opened, r.access)
 		}
 		acc = fl.newValue(pt)
-		fl.emit(&ir.AccessBegin{Dst: acc, Place: r.pl, Pos: x.Args[0].Pos})
+		fl.emit(&ir.AccessBegin{Dst: acc, Edit: edit, Place: r.pl, Pos: x.Args[0].Pos})
 		opened = append(opened, acc)
 	default:
 		tmp := fl.newTemp(r.val.Type)
 		fl.emit(&ir.Store{Place: ir.Place{Local: tmp}, Src: r.val})
 		fl.emit(&ir.Init{Place: ir.Place{Local: tmp}})
 		acc = fl.newValue(pt)
-		fl.emit(&ir.AccessBegin{Dst: acc, Place: ir.Place{Local: tmp}, Pos: x.Args[0].Pos})
+		fl.emit(&ir.AccessBegin{Dst: acc, Edit: edit, Place: ir.Place{Local: tmp}, Pos: x.Args[0].Pos})
 		opened = append(opened, acc)
 	}
 	idx := fl.value(x.Args[1].X, usize)
@@ -827,12 +852,19 @@ func (fl *fnLower) loadWide(x *ast.CallExpr, name string, t resolve.Type) operan
 	ln := fl.newValue(usize)
 	fl.emit(&ir.Len{Dst: ln, Place: ir.Place{Access: acc}})
 	fl.emit(&ir.CheckBounds{Index: last, Len: ln, Prov: ir.RuntimeChecked, Pos: x.Pos})
+	end := func() {
+		for i := len(opened) - 1; i >= 0; i-- {
+			fl.emit(&ir.AccessEnd{Access: opened[i]})
+		}
+	}
+	if edit {
+		val := fl.value(x.Args[2].X, t)
+		fl.emit(&ir.Call{Intrinsic: name, Args: []*ir.Value{acc, idx, val}, Pos: x.Pos, TypeArgs: []resolve.Type{t}})
+		return nil, end
+	}
 	v := fl.newValue(t)
 	fl.emit(&ir.Call{Dsts: []*ir.Value{v}, Intrinsic: name, Args: []*ir.Value{acc, idx}, Pos: x.Pos, TypeArgs: []resolve.Type{t}})
-	for i := len(opened) - 1; i >= 0; i-- {
-		fl.emit(&ir.AccessEnd{Access: opened[i]})
-	}
-	return operand{val: v}
+	return v, end
 }
 
 func intrinsicName(fd *resolve.FuncDecl) string {

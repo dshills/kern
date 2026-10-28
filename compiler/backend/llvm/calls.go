@@ -586,6 +586,23 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 			e.declare("llvm.bswap."+ty, ty+" ("+ty+")")
 			fe.emit("%s = call %s @llvm.bswap.%s(%s %s)", fe.v(dst()), ty, ty, ty, r)
 		}
+	case "store_be", "store_le":
+		// one store of the integer's width at byte offset a[1] of the edit,
+		// unaligned, byte-swapped for big-endian
+		t := fe.elemType(c, 0)
+		ty := e.mty(t)
+		p := fe.next("t")
+		fe.emit("%s = extractvalue { ptr, i64 } %s, 0", p, fe.v(a[0]))
+		q := fe.next("t")
+		fe.emit("%s = getelementptr i8, ptr %s, i64 %s", q, p, fe.v(a[1]))
+		val := fe.memVal(a[2])
+		if c.Intrinsic == "store_be" && layout.Of(t).Size > 1 {
+			r := fe.next("t")
+			e.declare("llvm.bswap."+ty, ty+" ("+ty+")")
+			fe.emit("%s = call %s @llvm.bswap.%s(%s %s)", r, ty, ty, ty, val)
+			val = r
+		}
+		fe.emit("store %s %s, ptr %s, align 1", ty, val, q)
 	case "ptr_view_seq", "ptr_edit_seq":
 		s1 := fe.next("t")
 		fe.emit("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", s1, fe.v(a[0]))
