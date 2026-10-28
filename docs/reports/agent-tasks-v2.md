@@ -116,6 +116,28 @@ conservative against its own hypothesis on the diagnostic text. Whether
 the wire diagnostic should carry `message` is an open schema decision
 (`docs/reports/diagnostic-fixes.md`).
 
+A second pilot on the tightened tasks (t01, t03, t10; claude-opus-5-5;
+one trial per arm; records under `bench/agent/runs/20261028-103735`):
+
+| task | arm | success | iterations | wall (s) | final measure |
+|---|---|---|---|---|---|
+| t01_copy_budget | structured | yes | 3 | 16 | 0 copies |
+| t01_copy_budget | plain | yes | 3 | 25 | 0 copies |
+| t03_proven_checks | structured | yes | 4 | 47 | 2 runtime checks |
+| t03_proven_checks | plain | no | 20 (max) | 1800 (max) | 10 runtime checks |
+| t10_tlv_decoder | structured | yes | 10 | 108 | 4 runtime checks |
+| t10_tlv_decoder | plain | no | 20 (max) | 1800 (max) | 7 runtime checks |
+
+On both bounds-check tasks the plain arm wrote a program with the right
+output, saw a clean check and a correct run, and said DONE at its second
+iteration with 10 and 7 runtime-checked bounds checks against budgets of
+4 and 5: with nothing to measure the requirement by, its first guess was
+its answer. The structured arm called `show_bounds_checks` after every
+rewrite and converged in 4 and 10 iterations. t01 is a tie on iterations
+(3 and 3), which the rule scores as a loss, although the structured arm
+was faster; a copy budget is reasoned about correctly from the reference
+alone by this model.
+
 ## Accepted
 
 A solution could keep every required function as a stub and print the
