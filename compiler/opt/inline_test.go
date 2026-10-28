@@ -509,7 +509,10 @@ func TestInlineThresholds(t *testing.T) {
 // TestInlineChainBounded: a chain of empty functions each calling its
 // predecessor twice would double the caller's blocks at every level if
 // only instructions counted; the size metric counts blocks, so the growth
-// stays within the budget and the pass terminates quickly.
+// stays within the budget and the pass terminates quickly. Every level is
+// eligible (5 as lowered), so each grows by one copy of its predecessor
+// within MaxGrowth; main, which calls the last level once, holds that
+// level's copy outside its budget and its own budget on top.
 func TestInlineChainBounded(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString("module t\nfunc f0() { }\n")
@@ -521,9 +524,14 @@ func TestInlineChainBounded(t *testing.T) {
 	mod := lowerSrc(t, sb.String())
 	Inline(mod)
 	validate(t, mod)
+	bound := MaxGrowth + MaxCalleeSize + 8
 	for _, f := range mod.Funcs {
-		if s := size(f); s > MaxGrowth+MaxCalleeSize+8 {
-			t.Fatalf("%s grew to size %d", f.Name, s)
+		limit := bound
+		if f.Name == "t.main" {
+			limit += size(mod.Func(fmt.Sprintf("t.f%d", depth)))
+		}
+		if s := size(f); s > limit {
+			t.Fatalf("%s grew to size %d, limit %d", f.Name, s, limit)
 		}
 	}
 }
@@ -540,18 +548,30 @@ func parse(pkt: view[]u8) -> u64 {
     return u64(rd(pkt, 0usize)) + u64(rd(pkt, 2usize)) + u64(rd(pkt, 3usize))
 }
 func main() -> i32 {
-    var b: [6]u8 = zero()
-    print_u64(parse(b))
+    v := Vec[u8].new()
+    v.push(1u8)
+    v.push(2u8)
+    v.push(3u8)
+    v.push(4u8)
+    v.push(5u8)
+    v.push(6u8)
+    print_u64(parse(v.as_view()))
+    println()
+    print_u64(parse(v.as_view()))
     println()
     return 0i32
 }
 `
+	// parse is small as lowered, so it is inlined into main at both sites
+	// (with rd inside it); the checks are read from main, where the proof
+	// pass sees them, one run of six per site. The bytes come from a Vec
+	// so that only the guard, not a constant array length, proves them.
 	mod := lowerSrc(t, src)
 	if err := Run(mod, Options{Inline: true}); err != nil {
 		t.Fatal(err)
 	}
 	var got []string
-	for _, b := range mod.Func("t.parse").Blocks {
+	for _, b := range mod.Func("t.main").Blocks {
 		for _, in := range b.Instrs {
 			if cb, ok := in.(*ir.CheckBounds); ok && cb.Index != nil {
 				if cb.Prov.Label == "proven" {
@@ -563,7 +583,8 @@ func main() -> i32 {
 		}
 	}
 	// offsets 0, 1, 2, 3 are covered by the guard; 4 is not
-	want := "dominated_by_check dominated_by_check dominated_by_check dominated_by_check dominated_by_check runtime"
+	site := "dominated_by_check dominated_by_check dominated_by_check dominated_by_check dominated_by_check runtime"
+	want := site + " " + site
 	if g := strings.Join(got, " "); g != want {
 		t.Fatalf("checks %q, want %q\n%s", g, want, ir.Print(mod))
 	}
@@ -578,4 +599,180 @@ func TestInlineDeterministic(t *testing.T) {
 		t.Fatalf("two runs differ")
 	}
 	_ = fmt.Sprint
+}
+
+// TestInlineOrderKeepsLimit: mid calls two small helpers and is itself
+// small as lowered, but grows past MaxCalleeSize once they are inlined
+// into it, which happens before main is visited (callees first). The
+// callee is judged by its size as lowered, so main still inlines it and
+// all three end up inlined.
+func TestInlineOrderKeepsLimit(t *testing.T) {
+	src := `module t
+func lo(a: u64, b: u64) -> u64 {
+    x := a * 3u64 + b
+    y := x ^ (a << 2u32)
+    return y + (b >> 1u32)
+}
+func hi(a: u64, b: u64) -> u64 {
+    x := a + b * 5u64
+    y := x & (b | 1u64)
+    return y - (a >> 3u32)
+}
+func mid(a: u64, b: u64) -> u64 {
+    p := lo(a, b)
+    q := hi(b, a)
+    return p + q
+}
+func main() -> i32 {
+    print_u64(mid(1u64, 2u64))
+    println()
+    print_u64(mid(5u64, 7u64))
+    println()
+    return 0i32
+}
+`
+	plain, inl := same(t, src)
+	if n := size(plain.Func("t.mid")); n > MaxCalleeSize {
+		t.Fatalf("mid is %d as lowered, the case needs it within %d", n, MaxCalleeSize)
+	}
+	if n := size(inl.Func("t.mid")); n <= MaxCalleeSize {
+		t.Fatalf("mid is %d with its callees inlined, the case needs it past %d", n, MaxCalleeSize)
+	}
+	if got := calls(inl.Func("t.main")); len(got) != 0 {
+		t.Fatalf("main still calls %v\n%s", got, ir.Print(inl))
+	}
+	for _, name := range []string{"t.lo", "t.hi", "t.mid"} {
+		if !inl.Func(name).Inlined {
+			t.Errorf("%s should be marked Inlined", name)
+		}
+	}
+}
+
+// bigSrc is a program with one straight-line helper well past
+// MaxCalleeSize; sites is the number of calls main makes to it, and ref
+// also takes it as a function value.
+func bigSrc(sites int, ref bool) string {
+	var sb strings.Builder
+	sb.WriteString("module t\nfunc big(a: u64) -> u64 {\n    x := a\n")
+	for i := 0; i < 24; i++ {
+		fmt.Fprintf(&sb, "    x = (x << 1u32) ^ (x >> 3u32) ^ %du64\n", i+11)
+	}
+	sb.WriteString("    return x\n}\n")
+	if ref {
+		sb.WriteString("func apply(f: func(u64) -> u64, n: u64) -> u64 { return f(n) }\n")
+	}
+	sb.WriteString("func main() -> i32 {\n")
+	for i := 0; i < sites; i++ {
+		fmt.Fprintf(&sb, "    print_u64(big(%du64))\n    println()\n", i+1)
+	}
+	if ref {
+		sb.WriteString("    print_u64(apply(big, 9u64))\n    println()\n")
+	}
+	sb.WriteString("    return 0i32\n}\n")
+	return sb.String()
+}
+
+// TestInlineSingleSite: a callee past MaxCalleeSize is inlined at its
+// only call site, since the copy replaces the body; the same callee with
+// two sites, or one site and a func_ref, stays a call.
+func TestInlineSingleSite(t *testing.T) {
+	if n := size(lowerSrc(t, bigSrc(1, false)).Func("t.big")); n <= MaxCalleeSize {
+		t.Fatalf("big is %d, the case needs it past %d", n, MaxCalleeSize)
+	}
+	_, inl := same(t, bigSrc(1, false))
+	if got := calls(inl.Func("t.main")); len(got) != 0 {
+		t.Fatalf("the only site should be inlined, main still calls %v", got)
+	}
+	if !inl.Func("t.big").Inlined {
+		t.Fatalf("big should be marked Inlined")
+	}
+	for name, src := range map[string]string{"two sites": bigSrc(2, false), "one site and a func_ref": bigSrc(1, true)} {
+		_, inl := same(t, src)
+		if got := calls(inl.Func("t.main")); len(got) == 0 {
+			t.Errorf("%s: big should stay a call\n%s", name, ir.Print(inl))
+		}
+		if inl.Func("t.big").Inlined {
+			t.Errorf("%s: big must not be marked Inlined", name)
+		}
+	}
+	defer func(v bool) { InlineSingleSite = v }(InlineSingleSite)
+	InlineSingleSite = false
+	_, inl = same(t, bigSrc(1, false))
+	if got := calls(inl.Func("t.main")); len(got) != 1 {
+		t.Fatalf("with the rule off, big should stay a call, main calls %v", got)
+	}
+}
+
+// TestInlineSingleSiteOutsideBudget: a single-site copy is not charged
+// against the caller's growth budget (the module does not grow by it),
+// so a budget that admits only the two small helper sites still sees
+// the big callee inlined before them and the helpers after it.
+func TestInlineSingleSiteOutsideBudget(t *testing.T) {
+	src := bigSrc(1, false)
+	src = strings.Replace(src, "    return 0i32\n}\n", `    var buf: [4]u8 = zero()
+    buf[1usize] = 2u8
+    print_u64(u64(rd(buf, 0usize)))
+    println()
+    print_u64(u64(rd(buf, 2usize)))
+    println()
+    return 0i32
+}
+func rd(p: view[]u8, at: usize) -> u16 {
+    return (u16(p[at]) << 8u32) | u16(p[at + 1usize])
+}
+`, 1)
+	plain := lowerSrc(t, src)
+	var first *ir.Call
+	for _, b := range plain.Func("t.main").Blocks {
+		for _, in := range b.Instrs {
+			if c, ok := in.(*ir.Call); ok && c.Callee == "t.rd" && first == nil {
+				first = c
+			}
+		}
+	}
+	defer func(v int) { MaxGrowth = v }(MaxGrowth)
+	MaxGrowth = 2 * growthOf(first, plain.Func("t.rd"))
+	if g := growthOf(first, plain.Func("t.big")); g <= MaxGrowth {
+		t.Fatalf("big grows the caller by %d, the case needs it past the budget %d", g, MaxGrowth)
+	}
+	_, inl := same(t, src)
+	if got := calls(inl.Func("t.main")); len(got) != 0 {
+		t.Fatalf("big and both rd sites should be inlined, main still calls %v", got)
+	}
+}
+
+// TestInlineSingleSiteChainBounded: a chain of functions each calling its
+// predecessor once, with some arithmetic of its own, is inlined level by
+// level; MaxCallerSize stops a function from taking a single-site copy
+// past it, so no function grows beyond that plus the ordinary budget and
+// the retained IR stays linear in the chain's length.
+func TestInlineSingleSiteChainBounded(t *testing.T) {
+	var sb strings.Builder
+	// (named c, not f: f32 would be the float type)
+	sb.WriteString("module t\nfunc c0(a: u64) -> u64 { return a ^ 5u64 }\n")
+	const depth = 40
+	for i := 1; i <= depth; i++ {
+		fmt.Fprintf(&sb, "func c%d(a: u64) -> u64 {\n    x := (a << 1u32) ^ (a >> 2u32) ^ %du64\n    y := (x << 3u32) ^ (x >> 1u32)\n    r := c%d(y)\n    return r ^ x\n}\n", i, i+3, i-1)
+	}
+	fmt.Fprintf(&sb, "func main() -> i32 {\n    print_u64(c%d(7u64))\n    println()\n    return 0i32\n}\n", depth)
+	src := sb.String()
+	defer func(a, b int) { MaxCallerSize, MaxGrowth = a, b }(MaxCallerSize, MaxGrowth)
+	MaxCallerSize, MaxGrowth = 160, 48
+	_, inl := same(t, src)
+	total := 0
+	for _, f := range inl.Funcs {
+		s := size(f)
+		total += s
+		if s > MaxCallerSize+MaxGrowth {
+			t.Fatalf("%s grew to size %d, limit %d", f.Name, s, MaxCallerSize+MaxGrowth)
+		}
+	}
+	if total > (depth+2)*(MaxCallerSize+MaxGrowth) {
+		t.Fatalf("retained IR is %d over %d functions", total, len(inl.Funcs))
+	}
+	// the chain is still collapsed as far as the bound allows: main holds
+	// more than one level
+	if n := size(inl.Func("t.main")); n < 2*size(lowerSrc(t, src).Func("t.c1")) {
+		t.Fatalf("main is %d, expected it to hold more than one level of the chain", n)
+	}
 }

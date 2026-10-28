@@ -15,16 +15,40 @@ import (
 
 // MaxCalleeSize is the largest callee the inliner copies: its size, the
 // number of instructions over its blocks plus one per block for the
-// terminator, measured after the callee's own call sites have been
-// processed. Counting blocks keeps a chain of empty functions that call
-// their predecessor twice from doubling the caller's control flow at
-// every step.
+// terminator, as the function was lowered, before the pass inlined the
+// callee's own callees into it. Judging the callee as written keeps the
+// callees-first order from defeating the limit: a small function that
+// absorbs two small helpers is still the small function the limit was
+// set for, and what its copies cost the caller is bounded by MaxGrowth.
+// Counting blocks keeps a chain of empty functions that call their
+// predecessor twice from doubling the caller's control flow at every
+// step.
 var MaxCalleeSize = 48
 
 // MaxGrowth bounds the net instruction growth of one function through
-// inlining; a site whose rewrite would exceed it stays a call, as do every
-// later site in that function.
+// inlining, measured on the callee as it is when copied; a site whose
+// rewrite would exceed it stays a call, as do every later site in that
+// function.
 var MaxGrowth = 512
+
+// InlineSingleSite admits a callee of any size at its only call site
+// when nothing else references it. The copy replaces the body, so the
+// module does not grow by it, and for the same reason the copy is not
+// charged against the caller's MaxGrowth: charging it would starve the
+// small helpers at the sites after it (docs/reports/inliner-sizing.md
+// has the measurement). The callee is otherwise judged like any other
+// (no loops, no out parameters, no returned accesses, not recursive,
+// same file, not library).
+var InlineSingleSite = true
+
+// MaxCallerSize bounds a function's size through single-site copies: a
+// single-site callee is outside MaxGrowth only while the caller's size
+// after the copy stays within it (past that, the site is judged by the
+// budget like any other). Without the bound a chain of functions each
+// calling its predecessor once would be copied level by level into its
+// last member, quadratic work in the chain's length; with it the work
+// is linear in the module's size.
+var MaxCallerSize = 2048
 
 // Inline rewrites every eligible direct call site of the module (PLAN.md
 // 6.2, 6.3), callees before callers, and marks the functions nothing
@@ -34,18 +58,79 @@ var MaxGrowth = 512
 func Inline(mod *ir.Module) {
 	funcs := append([]*ir.Func(nil), mod.Funcs...)
 	sort.Slice(funcs, func(i, j int) bool { return funcs[i].Name < funcs[j].Name })
-	recursive := recursiveFuncs(mod, funcs)
+	in := &inliner{
+		mod:       mod,
+		recursive: recursiveFuncs(mod, funcs),
+		sizes:     map[*ir.Func]int{},
+		sites:     callSites(mod, funcs),
+	}
+	for _, f := range funcs {
+		in.sizes[f] = size(f)
+	}
 	for _, f := range callOrder(mod, funcs) {
 		if f.Entry == nil {
 			continue
 		}
-		inlineInto(mod, f, recursive)
+		in.inlineInto(f)
 	}
 	markInlined(mod, funcs)
 }
 
+// inliner holds what the pass decides eligibility from, recorded before
+// any function is rewritten: the functions in recursive components, every
+// function's size as lowered, and its direct call sites over the module.
+type inliner struct {
+	mod       *ir.Module
+	recursive map[*ir.Func]bool
+	sizes     map[*ir.Func]int // size as lowered, before the pass
+	sites     map[*ir.Func]int // direct call sites as lowered; -1 when otherwise referenced
+}
+
+// callSites counts each function's direct call sites over the module as
+// lowered. A function the module also references another way, by
+// func_ref, as a release function, as the entry, a destructor or an
+// exported symbol, keeps its body whatever the pass does at its calls, so
+// it counts as referenced (-1) rather than called.
+func callSites(mod *ir.Module, funcs []*ir.Func) map[*ir.Func]int {
+	sites := map[*ir.Func]int{}
+	referenced := map[string]bool{mod.Entry: true}
+	for _, f := range funcs {
+		if f.Release != "" {
+			referenced[f.Release] = true
+		}
+		for _, b := range f.Blocks {
+			for _, in := range b.Instrs {
+				switch i := in.(type) {
+				case *ir.Call:
+					if i.Fn == nil && i.Intrinsic == "" {
+						if g := mod.Func(i.Callee); g != nil {
+							sites[g]++
+						}
+					}
+					if i.Release != "" {
+						referenced[i.Release] = true
+					}
+				case *ir.AccessEnd:
+					if i.Release != "" {
+						referenced[i.Release] = true
+					}
+				case *ir.FuncRef:
+					referenced[i.Name] = true
+				}
+			}
+		}
+	}
+	for _, f := range funcs {
+		if referenced[f.Name] || f.Extern != "" || isDestructor(f.Name) {
+			sites[f] = -1
+		}
+	}
+	return sites
+}
+
 // eligible reports whether a call from f to g may be inlined (PLAN.md 6.2).
-func eligible(f, g *ir.Func, recursive map[*ir.Func]bool) bool {
+func (in *inliner) eligible(f, g *ir.Func) bool {
+	recursive := in.recursive
 	switch {
 	case g == nil || g == f || g.Entry == nil:
 		return false
@@ -68,8 +153,11 @@ func eligible(f, g *ir.Func, recursive map[*ir.Func]bool) bool {
 			return false // a returned projection is tied to the caller's AccessEnd
 		}
 	}
-	if hasLoop(g) || size(g) > MaxCalleeSize {
+	if hasLoop(g) {
 		return false
+	}
+	if in.sizes[g] > MaxCalleeSize {
+		return InlineSingleSite && in.sites[g] == 1 // the copy replaces the body
 	}
 	return true
 }
@@ -244,10 +332,12 @@ func callOrder(mod *ir.Module, funcs []*ir.Func) []*ir.Func {
 }
 
 // inlineInto rewrites the eligible call sites of f, in block then
-// instruction order, within the growth budget. Sites are considered in the
-// original blocks' order and then in the spliced blocks' (work), while the
-// layout (f.Blocks) places each splice right after its call block.
-func inlineInto(mod *ir.Module, f *ir.Func, recursive map[*ir.Func]bool) {
+// instruction order, within the growth budget; a single-site callee's
+// copy is outside the budget while f stays within MaxCallerSize (see
+// InlineSingleSite). Sites are considered in the original blocks' order and
+// then in the spliced blocks' (work), while the layout (f.Blocks) places
+// each splice right after its call block.
+func (in *inliner) inlineInto(f *ir.Func) {
 	growth := 0
 	work := append([]*ir.Block(nil), f.Blocks...)
 	for bi := 0; bi < len(work); bi++ {
@@ -257,12 +347,13 @@ func inlineInto(mod *ir.Module, f *ir.Func, recursive map[*ir.Func]bool) {
 			if !ok || c.Fn != nil || c.Intrinsic != "" {
 				continue
 			}
-			g := mod.Func(c.Callee)
-			if !eligible(f, g, recursive) {
+			g := in.mod.Func(c.Callee)
+			if !in.eligible(f, g) {
 				continue
 			}
 			delta := growthOf(c, g)
-			if growth+delta > MaxGrowth {
+			single := InlineSingleSite && in.sites[g] == 1 && size(f)+delta <= MaxCallerSize
+			if growth+delta > MaxGrowth && !single {
 				return // this site and the ones after it stay calls
 			}
 			before := size(f)
@@ -270,7 +361,9 @@ func inlineInto(mod *ir.Module, f *ir.Func, recursive map[*ir.Func]bool) {
 			if size(f)-before != delta {
 				panic(fmt.Sprintf("opt: inline: growth of %s at %d is %d, estimated %d", c.Callee, c.Pos.Start, size(f)-before, delta))
 			}
-			growth += delta
+			if !single {
+				growth += delta
+			}
 			break // the rest of b moved to the continuation block, visited later
 		}
 	}
