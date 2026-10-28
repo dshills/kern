@@ -144,11 +144,11 @@ go run ./bench/harness
 
 regenerates `bench/REPORT.md` from five runs per row with 95% confidence
 intervals, checking that the C, Rust and kern implementations agree on their
-checksums. In the latest report user-level kern code meets the 10% throughput
-target on three of the thirteen workloads (ring_buffer, intrusive_run_queue and
-page_frame_allocator), reaches 0.84× to 0.87× of the best of C and Rust on
-vector, hash_table and buffer_pool, and 0.2× to 0.73× on the other seven; peak
-memory meets the 10% target on eleven of the thirteen.
+checksums. In the latest report (2026-10-28) user-level kern code meets the
+10% throughput target on eleven of the thirteen workloads, at 0.92× to 1.08× of
+the best of C and Rust; thread_pool (0.88×) and lock_protected_map (0.76×) miss
+it. Peak memory meets the 10% target on twelve of the thirteen: btree uses 1.23×
+the memory of C, the width of its checked 8-byte handles (ADR-014).
 
 ## Status
 
@@ -156,8 +156,14 @@ The implementation went through five planned phases (`specs/initial/PLAN.md`,
 reports in `docs/reports/`): workload design, the core language and
 interpreter, the native backend and ownership checker, concurrency and
 freestanding targets, tooling and the machine API, and hardening (frozen
-rules, DWARF, reproducible releases, security review). Open items are recorded
-in the reports and ADRs rather than in an issue tracker.
+rules, DWARF, reproducible releases, security review), then a sixth of
+performance work and language additions (kern-level inlining, condition
+variables, byte-order reads and writes, `where` clauses, non-escaping
+closures, `std/str`, `std/map` and `std/io`; `docs/reports/`). The agent
+experiment's full matrix has been run (`bench/agent/REPORT.md`): every trial
+succeeds in both arms and the primary metric does not pass, because the tasks
+do not separate the arms. Open items are recorded in the reports and ADRs
+rather than in an issue tracker.
 
 Specification documents, the language reference and the ADRs are the
 authority; where the code disagrees with them, the code is wrong.

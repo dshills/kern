@@ -16,31 +16,31 @@ The Phase 0 gate was **GO** (`docs/reports/phase-0.md`): the checker prototype a
 
 ## 3. Performance (Phases 2 and 3)
 
-`bench/REPORT.md` (generated; 5 runs per row, 95% confidence intervals, Apple M4 Pro, clang 23.1.4, rustc 1.99.0, go 1.27.3) measures all thirteen §8 workloads in C, Rust [rust-reference] and kern with the same checksums. kern release against the better of C and Rust:
+`bench/REPORT.md` (generated; 5 runs per row, 95% confidence intervals, Apple M4 Pro, clang 23.1.4, rustc 1.99.0, go 1.27.3; the run of 2026-10-28 at a one-minute load of 1.7) measures all thirteen §8 workloads in C, Rust [rust-reference] and kern with the same checksums. kern release against the better of C and Rust:
 
 | Workload | throughput ratio | RSS ratio | 10% targets met |
 |---|---|---|---|
-| vector | 0.25 | 1.00 | RSS |
-| hash_table | 0.50 | 1.06 | RSS |
-| btree | 0.52 | 3.21 | neither |
-| arena_ast | 0.51 | 1.37 | neither |
-| ring_buffer | 1.03 | 1.03 | both |
-| wal | 0.39 | 1.00 | RSS |
-| packet_parser | 0.27 (SIMD row +34%) | 1.07 | RSS |
-| buffer_pool | 0.50–1.36 (load-sensitive) | 1.01 | RSS |
-| page_frame_allocator | 0.87 | 1.06 | both |
-| intrusive_run_queue | 1.03 | 1.05 | both |
-| thread_pool | 0.62 | 1.02 | RSS |
-| lock_protected_map | 0.60 | 1.06 | RSS |
-| lock_free_queue | 0.34 | 1.02 | RSS |
+| vector | 1.08 | 1.00 | both |
+| hash_table | 0.96 | 1.06 | both |
+| btree | 0.94 | 1.23 | throughput |
+| arena_ast | 0.92 | 0.99 | both |
+| ring_buffer | 1.02 | 1.03 | both |
+| wal | 1.00 | 1.00 | both |
+| packet_parser | 0.92 | 1.06 | both |
+| buffer_pool | 0.96 | 1.01 | both |
+| page_frame_allocator | 0.92 | 1.02 | both |
+| intrusive_run_queue | 1.01 | 1.04 | both |
+| thread_pool | 0.88 | 1.02 | RSS |
+| lock_protected_map | 0.76 | 1.06 | RSS |
+| lock_free_queue | 0.95 | 1.03 | both |
 
-Three workloads meet both targets and eleven meet the RSS target. The §9 separations in the same report attribute the throughput gap: the workloads that meet the target are the ones written over arrays and raw pointers; the ones that miss it call the hosted runtime's C containers out of line on every operation (every `Vec`/`Pool` access reloads its handle and crosses a call boundary that LLVM does not inline), keep every bounds, overflow and conversion check on in both build configurations (the measurement-only `--unsafe-elide-checks` build quantifies that cost per workload), and, for the lock-free queue, publish every element where the C and Rust programs batch their index stores. The `[unproven]` aliasing experiment shows that LLVM gains nothing from the §5.4 `noalias`/`readonly` attributes on the container workloads today, because the loads that matter happen inside the C runtime rather than through the attributed parameters. None of these is a cost of second-class access itself; they are costs of the Phase 2 decision to implement the library in C rather than in kern over the raw-pointer core, which Phase 3 delivered and which a kern rewrite of the containers would now remove. The performance thesis is therefore **not yet demonstrated for container-heavy code and demonstrated for array- and pointer-based code**.
+Ten workloads meet both targets, eleven meet the throughput target and twelve the memory target. The first report of this phase (`docs/reports/phase-4.md`, 2026-10-26) had three workloads meeting both, with the container-heavy ones at 0.25 to 0.52 of C; the difference is the sequence of engineering reports under `docs/reports/`: the containers rewritten in kern over the raw-pointer core (`containers-in-kern.md`), `Pool` growth through `realloc` (`btree-rss.md`), internal linkage and a union layout without a padding slot (`gap-diagnosis.md`), kern-level inlining with callees judged as lowered and loops admitted (`inliner.md`, `inliner-sizing.md`, `inliner-loops.md`), bit-count and byte-order intrinsics (`throughput-gaps.md`, `byte-order-reads.md`, `byte-order-stores.md`), `Vec.extend` and zeroed `Vec.resize` (`vec-extend.md`, `hash-table-gap.md`), release handles without identity tags and `Pool` slot metadata beside the element (`release-handles.md`), an owner-checked default mutex and condition variables (`quiet-harness-2026-10-28.md`, `condvar.md`). None of these changed the ownership model: the gap was the C runtime boundary, the shape of the generated code and the synchronisation primitives, as the §9 separations had attributed it. What remains is the memory of a checked handle (btree, ADR-014) and the lock hand-off between threads in the two mutex-bound workloads, of which thread_pool went from 0.59 to 0.88 with condition variables and lock_protected_map from 0.57 to 0.76 with the cheaper mutex. The `[unproven]` aliasing experiment still measures no throughput change from the §5.4 `noalias`/`readonly` attributes.
 
 ## 4. The agent experiment (Phase 4)
 
 `bench/agent/` holds the experiment: ten tasks drawn from the §8 workloads (implementation, debugging, refactoring, optimization, unsafe-contract review), each with hidden tests (expected output, a clean check, and for the optimization and refactoring tasks a bound on allocation sites or copies measured through the machine API), reference solutions validated by the harness, and a tool-driving harness that records every tool call. The two arms receive the same language reference, grammar, prelude and examples; the structured arm gets JSON diagnostics with rule numbers and the semantic queries (`explain_ownership`, `show_copies`, `show_allocations`), the plain arm gets text diagnostics only. The aggregation rule closes spec §13 accepted gap 7: a trial succeeds only if the hidden suite passes within 20 iterations and 30 minutes, a failure scores the budget maximum, and a task is a win only when, for every model, the structured arm has at least as many successes and strictly lower median iterations and wall-clock time.
 
-**Status:** the full matrix (10 tasks × 2 models × 2 arms × 5 trials, up to 200 agent runs of up to 30 minutes each) was not run in this phase; a one-trial pilot of one task validated the harness end to end (`bench/agent/REPORT.md` holds whatever has been run, with the win count computed by the rule above; partial runs count as losses). The result of the full run, when it is executed, replaces this paragraph.
+**Result** (`bench/agent/REPORT.md`, 2026-10-28; models claude-opus-5-5 and gpt-6.1-sol, 5 trials per task, model and arm, 200 trials): every trial succeeds in both arms, and the primary metric records **0 wins of 10**, below the threshold of 8. The medians tie on iterations in every task (3 for claude-opus-5-5, 5 for gpt-6.1-sol, in both arms) and the wall-clock medians differ by a few seconds in either direction; no regression and no unsafe code beyond the task that asks for it were recorded. The rule counts a tie as a loss, so the experiment does not show that structured diagnostics help, and it does not show that they do not: the ten tasks are solved on the first attempt by both models from the language reference alone, so they cannot separate the arms. A test of the hypothesis needs tasks that the plain arm fails or takes several corrections on, which these ten, written to validate the harness, are not.
 
 The secondary comparison with Go and Rust agents [go-spec] [rust-reference] is descriptive only and was not run: both languages dominate model training corpora while kern is absent from them, so a difference in either direction would measure familiarity rather than the effect of structured diagnostics.
 
@@ -73,5 +73,5 @@ The secondary comparison with Go and Rust agents [go-spec] [rust-reference] is d
 ## 6. Conclusions
 
 1. Second-class access as the sole ownership mechanism is **feasible** for the thirteen workloads: no workload needed references, three needed audited unsafe internals, and the checker's rules each have a fixture.
-2. The performance target holds for array- and raw-pointer-based workloads and does not yet hold for container-heavy ones; the separations attribute the gap to the C runtime boundary and to checks that are on by design, not to the ownership model. Rewriting the containers in kern over the raw-pointer core is the next step.
-3. The agent metric is reported in §4 from the recorded trials; the harness, tasks and aggregation rule are in place and auditable.
+2. The performance target holds for eleven of the thirteen workloads in throughput and twelve in memory, container-heavy ones included, once the containers were written in kern and the generated code, the handles and the synchronisation primitives were brought level with the C versions; the two remaining throughput gaps are mutex-bound workloads at 0.88 and 0.76, and the one memory gap is the generation a checked handle carries. The ownership model cost none of the throughput.
+3. The agent metric does not pass: all 200 trials succeed in both arms and the tasks do not separate structured diagnostics from plain ones. The harness, tasks and aggregation rule are in place and auditable; the next experiment needs tasks that the plain arm fails.
