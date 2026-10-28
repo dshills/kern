@@ -112,7 +112,7 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 // to stdout and exit 2; otherwise stdout belongs to the program, a trap
 // writes its record to stderr and exits 134.
 func runProgram(args []string, stdout, stderr io.Writer) int {
-	opts, files, _, err := parseRunArgs(args)
+	opts, files, progArgs, err := parseRunArgs(args)
 	if err != nil {
 		return fail(stdout, "CLI_INVALID_FLAGS", "%v", err)
 	}
@@ -137,6 +137,7 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 		return fail(stdout, "CLI_INVALID_FLAGS", "program has no main function")
 	}
 	it := interp.New(mod, files[0], stdout, stderr)
+	it.SetArgs(append([]string{files[0]}, progArgs...))
 	it.TestHooks = opts.TestHooks
 	it.Freestanding = opts.Env == "freestanding"
 	it.SetIdentityTags(opts.Opt != "release")

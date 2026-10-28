@@ -1,0 +1,127 @@
+// std/str: an owned byte string and operations on byte views. Imported
+// with `import "std/str"`; every declaration is exported (spec/types.md §1).
+module str
+
+// String is an owned, growable byte string. The library treats it as
+// bytes; text is UTF-8 by convention.
+struct String nocopy { bytes: Vec[u8] }
+
+impl String {
+    func new() -> String { return String { bytes: Vec[u8].new() } }
+    // from copies the bytes of s into a new String.
+    func from(s: view[]u8) -> String {
+        r := String { bytes: Vec[u8].new() }
+        r.bytes.extend(s)
+        return r
+    }
+    func len(view self) -> usize { return self.bytes.len() }
+    func as_view(view self) -> view[]u8 { return self.bytes.as_view() }
+    func push(edit self, b: u8) { self.bytes.push(b) }
+    func push_str(edit self, s: view[]u8) { self.bytes.extend(s) }
+    // push_u64 appends v in decimal.
+    func push_u64(edit self, v: u64) {
+        if v == 0u64 { self.bytes.push(48u8); return }
+        var digits: [20]u8 = zero()
+        n := 0usize
+        x := v
+        while x > 0u64 {
+            digits[n] = truncate[u8](x % 10u64) + 48u8
+            x = x / 10u64
+            n = n + 1usize
+        }
+        while n > 0usize {
+            n = n - 1usize
+            self.bytes.push(digits[n])
+        }
+    }
+    func clear(edit self) { self.bytes.clear() }
+    func clone(view self) -> String { return String { bytes: self.bytes.clone() } }
+    func byte(view self, i: usize) -> u8 { b := self.bytes.get(i); return b }
+    // equals compares the bytes with s.
+    func equals(view self, s: view[]u8) -> bool { return equal(self.bytes.as_view(), s) }
+}
+
+// equal reports whether a and b hold the same bytes.
+func equal(a: view[]u8, b: view[]u8) -> bool {
+    if len(a) != len(b) { return false }
+    i := 0usize
+    while i < len(a) {
+        if a[i] != b[i] { return false }
+        i = i + 1usize
+    }
+    return true
+}
+
+// hash is the 64-bit FNV-1a hash of s.
+func hash(s: view[]u8) -> u64 {
+    h := 14695981039346656037u64
+    i := 0usize
+    while i < len(s) {
+        h = wrapping_mul(h ^ u64(s[i]), 1099511628211u64)
+        i = i + 1usize
+    }
+    return h
+}
+
+// starts_with reports whether s begins with prefix.
+func starts_with(s: view[]u8, prefix: view[]u8) -> bool {
+    if len(prefix) > len(s) { return false }
+    i := 0usize
+    while i < len(prefix) {
+        if s[i] != prefix[i] { return false }
+        i = i + 1usize
+    }
+    return true
+}
+
+// find returns the index of the first occurrence of needle in s.
+func find(s: view[]u8, needle: view[]u8) -> Option[usize] {
+    if len(needle) > len(s) { return None }
+    i := 0usize
+    last := len(s) - len(needle)
+    while i <= last {
+        j := 0usize
+        while j < len(needle) && s[i + j] == needle[j] { j = j + 1usize }
+        if j == len(needle) { return Some(i) }
+        i = i + 1usize
+    }
+    return None
+}
+
+// parse_u64 reads a decimal number; None when s is empty, has a byte that
+// is not a digit, or does not fit in a u64.
+func parse_u64(s: view[]u8) -> Option[u64] {
+    if len(s) == 0usize { return None }
+    v := 0u64
+    i := 0usize
+    while i < len(s) {
+        b := s[i]
+        if b < 48u8 || b > 57u8 { return None }
+        match checked_mul(v, 10u64) {
+            Some(m) => {
+                match checked_add(m, u64(b - 48u8)) {
+                    Some(a) => v = a
+                    None => return None
+                }
+            }
+            None => return None
+        }
+        i = i + 1usize
+    }
+    return Some(v)
+}
+
+// Bounds is a byte range lo..hi of a view.
+struct Bounds { lo: usize; hi: usize }
+
+// trim returns the bounds of s without leading and trailing spaces, tabs,
+// carriage returns and newlines: s[b.lo : b.hi].
+func trim(s: view[]u8) -> Bounds {
+    lo := 0usize
+    hi := len(s)
+    while lo < hi && is_space(s[lo]) { lo = lo + 1usize }
+    while hi > lo && is_space(s[hi - 1usize]) { hi = hi - 1usize }
+    return Bounds { lo: lo, hi: hi }
+}
+
+func is_space(b: u8) -> bool { return b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8 }

@@ -1,6 +1,7 @@
 package check
 
 import (
+	"sort"
 	"fmt"
 
 	"github.com/dshills/kern/compiler/ast"
@@ -13,13 +14,27 @@ import (
 // returns diagnostics.
 func Check(prog *resolve.Program) []diag.Diagnostic {
 	c := &checker{prog: prog, info: prog.Info}
+	// every module: the prelude, the std modules the program imports, the
+	// imported user modules and the main module, in a fixed order
 	var files []*ast.File
 	if prog.Core != nil {
 		files = append(files, prog.Core.Files...)
 	}
-	files = append(files, prog.Main.Files...)
+	var names []string
+	for name, m := range prog.Modules {
+		if m != prog.Core && m != prog.Main {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		files = append(files, prog.Modules[name].Files...)
+	}
+	if prog.Main != nil && prog.Main != prog.Core {
+		files = append(files, prog.Main.Files...)
+	}
 	for _, f := range files {
-		core := prog.Core != nil && f.Module == prog.Core.Name
+		core := prog.IsStd(f.Module)
 		for _, d := range f.Decls {
 			switch d := d.(type) {
 			case *ast.FuncDecl:

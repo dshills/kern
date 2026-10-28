@@ -72,10 +72,18 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 		if opts.Freestanding {
 			entrySym = "@kern_main" // the startup code calls it and halts with its result
 		}
+		// a hosted program's main receives argc and argv and hands them to
+		// the runtime for std/io's args(); a freestanding image has none
+		params, setArgs := "", ""
+		if !opts.Freestanding {
+			params = "i32 %argc, ptr %argv"
+			setArgs = "  call void @kern_set_args(i32 %argc, ptr %argv)\n"
+			e.declare("kern_set_args", "void (i32, ptr)")
+		}
 		if ret == "void" {
-			fmt.Fprintf(&e.sb, "define i32 %s() {\nentry:\n  call void @kern_start()\n  call %s %s()\n  ret i32 0\n}\n", entrySym, retOrVoid(ret), fnSym(mod.Entry))
+			fmt.Fprintf(&e.sb, "define i32 %s(%s) {\nentry:\n%s  call void @kern_start()\n  call %s %s()\n  ret i32 0\n}\n", entrySym, params, setArgs, retOrVoid(ret), fnSym(mod.Entry))
 		} else {
-			fmt.Fprintf(&e.sb, "define i32 %s() {\nentry:\n  call void @kern_start()\n  %%r = call %s %s()\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", entrySym, ret, fnSym(mod.Entry), widenOp(ret), ret)
+			fmt.Fprintf(&e.sb, "define i32 %s(%s) {\nentry:\n%s  call void @kern_start()\n  %%r = call %s %s()\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", entrySym, params, setArgs, ret, fnSym(mod.Entry), widenOp(ret), ret)
 		}
 		e.declare("kern_start", "void ()")
 	}

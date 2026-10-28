@@ -15,6 +15,8 @@
 #include <unistd.h>
 #include <time.h>
 #include <sched.h>
+#include <fcntl.h>
+#include <errno.h>
 
 typedef void (*kern_glue)(void *);
 
@@ -71,6 +73,61 @@ void println(void) { kern_out("\n", 1); }
 #define KERN_CLOCK CLOCK_MONOTONIC
 #endif
 void kern_exit(int32_t code) { kern_flush(); _exit(code); }
+
+// ---- std/io (hosted): descriptor-level file access ----
+// Errors are negative errno values; the kern side maps them to IoErr.
+// Descriptor 1 goes through the output buffer so that it interleaves with
+// print_* as written.
+
+static int kern_argc = 0;
+static char **kern_argv = NULL;
+void kern_set_args(int32_t argc, char **argv) { kern_argc = argc; kern_argv = argv; }
+int32_t kern_io_open(const char *p, int64_t n, uint8_t write) {
+    char path[4096];
+    if (n < 0 || (size_t)n >= sizeof path) return -ENAMETOOLONG;
+    if (n > 0 && memchr(p, 0, (size_t)n) != NULL) return -EINVAL; // an embedded NUL would cut the path
+    memcpy(path, p, (size_t)n);
+    path[n] = 0;
+    int fd = write ? open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644) : open(path, O_RDONLY);
+    if (fd < 0) return -errno;
+    if (fd < 3) {
+        // a standard stream was closed at startup: keep opened files above
+        // the descriptors the output buffer and the kern side treat specially
+        int d = fcntl(fd, F_DUPFD, 3);
+        int saved = errno;
+        close(fd);
+        if (d < 0) return -saved;
+        fd = d;
+    }
+    return fd;
+}
+int64_t kern_io_read(int32_t fd, char *buf, int64_t n) {
+    ssize_t r = read(fd, buf, (size_t)n);
+    return r < 0 ? -errno : (int64_t)r;
+}
+int64_t kern_io_write(int32_t fd, const char *p, int64_t n) {
+    if (fd == 1) { kern_out(p, (size_t)n); return n; }
+    ssize_t r = write(fd, p, (size_t)n);
+    return r < 0 ? -errno : (int64_t)r;
+}
+// kern_io_close closes a descriptor the program opened (the kern side never
+// passes the standard streams); a delayed write error surfaces here.
+int32_t kern_io_close(int32_t fd) { if (fd < 0) return -EBADF; return close(fd) < 0 ? -errno : 0; }
+int32_t kern_io_remove(const char *p, int64_t n) {
+    char path[4096];
+    if (n < 0 || (size_t)n >= sizeof path) return -ENAMETOOLONG;
+    if (n > 0 && memchr(p, 0, (size_t)n) != NULL) return -EINVAL;
+    memcpy(path, p, (size_t)n);
+    path[n] = 0;
+    return unlink(path) < 0 ? -errno : 0;
+}
+int64_t kern_io_argc(void) { return kern_argc; }
+int64_t kern_io_arg(int64_t i, char *buf, int64_t n) {
+    if (i < 0 || i >= kern_argc) return 0;
+    size_t len = strlen(kern_argv[i]);
+    memcpy(buf, kern_argv[i], len < (size_t)n ? len : (size_t)n);
+    return (int64_t)len;
+}
 void kern_yield(void) { sched_yield(); }
 uint64_t kern_now_ns(void) { struct timespec ts; clock_gettime(KERN_CLOCK, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
 

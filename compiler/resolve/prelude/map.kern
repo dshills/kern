@@ -1,0 +1,185 @@
+// std/map: an open-addressing hash map with linear probing (the
+// bench/kern/hash_table design), keyed by any Hashable type. Imported with
+// `import "std/map"`. A Map[K, V] keeps its slots in three vectors (state,
+// key, value); removal leaves a tombstone, and the table doubles when
+// three quarters of its slots are in use.
+module map
+import "std/str"
+
+// Hashable is the constraint on a Map's key type: a hash and an equality.
+interface Hashable {
+    func hash(view self) -> u64
+    func eq(view self, other: view[Self]) -> bool
+}
+
+// mix scrambles an integer key (Fibonacci hashing of its folded halves).
+func mix(x: u64) -> u64 { return wrapping_mul(x ^ (x >> 32u32), 11400714819323198485u64) }
+
+impl Hashable for u64 {
+    func hash(view self) -> u64 { return mix(self) }
+    func eq(view self, other: view[u64]) -> bool { return self == other }
+}
+impl Hashable for u32 {
+    func hash(view self) -> u64 { return mix(u64(self)) }
+    func eq(view self, other: view[u32]) -> bool { return self == other }
+}
+impl Hashable for usize {
+    func hash(view self) -> u64 { return mix(u64(self)) }
+    func eq(view self, other: view[usize]) -> bool { return self == other }
+}
+impl Hashable for i64 {
+    func hash(view self) -> u64 { return mix(truncate[u64](self)) }
+    func eq(view self, other: view[i64]) -> bool { return self == other }
+}
+impl Hashable for u8 {
+    func hash(view self) -> u64 { return mix(u64(self)) }
+    func eq(view self, other: view[u8]) -> bool { return self == other }
+}
+impl Hashable for str.String {
+    func hash(view self) -> u64 { return str.hash(self.as_view()) }
+    func eq(view self, other: view[str.String]) -> bool { return self.equals(other.as_view()) }
+}
+
+// Map is the table: states (0 empty, 1 deleted, 2 full), keys and values
+// by slot; count is the number of live entries, used the number of slots
+// that are not empty.
+struct Map[K, V] nocopy { states: Vec[u8]; keys: Vec[Option[K]]; vals: Vec[Option[V]]; cap: usize; count: usize; used: usize; bits: u32 }
+
+// with_bits builds an empty map of 2^bits slots, 1 <= bits <= 58 (the hash
+// is shifted by 64 - bits to pick a slot; a map traps explicitly outside
+// that range).
+func with_bits[K, V](bits: u32) -> Map[K, V] {
+    if bits == 0u32 || bits > 58u32 { trap() }
+    cap := 1usize << bits
+    m := Map[K, V] { states: Vec[u8].new(), keys: Vec[Option[K]].new(), vals: Vec[Option[V]].new(), cap: cap, count: 0usize, used: 0usize, bits: bits }
+    m.states.resize(cap, 0u8)
+    i := 0usize
+    while i < cap {
+        m.keys.push(None)
+        m.vals.push(None)
+        i = i + 1usize
+    }
+    return m
+}
+
+// The methods that hash or compare keys bound K with a where clause
+// (spec/types.md): a Map exists for every K, and is usable for Hashable ones.
+impl Map[K, V] {
+    func new() -> Map[K, V] { return with_bits[K, V](4u32) }
+    func len(view self) -> usize { return self.count }
+
+    // slot finds the slot holding key, or, when key is absent, the first
+    // slot (deleted or empty) an insert of it would use.
+    func slot(view self, key: view[K]) -> usize where K: Hashable {
+        mask := self.cap - 1usize
+        i := usize(key.hash() >> (64u32 - self.bits))
+        free := self.cap
+        while true {
+            st := self.states.get(i)
+            if st == 0u8 {
+                if free == self.cap { return i }
+                return free
+            }
+            if st == 1u8 {
+                if free == self.cap { free = i }
+            } else {
+                match self.keys.get(i) {
+                    Some(k) => { if k.eq(key) { return i } }
+                    None => { }
+                }
+            }
+            i = (i + 1usize) & mask
+        }
+        return self.cap
+    }
+
+    // Lookups take the key by value (a Copy key is copied, an owned key such
+    // as a String is given up and destroyed after the lookup), so a literal
+    // or a temporary may be passed.
+    func contains(view self, key: own K) -> bool where K: Hashable {
+        i := self.slot(key)
+        return self.states.get(i) == 2u8
+    }
+
+    // get views the value stored under key; it traps (explicit) when the
+    // key is absent, so callers test with contains first when unsure.
+    func get(view self, key: own K) -> view[V] where K: Hashable {
+        i := self.slot(key)
+        if self.states.get(i) != 2u8 { trap() }
+        match self.vals.get(i) {
+            Some(v) => return v
+            None => trap()
+        }
+    }
+
+    // at edits the value stored under key; it traps when the key is absent.
+    func at(edit self, key: own K) -> edit[V] where K: Hashable {
+        i := self.slot(key)
+        if self.states.get(i) != 2u8 { trap() }
+        match self.vals.at(i) {
+            Some(v) => return v
+            None => trap()
+        }
+    }
+
+    // insert stores val under key and returns the value it replaced, if any.
+    func insert(edit self, key: own K, val: own V) -> Option[V] where K: Hashable {
+        if (self.used + 1usize) * 4usize >= self.cap * 3usize {
+            // slots are running out: double when the live entries need it,
+            // otherwise rebuild at the same size to drop the tombstones
+            bits := self.bits
+            if (self.count + 1usize) * 2usize > self.cap { self.rebuild(bits + 1u32) } else { self.rebuild(bits) }
+        }
+        i := self.slot(key)
+        if self.states.get(i) == 2u8 {
+            with slot := self.vals.at(i) { return replace(slot, Some(val)) }
+        }
+        fresh := self.states.get(i) == 0u8
+        if fresh { self.used = self.used + 1usize }
+        with st := self.states.at(i) { st = 2u8 }
+        with ks := self.keys.at(i) { ks = Some(key) }
+        with vs := self.vals.at(i) { vs = Some(val) }
+        self.count = self.count + 1usize
+        return None
+    }
+
+    // remove takes the value stored under key out of the map, if any.
+    func remove(edit self, key: own K) -> Option[V] where K: Hashable {
+        i := self.slot(key)
+        if self.states.get(i) != 2u8 { return None }
+        with st := self.states.at(i) { st = 1u8 }
+        with ks := self.keys.at(i) { ks = None }
+        self.count = self.count - 1usize
+        with vs := self.vals.at(i) { return replace(vs, None) }
+    }
+
+    // rebuild makes a table of 2^bits slots, dropping tombstones: each live
+    // entry is taken out of its slots and inserted into the new map, which
+    // then replaces this one.
+    func rebuild(edit self, bits: u32) where K: Hashable {
+        bigger := with_bits[K, V](bits)
+        i := 0usize
+        while i < self.cap {
+            if self.states.get(i) == 2u8 {
+                var k: Option[K] = None
+                var v: Option[V] = None
+                with ks := self.keys.at(i) { k = replace(ks, None) }
+                with vs := self.vals.at(i) { v = replace(vs, None) }
+                match move k {
+                    Some(kk) => { insert_opt(bigger, kk, v) }
+                    None => { drop(v) }
+                }
+            }
+            i = i + 1usize
+        }
+        self = bigger
+    }
+}
+
+// insert_opt inserts kk with the value in v, if any (grow's helper).
+func insert_opt[K: Hashable, V](m: edit[Map[K, V]], kk: own K, v: own Option[V]) {
+    match move v {
+        Some(vv) => { m.insert(kk, vv) }
+        None => { drop(kk) }
+    }
+}

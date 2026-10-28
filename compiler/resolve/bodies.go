@@ -82,6 +82,9 @@ func (r *resolver) checkDestructor(m *Module, file string, d *ast.ImplDecl) {
 
 func (r *resolver) checkFunc(m *Module, file string, fd *FuncDecl, _ *scope) {
 	sc := r.typeScope(m, fd.OwnerParams)
+	for _, tp := range fd.bodyParams {
+		sc.vars[tp.Name] = &Symbol{Kind: SymTypeParam, Name: tp.Name, TParam: tp} // the where-clause bounds
+	}
 	for _, tp := range fd.TypeParams {
 		sc.vars[tp.Name] = &Symbol{Kind: SymTypeParam, Name: tp.Name, TParam: tp}
 	}

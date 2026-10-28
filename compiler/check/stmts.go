@@ -348,6 +348,13 @@ func (f *fn) match(st *flow, s *ast.Match) *flow {
 		t := f.tick()
 		f.accs = append(f.accs, &access{pl: place{root: r.ownedRoot}, kind: accConsume, start: t, end: t, pos: s.Subject.Span()})
 		f.markMoved(st, r.ownedRoot, s.Subject.Span())
+	} else if s.Move && r != nil && r.pl.root != nil && len(r.pl.path) == 0 && !r.isAccess {
+		// `match move x`: the match consumes the whole variable (Rule 5.3.1),
+		// so nothing of it is dropped afterwards (a generic body is checked
+		// once; an instantiation whose payload has a destructor relies on this)
+		t := f.tick()
+		f.accs = append(f.accs, &access{pl: place{root: r.pl.root}, kind: accConsume, start: t, end: t, pos: s.Subject.Span()})
+		f.markMoved(st, r.pl.root, s.Subject.Span())
 	}
 	if r != nil && r.isAccess {
 		f.closeAccess(r)

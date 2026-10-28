@@ -1,6 +1,7 @@
 package interp
 
 import (
+	"os"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,12 +48,16 @@ type Interp struct {
 // errOut the trap record.
 func New(mod *ir.Module, file string, out, errOut io.Writer) *Interp {
 	mu := &sync.Mutex{}
-	return &Interp{mod: mod, file: file, out: &lockedWriter{mu: mu, w: out}, errOut: &lockedWriter{mu: mu, w: errOut}, stackBytes: 8 << 20, heap: newRawHeap(), sh: &sharedState{nextIdent: 1, fatalCh: make(chan struct{})}}
+	// the program's arguments default to its name alone, as a native run
+	// without arguments reports them (SetArgs replaces them)
+	return &Interp{mod: mod, file: file, out: &lockedWriter{mu: mu, w: out}, errOut: &lockedWriter{mu: mu, w: errOut}, stackBytes: 8 << 20, heap: newRawHeap(), sh: &sharedState{nextIdent: 1, fatalCh: make(chan struct{}), args: []string{file}}}
 }
 
 // sharedState is the process-wide interpreter state shared by every thread
 // (spawned threads are goroutines with their own Interp copy).
 type sharedState struct {
+	args  []string           // the program's arguments (std/io args)
+	files map[int64]*os.File // open files by descriptor (std/io)
 	mu            sync.Mutex
 	handler       *FuncVal
 	nextIdent     uint32
@@ -156,6 +161,10 @@ func (it *Interp) await(done chan struct{}) {
 
 // SetIdentityTags disables identity tags (a debug-build feature, PLAN.md
 // 2.2) when off: containers get identity 0 and the check is skipped.
+// SetArgs sets the program's arguments, the first being the program name,
+// as std/io's args() reports them.
+func (it *Interp) SetArgs(args []string) { it.sh.args = args }
+
 func (it *Interp) SetIdentityTags(on bool) {
 	if !on {
 		it.sh.nextIdent = 0

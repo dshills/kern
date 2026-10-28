@@ -1,0 +1,61 @@
+//! phase: 3
+//! expect: output
+// std/map: a Map over u64 and over str.String keys (insert, contains, get,
+// at, replace, remove, growth), in both engines.
+module t
+import "std/map"
+import "std/str"
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    i := 0u64
+    while i < 100u64 { m.insert(i * 7u64, i); i = i + 1u64 }
+    print_u64(u64(m.len()))
+    println()
+    k21 := 21u64
+    k22 := 22u64
+    k14 := 14u64
+    print_bool(m.contains(k21))
+    println()
+    print_bool(m.contains(k22))
+    println()
+    print_u64(m.get(k21))
+    println()
+    match m.insert(21u64, 1000u64) {
+        Some(old) => { print_u64(old); println() }
+        None => { print_str("none"); println() }
+    }
+    with v := m.at(k21) { v = v + 1u64 }
+    print_u64(m.get(k21))
+    println()
+    match m.remove(k14) {
+        Some(old) => { print_u64(old); println() }
+        None => { print_str("none"); println() }
+    }
+    print_bool(m.contains(k14))
+    println()
+    print_u64(u64(m.len()))
+    println()
+    names := map.Map[str.String, u64].new()
+    names.insert(str.String.from("one"), 1u64)
+    names.insert(str.String.from("two"), 2u64)
+    names.insert(str.String.from("three"), 3u64)
+    print_u64(names.get(str.String.from("two")))
+    println()
+    print_bool(names.contains(str.String.from("four")))
+    println()
+    // churn: insert and remove distinct keys with a live set of one, which
+    // rebuilds in place to drop tombstones instead of doubling
+    churn := map.Map[u64, u64].new()
+    j := 0u64
+    while j < 5000u64 {
+        churn.insert(j, j)
+        churn.remove(j)
+        j = j + 1u64
+    }
+    churn.insert(1u64, 1u64)
+    print_u64(u64(churn.len()))
+    println()
+    print_bool(churn.contains(4999u64))
+    println()
+    return 0i32
+}

@@ -1,6 +1,11 @@
 package interp
 
 import (
+	"syscall"
+	"os"
+	"io/fs"
+	"io"
+	"errors"
 	"fmt"
 	"math"
 	"runtime"
@@ -69,6 +74,121 @@ func init() {
 			return nil
 		},
 		"println": func(it *Interp, a []Value, _ callCtx) []Value { _, _ = fmt.Fprintln(it.out); return nil },
+		// std/io (hosted): descriptors are indexes into the shared file
+		// table (0, 1 and 2 are the standard streams, 1 and 2 through the
+		// interpreter's writers); errors are negative errno values
+		"io_open": func(it *Interp, a []Value, _ callCtx) []Value {
+			path := string(seqBytes(acc(a[0])))
+			flags := os.O_RDONLY
+			if a[1].(Bool) {
+				flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+			}
+			f, err := os.OpenFile(path, flags, 0o644)
+			if err != nil {
+				return []Value{mkInt("i32", uint64(uint32(-errnoOf(err))))}
+			}
+			it.sh.mu.Lock()
+			if it.sh.files == nil {
+				it.sh.files = map[int64]*os.File{}
+			}
+			fd := int64(3)
+			for it.sh.files[fd] != nil {
+				fd++
+			}
+			it.sh.files[fd] = f
+			it.sh.mu.Unlock()
+			return []Value{mkInt("i32", uint64(fd))}
+		},
+		"io_read": func(it *Interp, a []Value, _ callCtx) []Value {
+			fd := int64(int32(a[0].(Int).Bits))
+			seq := byteSeq(acc(a[1]))
+			buf := make([]byte, seq.length())
+			var n int
+			var err error
+			if fd == 0 {
+				n, err = os.Stdin.Read(buf)
+			} else {
+				it.sh.mu.Lock()
+				f := it.sh.files[fd]
+				it.sh.mu.Unlock()
+				if f == nil {
+					return []Value{mkInt("i64", ^uint64(8))} // EBADF, -9
+				}
+				n, err = f.Read(buf)
+			}
+			if err != nil && n == 0 {
+				if errors.Is(err, io.EOF) {
+					return []Value{mkInt("i64", 0)}
+				}
+				return []Value{mkInt("i64", uint64(-errnoOf(err)))}
+			}
+			for i := 0; i < n; i++ {
+				seq.at(i).set(mkInt("u8", uint64(buf[i])))
+			}
+			return []Value{mkInt("i64", uint64(n))}
+		},
+		"io_write": func(it *Interp, a []Value, _ callCtx) []Value {
+			fd := int64(int32(a[0].(Int).Bits))
+			data := seqBytes(acc(a[1]))
+			switch fd {
+			case 1, 2:
+				w := it.out
+				if fd == 2 {
+					w = it.errOut
+				}
+				n, err := w.Write(data)
+				if err != nil && n == 0 {
+					return []Value{mkInt("i64", uint64(-errnoOf(err)))}
+				}
+				return []Value{mkInt("i64", uint64(n))}
+			}
+			it.sh.mu.Lock()
+			f := it.sh.files[fd]
+			it.sh.mu.Unlock()
+			if f == nil {
+				return []Value{mkInt("i64", ^uint64(8))}
+			}
+			n, err := f.Write(data)
+			if err != nil && n == 0 {
+				return []Value{mkInt("i64", uint64(-errnoOf(err)))}
+			}
+			return []Value{mkInt("i64", uint64(n))}
+		},
+		"io_close": func(it *Interp, a []Value, _ callCtx) []Value {
+			fd := int64(int32(a[0].(Int).Bits))
+			it.sh.mu.Lock()
+			f := it.sh.files[fd]
+			delete(it.sh.files, fd)
+			it.sh.mu.Unlock()
+			if f == nil {
+				return []Value{mkInt("i32", uint64(^uint32(8)))} // EBADF, -9
+			}
+			if err := f.Close(); err != nil {
+				return []Value{mkInt("i32", uint64(uint32(-errnoOf(err))))}
+			}
+			return []Value{mkInt("i32", 0)}
+		},
+		"io_remove": func(it *Interp, a []Value, _ callCtx) []Value {
+			if err := os.Remove(string(seqBytes(acc(a[0])))); err != nil {
+				return []Value{mkInt("i32", uint64(uint32(-errnoOf(err))))}
+			}
+			return []Value{mkInt("i32", 0)}
+		},
+		"io_argc": func(it *Interp, a []Value, _ callCtx) []Value {
+			return []Value{mkInt("usize", uint64(len(it.sh.args)))}
+		},
+		"io_arg": func(it *Interp, a []Value, _ callCtx) []Value {
+			i := int(u64(a[0]))
+			if i < 0 || i >= len(it.sh.args) {
+				return []Value{mkInt("usize", 0)}
+			}
+			arg := []byte(it.sh.args[i])
+			seq := byteSeq(acc(a[1]))
+			for k := 0; k < len(arg) && k < seq.length(); k++ {
+				seq.at(k).set(mkInt("u8", uint64(arg[k])))
+			}
+			return []Value{mkInt("usize", uint64(len(arg)))}
+		},
 		"now_ns": func(it *Interp, a []Value, _ callCtx) []Value {
 			return []Value{mkInt("u64", uint64(time.Now().UnixNano()))}
 		},
@@ -639,6 +759,33 @@ func (it *Interp) storeWide(a []Value, c callCtx, be bool) {
 		}
 		seq.at(at + i).set(mkInt("u8", uint64(b)))
 	}
+}
+
+// seqBytes copies the bytes a sequence access denotes.
+func seqBytes(a *Access) []byte {
+	seq := byteSeq(a)
+	b := make([]byte, seq.length())
+	for i := range b {
+		b[i] = byte(u64(seq.at(i).get()))
+	}
+	return b
+}
+
+// errnoOf maps an I/O error to the errno std/io reports.
+func errnoOf(err error) int {
+	var en syscall.Errno
+	if errors.As(err, &en) {
+		return int(en)
+	}
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return 2 // ENOENT
+	case errors.Is(err, fs.ErrPermission):
+		return 13 // EACCES
+	case errors.Is(err, fs.ErrExist):
+		return 17 // EEXIST
+	}
+	return 5 // EIO
 }
 
 // byteSeq is the sequence window of an access to bytes: the access's own

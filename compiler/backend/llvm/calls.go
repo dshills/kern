@@ -358,6 +358,15 @@ func (fe *fnEmit) elemType(c *ir.Call, i int) resolve.Type {
 	return &resolve.Unit{}
 }
 
+// seqParts splits a sequence access value into its pointer and length.
+func (fe *fnEmit) seqParts(v *ir.Value) (string, string) {
+	p := fe.next("t")
+	fe.emit("%s = extractvalue { ptr, i64 } %s, 0", p, fe.v(v))
+	l := fe.next("t")
+	fe.emit("%s = extractvalue { ptr, i64 } %s, 1", l, fe.v(v))
+	return p, l
+}
+
 func (fe *fnEmit) unionOut(dst *ir.Value) (string, int) {
 	n := dst.Type.(*resolve.Named)
 	li := layout.Of(n)
@@ -412,6 +421,25 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.rt("print_str", "void (ptr, i64)", "ptr "+p+", i64 "+l)
 	case "println":
 		fe.rt("println", "void ()", "")
+	// std/io (hosted): descriptor-level calls into the runtime
+	case "io_open":
+		p, l := fe.seqParts(a[0])
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[1]))
+		setDst(fe.rt("kern_io_open", "i32 (ptr, i64, i8)", "ptr "+p+", i64 "+l+", i8 "+z))
+	case "io_read", "io_write":
+		p, l := fe.seqParts(a[1])
+		setDst(fe.rt("kern_"+c.Intrinsic, "i64 (i32, ptr, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l))
+	case "io_close":
+		setDst(fe.rt("kern_io_close", "i32 (i32)", "i32 "+fe.v(a[0])))
+	case "io_remove":
+		p, l := fe.seqParts(a[0])
+		setDst(fe.rt("kern_io_remove", "i32 (ptr, i64)", "ptr "+p+", i64 "+l))
+	case "io_argc":
+		setDst(fe.rt("kern_io_argc", "i64 ()", ""))
+	case "io_arg":
+		p, l := fe.seqParts(a[1])
+		setDst(fe.rt("kern_io_arg", "i64 (i64, ptr, i64)", "i64 "+fe.v(a[0])+", ptr "+p+", i64 "+l))
 	case "now_ns":
 		setDst(fe.rt("kern_now_ns", "i64 ()", ""))
 	case "yield_now":

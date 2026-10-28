@@ -451,7 +451,7 @@ func (c *fnCtx) fieldWant1(sc *scope, x *ast.FieldExpr, want Type) Type {
 		if mod, ok := c.m.Imports[id.Name]; ok && sc.lookup(id.Name) == nil {
 			if f, ok := mod.Funcs[x.Name]; ok {
 				c.r.prog.Info.Idents[id] = &Symbol{Kind: SymModule, Name: id.Name, Module: mod}
-				if !isExported(x.Name) && mod.Name != "core" {
+				if !isExported(x.Name) && !mod.Std {
 					c.errorf("NAME_PRIVATE", x.Pos, "%s.%s is private to module %s", id.Name, x.Name, mod.Name)
 				}
 				return f.Type
@@ -461,7 +461,7 @@ func (c *fnCtx) fieldWant1(sc *scope, x *ast.FieldExpr, want Type) Type {
 				c.r.prog.Info.Idents[id] = &Symbol{Kind: SymModule, Name: id.Name, Module: mod}
 				c.r.prog.Info.Consts[x] = true
 				c.r.prog.Info.ImportedConsts[x] = k
-				if !isExported(x.Name) && mod.Name != "core" {
+				if !isExported(x.Name) && !mod.Std {
 					c.errorf("NAME_PRIVATE", x.Pos, "%s.%s is private to module %s", id.Name, x.Name, mod.Name)
 				}
 				return k.Type
@@ -515,16 +515,47 @@ func (c *fnCtx) typeExprOf(sc *scope, e ast.Expr) (*TypeDecl, []Type, bool) {
 			c.r.prog.Info.Idents[x] = &Symbol{Kind: SymType, Name: x.Name, TDecl: td}
 			return td, nil, true
 		}
-	case *ast.IndexExpr:
+	case *ast.FieldExpr:
+		// module.Type: a type of an imported module
 		id, ok := x.X.(*ast.Ident)
 		if !ok || sc.lookup(id.Name) != nil {
 			return nil, nil, false
 		}
-		td, ok := c.m.Types[id.Name]
+		mod, ok := c.m.Imports[id.Name]
 		if !ok {
 			return nil, nil, false
 		}
-		c.r.prog.Info.Idents[id] = &Symbol{Kind: SymType, Name: id.Name, TDecl: td}
+		td, ok := mod.Types[x.Name]
+		if !ok {
+			return nil, nil, false
+		}
+		if !isExported(x.Name) && !mod.Std {
+			c.errorf("NAME_PRIVATE", x.Pos, "%s.%s is private to module %s", id.Name, x.Name, mod.Name)
+		}
+		c.r.prog.Info.Idents[id] = &Symbol{Kind: SymModule, Name: id.Name, Module: mod}
+		return td, nil, true
+	case *ast.IndexExpr:
+		var td *TypeDecl
+		switch base := x.X.(type) {
+		case *ast.Ident:
+			if sc.lookup(base.Name) != nil {
+				return nil, nil, false
+			}
+			t, ok := c.m.Types[base.Name]
+			if !ok {
+				return nil, nil, false
+			}
+			td = t
+			c.r.prog.Info.Idents[base] = &Symbol{Kind: SymType, Name: base.Name, TDecl: td}
+		case *ast.FieldExpr:
+			t, _, ok := c.typeExprOf(sc, base)
+			if !ok {
+				return nil, nil, false
+			}
+			td = t
+		default:
+			return nil, nil, false
+		}
 		var args []Type
 		p := &parser.Converter{}
 		for _, a := range x.Args {
@@ -780,6 +811,9 @@ func fieldPrivate(n *Named, name, from string) bool {
 	}
 	if n.Decl.Module == "core" {
 		return n.Decl.NoCopy || name == tagField
+	}
+	if n.Decl.Std {
+		return n.Decl.NoCopy // a std container's fields are its own (a String's bytes)
 	}
 	return !isExported(name)
 }

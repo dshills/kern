@@ -122,7 +122,7 @@ func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 					return &Bad{}
 				}
 				c.r.prog.Info.Idents[id] = &Symbol{Kind: SymModule, Name: id.Name, Module: mod}
-				if !isExported(fn.Name) && mod.Name != "core" {
+				if !isExported(fn.Name) && !mod.Std {
 					c.errorf("NAME_PRIVATE", fn.Pos, "%s.%s is private to module %s", id.Name, fn.Name, mod.Name)
 				}
 				return c.callFunc(sc, x, info, f, nil, nil, want)

@@ -14,8 +14,8 @@ Arenas, pools, handles and synchronisation are library types built on one
 ownership mechanism, not type-system features.
 
 This repository is a research implementation. The specification is a v1.0
-candidate; the standard library covers the thirteen benchmark workloads and not
-much more (no strings, maps, file or process I/O, or JSON yet; see
+candidate; the standard library covers the thirteen benchmark workloads plus
+strings, hash maps and file I/O (no JSON or process control yet; see
 `docs/decisions/ADR-013-self-hosting.md`).
 
 ## A taste
@@ -66,7 +66,7 @@ observable only as termination with a structured `TrapInfo` record.
 | Language reference | `docs/ownership.md` | Normative restatement of the ownership rules, one rule per diagnostic code |
 | Decisions | `docs/decisions/ADR-*.md` | Fourteen architecture decision records with the alternatives considered |
 | Compiler | `compiler/` | Lexer and parser, resolver, ownership checker, lowering to a semantic IR, LLVM text backend, interpreter, formatter, incremental driver |
-| Standard library | `std/core.kern` | Implicitly imported prelude: `Box`, `Vec`, `Pool`, `Arena`, `Mutex`, `Condvar`, `Atomic`, scoped threads, raw pointers. The containers are written in kern over audited `unsafe` blocks (`docs/unsafe-audit.md`) |
+| Standard library | `std/core.kern`, `std/str.kern`, `std/map.kern`, `std/io.kern` | The implicitly imported prelude (`Box`, `Vec`, `Pool`, `Arena`, `Mutex`, `Condvar`, `Atomic`, scoped threads, raw pointers; the containers are written in kern over audited `unsafe` blocks, `docs/unsafe-audit.md`), and the modules a program imports as `std/str` (an owned `String` and byte-view helpers), `std/map` (a hash map over `Hashable` keys) and `std/io` (files, the standard streams and arguments; hosted only) |
 | Runtimes | `runtime/hosted/`, `runtime/freestanding/` | A small C runtime for Linux/macOS, and a freestanding one for bare-metal x86-64 and AArch64 images that boot under QEMU |
 | Machine API | `tools/agent-api/schema.{json,md}` | JSON request/response schema for every command, with stable diagnostic codes and machine-applicable fixes |
 | Tests | `tests/` | Positive, negative and adversarial fixtures (one rejecting fixture and one accepting twin per rule), trap fixtures, concurrency and FFI fixtures, freestanding images |

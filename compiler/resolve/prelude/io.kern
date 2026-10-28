@@ -1,0 +1,108 @@
+// std/io: files, the standard streams and the program's arguments, for
+// hosted programs (a freestanding image has no runtime behind these).
+// Imported with `import "std/io"`. The runtime calls below work at the
+// descriptor level and report errors as negative errno values; the
+// functions after them are the library's interface.
+module io
+
+// IoErr is why an operation failed.
+union IoErr { NotFound; Permission; Exists; Other(code: i32) }
+
+// Runtime intrinsics (hosted).
+func io_open(path: view[]u8, write: bool) -> i32
+func io_read(fd: i32, buf: edit[]u8) -> i64
+func io_write(fd: i32, data: view[]u8) -> i64
+func io_close(fd: i32) -> i32
+func io_remove(path: view[]u8) -> i32
+func io_argc() -> usize
+func io_arg(i: usize, buf: edit[]u8) -> usize
+
+func err_of(code: i32) -> IoErr {
+    if code == 2i32 { return NotFound }
+    if code == 13i32 { return Permission }
+    if code == 17i32 { return Exists }
+    return Other(code)
+}
+
+// read_from reads a descriptor to its end.
+func read_from(fd: i32) -> Result[Vec[u8], IoErr] {
+    data := Vec[u8].new()
+    var buf: [4096]u8 = zero()
+    while true {
+        n := io_read(fd, buf)
+        if n < 0i64 { return Err(err_of(truncate[i32](0i64 - n))) }
+        if n == 0i64 { break }
+        data.extend(buf[0usize : usize(n)])
+    }
+    return Ok(data)
+}
+
+// read_file reads the whole file at path.
+func read_file(path: view[]u8) -> Result[Vec[u8], IoErr] {
+    fd := io_open(path, false)
+    if fd < 0i32 { return Err(err_of(0i32 - fd)) }
+    r := read_from(fd)
+    c := io_close(fd)
+    return r
+}
+
+// read_stdin reads standard input to its end.
+func read_stdin() -> Result[Vec[u8], IoErr] { return read_from(0i32) }
+
+// write_all writes data to a descriptor, retrying short writes.
+func write_all(fd: i32, data: view[]u8) -> Result[(), IoErr] {
+    off := 0usize
+    while off < len(data) {
+        n := io_write(fd, data[off : len(data)])
+        if n <= 0i64 { return Err(err_of(truncate[i32](0i64 - n))) }
+        off = off + usize(n)
+    }
+    return Ok(())
+}
+
+// write_file creates or truncates the file at path and writes data to it.
+func write_file(path: view[]u8, data: view[]u8) -> Result[(), IoErr] {
+    fd := io_open(path, true)
+    if fd < 0i32 { return Err(err_of(0i32 - fd)) }
+    r := write_all(fd, data)
+    c := io_close(fd)
+    if c < 0i32 {
+        // a delayed write error surfaces at close; an earlier write error
+        // takes precedence
+        match r {
+            Ok(u) => return Err(err_of(0i32 - c))
+            Err(e) => { }
+        }
+    }
+    return r
+}
+
+// write_stdout and write_stderr write bytes to the standard streams
+// (stdout in order with print_str).
+func write_stdout(data: view[]u8) -> Result[(), IoErr] { return write_all(1i32, data) }
+func write_stderr(data: view[]u8) -> Result[(), IoErr] { return write_all(2i32, data) }
+
+// remove_file deletes the file at path.
+func remove_file(path: view[]u8) -> Result[(), IoErr] {
+    r := io_remove(path)
+    if r < 0i32 { return Err(err_of(0i32 - r)) }
+    return Ok(())
+}
+
+// args returns the program's arguments, the program name first; an
+// argument longer than 4096 bytes is cut there.
+func args() -> Vec[Vec[u8]] {
+    list := Vec[Vec[u8]].new()
+    n := io_argc()
+    i := 0usize
+    while i < n {
+        var buf: [4096]u8 = zero()
+        k := io_arg(i, buf)
+        if k > 4096usize { k = 4096usize }
+        a := Vec[u8].new()
+        a.extend(buf[0usize : k])
+        list.push(a)
+        i = i + 1usize
+    }
+    return list
+}

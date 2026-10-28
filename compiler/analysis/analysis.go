@@ -23,7 +23,7 @@ func Layout(prog *resolve.Program, target string) diag.ShowLayoutResult {
 	res := diag.ShowLayoutResult{Target: target, Types: []diag.TypeLayout{}}
 	var names []string
 	for name, m := range prog.Modules {
-		if m == prog.Core || name == "core" {
+		if m == prog.Core || name == "core" || m.Std {
 			continue
 		}
 		names = append(names, name)

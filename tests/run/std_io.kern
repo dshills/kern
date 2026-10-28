@@ -1,0 +1,40 @@
+//! phase: 3
+//! expect: output
+// std/io: write a file in the working directory, read it back, read a
+// missing file (NotFound), remove the file, and count the program's
+// arguments (one, the program itself, in both engines).
+module t
+import "std/io"
+func main() -> i32 {
+    match io.write_file("std_io.scratch", "line one\nline two\n") {
+        Ok(u) => { print_str("written"); println() }
+        Err(e) => { print_str("write failed"); println(); return 1i32 }
+    }
+    with r1 := io.read_file("std_io.scratch") {
+        match r1 {
+            Ok(data) => { print_u64(u64(data.len())); println(); print_str(data.as_view()) }
+            Err(e) => { print_str("read failed"); println(); return 1i32 }
+        }
+    }
+    with r2 := io.read_file("no_such_file.scratch") {
+        match r2 {
+            Ok(data) => { print_str("unexpected"); println() }
+            Err(e) => {
+                match e {
+                    NotFound => { print_str("not found"); println() }
+                    Permission => { print_str("permission"); println() }
+                    Exists => { print_str("exists"); println() }
+                    Other(c) => { print_str("other"); println() }
+                }
+            }
+        }
+    }
+    match io.remove_file("std_io.scratch") {
+        Ok(u) => { print_str("removed"); println() }
+        Err(e) => { print_str("remove failed"); println(); return 1i32 }
+    }
+    a := io.args()
+    print_u64(u64(a.len()))
+    println()
+    return 0i32
+}

@@ -715,26 +715,33 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 	}
 	callee := ""
 	intrinsic := ""
-	if info.Fn != nil {
-		callee = fl.l.request(info.Fn, fl.callSubst(info), fl.file)
-		if info.Fn.Intrinsic {
-			intrinsic = intrinsicName(info.Fn)
+	fn := info.Fn
+	var sub map[string]resolve.Type
+	if fn != nil {
+		sub = fl.callSubst(info)
+		if fn.Iface != nil {
+			// a call through an interface constraint: the receiver's type is
+			// known here, so the call goes to its implementing method
+			fn, sub = fl.dispatch(fn, info, x.Pos)
+		}
+		callee = fl.l.request(fn, sub, fl.file)
+		if fn.Intrinsic {
+			intrinsic = intrinsicName(fn)
 		}
 	}
 	rel := ""
-	if info.Fn != nil && info.Fn.Release != "" {
-		rel = fl.l.request(info.Fn.Receiver.Methods[info.Fn.Release], fl.callSubst(info), fl.file)
-		if info.Fn.Receiver.Methods[info.Fn.Release].Intrinsic {
-			rel = intrinsicName(info.Fn.Receiver.Methods[info.Fn.Release])
+	if fn != nil && fn.Release != "" {
+		rel = fl.l.request(fn.Receiver.Methods[fn.Release], sub, fl.file)
+		if fn.Receiver.Methods[fn.Release].Intrinsic {
+			rel = intrinsicName(fn.Receiver.Methods[fn.Release])
 		}
 	}
 	var targs []resolve.Type
-	if info.Fn != nil {
-		sub := fl.callSubst(info)
-		for _, tp := range info.Fn.OwnerParams {
+	if fn != nil {
+		for _, tp := range fn.OwnerParams {
 			targs = append(targs, sub[tp.Name])
 		}
-		for _, tp := range info.Fn.TypeParams {
+		for _, tp := range fn.TypeParams {
 			targs = append(targs, sub[tp.Name])
 		}
 	}
@@ -783,6 +790,43 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 
 // callSubst builds the substitution for a callee instantiation: the call's
 // inferred type arguments, themselves substituted by the caller's.
+// dispatch resolves a call to an interface method signature im, made
+// through a constraint on a type parameter, to the implementing method of
+// the receiver's type under this instantiation (Self), with that method's
+// owner parameters bound to the type's arguments and its own parameters to
+// the call's.
+func (fl *fnLower) dispatch(im *resolve.FuncDecl, info *resolve.CallInfo, pos ast.Pos) (*resolve.FuncDecl, map[string]resolve.Type) {
+	self := fl.ty(info.TypeArgs["Self"])
+	var td *resolve.TypeDecl
+	var args []resolve.Type
+	switch t := self.(type) {
+	case *resolve.Named:
+		td, args = t.Decl, t.Args
+	case *resolve.Prim:
+		td = fl.l.prog.Core.Types["prim_"+t.Name]
+	}
+	if td == nil || td.Methods[im.Name] == nil {
+		fl.fail(pos, "%s has no implementation of %s.%s", self, im.Iface.Name, im.Name)
+	}
+	impl := td.Methods[im.Name]
+	sub := map[string]resolve.Type{}
+	for i, tp := range impl.OwnerParams {
+		if i < len(args) {
+			sub[tp.Name] = args[i]
+		}
+	}
+	// the method's own type parameters correspond by position to the
+	// signature's (their names may differ)
+	for i, tp := range impl.TypeParams {
+		if i < len(im.TypeParams) {
+			if v, ok := info.TypeArgs[im.TypeParams[i].Name]; ok {
+				sub[tp.Name] = fl.ty(v)
+			}
+		}
+	}
+	return impl, sub
+}
+
 func (fl *fnLower) callSubst(info *resolve.CallInfo) map[string]resolve.Type {
 	m := map[string]resolve.Type{}
 	for k, v := range info.TypeArgs {

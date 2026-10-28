@@ -19,6 +19,8 @@ import (
 // preludeFile is the file name the resolver gives the prelude.
 const preludeFile = "std/core.kern"
 
+var _ = preludeFile
+
 // Lower lowers a resolved program. Generic functions are lowered once per
 // instantiation reachable from the main module's non-generic functions.
 func Lower(prog *resolve.Program) (mod *ir.Module, diags []diag.Diagnostic) {
@@ -145,9 +147,9 @@ func (l *lowerer) request(fd *resolve.FuncDecl, subst map[string]resolve.Type, f
 	if _, ok := l.done[name]; ok {
 		return name
 	}
-	library := fd.Module == "core" && !fd.Intrinsic
+	library := l.prog.IsStd(fd.Module) && !fd.Intrinsic
 	if library {
-		file = preludeFile
+		file = "std/" + fd.Module + ".kern"
 	}
 	f := &ir.Func{Name: name, Release: fd.Release, Contract: fd.Contract, Pos: fd.Pos, File: file, Extern: fd.Extern, Intrinsic: fd.Intrinsic, Library: library}
 	l.done[name] = f
@@ -191,8 +193,8 @@ func (l *lowerer) requestDestructor(n *resolve.Named, file string) string {
 		f.Blocks = []*ir.Block{f.Entry}
 		f.Locals = []*ir.Local{f.Params[0]}
 	case n.Decl.Destructor != nil && hasKernDestructor(n, l.prog.Main.Name):
-		if n.Decl.Module == "core" {
-			file = preludeFile
+		if n.Decl.Std {
+			file = "std/" + n.Decl.Module + ".kern"
 			f.File = file
 			f.Library = true
 		}
@@ -582,7 +584,7 @@ func hasKernDestructor(n *resolve.Named, main string) bool {
 	if n.Decl.Module == main {
 		return true
 	}
-	return n.Decl.Module == "core" && !layout.Opaque(n)
+	return n.Decl.Std && !layout.Opaque(n)
 }
 
 // maxExpansion bounds the growing instantiations of one declaration along

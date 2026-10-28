@@ -1,0 +1,33 @@
+//! phase: 3
+//! expect: output
+// std/str: String over Vec[u8] and the byte-view helpers, in both engines.
+module t
+import "std/str"
+func main() -> i32 {
+    s := str.String.from("hello")
+    s.push_str(", world ")
+    s.push_u64(2026u64)
+    print_str(s.as_view())
+    println()
+    print_u64(u64(s.len()))
+    println()
+    print_bool(s.equals("hello, world 2026"))
+    println()
+    print_bool(str.starts_with(s.as_view(), "hell"))
+    println()
+    match str.find(s.as_view(), "world") {
+        Some(i) => { print_u64(u64(i)); println() }
+        None => { print_str("none"); println() }
+    }
+    match str.parse_u64("12345") {
+        Some(v) => { print_u64(v); println() }
+        None => { print_str("none"); println() }
+    }
+    match str.parse_u64("12x") {
+        Some(v) => { print_u64(v); println() }
+        None => { print_str("none"); println() }
+    }
+    print_u64(str.hash("abc") % 1000u64)
+    println()
+    return 0i32
+}

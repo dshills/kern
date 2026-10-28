@@ -13,8 +13,53 @@ import (
 	"github.com/dshills/kern/compiler/source"
 )
 
-//go:embed prelude/core.kern
+//go:embed prelude/*.kern
 var preludeFS embed.FS
+
+// StdModules are the embedded standard-library modules beyond the prelude,
+// loaded when a file imports "std/<name>" (spec/types.md §1).
+var StdModules = []string{"str", "map", "io"}
+
+// StdSource returns the text of an embedded std module (std/<name>.kern).
+func StdSource(name string) ([]byte, bool) {
+	b, err := preludeFS.ReadFile("prelude/" + name + ".kern")
+	return b, err == nil
+}
+
+// loadStd parses and collects an embedded std module and the std modules
+// it imports, in dependency order; bodies are resolved by the caller once
+// every module's declarations are known.
+func (r *resolver) loadStd(name string, stack map[string]bool) *Module {
+	if m, ok := r.prog.Modules[name]; ok {
+		return m
+	}
+	b, ok := StdSource(name)
+	if !ok || stack[name] {
+		return nil
+	}
+	stack[name] = true
+	f := &source.File{Name: "std/" + name + ".kern", Bytes: b}
+	af, ds := parser.ParseWith(f, parser.Options{AllowBodyless: true})
+	if len(ds) > 0 {
+		panic("std/" + name + " does not parse: " + ds[0].Message)
+	}
+	for _, imp := range af.Imports {
+		if strings.HasPrefix(imp.Path, "std/") {
+			r.loadStd(imp.Path[4:], stack)
+		}
+	}
+	m := newModule(name)
+	m.Std = true
+	m.Files = []*ast.File{af}
+	r.prog.Modules[name] = m
+	r.collect(m)
+	if len(r.prog.Diags) > 0 {
+		d := r.prog.Diags[0]
+		panic(fmt.Sprintf("std/%s does not resolve: %s (%s at %d-%d)", name, d.Message, d.Code, d.Span.Start, d.Span.End))
+	}
+	r.stdLoaded = append(r.stdLoaded, m)
+	return m
+}
 
 // TypeKind distinguishes struct and union declarations.
 type TypeKind int
@@ -45,6 +90,7 @@ type TypeDecl struct {
 	Kind                                    TypeKind
 	Name                                    string
 	Module                                  string
+	Std                                     bool // declared by a standard-library module (core or std/*)
 	Pos                                     ast.Pos
 	TypeParams                              []*TypeParamType
 	Fields                                  []*FieldDecl   // struct
@@ -80,10 +126,12 @@ type FuncDecl struct {
 	Ret         []Type
 	Release     string
 	Where       []*TypeParamType // where-clause bounds on the owner's type parameters, checked at each call
+	bodyParams  []*TypeParamType // the owner's parameters as the body sees them: with the where-clause bounds
 	Contract    *ast.Contract
 	Extern      string
 	Receiver    *TypeDecl // non-nil for methods
 	RecvIface   *InterfaceDecl
+	Iface       *InterfaceDecl // the interface this declaration is a method signature of: a call through a constraint dispatches to the implementing method
 	Intrinsic   bool // declared without body in the prelude
 	AST         *ast.FuncDecl
 	Type        *Func // function type with receiver as first param when a method
@@ -127,6 +175,17 @@ type Module struct {
 	Globals map[string]*GlobalDecl
 	Files   []*ast.File
 	Imports map[string]*Module // alias -> module
+	// Std marks a module of the standard library (the implicit prelude
+	// `core`, and the embedded `std/*` modules loaded on import): every
+	// declaration is exported, bodyless functions are runtime intrinsics,
+	// and its bodies are library code (traps report the user-level call).
+	Std bool
+}
+
+// IsStd reports whether the named module is part of the standard library.
+func (p *Program) IsStd(name string) bool {
+	m, ok := p.Modules[name]
+	return ok && m.Std
 }
 
 func newModule(name string) *Module {
@@ -334,6 +393,25 @@ func ResolveFor(files []*source.File, release bool) *Program {
 			}
 		}
 	}
+	// embedded std modules the program imports, declarations first
+	for _, name := range sorted {
+		for _, f := range byName[name].mod.Files {
+			for _, imp := range f.Imports {
+				if strings.HasPrefix(imp.Path, "std/") && imp.Path != "std/core" {
+					if _, user := byName[imp.Path[4:]]; !user {
+						r.loadStd(imp.Path[4:], map[string]bool{})
+					}
+				}
+			}
+		}
+	}
+	for _, m := range r.stdLoaded {
+		r.checkBodies(m)
+		if len(prog.Diags) > 0 {
+			d := prog.Diags[0]
+			panic(fmt.Sprintf("std/%s does not resolve: %s (%s at %d-%d)", m.Name, d.Message, d.Code, d.Span.Start, d.Span.End))
+		}
+	}
 	for _, name := range sorted {
 		m := byName[name].mod
 		prog.Modules[name] = m
@@ -354,6 +432,7 @@ type resolver struct {
 	globalSyms       map[*GlobalDecl]*Symbol
 	prog             *Program
 	core             *Module
+	stdLoaded        []*Module // embedded std modules collected so far, bodies pending
 	deferConstraints bool
 	pending          []pendingConstraint
 	pendingFFI       []pendingFFI
@@ -427,6 +506,7 @@ func (r *resolver) loadPrelude(release bool) *Module {
 		panic("prelude does not parse: " + ds[0].Message)
 	}
 	core := newModule("core")
+	core.Std = true
 	core.Files = []*ast.File{af}
 	r.core = core
 	r.collect(core)
@@ -469,12 +549,12 @@ func (r *resolver) collect(m *Module) {
 				if r.dup(m, f.Name, d.Name, d.Pos) {
 					continue
 				}
-				m.Types[d.Name] = &TypeDecl{Kind: KindStruct, Name: d.Name, Module: m.Name, Pos: d.Pos, NoCopy: d.NoCopy, Packed: d.Packed, View: d.View, Methods: map[string]*FuncDecl{}, Impls: map[*InterfaceDecl]bool{}, AST: d}
+				m.Types[d.Name] = &TypeDecl{Kind: KindStruct, Name: d.Name, Module: m.Name, Std: m.Std, Pos: d.Pos, NoCopy: d.NoCopy, Packed: d.Packed, View: d.View, Methods: map[string]*FuncDecl{}, Impls: map[*InterfaceDecl]bool{}, AST: d}
 			case *ast.UnionDecl:
 				if r.dup(m, f.Name, d.Name, d.Pos) {
 					continue
 				}
-				m.Types[d.Name] = &TypeDecl{Kind: KindUnion, Name: d.Name, Module: m.Name, Pos: d.Pos, Methods: map[string]*FuncDecl{}, Impls: map[*InterfaceDecl]bool{}, AST: d}
+				m.Types[d.Name] = &TypeDecl{Kind: KindUnion, Name: d.Name, Module: m.Name, Std: m.Std, Pos: d.Pos, Methods: map[string]*FuncDecl{}, Impls: map[*InterfaceDecl]bool{}, AST: d}
 			case *ast.InterfaceDecl:
 				if r.dup(m, f.Name, d.Name, d.Pos) {
 					continue
@@ -499,6 +579,10 @@ func (r *resolver) collect(m *Module) {
 			alias := imp.Path[strings.LastIndex(imp.Path, "/")+1:]
 			if mod, ok := r.prog.Modules[alias]; ok {
 				m.Imports[alias] = mod
+			} else if strings.HasPrefix(imp.Path, "std/") && m.Std {
+				if mod := r.loadStd(alias, map[string]bool{}); mod != nil {
+					m.Imports[alias] = mod
+				}
 			} else if alias != "core" {
 				r.errorf("NAME_UNRESOLVED", f.Name, imp.Pos, "module %q is not available", imp.Path)
 			}
@@ -566,6 +650,7 @@ func (r *resolver) collect(m *Module) {
 				sc.vars["Self"] = &Symbol{Kind: SymTypeParam, Name: "Self", TParam: selfT}
 				for _, fn := range d.Methods {
 					fd := r.funcSig(m, f.Name, sc, fn, nil, selfT, id.TypeParams)
+					fd.Iface = id
 					fd.RecvIface = id
 					if _, dup := id.Methods[fn.Name]; dup {
 						r.errorf("NAME_DUPLICATE", f.Name, fn.Pos, "method %s declared twice", fn.Name)
@@ -810,7 +895,7 @@ func (r *resolver) resolveTypeName(m *Module, file string, sc *scope, t *ast.Typ
 			r.errorf("NAME_UNRESOLVED", file, t.Pos, "unknown type %s.%s", t.Pkg, t.Name)
 			return &Unit{}
 		}
-		if !isExported(t.Name) && mod.Name != "core" {
+		if !isExported(t.Name) && !mod.Std {
 			r.errorf("NAME_PRIVATE", file, t.Pos, "%s.%s is private to module %s", t.Pkg, t.Name, mod.Name)
 		}
 		return r.instantiate(m, file, sc, td, t)
@@ -1088,6 +1173,7 @@ func (r *resolver) funcSig(m *Module, file string, outer *scope, d *ast.FuncDecl
 			seen := &TypeParamType{Name: owner.Name, Owner: owner.Owner, Constraints: append(append([]*Constraint{}, owner.Constraints...), b.Constraints...)}
 			sc.vars[b.Name] = &Symbol{Kind: SymTypeParam, Name: b.Name, TParam: seen}
 			strengthened[b.Name] = seen
+			fd.bodyParams = append(fd.bodyParams, seen)
 		default:
 			r.errorf("NAME_UNRESOLVED", file, d.Where[i].Pos, "where clause names %s, which is not a type parameter of %s or its owner", b.Name, d.Name)
 		}
