@@ -21,7 +21,9 @@ func isUnsafeOp(f *FuncDecl) bool {
 }
 
 // wrappingIntrinsics are the prelude's wrapping arithmetic forms (§4.1).
-var wrappingIntrinsics = map[string]bool{"wrapping_add": true, "wrapping_sub": true, "wrapping_mul": true}
+var wrappingIntrinsics = map[string]bool{"wrapping_add": true, "wrapping_sub": true, "wrapping_mul": true, "wrapping_neg": true, "wrapping_shl": true, "wrapping_shr": true,
+	"saturating_add": true, "saturating_sub": true, "saturating_mul": true,
+	"checked_add": true, "checked_sub": true, "checked_mul": true, "checked_div": true, "checked_rem": true, "checked_shl": true, "checked_shr": true}
 
 // bitCountIntrinsics are the prelude's bit-count operations, integer-only
 // like the wrapping forms.

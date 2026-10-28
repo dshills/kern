@@ -1,0 +1,15 @@
+//! phase: 3
+//! expect: trap overflow
+//! twin: shift_signed_out_ok
+// A left shift traps when a set bit of the representation is shifted out
+// (spec §4.1), for a negative value too: -1 << 1 loses a set sign bit even
+// though -2 is representable. Both engines agree on the trap and its site.
+module t
+func sh(x: i32, n: u32) -> i32 { return x << n }
+func main() -> i32 {
+    print_i64(i64(sh(-1i32, 0u32)))
+    println()
+    print_i64(i64(sh(-1i32, 1u32)))
+    println()
+    return 0i32
+}

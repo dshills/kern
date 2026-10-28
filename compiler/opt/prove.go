@@ -34,7 +34,9 @@ import (
 // view of an Interior value), and a global is opaque.
 // readOnlyIntrinsics read through their access argument and write nothing,
 // so they forget no fact.
-var readOnlyIntrinsics = map[string]bool{"load_be": true, "load_le": true}
+var readOnlyIntrinsics = map[string]bool{"load_be": true, "load_le": true,
+	"saturating_add": true, "saturating_sub": true, "saturating_mul": true,
+	"checked_add": true, "checked_sub": true, "checked_mul": true, "checked_div": true, "checked_rem": true, "checked_shl": true, "checked_shr": true}
 
 func Prove(mod *ir.Module) {
 	for _, f := range mod.Funcs {

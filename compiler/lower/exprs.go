@@ -588,11 +588,21 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 	}
 	// the §4.1 wrapping forms are binary operations in wrapping mode
 	if info.Fn != nil && info.Fn.Module == "core" && info.Fn.Receiver == nil {
-		if op, ok := map[string]string{"wrapping_add": "+", "wrapping_sub": "-", "wrapping_mul": "*"}[info.Fn.Name]; ok {
+		if op, ok := map[string]string{"wrapping_add": "+", "wrapping_sub": "-", "wrapping_mul": "*", "wrapping_shl": "<<", "wrapping_shr": ">>"}[info.Fn.Name]; ok {
 			l := fl.value(x.Args[0].X, t)
-			r := fl.value(x.Args[1].X, t)
+			rt := t
+			if op == "<<" || op == ">>" {
+				rt = &resolve.Prim{Name: "u32"} // the count; wrapping mode masks it to width - 1
+			}
+			r := fl.value(x.Args[1].X, rt)
 			v := fl.newValue(t)
 			fl.emit(&ir.Binary{Dst: v, Op: op, L: l, R: r, Mode: "wrapping"})
+			return operand{val: v}
+		}
+		if info.Fn.Name == "wrapping_neg" {
+			xv := fl.value(x.Args[0].X, t)
+			v := fl.newValue(t)
+			fl.emit(&ir.Unary{Dst: v, Op: "neg", X: xv}) // negation without the overflow check wraps
 			return operand{val: v}
 		}
 	}

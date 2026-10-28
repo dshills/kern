@@ -680,31 +680,49 @@ func (it *Interp) constValue(c *ir.Const) Value {
 
 // ---- arithmetic (spec §4.1) ----
 
+// shiftCount is the shift count the operation uses: in wrapping mode the
+// count masked to width - 1 (spec §4.1); otherwise the count as given, which
+// the preceding check bounded below the width.
+func shiftCount(n uint64, ty string, mode string) uint64 {
+	if mode == "wrapping" {
+		return n & uint64(width(ty)-1)
+	}
+	return n & 63
+}
+
 func (it *Interp) checkOverflow(op string, l, r Value, pos ast.Pos) {
 	a, ok := l.(Int)
 	if !ok {
 		return // floats never trap
 	}
-	b := r.(Int)
+	if kind := arithTrap(op, a, r.(Int)); kind != "" {
+		it.trap(kind, pos)
+	}
+}
+
+// arithTrap is the kind of trap the trapping form of op on a and b takes,
+// or "" when it completes (spec §4.1): div_zero, overflow (including the
+// minimum signed value divided by -1 and a set bit shifted out), shift (a
+// count of the width or more).
+func arithTrap(op string, a, b Int) string {
 	ty := a.Ty
 	w := width(ty)
 	switch op {
 	case "/", "%":
 		if b.Bits == 0 {
-			it.trap("div_zero", pos)
+			return "div_zero"
 		}
 		if signed(ty) && signedOf(a) == minSigned(w) && signedOf(b) == -1 {
-			it.trap("overflow", pos)
+			return "overflow"
 		}
 	case "<<", ">>":
 		if b.Bits >= uint64(w) {
-			it.trap("shift", pos)
+			return "shift"
 		}
 		if op == "<<" {
-			// a set bit shifted out traps (spec §4.1)
 			shifted := mask(ty, a.Bits<<b.Bits) >> b.Bits
 			if shifted != a.Bits {
-				it.trap("overflow", pos)
+				return "overflow"
 			}
 		}
 	case "+", "-", "*":
@@ -729,9 +747,9 @@ func (it *Interp) checkOverflow(op string, l, r Value, pos ast.Pos) {
 				over = true
 			}
 			if over {
-				it.trap("overflow", pos)
+				return "overflow"
 			}
-			return
+			return ""
 		}
 		x, y := a.Bits, b.Bits
 		var over bool
@@ -746,9 +764,10 @@ func (it *Interp) checkOverflow(op string, l, r Value, pos ast.Pos) {
 			over = hi != 0 || mask(ty, lo) != lo
 		}
 		if over {
-			it.trap("overflow", pos)
+			return "overflow"
 		}
 	}
+	return ""
 }
 
 func minSigned(w uint) int64 { return -(1 << (w - 1)) }
@@ -809,9 +828,9 @@ func (it *Interp) binary(op string, l, r Value, mode string) Value {
 			case "%":
 				return mkInt(ty, uint64(x%y))
 			case "<<":
-				return mkInt(ty, uint64(x<<(b.Bits&63)))
+				return mkInt(ty, uint64(x<<shiftCount(b.Bits, ty, mode)))
 			case ">>":
-				return mkInt(ty, uint64(x>>(b.Bits&63)))
+				return mkInt(ty, uint64(x>>shiftCount(b.Bits, ty, mode)))
 			case "&":
 				return mkInt(ty, a.Bits&b.Bits)
 			case "|":
@@ -845,9 +864,9 @@ func (it *Interp) binary(op string, l, r Value, mode string) Value {
 		case "%":
 			return mkInt(ty, x%y)
 		case "<<":
-			return mkInt(ty, x<<(y&63))
+			return mkInt(ty, x<<shiftCount(y, ty, mode))
 		case ">>":
-			return mkInt(ty, x>>(y&63))
+			return mkInt(ty, x>>shiftCount(y, ty, mode))
 		case "&":
 			return mkInt(ty, x&y)
 		case "|":

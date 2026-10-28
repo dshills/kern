@@ -102,6 +102,26 @@ impl testing {
 
 union Option[T] { Some(T); None }
 union Result[T, E] { Ok(T); Err(E) }
+// The remaining §4.1 alternative forms. wrapping_neg, wrapping_shl and
+// wrapping_shr complete the wrapping forms: two's-complement negation, and
+// shifts whose count is masked to width - 1; none traps. The saturating
+// forms clamp to the type's range. The checked forms yield None exactly
+// where the trapping form would trap (overflow, division by zero, the
+// minimum signed value divided by -1, a shift count of the width or more,
+// a set bit shifted out) and Some(result) otherwise.
+func wrapping_neg[T: Copy](a: T) -> T
+func wrapping_shl[T: Copy](a: T, n: u32) -> T
+func wrapping_shr[T: Copy](a: T, n: u32) -> T
+func saturating_add[T: Copy](a: T, b: T) -> T
+func saturating_sub[T: Copy](a: T, b: T) -> T
+func saturating_mul[T: Copy](a: T, b: T) -> T
+func checked_add[T: Copy](a: T, b: T) -> Option[T]
+func checked_sub[T: Copy](a: T, b: T) -> Option[T]
+func checked_mul[T: Copy](a: T, b: T) -> Option[T]
+func checked_div[T: Copy](a: T, b: T) -> Option[T]
+func checked_rem[T: Copy](a: T, b: T) -> Option[T]
+func checked_shl[T: Copy](a: T, n: u32) -> Option[T]
+func checked_shr[T: Copy](a: T, n: u32) -> Option[T]
 union AllocErr { OutOfMemory }
 union AllocOrInit[E] { Alloc(AllocErr); Init(E) }
 union SpawnErr { ResourceExhausted }
