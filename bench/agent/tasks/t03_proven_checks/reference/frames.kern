@@ -1,0 +1,68 @@
+module frames
+// A stream of fixed-size frames: each frame is 6 bytes, a 16-bit big-endian
+// tag, a 16-bit big-endian value and a 16-bit big-endian checksum of the
+// first four bytes. The stream is scanned once to total the values of the
+// frames whose checksum holds, and once more to find the largest tag.
+
+func rd16(buf: view[[]u8], at: usize) -> u64 {
+    if at + 1usize < len(buf) { return u64(buf[at]) * 256u64 + u64(buf[at + 1usize]) }
+    return 0u64
+}
+
+func frame_ok(buf: view[[]u8], at: usize) -> bool {
+    if at + 5usize < len(buf) {
+        sum := (u64(buf[at]) + u64(buf[at + 1usize]) + u64(buf[at + 2usize]) + u64(buf[at + 3usize])) % 65536u64
+        return sum == rd16(buf, at + 4usize)
+    }
+    return false
+}
+
+func total_values(buf: view[[]u8]) -> u64 {
+    t := 0u64
+    at := 0usize
+    while at + 5usize < len(buf) {
+        if frame_ok(buf, at) { t = t + rd16(buf, at + 2usize) }
+        at = at + 6usize
+    }
+    return t
+}
+
+func largest_tag(buf: view[[]u8]) -> u64 {
+    best := 0u64
+    at := 0usize
+    while at + 5usize < len(buf) {
+        tag := rd16(buf, at)
+        if tag > best { best = tag }
+        at = at + 6usize
+    }
+    return best
+}
+
+func byte_sum(buf: view[[]u8]) -> u64 {
+    t := 0u64
+    for b in buf { t = t + u64(b) }
+    return t
+}
+
+func main() -> i32 {
+    // five frames (the third has a bad checksum) and two trailing bytes
+    stream := [0u8, 7u8, 3u8, 232u8, 0u8, 242u8,
+               1u8, 44u8, 0u8, 25u8, 0u8, 70u8,
+               0u8, 9u8, 15u8, 160u8, 0u8, 185u8,
+               255u8, 255u8, 0u8, 1u8, 1u8, 255u8,
+               0u8, 12u8, 1u8, 244u8, 1u8, 1u8,
+               0u8, 0u8]
+    with s := stream[0usize:30usize] {
+        print_u64(total_values(s))
+        println()
+        print_u64(largest_tag(s))
+        println()
+        print_u64(byte_sum(s))
+        println()
+    }
+    with s := stream[0usize:32usize] {
+        print_u64(total_values(s))
+        println()
+    }
+    return 0i32
+}

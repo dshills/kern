@@ -24,7 +24,7 @@ func systemPrompt(root string, arm string) string {
 	var b strings.Builder
 	b.WriteString("You are a programmer working in kern, a systems language with second-class access (view/edit/own parameters, no references), static moves and traps. Edit the task's files with the tools until the task is done. Work in small verified steps: after each change, check the program and run it. When the program checks cleanly and prints the expected output, reply with exactly DONE.\n\n")
 	if arm == "structured" {
-		b.WriteString("The `check` tool returns structured JSON diagnostics: each has a stable code, the violated rule number, the byte span and related spans. Use the rule number to look up the rule in the reference below. The tools `explain_ownership`, `show_copies` and `show_allocations` answer semantic questions about places, copies and allocation sites; use them instead of guessing.\n\n")
+		b.WriteString("The `check` tool returns structured JSON diagnostics: each has a stable code, the violated rule number, the byte span, related spans and, where one exists, a machine-applicable fix. Use the rule number to look up the rule in the reference below. The tools `explain_ownership`, `show_copies`, `show_allocations`, `show_bounds_checks` and `show_layout` answer semantic questions about places, copies, allocation sites, which bounds checks the compiler proved away and the layout of types; use them instead of guessing, and use them to verify a requirement stated in terms of what the compiler reports.\n\n")
 	} else {
 		b.WriteString("The `check` tool returns the compiler's plain-text diagnostics.\n\n")
 	}
@@ -55,6 +55,8 @@ func tools(arm string) []toolDef {
 			toolDef{Name: "explain_ownership", Description: "Explain the ownership state, accesses and drop points of every place intersecting a byte span of a file (JSON).", Params: map[string]string{"file": "file name", "start": "byte offset", "end": "byte offset"}},
 			toolDef{Name: "show_copies", Description: "List every bitwise and explicit copy in the program with its location, type and size (JSON).", Params: map[string]string{}},
 			toolDef{Name: "show_allocations", Description: "List every allocation site in the program (JSON).", Params: map[string]string{}},
+			toolDef{Name: "show_bounds_checks", Description: "List every bounds and overflow check in the program, each labelled proven (with what proved it: a constant index under a length check, a dominating comparison against the same length, or a for loop's bound) or runtime-checked (JSON).", Params: map[string]string{}},
+			toolDef{Name: "show_layout", Description: "Give the size, alignment and field offsets of every struct and union in the program (JSON).", Params: map[string]string{}},
 		)
 	}
 	return ts
@@ -228,6 +230,12 @@ func execTool(ctx context.Context, root, kernBin, work string, t *task, arm stri
 	case "show_allocations":
 		out, _ := runCmdCtx(ctx, work, kernBin, append([]string{"show-allocations"}, files()...)...)
 		return out
+	case "show_bounds_checks":
+		out, _ := runCmdCtx(ctx, work, kernBin, append([]string{"show-bounds-checks"}, files()...)...)
+		return out
+	case "show_layout":
+		out, _ := runCmdCtx(ctx, work, kernBin, append([]string{"show-layout"}, files()...)...)
+		return out
 	}
 	return "error: unknown tool"
 }
@@ -268,6 +276,39 @@ func hiddenPasses(ctx context.Context, root, kernBin string, t *task, dir string
 		if n := countField(ctx, dir, kernBin, "show-copies", "copies", files); n > *t.Hidden.MaxCopies {
 			return false, fmt.Sprintf("%d copies, at most %d allowed", n, *t.Hidden.MaxCopies)
 		}
+	}
+	if t.Hidden.MaxRuntimeBoundsChecks != nil {
+		if n := countRuntimeBoundsChecks(ctx, dir, kernBin, files); n > *t.Hidden.MaxRuntimeBoundsChecks {
+			return false, fmt.Sprintf("%d runtime bounds checks, at most %d allowed", n, *t.Hidden.MaxRuntimeBoundsChecks)
+		}
+	}
+	if len(t.Hidden.MaxTypeSize) > 0 {
+		sizes := typeSizes(ctx, dir, kernBin, files)
+		for _, ts := range t.Hidden.MaxTypeSize {
+			n, ok := sizes[ts.Type]
+			if !ok {
+				return false, fmt.Sprintf("type %s is not in the program's layout", ts.Type)
+			}
+			if n > ts.Bytes {
+				return false, fmt.Sprintf("%s is %d bytes, at most %d allowed", ts.Type, n, ts.Bytes)
+			}
+		}
+	}
+	if len(t.Hidden.RequiredFunctions) > 0 || len(t.Hidden.MustSpawn) > 0 {
+		spawns := functionSpawns(ctx, dir, kernBin, files)
+		for _, name := range t.Hidden.RequiredFunctions {
+			if _, ok := spawns[name]; !ok {
+				return false, fmt.Sprintf("function %s is missing", name)
+			}
+		}
+		for _, name := range t.Hidden.MustSpawn {
+			if !spawns[name] {
+				return false, fmt.Sprintf("function %s does not spawn a thread", name)
+			}
+		}
+	}
+	if t.Hidden.NoUnsafeAdded && unsafeLineCount(dir, t.Files) > unsafeLineCount(filepath.Join(t.Dir, "start"), t.Files) {
+		return false, "unsafe lines were added"
 	}
 	for _, ep := range t.Hidden.ExtraPrograms {
 		hidden := filepath.Join(t.Dir, "hidden", ep.File)
@@ -317,6 +358,110 @@ func countField(ctx context.Context, dir, kernBin, cmd, field string, files []st
 		return 1 << 30
 	}
 	return len(items)
+}
+
+// countRuntimeBoundsChecks counts the show-bounds-checks entries of kind
+// bounds whose label is runtime-checked; any failure counts as unbounded.
+func countRuntimeBoundsChecks(ctx context.Context, dir, kernBin string, files []string) int {
+	out, err := runCmdCtx(ctx, dir, kernBin, append([]string{"show-bounds-checks"}, files...)...)
+	if err != nil {
+		return 1 << 30
+	}
+	var resp struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Checks *[]struct {
+				Kind  string `json:"kind"`
+				Label string `json:"label"`
+			} `json:"checks"`
+		} `json:"result"`
+	}
+	// a missing or unsuccessful result counts as unbounded, not as zero
+	if json.Unmarshal([]byte(out), &resp) != nil || !resp.OK || resp.Result.Checks == nil {
+		return 1 << 30
+	}
+	n := 0
+	for _, c := range *resp.Result.Checks {
+		if c.Kind == "bounds" && c.Label == "runtime-checked" {
+			n++
+		}
+	}
+	return n
+}
+
+// typeSizes maps every type of show-layout to its size in bytes (empty on
+// any failure, so a size requirement then fails).
+func typeSizes(ctx context.Context, dir, kernBin string, files []string) map[string]int {
+	sizes := map[string]int{}
+	out, err := runCmdCtx(ctx, dir, kernBin, append([]string{"show-layout"}, files...)...)
+	if err != nil {
+		return sizes
+	}
+	var resp struct {
+		Result struct {
+			Types []struct {
+				Name string `json:"name"`
+				Size int    `json:"size"`
+			} `json:"types"`
+		} `json:"result"`
+	}
+	if json.Unmarshal([]byte(out), &resp) != nil {
+		return sizes
+	}
+	for _, ty := range resp.Result.Types {
+		sizes[ty.Name] = ty.Size
+	}
+	return sizes
+}
+
+// functionSpawns maps every function show-effects lists (generic suffixes
+// dropped) to whether it may spawn a thread; empty on any failure, so a
+// requirement then fails.
+func functionSpawns(ctx context.Context, dir, kernBin string, files []string) map[string]bool {
+	names := map[string]bool{}
+	out, err := runCmdCtx(ctx, dir, kernBin, append([]string{"show-effects"}, files...)...)
+	if err != nil {
+		return names
+	}
+	var resp struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Functions []struct {
+				Name   string `json:"name"`
+				Spawns bool   `json:"spawns"`
+			} `json:"functions"`
+		} `json:"result"`
+	}
+	if json.Unmarshal([]byte(out), &resp) != nil || !resp.OK {
+		return names
+	}
+	for _, f := range resp.Result.Functions {
+		name, _, _ := strings.Cut(f.Name, "[")
+		names[name] = names[name] || f.Spawns
+	}
+	return names
+}
+
+// measure reports what the hidden suite's analyses count for the sources in
+// dir, for calibrating a task's budgets (dry runs).
+func measure(ctx context.Context, kernBin string, t *task, dir string) string {
+	var files []string
+	for _, f := range t.Files {
+		files = append(files, filepath.Join(dir, f))
+	}
+	parts := []string{
+		fmt.Sprintf("copies=%d", countField(ctx, dir, kernBin, "show-copies", "copies", files)),
+		fmt.Sprintf("allocation_sites=%d", countField(ctx, dir, kernBin, "show-allocations", "sites", files)),
+		fmt.Sprintf("runtime_bounds_checks=%d", countRuntimeBoundsChecks(ctx, dir, kernBin, files)),
+		fmt.Sprintf("unsafe_lines=%d", unsafeLineCount(dir, t.Files)),
+	}
+	if len(t.Hidden.MaxTypeSize) > 0 {
+		sizes := typeSizes(ctx, dir, kernBin, files)
+		for _, ts := range t.Hidden.MaxTypeSize {
+			parts = append(parts, fmt.Sprintf("size(%s)=%d", ts.Type, sizes[ts.Type]))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 var unsafeRE = regexp.MustCompile(`\bunsafe\b`)

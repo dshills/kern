@@ -1,0 +1,64 @@
+module words
+// Word statistics over a text: the number of words, the length of the longest
+// word, the number of vowels and a checksum of every word's first byte.
+struct Stats { words: u64; longest: u64; vowels: u64; check: u64 }
+
+func is_space(b: u8) -> bool { return b == 32u8 || b == 10u8 }
+
+func is_vowel(b: u8) -> bool {
+    return b == 97u8 || b == 101u8 || b == 105u8 || b == 111u8 || b == 117u8
+}
+
+// word_end returns the index just past the word starting at `start`.
+func word_end(text: view[[]u8], start: usize) -> usize {
+    i := start
+    while i < len(text) && !is_space(text[i]) { i = i + 1usize }
+    return i
+}
+
+func vowels_in(text: view[[]u8], start: usize, end: usize) -> u64 {
+    n := 0u64
+    i := start
+    while i < end && i < len(text) {
+        if is_vowel(text[i]) { n = n + 1u64 }
+        i = i + 1usize
+    }
+    return n
+}
+
+func stats(text: view[[]u8]) -> Stats {
+    s := Stats { words: 0u64, longest: 0u64, vowels: 0u64, check: 0u64 }
+    i := 0usize
+    while i < len(text) {
+        if is_space(text[i]) {
+            i = i + 1usize
+            continue
+        }
+        end := word_end(text, i)
+        n := u64(end - i)
+        s.words = s.words + 1u64
+        if n > s.longest { s.longest = n }
+        s.vowels = s.vowels + vowels_in(text, i, end)
+        s.check = s.check * 31u64 + u64(text[i])
+        i = end
+    }
+    return s
+}
+
+func report(text: view[[]u8]) {
+    s := stats(text)
+    print_u64(s.words)
+    println()
+    print_u64(s.longest)
+    println()
+    print_u64(s.vowels)
+    println()
+    print_u64(s.check)
+    println()
+}
+
+func main() -> i32 {
+    report("the quick brown fox jumps over the lazy dog")
+    report("a systems language with second class access and no garbage collector")
+    return 0i32
+}

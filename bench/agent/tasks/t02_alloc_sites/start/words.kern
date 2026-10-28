@@ -1,0 +1,72 @@
+module words
+// Word statistics over a text: the number of words, the length of the longest
+// word, the number of vowels and a checksum of every word's first byte.
+struct Stats { words: u64; longest: u64; vowels: u64; check: u64 }
+
+func is_space(b: u8) -> bool { return b == 32u8 || b == 10u8 }
+
+func is_vowel(b: u8) -> bool {
+    return b == 97u8 || b == 101u8 || b == 105u8 || b == 111u8 || b == 117u8
+}
+
+// word_at copies the word starting at `start` into a fresh vector.
+func word_at(text: view[[]u8], start: usize) -> Vec[u8] {
+    w := Vec[u8].new()
+    i := start
+    while i < len(text) && !is_space(text[i]) {
+        w.push(text[i])
+        i = i + 1usize
+    }
+    return w
+}
+
+func vowels_in(w: view[Vec[u8]]) -> u64 {
+    n := 0u64
+    for b in w.as_view() { if is_vowel(b) { n = n + 1u64 } }
+    return n
+}
+
+func first_byte(w: view[Vec[u8]]) -> u64 {
+    held := w.clone()
+    if held.len() == 0usize { return 0u64 }
+    return u64(held.as_view()[0usize])
+}
+
+func stats(text: view[[]u8]) -> Box[Stats] {
+    s := Box.new(Stats { words: 0u64, longest: 0u64, vowels: 0u64, check: 0u64 })
+    i := 0usize
+    while i < len(text) {
+        if is_space(text[i]) {
+            i = i + 1usize
+            continue
+        }
+        w := word_at(text, i)
+        n := u64(w.len())
+        with st := s.at() {
+            st.words = st.words + 1u64
+            if n > st.longest { st.longest = n }
+            st.vowels = st.vowels + vowels_in(w)
+            st.check = st.check * 31u64 + first_byte(w)
+        }
+        i = i + w.len()
+    }
+    return s
+}
+
+func report(text: view[[]u8]) {
+    s := stats(text)
+    print_u64(s.get().words)
+    println()
+    print_u64(s.get().longest)
+    println()
+    print_u64(s.get().vowels)
+    println()
+    print_u64(s.get().check)
+    println()
+}
+
+func main() -> i32 {
+    report("the quick brown fox jumps over the lazy dog")
+    report("a systems language with second class access and no garbage collector")
+    return 0i32
+}

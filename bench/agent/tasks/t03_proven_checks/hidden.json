@@ -1,0 +1,12 @@
+{
+ "main": "frames.kern",
+ "expected_output": "1526\n65535\n2019\n1526\n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 4,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "frames.total_values",
+  "frames.largest_tag",
+  "frames.byte_sum"
+ ]
+}

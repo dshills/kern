@@ -22,7 +22,7 @@ func writeAgentReport(records []trialRecord, tasks []*task, trials, iterations i
 		modelList = append(modelList, m)
 	}
 	sort.Strings(modelList)
-	fmt.Fprintf(&b, "Models: %s. Trials per task, model and arm: %d. Arms: `structured` (JSON diagnostics with rule numbers plus `explain_ownership`, `show_copies`, `show_allocations`) and `plain` (text diagnostics only); both arms receive the same language reference, grammar, prelude and examples.\n\n", strings.Join(modelList, ", "), trials)
+	fmt.Fprintf(&b, "Models: %s. Trials per task, model and arm: %d. Arms: `structured` (JSON diagnostics with rule numbers, related spans and fixes, plus the semantic queries `explain_ownership`, `show_copies`, `show_allocations`, `show_bounds_checks` and `show_layout`) and `plain` (text diagnostics only); both arms receive the same language reference, grammar, prelude and examples.\n\n", strings.Join(modelList, ", "), trials)
 	type cell struct {
 		n, successes          int
 		iters, wall, tokens   []float64

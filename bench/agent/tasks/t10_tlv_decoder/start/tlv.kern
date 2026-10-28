@@ -1,0 +1,44 @@
+module tlv
+// A buffer of type-length-value records: one byte of type, one byte of
+// length, then that many payload bytes. Type 1 carries a 16-bit big-endian
+// counter, type 2 a 32-bit big-endian flag word, type 3 raw bytes; any other
+// type is skipped. A record is malformed when its payload runs past the end
+// of the buffer or when a type-1 or type-2 payload has the wrong length.
+struct Summary { records: u64; counters: u64; flags: u32; bytes: u64; skipped: u64 }
+
+// decode walks the records of buf and returns their summary: the number of
+// records, the sum of the counters, the OR of the flag words, the sum of the
+// raw bytes and the number of skipped records; None for a malformed buffer.
+func decode(buf: view[[]u8]) -> Option[Summary] {
+    // TODO
+    return None
+}
+
+func show(o: Option[Summary]) {
+    match o {
+        Some(s) => {
+            print_u64(s.records); println()
+            print_u64(s.counters); println()
+            print_u64(u64(s.flags)); println()
+            print_u64(s.bytes); println()
+            print_u64(s.skipped); println()
+        }
+        None => { print_str("malformed"); println() }
+    }
+}
+
+func main() -> i32 {
+    good := [1u8, 2u8, 1u8, 44u8,
+             3u8, 3u8, 10u8, 20u8, 30u8,
+             2u8, 4u8, 0u8, 0u8, 1u8, 5u8,
+             9u8, 2u8, 99u8, 99u8,
+             1u8, 2u8, 0u8, 200u8,
+             2u8, 4u8, 0u8, 1u8, 0u8, 2u8,
+             3u8, 0u8]
+    show(decode(good[0usize:31usize]))
+    show(decode(good[0usize:0usize]))
+    show(decode(good[0usize:30usize]))
+    bad := [1u8, 3u8, 0u8, 0u8, 0u8]
+    show(decode(bad[0usize:5usize]))
+    return 0i32
+}

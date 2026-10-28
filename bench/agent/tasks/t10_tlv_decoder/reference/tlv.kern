@@ -1,0 +1,89 @@
+module tlv
+// A buffer of type-length-value records: one byte of type, one byte of
+// length, then that many payload bytes. Type 1 carries a 16-bit big-endian
+// counter, type 2 a 32-bit big-endian flag word, type 3 raw bytes; any other
+// type is skipped. A record is malformed when its payload runs past the end
+// of the buffer or when a type-1 or type-2 payload has the wrong length.
+struct Summary { records: u64; counters: u64; flags: u32; bytes: u64; skipped: u64 }
+
+// decode walks the records of buf and returns their summary: the number of
+// records, the sum of the counters, the OR of the flag words, the sum of the
+// raw bytes and the number of skipped records; None for a malformed buffer.
+func rd16(buf: view[[]u8], at: usize) -> u64 {
+    if at + 1usize < len(buf) { return u64(buf[at]) * 256u64 + u64(buf[at + 1usize]) }
+    return 0u64
+}
+
+func rd32(buf: view[[]u8], at: usize) -> u32 {
+    if at + 3usize < len(buf) {
+        return u32(buf[at]) << 24u32 | u32(buf[at + 1usize]) << 16u32 | u32(buf[at + 2usize]) << 8u32 | u32(buf[at + 3usize])
+    }
+    return 0u32
+}
+
+func byte_sum(buf: view[[]u8], start: usize, end: usize) -> u64 {
+    t := 0u64
+    i := start
+    while i < len(buf) {
+        if i >= end { break }
+        t = t + u64(buf[i])
+        i = i + 1usize
+    }
+    return t
+}
+
+func decode(buf: view[[]u8]) -> Option[Summary] {
+    s := Summary { records: 0u64, counters: 0u64, flags: 0u32, bytes: 0u64, skipped: 0u64 }
+    at := 0usize
+    while at + 1usize < len(buf) {
+        ty := buf[at]
+        n := usize(buf[at + 1usize])
+        start := at + 2usize
+        end := start + n
+        if end > len(buf) { return None }
+        if ty == 1u8 {
+            if n != 2usize { return None }
+            s.counters = s.counters + rd16(buf, start)
+        } else if ty == 2u8 {
+            if n != 4usize { return None }
+            s.flags = s.flags | rd32(buf, start)
+        } else if ty == 3u8 {
+            s.bytes = s.bytes + byte_sum(buf, start, end)
+        } else {
+            s.skipped = s.skipped + 1u64
+        }
+        s.records = s.records + 1u64
+        at = end
+    }
+    if at != len(buf) { return None }
+    return Some(s)
+}
+
+func show(o: Option[Summary]) {
+    match o {
+        Some(s) => {
+            print_u64(s.records); println()
+            print_u64(s.counters); println()
+            print_u64(u64(s.flags)); println()
+            print_u64(s.bytes); println()
+            print_u64(s.skipped); println()
+        }
+        None => { print_str("malformed"); println() }
+    }
+}
+
+func main() -> i32 {
+    good := [1u8, 2u8, 1u8, 44u8,
+             3u8, 3u8, 10u8, 20u8, 30u8,
+             2u8, 4u8, 0u8, 0u8, 1u8, 5u8,
+             9u8, 2u8, 99u8, 99u8,
+             1u8, 2u8, 0u8, 200u8,
+             2u8, 4u8, 0u8, 1u8, 0u8, 2u8,
+             3u8, 0u8]
+    show(decode(good[0usize:31usize]))
+    show(decode(good[0usize:0usize]))
+    show(decode(good[0usize:30usize]))
+    bad := [1u8, 3u8, 0u8, 0u8, 0u8]
+    show(decode(bad[0usize:5usize]))
+    return 0i32
+}

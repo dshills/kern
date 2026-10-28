@@ -1,0 +1,11 @@
+{
+ "main": "words.kern",
+ "expected_output": "9\n5\n11\n102134282586790\n11\n9\n20\n82639991608527229\n",
+ "must_check_clean": true,
+ "max_allocations": 1,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "words.stats",
+  "words.report"
+ ]
+}

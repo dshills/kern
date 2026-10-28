@@ -1,0 +1,15 @@
+{
+ "main": "inventory.kern",
+ "expected_output": "21\n130\n321\n2\n4\n",
+ "must_check_clean": true,
+ "max_allocations": 7,
+ "max_copies": 4,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "Inventory.find",
+  "Inventory.restock",
+  "Inventory.fulfil",
+  "Inventory.value",
+  "inventory.total_qty"
+ ]
+}

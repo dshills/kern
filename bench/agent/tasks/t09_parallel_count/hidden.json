@@ -1,0 +1,16 @@
+{
+ "main": "par.kern",
+ "expected_output": "78\n77\n1\n",
+ "must_check_clean": true,
+ "max_allocations": 8,
+ "max_copies": 3,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "par.count_byte",
+  "par.parallel_count",
+  "par.fill"
+ ],
+ "must_spawn": [
+  "par.parallel_count"
+ ]
+}

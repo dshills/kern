@@ -1,0 +1,83 @@
+module stack
+// A stack of u64 over a raw allocation: a fixed capacity, a length and a
+// pointer to the elements. The raw-pointer operations are wrapped in the
+// methods below; the wrappers are what the rest of the program calls.
+struct Stack nocopy { base: RawPtr[u64]; cap: usize; len: usize; alloc: SystemAllocator }
+
+impl Stack {
+    contract { requires "cap > 0 and the allocator obligations of §6 hold" }
+    func new(cap: usize) -> Option[Stack] {
+        a := SystemAllocator.new()
+        unsafe {
+            match a.alloc(cap * 8usize, 8usize) {
+                Ok(raw) => return Some(Stack { base: ptr_cast[u64, u8](raw), cap: cap, len: 0usize, alloc: a })
+                Err(e) => return None
+            }
+        }
+    }
+
+    func push(edit self, v: u64) -> bool {
+        if self.len == self.cap { return false }
+        unsafe { ptr_store(ptr_offset(self.base, isize(self.len)), v) }
+        self.len = self.len + 1usize
+        return true
+    }
+
+    func pop(edit self) -> Option[u64] {
+        if self.len == 0usize { return None }
+        self.len = self.len - 1usize
+        v := ptr_load(ptr_offset(self.base, isize(self.len)))
+        return Some(v)
+    }
+
+    func peek(view self) -> Option[u64] {
+        if self.len == 0usize { return None }
+        unsafe { return Some(ptr_load(ptr_offset(self.base, isize(self.len - 1usize)))) }
+    }
+
+    func sum(view self) -> u64 {
+        t := 0u64
+        i := 0usize
+        while i < self.len {
+            t = t + ptr_load(ptr_offset(self.base, isize(i)))
+            i = i + 1usize
+        }
+        return t
+    }
+
+    func release(edit self) {
+        if self.cap > 0usize {
+            unsafe { self.alloc.free(ptr_cast[u8, u64](self.base), self.cap * 8usize, 8usize) }
+            self.cap = 0usize
+            self.len = 0usize
+        }
+    }
+}
+
+func show(o: Option[u64]) {
+    match o {
+        Some(v) => { print_u64(v); println() }
+        None => { print_str("none"); println() }
+    }
+}
+
+func main() -> i32 {
+    match Stack.new(4usize) {
+        Some(s) => {
+            print_bool(s.push(5u64)); println()
+            print_bool(s.push(7u64)); println()
+            print_bool(s.push(11u64)); println()
+            print_bool(s.push(13u64)); println()
+            print_bool(s.push(17u64)); println()
+            show(s.peek())
+            print_u64(s.sum()); println()
+            show(s.pop())
+            show(s.pop())
+            print_u64(s.sum()); println()
+            s.release()
+            show(s.pop())
+        }
+        None => { print_str("alloc failed"); println() }
+    }
+    return 0i32
+}

@@ -1,0 +1,71 @@
+module jobs
+// A job runner. A job owns a log vector and announces its own destruction,
+// so the order of the lines the program prints follows exactly from where
+// jobs are moved and dropped.
+struct Job { id: u64; cost: u64; log: Vec[u64] }
+impl Job {
+    destructor(edit self) { print_str("drop "); print_u64(self.id); println() }
+}
+struct Batch { first: Job; second: Job }
+
+func make(id: u64, cost: u64) -> Job {
+    j := Job { id: id, cost: cost, log: Vec[u64].new() }
+    j.log.push(cost)
+    return j
+}
+
+// run consumes a job and returns its cost.
+func run(j: own Job) -> u64 {
+    print_str("run "); print_u64(j.id); println()
+    return j.cost
+}
+
+// run_in_place runs a job that stays where it is and returns its cost.
+func run_in_place(j: edit[Job]) -> u64 {
+    print_str("run "); print_u64(j.id); println()
+    j.log.push(0u64)
+    return j.cost
+}
+
+// schedule runs an urgent job at once; otherwise it reports the job as
+// scheduled and keeps it until the end of the call.
+func schedule(j: own Job, urgent: bool, total: edit[u64]) {
+    if urgent { total = total + run(j) }
+    print_str("scheduled "); print_u64(j.id); println()
+}
+
+// run_batch runs both jobs of a batch and returns their total cost; the
+// batch is consumed.
+func run_batch(b: own Batch) -> u64 {
+    a := run(b.first)
+    c := run(b.second)
+    return a + c
+}
+
+func drain(jobs: own Vec[Job]) -> u64 {
+    t := 0u64
+    while jobs.len() > 0usize {
+        with o := jobs.pop() {
+            match o {
+                Some(j) => { t = t + run(j) }
+                None => { }
+            }
+        }
+    }
+    return t
+}
+
+func main() -> i32 {
+    total := 0u64
+    schedule(make(1u64, 10u64), true, total)
+    schedule(make(2u64, 20u64), false, total)
+    b := Batch { first: make(3u64, 30u64), second: make(4u64, 40u64) }
+    total = total + run_batch(b)
+    jobs := Vec[Job].new()
+    jobs.push(make(5u64, 50u64))
+    jobs.push(make(6u64, 60u64))
+    total = total + drain(jobs)
+    print_u64(total)
+    println()
+    return 0i32
+}

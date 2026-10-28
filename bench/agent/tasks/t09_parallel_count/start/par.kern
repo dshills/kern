@@ -1,0 +1,45 @@
+module par
+// Count how often a byte occurs in a buffer, splitting the work over four
+// scoped threads.
+func count_byte(xs: view[[]u8], b: u8) -> u64 {
+    n := 0u64
+    for x in xs { if x == b { n = n + 1u64 } }
+    return n
+}
+
+// parallel_count splits v's view into four parts of as equal a size as
+// possible (the first parts take the remainder), counts `b` in each part on
+// its own scoped thread, and returns the total; a spawn failure is returned
+// as Err.
+func parallel_count(v: view[Vec[u8]], b: u8) -> Result[u64, SpawnErr] {
+    // TODO
+    return Ok(0u64)
+}
+
+func fill(v: edit[Vec[u8]], n: u64) {
+    i := 0u64
+    while i < n {
+        v.push(u8((i * 2u64 + i / 2u64) % 13u64))
+        i = i + 1u64
+    }
+}
+
+func main() -> i32 {
+    v := Vec[u8].new()
+    fill(v, 1003u64)
+    match parallel_count(v, 4u8) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    match parallel_count(v, 10u8) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    w := Vec[u8].new()
+    fill(w, 3u64)
+    match parallel_count(w, 0u8) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}

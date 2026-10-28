@@ -160,9 +160,12 @@ rules, DWARF, reproducible releases, security review), then a sixth of
 performance work and language additions (kern-level inlining, condition
 variables, byte-order reads and writes, `where` clauses, non-escaping
 closures, `std/str`, `std/map` and `std/io`; `docs/reports/`). The agent
-experiment's full matrix has been run (`bench/agent/REPORT.md`): every trial
-succeeds in both arms and the primary metric does not pass, because the tasks
-do not separate the arms. Open items are recorded in the reports and ADRs
+experiment's full matrix has been run on its first task suite
+(`bench/agent/REPORT.md`, now `bench/agent/tasks-v1/`): every trial
+succeeds in both arms and the primary metric does not pass, because those
+tasks do not separate the arms. A second suite (`bench/agent/tasks/`,
+`docs/reports/agent-tasks-v2.md`) states each task's requirement in terms of
+what the compiler's analyses report; its matrix has not been run. Open items are recorded in the reports and ADRs
 rather than in an issue tracker.
 
 Specification documents, the language reference and the ADRs are the

@@ -1,0 +1,78 @@
+module layout
+// Entries of a priority list kept in a pool, and a record header. The field
+// orders below were written for readability, not for size.
+union Payload { Empty; Count(u32); Pair(u16, u16); Wide(u64) }
+
+struct Entry {
+    live: bool
+    key: u64
+    prio: u8
+    next: Option[PoolId[Entry]]
+    payload: Payload
+    gen: u16
+    flags: u8
+}
+
+struct Header {
+    magic: u8
+    length: u32
+    kind: u8
+    crc: u16
+    stamp: u64
+    version: u8
+}
+
+func payload_value(p: view[Payload]) -> u64 {
+    match p {
+        Empty => return 0u64
+        Count(n) => return u64(n)
+        Pair(a, b) => return u64(a) * 1000u64 + u64(b)
+        Wide(w) => return w
+    }
+}
+
+func push(pool: edit[Pool[Entry]], head: Option[PoolId[Entry]], key: u64, prio: u8, payload: own Payload) -> Option[PoolId[Entry]] {
+    e := Entry { live: true, key: key, prio: prio, next: head, payload: payload, gen: 1u16, flags: 0u8 }
+    match pool.alloc(e) {
+        Ok(id) => return Some(id)
+        Err(err) => return head
+    }
+}
+
+func walk(pool: view[Pool[Entry]], head: Option[PoolId[Entry]]) -> u64 {
+    acc := 0u64
+    cur := head
+    while cur != None {
+        match cur {
+            Some(id) => {
+                with e := pool.get(id) {
+                    if e.live { acc = acc * 7u64 + e.key + u64(e.prio) + payload_value(e.payload) + u64(e.gen) + u64(e.flags) }
+                    cur = e.next
+                }
+            }
+            None => { }
+        }
+    }
+    return acc
+}
+
+func header_check(h: view[Header]) -> u64 {
+    return u64(h.magic) * 3u64 + u64(h.length) + u64(h.kind) * 5u64 + u64(h.crc) + h.stamp + u64(h.version)
+}
+
+func main() -> i32 {
+    pool := Pool[Entry].new()
+    var head: Option[PoolId[Entry]] = None
+    head = push(pool, head, 10u64, 1u8, Count(4u32))
+    head = push(pool, head, 20u64, 2u8, Pair(3u16, 9u16))
+    head = push(pool, head, 30u64, 3u8, Wide(100000u64))
+    head = push(pool, head, 40u64, 4u8, Empty)
+    print_u64(walk(pool, head))
+    println()
+    h := Header { magic: 75u8, length: 512u32, kind: 2u8, crc: 48879u16, stamp: 1700000000u64, version: 3u8 }
+    print_u64(header_check(h))
+    println()
+    print_u64(u64(pool.len()))
+    println()
+    return 0i32
+}

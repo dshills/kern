@@ -43,6 +43,25 @@ type hiddenSpec struct {
 	NoUnsafeAdded  bool           `json:"no_unsafe_added"`  // the agent must not add unsafe blocks
 	MustCheckClean bool           `json:"must_check_clean"` // check must report no diagnostics
 	ExtraPrograms  []extraProgram `json:"extra_programs"`   // additional hidden programs compiled with the solution
+
+	// MaxRuntimeBoundsChecks bounds the show-bounds-checks entries of kind
+	// bounds that are runtime-checked (not proven), when set.
+	MaxRuntimeBoundsChecks *int `json:"max_runtime_bounds_checks"`
+	// MaxTypeSize bounds the show-layout size of named types.
+	MaxTypeSize []typeSize `json:"max_type_size"`
+	// RequiredFunctions must each be a function of the program, named as
+	// show-effects names them (module.f, Type.method), so that a solution
+	// cannot delete what the task asks to keep.
+	RequiredFunctions []string `json:"required_functions"`
+	// MustSpawn names functions that show-effects must report as spawning
+	// threads (`spawns` true), so that a parallel task cannot be solved
+	// sequentially.
+	MustSpawn []string `json:"must_spawn"`
+}
+
+type typeSize struct {
+	Type  string `json:"type"`
+	Bytes int    `json:"bytes"`
 }
 
 type extraProgram struct {
@@ -76,6 +95,7 @@ type toolCallLog struct {
 
 func main() {
 	tasksFlag := flag.String("tasks", "", "comma-separated task names (default: all)")
+	tasksDir := flag.String("tasks-dir", "bench/agent/tasks", "task directory, relative to the repository root")
 	modelsFlag := flag.String("models", "openai:gpt-6.1-sol,anthropic:claude-opus-5-5", "provider:model pairs")
 	armsFlag := flag.String("arms", "structured,plain", "arms to run")
 	trials := flag.Int("trials", 5, "trials per task, model and arm")
@@ -92,7 +112,7 @@ func main() {
 	if msg, err := runCmd(root, "go", "build", "-o", kernBin, "./cmd/kern"); err != nil {
 		fatalf("building kern: %v: %s", err, msg)
 	}
-	tasks := loadTasks(root)
+	tasks := loadTasks(filepath.Join(root, *tasksDir))
 	if *tasksFlag != "" {
 		want := map[string]bool{}
 		for _, t := range strings.Split(*tasksFlag, ",") {
@@ -111,6 +131,8 @@ func main() {
 		for _, t := range tasks {
 			ok, detail := validateReference(context.Background(), root, kernBin, t)
 			fmt.Printf("%s: reference solution %s %s\n", t.Name, map[bool]string{true: "passes", false: "FAILS"}[ok], detail)
+			fmt.Printf("%s: reference measures %s\n", t.Name, measure(context.Background(), kernBin, t, filepath.Join(t.Dir, "reference")))
+			fmt.Printf("%s: start measures %s\n", t.Name, measure(context.Background(), kernBin, t, filepath.Join(t.Dir, "start")))
 			bad, detail2 := hiddenPasses(context.Background(), root, kernBin, t, filepath.Join(t.Dir, "start"))
 			fmt.Printf("%s: starting sources %s hidden tests %s\n", t.Name, map[bool]string{true: "already pass (task is trivial!)", false: "fail as intended"}[bad], detail2)
 			if !ok || bad {
@@ -159,9 +181,8 @@ func main() {
 	fmt.Printf("wrote %s (%d trials under %s)\n", path, len(records), runDir)
 }
 
-// loadTasks reads bench/agent/tasks/<name>/{task.md,hidden.json,start/,reference/}.
-func loadTasks(root string) []*task {
-	dir := filepath.Join(root, "bench", "agent", "tasks")
+// loadTasks reads <dir>/<name>/{task.md,hidden.json,start/,reference/}.
+func loadTasks(dir string) []*task {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		fatalf("%v", err)

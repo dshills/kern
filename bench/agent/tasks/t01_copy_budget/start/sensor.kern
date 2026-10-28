@@ -1,0 +1,96 @@
+module sensor
+// A sensor log: four samples of 64 readings each, summarised in several ways.
+struct Sample { readings: [64]u32; id: u64; scale: u32 }
+struct Window { samples: [4]Sample; count: u64 }
+
+func fill(w: edit[Window]) {
+    i := 0usize
+    while i < len(w.samples) {
+        j := 0usize
+        while j < len(w.samples[i].readings) {
+            w.samples[i].readings[j] = u32(i * 100usize + j)
+            j = j + 1usize
+        }
+        w.samples[i].id = u64(i) + 1u64
+        w.samples[i].scale = u32(i) + 1u32
+        i = i + 1usize
+    }
+    w.count = 4u64
+}
+
+func sample_total(s: Sample) -> u64 {
+    t := 0u64
+    for r in s.readings { t = t + u64(r) }
+    return t * u64(s.scale)
+}
+
+func sample_peak(s: Sample) -> u64 {
+    best := 0u32
+    for r in s.readings { if r > best { best = r } }
+    return u64(best)
+}
+
+func newest(w: view[Window]) -> Sample {
+    return w.samples[3usize]
+}
+
+func oldest(w: view[Window]) -> Sample {
+    return w.samples[0usize]
+}
+
+func window_total(w: view[Window]) -> u64 {
+    t := 0u64
+    for s in w.samples { t = t + sample_total(s) }
+    return t
+}
+
+func window_peak(w: view[Window]) -> u64 {
+    best := 0u64
+    i := 0usize
+    while i < len(w.samples) {
+        s := w.samples[i]
+        p := sample_peak(s)
+        if p > best { best = p }
+        i = i + 1usize
+    }
+    return best
+}
+
+func id_sum(w: view[Window]) -> u64 {
+    first := oldest(w)
+    last := newest(w)
+    return first.id + last.id
+}
+
+func rescale(w: edit[Window], k: u32) {
+    i := 0usize
+    while i < len(w.samples) {
+        w.samples[i].scale = w.samples[i].scale * k
+        w.samples[i].id = w.samples[i].id + u64(k)
+        i = i + 1usize
+    }
+}
+
+func report(w: view[Window]) {
+    print_u64(window_total(w))
+    println()
+    print_u64(window_peak(w))
+    println()
+    print_u64(id_sum(w))
+    println()
+    print_u64(sample_total(newest(w)))
+    println()
+    print_u64(sample_peak(oldest(w)))
+    println()
+}
+
+func main() -> i32 {
+    var w: Window = zero()
+    fill(w)
+    report(w)
+    rescale(w, 3u32)
+    report(w)
+    print_u64(w.count)
+    println()
+    return 0i32
+}

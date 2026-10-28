@@ -1,0 +1,18 @@
+{
+ "main": "sensor.kern",
+ "expected_output": "148160\n363\n5\n84864\n63\n444480\n363\n11\n254592\n63\n4\n",
+ "must_check_clean": true,
+ "max_copies": 1,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "sensor.sample_total",
+  "sensor.sample_peak",
+  "sensor.newest",
+  "sensor.oldest",
+  "sensor.window_total",
+  "sensor.window_peak",
+  "sensor.id_sum",
+  "sensor.report",
+  "sensor.rescale"
+ ]
+}

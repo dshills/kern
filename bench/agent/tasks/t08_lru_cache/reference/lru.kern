@@ -1,0 +1,171 @@
+module lru
+// A least-recently-used cache of u64 values keyed by u64, of fixed capacity,
+// kept as a doubly linked list of entries in a pool: the head is the most
+// recently used entry, the tail the least.
+struct Entry { key: u64; value: u64; prev: Option[PoolId[Entry]]; next: Option[PoolId[Entry]] }
+struct Cache {
+    entries: Pool[Entry]
+    head: Option[PoolId[Entry]]
+    tail: Option[PoolId[Entry]]
+    cap: usize
+    count: usize
+    hits: u64
+    misses: u64
+    evictions: u64
+}
+
+impl Cache {
+    func new(cap: usize) -> Cache {
+        return Cache { entries: Pool[Entry].new(), head: None, tail: None, cap: cap, count: 0usize, hits: 0u64, misses: 0u64, evictions: 0u64 }
+    }
+
+    // get returns the value stored under key, making its entry the most
+    // recently used, and counts a hit; None (and a miss) when absent.
+    func find(view self, key: u64) -> Option[PoolId[Entry]] {
+        cur := self.head
+        while cur != None {
+            match cur {
+                Some(id) => {
+                    with e := self.entries.get(id) {
+                        if e.key == key { return cur }
+                        cur = e.next
+                    }
+                }
+                None => { }
+            }
+        }
+        return None
+    }
+
+    // unlink removes id from the list without freeing it.
+    func unlink(edit self, id: PoolId[Entry]) {
+        var prev: Option[PoolId[Entry]] = None
+        var next: Option[PoolId[Entry]] = None
+        with e := self.entries.get(id) { prev = e.prev; next = e.next }
+        match prev {
+            Some(p) => { with pe := self.entries.at(p) { pe.next = next } }
+            None => { self.head = next }
+        }
+        match next {
+            Some(n) => { with ne := self.entries.at(n) { ne.prev = prev } }
+            None => { self.tail = prev }
+        }
+        with e := self.entries.at(id) { e.prev = None; e.next = None }
+    }
+
+    // push_front makes id the head.
+    func push_front(edit self, id: PoolId[Entry]) {
+        old := self.head
+        with e := self.entries.at(id) { e.prev = None; e.next = old }
+        match old {
+            Some(h) => { with he := self.entries.at(h) { he.prev = Some(id) } }
+            None => { self.tail = Some(id) }
+        }
+        self.head = Some(id)
+    }
+
+    func get(edit self, key: u64) -> Option[u64] {
+        match self.find(key) {
+            Some(id) => {
+                self.unlink(id)
+                self.push_front(id)
+                self.hits = self.hits + 1u64
+                return Some(self.entries.get(id).value)
+            }
+            None => {
+                self.misses = self.misses + 1u64
+                return None
+            }
+        }
+    }
+
+    // put stores value under key: an existing entry is updated and becomes
+    // the most recently used; otherwise a new entry becomes the head, and
+    // when the cache is full the least recently used entry is evicted first.
+    func put(edit self, key: u64, value: u64) {
+        if self.cap == 0usize { return }
+        match self.find(key) {
+            Some(id) => {
+                with e := self.entries.at(id) { e.value = value }
+                self.unlink(id)
+                self.push_front(id)
+                return
+            }
+            None => { }
+        }
+        if self.count == self.cap {
+            match self.tail {
+                Some(t) => {
+                    self.unlink(t)
+                    self.entries.free(t)
+                    self.count = self.count - 1usize
+                    self.evictions = self.evictions + 1u64
+                }
+                None => { }
+            }
+        }
+        match self.entries.alloc(Entry { key: key, value: value, prev: None, next: None }) {
+            Ok(id) => {
+                self.push_front(id)
+                self.count = self.count + 1usize
+            }
+            Err(e) => { }
+        }
+    }
+
+    // keys_in_order appends the keys from most to least recently used.
+    func keys_in_order(view self, dst: edit[Vec[u64]]) {
+        cur := self.head
+        while cur != None {
+            match cur {
+                Some(id) => {
+                    with e := self.entries.get(id) {
+                        dst.push(e.key)
+                        cur = e.next
+                    }
+                }
+                None => { }
+            }
+        }
+    }
+}
+
+func show(o: Option[u64]) {
+    match o {
+        Some(v) => { print_u64(v); println() }
+        None => { print_str("miss"); println() }
+    }
+}
+
+func show_keys(c: view[Cache]) {
+    ks := Vec[u64].new()
+    c.keys_in_order(ks)
+    for k in ks.as_view() { print_u64(k); print_str(" ") }
+    println()
+}
+
+func main() -> i32 {
+    c := Cache.new(3usize)
+    c.put(1u64, 100u64)
+    c.put(2u64, 200u64)
+    c.put(3u64, 300u64)
+    show(c.get(1u64))
+    c.put(4u64, 400u64)
+    show(c.get(2u64))
+    show(c.get(3u64))
+    c.put(3u64, 333u64)
+    show(c.get(3u64))
+    show(c.get(4u64))
+    show_keys(c)
+    c.put(5u64, 500u64)
+    c.put(6u64, 600u64)
+    show(c.get(1u64))
+    show(c.get(5u64))
+    show_keys(c)
+    print_u64(c.hits); println()
+    print_u64(c.misses); println()
+    print_u64(c.evictions); println()
+    print_u64(u64(c.count)); println()
+    print_u64(u64(c.entries.len())); println()
+    return 0i32
+}

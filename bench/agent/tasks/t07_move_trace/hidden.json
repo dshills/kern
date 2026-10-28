@@ -1,0 +1,12 @@
+{
+ "main": "jobs.kern",
+ "expected_output": "run 1\ndrop 1\nscheduled 2\ndrop 2\nrun 3\nrun 4\ndrop 4\ndrop 3\nrun 6\ndrop 6\nrun 5\ndrop 5\n190\n",
+ "must_check_clean": true,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "jobs.run",
+  "jobs.schedule",
+  "jobs.run_batch",
+  "jobs.drain"
+ ]
+}

@@ -1,0 +1,13 @@
+{
+ "main": "stack.kern",
+ "expected_output": "true\ntrue\ntrue\ntrue\nfalse\n13\n36\n13\n11\n12\nnone\n",
+ "must_check_clean": true,
+ "required_functions": [
+  "Stack.new",
+  "Stack.push",
+  "Stack.pop",
+  "Stack.peek",
+  "Stack.sum",
+  "Stack.release"
+ ]
+}

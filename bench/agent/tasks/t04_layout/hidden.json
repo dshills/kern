@@ -1,0 +1,21 @@
+{
+ "main": "layout.kern",
+ "expected_output": "4938341\n1700049629\n4\n",
+ "must_check_clean": true,
+ "max_type_size": [
+  {
+   "type": "Entry",
+   "bytes": 48
+  },
+  {
+   "type": "Header",
+   "bytes": 24
+  }
+ ],
+ "required_functions": [
+  "layout.payload_value",
+  "layout.push",
+  "layout.walk",
+  "layout.header_check"
+ ]
+}

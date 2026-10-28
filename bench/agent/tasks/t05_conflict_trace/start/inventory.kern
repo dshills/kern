@@ -1,0 +1,87 @@
+module inventory
+// A small inventory: items with a stock count and a price, orders that take
+// stock, and a restock step that tops up anything that ran low.
+struct Item { sku: u64; stock: u64; price: u64 }
+struct Order { sku: u64; qty: u64 }
+struct Inventory { items: Vec[Item]; restocks: u64 }
+
+impl Inventory {
+    func new() -> Inventory { return Inventory { items: Vec[Item].new(), restocks: 0u64 } }
+
+    func add(edit self, sku: u64, stock: u64, price: u64) {
+        self.items.push(Item { sku: sku, stock: stock, price: price })
+    }
+
+    func find(view self, sku: u64) -> Option[usize] {
+        i := 0usize
+        while i < self.items.len() {
+            if self.items.as_view()[i].sku == sku { return Some(i) }
+            i = i + 1usize
+        }
+        return None
+    }
+
+    func restock(edit self, sku: u64, amount: u64) {
+        match self.find(sku) {
+            Some(i) => {
+                with it := self.items.at(i) { it.stock = it.stock + amount }
+                self.restocks = self.restocks + 1u64
+            }
+            None => { }
+        }
+    }
+
+    // fulfil takes an order and returns its cost, restocking the item when
+    // the order empties it.
+    func fulfil(edit self, order: Order) -> u64 {
+        match self.find(order.sku) {
+            Some(i) => {
+                with it := self.items.at(i) {
+                    if it.stock < order.qty { return 0u64 }
+                    it.stock = it.stock - order.qty
+                    cost := it.price * order.qty
+                    if it.stock == 0u64 { self.restock(order.sku, 5u64) }
+                    return cost
+                }
+            }
+            None => return 0u64
+        }
+    }
+
+    func value(view self) -> u64 {
+        t := 0u64
+        for it in self.items.as_view() { t = t + it.stock * it.price }
+        return t
+    }
+}
+
+func total_qty(orders: Vec[Order]) -> u64 {
+    t := 0u64
+    for o in orders.as_view() { t = t + o.qty }
+    return t
+}
+
+func main() -> i32 {
+    inv := Inventory.new()
+    inv.add(1u64, 10u64, 3u64)
+    inv.add(2u64, 2u64, 50u64)
+    inv.add(3u64, 7u64, 8u64)
+    orders := Vec[Order].new()
+    orders.push(Order { sku: 1u64, qty: 4u64 })
+    orders.push(Order { sku: 2u64, qty: 2u64 })
+    orders.push(Order { sku: 3u64, qty: 9u64 })
+    orders.push(Order { sku: 1u64, qty: 6u64 })
+    revenue := 0u64
+    for o in orders.as_view() { revenue = revenue + inv.fulfil(o) }
+    print_u64(total_qty(orders))
+    println()
+    print_u64(revenue)
+    println()
+    print_u64(inv.value())
+    println()
+    print_u64(inv.restocks)
+    println()
+    print_u64(u64(orders.len()))
+    println()
+    return 0i32
+}

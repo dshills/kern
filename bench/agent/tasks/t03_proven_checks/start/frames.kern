@@ -1,0 +1,67 @@
+module frames
+// A stream of fixed-size frames: each frame is 6 bytes, a 16-bit big-endian
+// tag, a 16-bit big-endian value and a 16-bit big-endian checksum of the
+// first four bytes. The stream is scanned once to total the values of the
+// frames whose checksum holds, and once more to find the largest tag.
+
+func rd16(buf: view[[]u8], at: usize) -> u64 {
+    return u64(buf[at]) * 256u64 + u64(buf[at + 1usize])
+}
+
+func frame_ok(buf: view[[]u8], at: usize) -> bool {
+    sum := (u64(buf[at]) + u64(buf[at + 1usize]) + u64(buf[at + 2usize]) + u64(buf[at + 3usize])) % 65536u64
+    return sum == rd16(buf, at + 4usize)
+}
+
+func total_values(buf: view[[]u8]) -> u64 {
+    t := 0u64
+    n := len(buf)
+    at := 0usize
+    while at + 6usize <= n {
+        if frame_ok(buf, at) { t = t + rd16(buf, at + 2usize) }
+        at = at + 6usize
+    }
+    return t
+}
+
+func largest_tag(buf: view[[]u8]) -> u64 {
+    best := 0u64
+    count := len(buf) / 6usize
+    i := 0usize
+    while i < count {
+        tag := rd16(buf, i * 6usize)
+        if tag > best { best = tag }
+        i = i + 1usize
+    }
+    return best
+}
+
+func byte_sum(buf: view[[]u8]) -> u64 {
+    t := 0u64
+    i := 0usize
+    while i < len(buf) { t = t + u64(buf[i]); i = i + 1usize }
+    return t
+}
+
+func main() -> i32 {
+    // five frames (the third has a bad checksum) and two trailing bytes
+    stream := [0u8, 7u8, 3u8, 232u8, 0u8, 242u8,
+               1u8, 44u8, 0u8, 25u8, 0u8, 70u8,
+               0u8, 9u8, 15u8, 160u8, 0u8, 185u8,
+               255u8, 255u8, 0u8, 1u8, 1u8, 255u8,
+               0u8, 12u8, 1u8, 244u8, 1u8, 1u8,
+               0u8, 0u8]
+    with s := stream[0usize:30usize] {
+        print_u64(total_values(s))
+        println()
+        print_u64(largest_tag(s))
+        println()
+        print_u64(byte_sum(s))
+        println()
+    }
+    with s := stream[0usize:32usize] {
+        print_u64(total_values(s))
+        println()
+    }
+    return 0i32
+}

@@ -1,0 +1,61 @@
+module par
+// Count how often a byte occurs in a buffer, splitting the work over four
+// scoped threads.
+func count_byte(xs: view[[]u8], b: u8) -> u64 {
+    n := 0u64
+    for x in xs { if x == b { n = n + 1u64 } }
+    return n
+}
+
+// parallel_count splits v's view into four parts of as equal a size as
+// possible (the first parts take the remainder), counts `b` in each part on
+// its own scoped thread, and returns the total; a spawn failure is returned
+// as Err.
+func parallel_count(v: view[Vec[u8]], b: u8) -> Result[u64, SpawnErr] {
+    with xs := v.as_view() {
+        n := len(xs)
+        q := n / 4usize
+        r := n % 4usize
+        a1 := q
+        if r > 0usize { a1 = a1 + 1usize }
+        a2 := a1 + q
+        if r > 1usize { a2 = a2 + 1usize }
+        a3 := a2 + q
+        if r > 2usize { a3 = a3 + 1usize }
+        with s := thread.scope() {
+            j1 := s.spawn(count_byte, xs[0usize:a1], b)?
+            j2 := s.spawn(count_byte, xs[a1:a2], b)?
+            j3 := s.spawn(count_byte, xs[a2:a3], b)?
+            j4 := s.spawn(count_byte, xs[a3:n], b)?
+            return Ok(j1.get() + j2.get() + j3.get() + j4.get())
+        }
+    }
+}
+
+func fill(v: edit[Vec[u8]], n: u64) {
+    i := 0u64
+    while i < n {
+        v.push(u8((i * 2u64 + i / 2u64) % 13u64))
+        i = i + 1u64
+    }
+}
+
+func main() -> i32 {
+    v := Vec[u8].new()
+    fill(v, 1003u64)
+    match parallel_count(v, 4u8) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    match parallel_count(v, 10u8) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    w := Vec[u8].new()
+    fill(w, 3u64)
+    match parallel_count(w, 0u8) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}

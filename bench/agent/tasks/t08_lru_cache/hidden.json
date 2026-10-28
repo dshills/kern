@@ -1,0 +1,13 @@
+{
+ "main": "lru.kern",
+ "expected_output": "100\nmiss\n300\n333\n400\n4 3 1 \nmiss\n500\n5 6 4 \n5\n2\n3\n3\n3\n",
+ "must_check_clean": true,
+ "max_allocations": 4,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "Cache.new",
+  "Cache.get",
+  "Cache.put",
+  "Cache.keys_in_order"
+ ]
+}
