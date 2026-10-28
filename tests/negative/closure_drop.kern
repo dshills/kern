@@ -1,0 +1,9 @@
+//! expect: reject OWN_PARTIAL_MOVE rule=5.1.6
+//! twin: closure_drop_ok
+module m
+func run(f: closure()) { f() }
+func main() -> i32 {
+    b := Box[u64].new(1u64)
+    run(|| drop(b))   // OWN_PARTIAL_MOVE: a captured variable cannot be dropped by the closure
+    return 0i32
+}

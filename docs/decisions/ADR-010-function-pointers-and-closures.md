@@ -1,6 +1,6 @@
 # ADR-010: Function pointers now; non-escaping closures later; no escaping closures
 
-**Status:** Decided (Phase 1, 2026-10-26): capture-free function pointers now; non-escaping closures deferred; escaping closures are a non-goal
+**Status:** Decided (Phase 1, 2026-10-26): capture-free function pointers now; non-escaping closures deferred; escaping closures are a non-goal. **Amended 2026-10-28:** the deferred option is implemented as `closure(P...) -> R` parameter types and `|x| expr` closure expressions (spec §4, `docs/reports/closures.md`); invariants 4 and 5 hold as written
 **Date:** 2026-10-26
 **Spec:** §2.2 (escaping closures are a non-goal), §4 (function values, closures deferred),
 §5.5 (`spawn` takes a function and owned arguments), §5.8 (callbacks retaining references),

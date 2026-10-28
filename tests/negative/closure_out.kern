@@ -1,0 +1,5 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: closure_out_ok
+module m
+struct Cell { x: u64 }
+func fill(f: closure(out Cell)) { }   // TYPE_MISMATCH: a closure parameter cannot be out

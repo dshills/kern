@@ -77,7 +77,12 @@ func Of(t resolve.Type) Info {
 		return Info{Size: 8, Align: 8}
 	case *resolve.Unit:
 		return Info{Size: 0, Align: 1}
-	case *resolve.RawPtr, *resolve.Func:
+	case *resolve.Func:
+		if x.Closure {
+			return Info{Size: 2 * PtrSize, Align: PtrSize} // function and environment
+		}
+		return Info{Size: PtrSize, Align: PtrSize}
+	case *resolve.RawPtr:
 		return Info{Size: PtrSize, Align: PtrSize}
 	case *resolve.Access:
 		if x.Seq {

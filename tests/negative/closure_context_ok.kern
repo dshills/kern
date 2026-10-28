@@ -1,0 +1,10 @@
+//! phase: 1
+//! expect: accept
+//! twin: closure_context
+module m
+func apply(f: closure(u64) -> u64, x: u64) -> u64 { return f(x) }
+func main() -> i32 {
+    k := 1u64
+    print_u64(apply(|x| x + k, 2u64))
+    return 0i32
+}

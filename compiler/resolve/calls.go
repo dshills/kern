@@ -460,6 +460,9 @@ func (c *fnCtx) spawn(sc *scope, x *ast.CallExpr, info *CallInfo, kind string, w
 		c.errorf("TYPE_MISMATCH", x.Args[0].Pos, "spawn requires a function value")
 		return &Bad{}
 	}
+	if ft.Closure {
+		c.errorf("SEND_NOT_SEND", x.Args[0].Pos, "a closure is not Send: spawn takes a function and owned arguments")
+	}
 	if kind == "thread.spawn" {
 		for _, p := range ft.Params {
 			if p.Conv == ast.ConvView || p.Conv == ast.ConvEdit || p.Conv == ast.ConvOut {

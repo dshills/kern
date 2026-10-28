@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: accept
+//! twin: closure_drop
+module m
+func run(f: closure()) { f() }
+func main() -> i32 {
+    b := Box[u64].new(1u64)
+    run(|| { with x := b.get() { print_u64(copy(x)) } })
+    drop(b)
+    return 0i32
+}

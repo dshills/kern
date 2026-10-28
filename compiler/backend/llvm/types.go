@@ -49,7 +49,12 @@ func (e *emitter) lty(t resolve.Type) string {
 		return "i64"
 	case *resolve.Unit:
 		return "{}"
-	case *resolve.RawPtr, *resolve.Func:
+	case *resolve.Func:
+		if x.Closure {
+			return "{ ptr, ptr }" // the function and its environment
+		}
+		return "ptr"
+	case *resolve.RawPtr:
 		return "ptr"
 	case *resolve.Access:
 		if seq, _ := accessInfo(x); seq {

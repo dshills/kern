@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: closure_store
+module m
+struct Handler { f: func(u64) -> u64 }
+func apply(h: view[Handler], f: closure(u64) -> u64, x: u64) -> u64 { return f(h.f(x)) }

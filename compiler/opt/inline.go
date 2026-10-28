@@ -122,6 +122,8 @@ func callSites(mod *ir.Module, funcs []*ir.Func) map[*ir.Func]int {
 					}
 				case *ir.FuncRef:
 					referenced[i.Name] = true
+				case *ir.MakeClosure:
+					referenced[i.Name] = true
 				}
 			}
 		}
@@ -153,6 +155,12 @@ func (in *inliner) eligible(f, g *ir.Func) bool {
 		if p.Conv == ast.ConvOut {
 			return false // the callee writes through the parameter slot
 		}
+		if ft, ok := p.Type.(*resolve.Func); ok && ft.Closure {
+			return false // a closure argument is second-class: the copy would store it in a slot
+		}
+	}
+	if g.Closure {
+		return false // only ever called through its value
 	}
 	for _, r := range g.Rets {
 		if _, ok := r.(*resolve.Access); ok {
@@ -602,6 +610,8 @@ func (m *copier) instr(in ir.Instr) ir.Instr {
 		return &ir.Tag{Dst: m.v(i.Dst), Place: m.place(i.Place)}
 	case *ir.FuncRef:
 		return &ir.FuncRef{Dst: m.v(i.Dst), Name: i.Name}
+	case *ir.MakeClosure:
+		return &ir.MakeClosure{Dst: m.v(i.Dst), Name: i.Name, Captures: m.vs(i.Captures), Pos: i.Pos}
 	case *ir.Trap:
 		return &ir.Trap{Kind: i.Kind, Pos: i.Pos}
 	case *ir.UnsafeBegin:
@@ -816,6 +826,8 @@ func defs(in ir.Instr) []*ir.Value {
 		return []*ir.Value{i.Dst}
 	case *ir.FuncRef:
 		return []*ir.Value{i.Dst}
+	case *ir.MakeClosure:
+		return []*ir.Value{i.Dst}
 	case *ir.Copy:
 		return []*ir.Value{i.Dst}
 	}
@@ -848,6 +860,8 @@ func markInlined(mod *ir.Module, funcs []*ir.Func) {
 						referenced[i.Release] = true
 					}
 				case *ir.FuncRef:
+					referenced[i.Name] = true
+				case *ir.MakeClosure:
 					referenced[i.Name] = true
 				}
 			}

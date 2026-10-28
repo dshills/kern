@@ -70,6 +70,20 @@ func (fe *fnEmit) call(c *ir.Call) {
 		rets := ft.Ret
 		var dsts []*ir.Value
 		dsts = append(dsts, c.Dsts...)
+		if ft.Closure {
+			// a closure value is its function and its environment; the
+			// function takes the environment first
+			fn := fe.next("t")
+			env := fe.next("t")
+			fe.emit("%s = extractvalue { ptr, ptr } %s, 0", fn, fe.v(c.Fn))
+			fe.emit("%s = extractvalue { ptr, ptr } %s, 1", env, fe.v(c.Fn))
+			args := "ptr " + env
+			if rest := fe.typedArgs(c.Args); rest != "" {
+				args += ", " + rest
+			}
+			fe.directCall(dsts, rets, fn, args)
+			return
+		}
 		fe.directCall(dsts, rets, fe.v(c.Fn), fe.typedArgs(c.Args))
 		return
 	}

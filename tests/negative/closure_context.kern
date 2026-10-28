@@ -1,0 +1,9 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: closure_context_ok
+module m
+func apply(f: func(u64) -> u64, x: u64) -> u64 { return f(x) }
+func main() -> i32 {
+    k := 1u64
+    print_u64(apply(|x| x + k, 2u64))   // TYPE_MISMATCH: a function parameter, not a closure parameter
+    return 0i32
+}

@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: accept
+//! twin: closure_conflict
+module m
+func both(f: closure(u64), n: u64) { f(n) }
+func main() -> i32 {
+    v := Vec[u64].new()
+    n := u64(v.len())
+    both(|x| v.push(x), n)
+    return 0i32
+}

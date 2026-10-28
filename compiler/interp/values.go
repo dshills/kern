@@ -53,6 +53,13 @@ type Array struct{ Elems []Value }
 // FuncVal is a function value.
 type FuncVal struct{ Name string }
 
+// ClosureVal is a closure value: its function and the captured accesses
+// its first parameters receive at every call.
+type ClosureVal struct {
+	Name string
+	Env  []Value
+}
+
 // Access is an open access: a ref to a place (scalar) or a sequence window.
 type Access struct {
 	Ref  ref

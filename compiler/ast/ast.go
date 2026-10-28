@@ -208,8 +208,9 @@ type RawPtrType struct {
 // FuncType is `func(P...) -> R`.
 type FuncType struct {
 	Pos
-	Params []*Param // Name empty
-	Ret    []TypeExpr
+	Params  []*Param // Name empty
+	Ret     []TypeExpr
+	Closure bool // `closure(P...) -> R`: a second-class callable that may capture (spec §4)
 }
 
 // UnitType is `()`.
@@ -437,6 +438,18 @@ type Try struct {
 type Move struct {
 	Pos
 	Name string
+}
+
+// ClosureExpr is `|params| expr` or `|params| { ... }`: a non-escaping
+// closure, typed by the closure parameter it is passed to. Expr is the
+// expression form as written (kept for formatting); the resolver gives both
+// forms a Body (a return of Expr, or Expr as a statement when the closure
+// returns nothing).
+type ClosureExpr struct {
+	Pos
+	Params []*Param // Type may be nil (taken from the parameter type)
+	Expr   Expr
+	Body   *Block
 }
 
 // Copy is `copy(x)`.

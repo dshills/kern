@@ -1,0 +1,61 @@
+//! phase: 1
+//! expect: output
+// Non-escaping closures (spec §4): a closure parameter is called and
+// passed on; closures capture locals by view (k), by edit (total, v), a
+// view parameter (words), a with-binding (e) and a closure parameter of
+// the enclosing function (inner); expression and block bodies; a closure
+// with no parameters; and the same output in both engines.
+module t
+struct Acc { sum: u64; n: u64 }
+func apply(f: closure(u64) -> u64, x: u64) -> u64 { return f(x) }
+func twice(f: closure(u64) -> u64, x: u64) -> u64 { return apply(f, apply(f, x)) }
+func each(n: u64, f: closure(u64)) {
+    i := 0u64
+    while i < n { f(i); i = i + 1u64 }
+}
+func fold(words: view[]u64, f: closure(view[]u64, usize) -> u64) -> u64 {
+    s := 0u64
+    i := 0usize
+    while i < len(words) { s = s + f(words, i); i = i + 1usize }
+    return s
+}
+func run(g: closure() -> u64) -> u64 { return g() + g() }
+// via captures its own closure parameter f in a closure of its own
+func via(f: closure(u64) -> u64, x: u64) -> u64 { return apply(|y| f(y) + 1u64, x) }
+func main() -> i32 {
+    k := 10u64
+    print_u64(apply(|x| x + k, 5u64))
+    println()
+    print_u64(twice(|x| x * 2u64, 3u64))
+    println()
+    total := 0u64
+    each(4u64, |i| { total = total + i })
+    print_u64(total)
+    println()
+    v := Vec[u64].new()
+    each(3u64, |i| v.push(i * i))
+    print_u64(u64(v.len()) + v.get(2usize))
+    println()
+    var arr: [4]u64 = zero()
+    arr[1usize] = 5u64
+    arr[3usize] = 7u64
+    with w := arr[0usize : 4usize] {
+        print_u64(fold(w, |ws, i| ws[i] * k))
+        println()
+    }
+    a := Acc { sum: 0u64, n: 0u64 }
+    with e := v.at(0usize) {
+        each(2u64, |i| { e = e + i + 1u64; a.sum = a.sum + e; a.n = a.n + 1u64 })
+    }
+    print_u64(v.get(0usize) + a.sum + a.n)
+    println()
+    print_u64(run(|| k + 1u64))
+    println()
+    // a nested closure capturing the outer closure's parameter and k
+    print_u64(apply(|x| apply(|y| x + y + k, x), 2u64))
+    println()
+    // a closure parameter captured by a closure in its own function
+    print_u64(via(|x| x * k, 3u64))
+    println()
+    return 0i32
+}

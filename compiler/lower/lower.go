@@ -87,6 +87,7 @@ type lowerer struct {
 	cur      string
 	parent   map[string]string
 	dtorType map[string]*resolve.Named
+	closures int // closure functions lowered so far (their names)
 }
 
 type pending struct {
@@ -231,6 +232,9 @@ type fnLower struct {
 	loops  []*loopCtx
 	fd     *resolve.FuncDecl
 	frames []*frame
+	// closureAccs are the capture accesses opened by closure arguments of
+	// the call being lowered; the call ends them with its other arguments
+	closureAccs []*ir.Value
 }
 
 // frame mirrors one checker scope: the symbols bound in it (whose exits the
@@ -453,11 +457,17 @@ func (fl *fnLower) dropSym(sym *resolve.Symbol) {
 		}
 		return
 	}
-	if resolve.IsCopy(fl.ty(sym.Type)) {
-		return
+	if t := fl.ty(sym.Type); resolve.IsCopy(t) || isClosure(t) {
+		return // nothing to destroy: a closure parameter is its function and environment
 	}
 	loc := fl.local(sym)
 	fl.emitDrop(ir.Place{Local: loc}, loc.Type, sym.Pos)
+}
+
+// isClosure reports a closure type (spec §4): second-class, never owned.
+func isClosure(t resolve.Type) bool {
+	ft, ok := t.(*resolve.Func)
+	return ok && ft.Closure
 }
 
 // emitDrop emits a Drop and schedules the destructor of every main-module
@@ -616,4 +626,101 @@ func nestingDepth(t resolve.Type) int {
 		}
 	}
 	return max
+}
+
+// closure lowers a closure expression (spec §4): its body becomes a
+// function of its own whose first parameters are the captured accesses
+// (view or edit, as the resolver classified them) and whose remaining
+// parameters are the closure's; the value is a MakeClosure over accesses
+// opened here on the captured places, which the enclosing call ends.
+func (fl *fnLower) closure(x *ast.ClosureExpr) operand {
+	info := fl.l.info.Closures[x]
+	if info == nil {
+		fl.fail(x.Pos, "unresolved closure")
+	}
+	ft := fl.ty(info.Type).(*resolve.Func)
+	fl.l.closures++
+	name := fmt.Sprintf("%s$closure%d", fl.f.Name, fl.l.closures)
+	cf := &ir.Func{Name: name, Pos: x.Pos, File: fl.file, Closure: true, Captures: len(info.Captures), Rets: append([]resolve.Type(nil), ft.Ret...)}
+	var caps []*ir.Value
+	for _, cp := range info.Captures {
+		at := fl.captureType(cp)
+		loc := &ir.Local{Name: cp.Sym.Name, Type: at, Conv: ast.ConvView}
+		if cp.Edit {
+			loc.Conv = ast.ConvEdit
+		}
+		cf.Params = append(cf.Params, loc)
+		v := fl.newValue(at)
+		fl.emit(&ir.AccessBegin{Dst: v, Edit: cp.Edit, Place: fl.symPlace(cp.Sym), Pos: cp.Ident.Pos})
+		caps = append(caps, v)
+	}
+	for i, sym := range info.Params {
+		fp := ft.Params[i]
+		cf.Params = append(cf.Params, &ir.Local{Name: sym.Name, Type: fp.Type, Conv: fp.Conv})
+	}
+	fl2 := &fnLower{l: fl.l, f: cf, file: fl.file, subst: fl.subst, locals: map[*resolve.Symbol]*ir.Local{}, accs: map[*resolve.Symbol]*ir.Value{}, relOf: map[*ir.Value]releaseInfo{}, fd: fl.fd}
+	entry := fl2.newBlock("entry")
+	cf.Entry = entry
+	fl2.cur = entry
+	fl2.pushFrame()
+	for i, cp := range info.Captures {
+		loc := cf.Params[i]
+		loc.ID = len(cf.Locals)
+		cf.Locals = append(cf.Locals, loc)
+		fl2.locals[cp.Sym] = loc
+		v := fl2.newValue(loc.Type)
+		fl2.emit(&ir.AccessBegin{Dst: v, Edit: cp.Edit, Place: ir.Place{Local: loc}, Pos: x.Pos})
+		fl2.accs[cp.Sym] = v
+	}
+	for j, sym := range info.Params {
+		loc := cf.Params[len(info.Captures)+j]
+		loc.ID = len(cf.Locals)
+		cf.Locals = append(cf.Locals, loc)
+		fl2.locals[sym] = loc
+		fl2.bindSym(sym)
+		if loc.Conv == ast.ConvView || loc.Conv == ast.ConvEdit {
+			v := fl2.newValue(loc.Type)
+			fl2.emit(&ir.AccessBegin{Dst: v, Edit: loc.Conv == ast.ConvEdit, Place: ir.Place{Local: loc}, Pos: sym.Pos})
+			fl2.accs[sym] = v
+		}
+	}
+	fl2.block(x.Body)
+	if fl2.cur != nil {
+		fl2.exit(fl.l.info.Drops[x], 0)
+		if len(cf.Rets) == 0 {
+			fl2.terminate(&ir.Ret{})
+		} else {
+			fl2.terminate(&ir.Unreachable{})
+		}
+	}
+	sortBlocks(cf)
+	fl.l.done[name] = cf
+	fl.l.parent[name] = fl.l.cur
+	fl.l.mod.Add(cf)
+	v := fl.newValue(ft)
+	fl.emit(&ir.MakeClosure{Dst: v, Name: name, Captures: caps, Pos: x.Pos})
+	fl.closureAccs = append(fl.closureAccs, caps...)
+	return operand{val: v}
+}
+
+// captureType is the access type a captured symbol is passed as: an
+// access to its value, a sequence access when the symbol is itself a
+// sequence view or edit.
+func (fl *fnLower) captureType(cp *resolve.Capture) *resolve.Access {
+	t := fl.ty(cp.Sym.Type)
+	a := &resolve.Access{Elem: t, Edit: cp.Edit}
+	if sl, ok := t.(*resolve.Slice); ok {
+		a.Seq = true
+		a.Elem = sl.Elem
+	}
+	return a
+}
+
+// symPlace is the place a symbol denotes in this function: the access it
+// holds (a binding or an access parameter) or its own slot.
+func (fl *fnLower) symPlace(sym *resolve.Symbol) ir.Place {
+	if acc, ok := fl.accs[sym]; ok {
+		return ir.Place{Access: acc}
+	}
+	return ir.Place{Local: fl.local(sym)}
 }

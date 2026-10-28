@@ -1,0 +1,4 @@
+//! expect: reject ACC_ESCAPE_STORE rule=5.2.2
+//! twin: closure_store_ok
+module m
+struct Handler { f: closure(u64) -> u64 }   // ACC_ESCAPE_STORE: a closure is second-class

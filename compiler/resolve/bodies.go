@@ -100,7 +100,7 @@ func (c *fnCtx) declareParams(sc *scope) {
 				sym.Type = &Slice{Elem: a.Elem}
 			}
 		}
-		if p.Conv == ast.ConvValue && !IsCopy(p.Type) {
+		if ft, isClosure := p.Type.(*Func); p.Conv == ast.ConvValue && !IsCopy(p.Type) && (!isClosure || !ft.Closure) {
 			if _, isTP := p.Type.(*TypeParamType); !isTP || !hasMarker(p.Type.(*TypeParamType), "Copy") {
 				c.r.errorf("PARAM_OWN_REQUIRED", c.file, p.Pos, "parameter %s has move-only type %s and must be declared own", p.Name, p.Type)
 				if a := c.fd.AST; a != nil && i < len(a.Params) && a.Params[i].Type != nil && a.Params[i].Name == p.Name {
@@ -161,6 +161,9 @@ func (c *fnCtx) stmt(sc *scope, s ast.Stmt) {
 		if _, isAcc := t.(*Access); isAcc {
 			c.errorf("ACC_UNBOUND_PROJECTION", s.Pos, "a local cannot have an access type; use with/match/for")
 		}
+		if ContainsClosure(t) {
+			c.errorf("ACC_UNBOUND_PROJECTION", s.Pos, "a local cannot have a closure type; a closure is passed as an argument")
+		}
 		if s.Init != nil {
 			c.exprExpect(sc, s.Init, t)
 		}
@@ -176,6 +179,10 @@ func (c *fnCtx) stmt(sc *scope, s ast.Stmt) {
 			}
 		case *Tuple:
 			c.errorf("ACC_UNBOUND_PROJECTION", s.Pos, "projection bound with :=; use with/match/for")
+		case *Func:
+			if tt.Closure {
+				c.errorf("ACC_UNBOUND_PROJECTION", s.Pos, "closure bound with :=; a closure is passed as an argument")
+			}
 		}
 		c.declare(sc, s, s.Name, SymLocal, t, ast.ConvValue, s.Pos)
 	case *ast.Assign:

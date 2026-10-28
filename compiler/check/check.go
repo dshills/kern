@@ -119,6 +119,7 @@ type fn struct {
 	bindRoots    map[*resolve.Symbol]*result
 	loopExits    []loopExit
 	guards       map[*resolve.Symbol]bool // with-bindings of a Mutex lock (Condvar.wait takes one)
+	captureConv  map[*resolve.Symbol]ast.Conv // inside a closure body: how each captured symbol was captured
 }
 
 // bindScope is a lexical scope that owns bindings (with/match/for/block).

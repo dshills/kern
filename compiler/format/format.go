@@ -836,7 +836,11 @@ func (p *printer) typ(t ast.TypeExpr) {
 		p.typ(t.Elem)
 		p.w("]")
 	case *ast.FuncType:
-		p.w("func(")
+		if t.Closure {
+			p.w("closure(")
+		} else {
+			p.w("func(")
+		}
 		for i, prm := range t.Params {
 			if i > 0 {
 				p.w(", ")
@@ -934,6 +938,29 @@ func (p *printer) expr(e ast.Expr) {
 			p.expr(e.Hi)
 		}
 		p.w("]")
+	case *ast.ClosureExpr:
+		if len(e.Params) == 0 {
+			p.w("||")
+		} else {
+			p.w("|")
+			for i, prm := range e.Params {
+				if i > 0 {
+					p.w(", ")
+				}
+				p.w(prm.Name)
+				if prm.Type != nil {
+					p.w(": ")
+					p.paramType(prm.Conv, prm.Type)
+				}
+			}
+			p.w("|")
+		}
+		p.w(" ")
+		if e.Expr != nil {
+			p.expr(e.Expr)
+		} else {
+			p.block(e.Body)
+		}
 	case *ast.CallExpr:
 		p.expr(e.Fn)
 		p.w("(")

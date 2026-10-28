@@ -42,6 +42,9 @@ func (f *fn) placeOf(st *flow, e ast.Expr, read bool) *place {
 		if sym.Kind == resolve.SymAccess && sym.Conv == ast.ConvView || sym.Kind == resolve.SymParam && sym.Conv == ast.ConvView {
 			perm = ast.ConvView
 		}
+		if conv, captured := f.captureConv[sym]; captured && conv == ast.ConvView {
+			perm = ast.ConvView // captured by view: read-only inside the closure
+		}
 		if read {
 			f.checkReadable(st, sym, x.Pos, nil)
 		}
@@ -164,6 +167,13 @@ func (f *fn) consumeValue(st *flow, e ast.Expr) *result {
 		return r
 	}
 	if r.pl.root != nil && !r.owned {
+		if ft, ok := r.t.(*resolve.Func); ok && ft.Closure {
+			// a closure parameter passed on or called: second-class, so the
+			// use is a view of it for the statement, never a move
+			t := f.tick()
+			f.accs = append(f.accs, &access{pl: r.pl, kind: accView, start: t, end: t, pos: e.Span()})
+			return r
+		}
 		if resolve.IsCopy(r.t) {
 			t := f.tick()
 			f.accs = append(f.accs, &access{pl: r.pl, kind: accView, start: t, end: t, pos: e.Span()})
@@ -177,6 +187,10 @@ func (f *fn) consumeValue(st *flow, e ast.Expr) *result {
 // consumePlace moves out of a place: only whole variables may be moved.
 func (f *fn) consumePlace(st *flow, r *result, pos ast.Pos) {
 	root := r.pl.root
+	if _, captured := f.captureConv[root]; captured {
+		f.errorf("OWN_PARTIAL_MOVE", pos, "cannot move %s out of the closure that captured it; use take or replace", root.Name)
+		return
+	}
 	if len(r.pl.path) > 0 || root.Kind == resolve.SymAccess || (root.Kind == resolve.SymParam && (root.Conv == ast.ConvView || root.Conv == ast.ConvEdit)) {
 		f.errorf("OWN_PARTIAL_MOVE", pos, "cannot move out of %s; use take or replace", describePlace(r.pl))
 		return
@@ -470,6 +484,10 @@ func (f *fn) call(st *flow, x *ast.CallExpr) *result {
 				vs.fields = nil
 			}
 		default:
+			if cl, ok := a.X.(*ast.ClosureExpr); ok {
+				argAccs = append(argAccs, f.closureArg(st, cl)...)
+				continue
+			}
 			f.consumeValue(st, a.X)
 		}
 	}
@@ -712,4 +730,85 @@ func (f *fn) isTrapKindCall(e ast.Expr) bool {
 	}
 	info := f.c.info.Calls[call]
 	return info != nil && info.Fn != nil && info.Fn.Module == "core" && info.Fn.Receiver == nil && info.Fn.Name == "trap_kind"
+}
+
+// closureArg records a closure argument's captures as accesses live for
+// the call (a view, or an edit where the body writes), checks that an edit
+// capture has an editable source, and checks the closure's body as a
+// function of its own whose captured symbols are access-like parameters.
+func (f *fn) closureArg(st *flow, cl *ast.ClosureExpr) []*access {
+	info := f.c.info.Closures[cl]
+	if info == nil {
+		return nil
+	}
+	var accs []*access
+	for _, cp := range info.Captures {
+		f.checkReadable(st, cp.Sym, cp.Ident.Pos, nil)
+		src := f.placeOf(st, cp.Ident, false)
+		if src == nil {
+			continue
+		}
+		kind := accView
+		if cp.Edit {
+			kind = accEdit
+			if src.perm != ast.ConvEdit {
+				f.errorf("ACC_PERMISSION_ESCALATION", cp.Ident.Pos, "closure edits %s, which it can only view", cp.Sym.Name)
+			}
+		}
+		acc := &access{pl: *src, kind: kind, start: f.tick(), end: forever, pos: cl.Pos}
+		f.accs = append(f.accs, acc)
+		accs = append(accs, acc)
+	}
+	f.checkClosureBody(cl, info)
+	return accs
+}
+
+// checkClosureBody checks a closure's body as a nested function: its
+// parameters are initialized, its captures are initialized access-like
+// roots (read-only when captured by view), and its returns are typed by the
+// closure's result. Unsafe inside the body counts for the enclosing
+// function's contract obligation.
+func (f *fn) checkClosureBody(cl *ast.ClosureExpr, info *resolve.ClosureInfo) {
+	fd := &resolve.FuncDecl{Name: "closure", Ret: info.Type.Ret, Pos: cl.Pos, Type: info.Type}
+	nf := &fn{c: f.c, file: f.file, fd: fd, params: map[string]*resolve.Symbol{}, unsafe: f.unsafe, captureConv: map[*resolve.Symbol]ast.Conv{}}
+	st := newFlow()
+	for _, sym := range info.Params {
+		nf.params[sym.Name] = sym
+		switch sym.Conv {
+		case ast.ConvView, ast.ConvEdit:
+			nf.accessParams = append(nf.accessParams, sym)
+		case ast.ConvOut:
+			// rejected by the resolver (a closure parameter cannot be out);
+			// kept uninitialized here as a function's would be
+			st.vars[sym] = &varState{st: stUninit, fields: map[string]bool{}}
+			nf.outParams = append(nf.outParams, sym)
+		default:
+			st.vars[sym] = &varState{st: stInit}
+		}
+	}
+	for _, cp := range info.Captures {
+		conv := ast.ConvView
+		if cp.Edit {
+			conv = ast.ConvEdit
+		}
+		nf.captureConv[cp.Sym] = conv
+		if cp.Sym.Kind == resolve.SymLocal || (cp.Sym.Kind == resolve.SymParam && (cp.Sym.Conv == ast.ConvOwn || cp.Sym.Conv == ast.ConvValue)) {
+			st.vars[cp.Sym] = &varState{st: stInit}
+		}
+	}
+	outer := nf.pushScope(cl.Body)
+	for _, sym := range info.Params {
+		if sym.Conv == ast.ConvOwn || sym.Conv == ast.ConvValue {
+			outer.owned = append(outer.owned, sym)
+		}
+	}
+	end := nf.block(st, cl.Body)
+	if !end.dead {
+		nf.normalReturn(end, cl.Body.Pos)
+		f.c.info.Drops[cl] = nf.exitSyms(end, 0)
+	}
+	nf.popScope()
+	if nf.hasUnsafe {
+		f.hasUnsafe = true
+	}
 }

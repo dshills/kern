@@ -109,6 +109,8 @@ func (c *fnCtx) expr(sc *scope, e ast.Expr, want Type) Type {
 		return c.record(e, c.slice(sc, x))
 	case *ast.CallExpr:
 		return c.record(e, c.call(sc, x, want))
+	case *ast.ClosureExpr:
+		return c.record(e, c.closure(sc, x, want))
 	case *ast.Binary:
 		return c.record(e, c.binary(sc, x, want))
 	case *ast.Unary:
@@ -144,6 +146,7 @@ func (c *fnCtx) expr(sc *scope, e ast.Expr, want Type) Type {
 		}
 		id := &ast.Ident{Pos: x.Pos, Name: x.Name}
 		c.r.prog.Info.Idents[id] = sym
+		c.r.prog.Info.Consumed[x] = id
 		return c.record(e, sym.Type)
 	case *ast.Copy:
 		t := c.expr(sc, x.X, nil)
@@ -169,6 +172,7 @@ func (c *fnCtx) expr(sc *scope, e ast.Expr, want Type) Type {
 		}
 		id := &ast.Ident{Pos: x.Pos, Name: x.Name}
 		c.r.prog.Info.Idents[id] = sym
+		c.r.prog.Info.Consumed[x] = id
 		return c.record(e, &Unit{})
 	case *ast.TrapExpr:
 		return c.record(e, &Unit{})
@@ -786,4 +790,165 @@ const tagField = "phantom_tag"
 // isHandle reports the container handle types of the prelude.
 func isHandle(n *Named) bool {
 	return n.Decl.Module == "core" && (n.Decl.Name == "PoolId" || n.Decl.Name == "ArenaId")
+}
+
+// closure types a closure expression against the closure parameter type it
+// is passed to (spec §4): the parameters take their types and conventions
+// from it (declared types must agree), the body is resolved in a scope
+// nested in the enclosing function's, with returns typed against the
+// closure's result, and the enclosing symbols the body uses are recorded as
+// captures, by edit where the body assigns, edits, moves or takes through
+// them and by view otherwise.
+func (c *fnCtx) closure(sc *scope, x *ast.ClosureExpr, want Type) Type {
+	ft, ok := want.(*Func)
+	if !ok || !ft.Closure {
+		c.errorf("TYPE_MISMATCH", x.Pos, "closure expression where no closure parameter is expected")
+		return &Bad{}
+	}
+	if len(x.Params) != len(ft.Params) {
+		c.errorf("CALL_ARITY", x.Pos, "closure takes %d parameters, the closure type has %d", len(x.Params), len(ft.Params))
+		return &Bad{}
+	}
+	for _, rt := range ft.Ret {
+		if _, isAcc := rt.(*Access); isAcc {
+			c.errorf("TYPE_MISMATCH", x.Pos, "a closure cannot return an access")
+			return &Bad{}
+		}
+	}
+	outer := map[*Symbol]bool{}
+	for s := sc; s != nil; s = s.parent {
+		for _, sym := range s.vars {
+			if sym.Kind == SymLocal || sym.Kind == SymParam || sym.Kind == SymAccess {
+				outer[sym] = true
+			}
+		}
+	}
+	info := &ClosureInfo{Type: ft}
+	csc := sc.child()
+	for i, p := range x.Params {
+		fp := ft.Params[i]
+		if p.Type != nil {
+			declared := c.r.resolveType(c.m, c.file, sc, p.Type)
+			if !Identical(declared, fp.Type) || p.Conv != fp.Conv {
+				c.errorf("TYPE_MISMATCH", p.Pos, "closure parameter %s is declared %s, the closure type has %s", p.Name, typeString(declared), typeString(fp.Type))
+			}
+		}
+		if fp.Conv == ast.ConvValue && !IsCopy(fp.Type) {
+			c.errorf("PARAM_OWN_REQUIRED", p.Pos, "closure parameter %s has move-only type %s and the closure type must declare it own", p.Name, typeString(fp.Type))
+		}
+		sym := c.declare(csc, p, p.Name, SymParam, fp.Type, fp.Conv, p.Pos)
+		if a, ok := fp.Type.(*Access); ok {
+			sym.Type = a.Elem
+			if a.Seq {
+				sym.Type = &Slice{Elem: a.Elem}
+			}
+		}
+		info.Params = append(info.Params, sym)
+	}
+	if x.Expr != nil && x.Body == nil {
+		pos := x.Expr.Span()
+		if len(ft.Ret) > 0 && !isUnitType(ft.Ret[0]) {
+			x.Body = &ast.Block{Pos: pos, Stmts: []ast.Stmt{&ast.Return{Pos: pos, Value: x.Expr}}}
+		} else {
+			x.Body = &ast.Block{Pos: pos, Stmts: []ast.Stmt{&ast.ExprStmt{Pos: pos, X: x.Expr}}}
+		}
+	}
+	saved := c.fd
+	c.fd = &FuncDecl{Name: "closure", Module: c.m.Name, Pos: x.Pos, Ret: ft.Ret, Type: ft}
+	c.block(csc, x.Body)
+	c.fd = saved
+	info.Captures = c.captures(x.Body, outer)
+	c.r.prog.Info.Closures[x] = info
+	return ft
+}
+
+func isUnitType(t Type) bool {
+	_, ok := t.(*Unit)
+	return ok
+}
+
+// captures lists the outer symbols a closure body uses, in order of first
+// use, each marked edit when the body assigns to, takes from, replaces,
+// moves, or passes as an edit or out argument a place rooted at it.
+func (c *fnCtx) captures(body *ast.Block, outer map[*Symbol]bool) []*Capture {
+	var out []*Capture
+	index := map[*Symbol]int{}
+	note := func(e ast.Expr, edit bool) {
+		id := rootIdent(e)
+		if id == nil {
+			return
+		}
+		sym := c.r.prog.Info.Idents[id]
+		if sym == nil || !outer[sym] {
+			return
+		}
+		i, ok := index[sym]
+		if !ok {
+			i = len(out)
+			index[sym] = i
+			out = append(out, &Capture{Sym: sym, Ident: id})
+		}
+		if edit {
+			out[i].Edit = true
+		}
+	}
+	ast.Walk(body, func(n any) bool {
+		switch x := n.(type) {
+		case *ast.Ident:
+			note(x, false)
+		case *ast.Assign:
+			note(x.Target, true)
+		case *ast.Take:
+			note(x.Place, true)
+		case *ast.Replace:
+			note(x.Place, true)
+		case *ast.Move, *ast.Drop:
+			// a move or drop of a captured variable: the checker rejects it
+			// as a move out of the closure; captured by edit so that it
+			// conflicts like a write would
+			if id := c.r.prog.Info.Consumed[x.(ast.Expr)]; id != nil {
+				note(id, true)
+			}
+		case *ast.CallExpr:
+			info := c.r.prog.Info.Calls[x]
+			if info == nil {
+				return false
+			}
+			params := info.Params
+			args := x.Args
+			if info.Method {
+				if fe, ok := x.Fn.(*ast.FieldExpr); ok {
+					args = append([]*ast.Arg{{Pos: fe.X.Span(), X: fe.X}}, args...)
+				}
+			}
+			for i, a := range args {
+				if i < len(params) && (params[i].Conv == ast.ConvEdit || params[i].Conv == ast.ConvOut) {
+					note(a.X, true)
+				}
+			}
+		}
+		return false
+	})
+	return out
+}
+
+// rootIdent is the identifier a place expression is rooted at, through
+// parentheses, fields, indexes and slices; nil for anything else.
+func rootIdent(e ast.Expr) *ast.Ident {
+	for {
+		switch x := e.(type) {
+		case *ast.Ident:
+			return x
+		case *ast.Paren:
+			e = x.X
+		case *ast.FieldExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.SliceExpr:
+			e = x.X
+		default:
+			return nil
+		}
+	}
 }

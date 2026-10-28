@@ -157,6 +157,8 @@ func instrPos(in ir.Instr) ast.Pos {
 		return i.Pos
 	case *ir.AccessBegin:
 		return i.Pos
+	case *ir.MakeClosure:
+		return i.Pos
 	}
 	return ast.Pos{}
 }

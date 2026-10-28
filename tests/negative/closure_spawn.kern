@@ -1,0 +1,7 @@
+//! expect: reject SEND_NOT_SEND rule=5.5.2
+//! twin: closure_spawn_ok
+module m
+func start(f: closure(u64) -> u64) -> Result[u64, SpawnErr] {
+    t := thread.spawn(f, 1u64)?   // SEND_NOT_SEND: a closure is not Send
+    return Ok(t.join())
+}

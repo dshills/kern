@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: closure_out
+module m
+struct Cell { x: u64 }
+func fill(f: closure(edit[Cell])) { }

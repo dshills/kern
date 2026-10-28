@@ -48,6 +48,7 @@ type          = prim_type | "RawPtr" "[" type "]"
               | "view" "[" type "]" | "edit" "[" type "]"
               | "view" "[" "]" type | "edit" "[" "]" type   (* sequence access shorthand *)
               | "func" "(" [ param_type { "," param_type } ] ")" [ "->" ret_type ]
+              | "closure" "(" [ param_type { "," param_type } ] ")" [ "->" ret_type ]   (* second-class, parameter types only *)
               | "(" ")"                                (* unit *)
               | type_name ;
 type_name     = ident [ "." ident ] [ "[" type { "," type } "]" ] ;
@@ -80,7 +81,9 @@ cmp_expr      = range_expr [ ( "==" | "!=" | "<" | "<=" | ">" | ">=" ) range_exp
 range_expr    = add_expr [ ".." add_expr ] ;
 add_expr      = mul_expr { ( "+" | "-" | "|" | "^" ) mul_expr } ;
 mul_expr      = unary_expr { ( "*" | "/" | "%" | "&" | "<<" | ">>" ) unary_expr } ;
-unary_expr    = ( "-" | "!" ) unary_expr | postfix_expr ;
+unary_expr    = ( "-" | "!" ) unary_expr | closure_expr | postfix_expr ;
+closure_expr  = ( "|" [ closure_param { "," closure_param } ] "|" | "||" ) ( expr | block ) ;   (* non-escaping; typed by the closure parameter it is passed to *)
+closure_param = ident [ ":" param_type ] ;
 postfix_expr  = primary { postfix } ;
 postfix       = "." ident [ "(" [ args ] ")" ]        (* field or method call *)
               | "[" expr "]" | "[" [ expr ] ":" [ expr ] "]"

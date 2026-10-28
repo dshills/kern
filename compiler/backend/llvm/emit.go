@@ -292,6 +292,16 @@ func (fe *fnEmit) fail(format string, args ...any) {
 }
 
 // paramType maps a parameter to its LLVM type.
+// envType is the LLVM type of a closure function's environment: a struct
+// of its captured accesses' parameter types.
+func (e *emitter) envType(f *ir.Func) string {
+	var parts []string
+	for i := 0; i < f.Captures && i < len(f.Params); i++ {
+		parts = append(parts, e.paramType(f.Params[i]))
+	}
+	return "{ " + strings.Join(parts, ", ") + " }"
+}
+
 func (e *emitter) paramType(p *ir.Local) string {
 	switch p.Conv {
 	case ast.ConvView, ast.ConvEdit:
@@ -413,7 +423,13 @@ func (e *emitter) function(f *ir.Func) {
 		fe.labels[b] = fmt.Sprintf("bb%d", b.ID)
 	}
 	var ps []string
+	if f.Closure {
+		ps = append(ps, "ptr %env") // the captures, stored by MakeClosure
+	}
 	for i, p := range f.Params {
+		if f.Closure && i < f.Captures {
+			continue
+		}
 		ps = append(ps, e.paramDecls(f, p, i)...)
 	}
 	if f.Library {
@@ -434,6 +450,11 @@ func (e *emitter) function(f *ir.Func) {
 	}
 	for i, p := range f.Params {
 		pt := e.paramType(p)
+		if f.Closure && i < f.Captures {
+			// a captured access arrives through the environment
+			fmt.Fprintf(&fe.pstores, "  %%p%d.env = getelementptr %s, ptr %%env, i32 0, i32 %d\n  %%p%d = load %s, ptr %%p%d.env\n  store %s %%p%d, ptr %s\n", i, e.envType(f), i, i, pt, i, pt, i, fe.local(p))
+			continue
+		}
 		if p.Conv == ast.ConvOut || p.Conv == ast.ConvView || p.Conv == ast.ConvEdit {
 			if pt == "{ ptr, i64 }" {
 				// a sequence access arrives as two scalars
@@ -918,6 +939,25 @@ func (fe *fnEmit) instr(in ir.Instr) {
 		r := fe.next("t")
 		fe.emit("%s = load %s, ptr %s", r, tagTy, p.ptr)
 		fe.emit("%s = zext %s %s to i32", fe.v(i.Dst), tagTy, r)
+	case *ir.MakeClosure:
+		// the environment is a frame slot holding the captured accesses;
+		// the value pairs the closure function with it
+		cf := e.mod.Func(i.Name)
+		if cf == nil {
+			fe.fail("unknown closure %s", i.Name)
+			return
+		}
+		envTy := e.envType(cf)
+		env := fe.next("env")
+		fmt.Fprintf(&fe.allocas, "  %s = alloca %s\n", env, envTy)
+		for k, c := range i.Captures {
+			g := fe.next("t")
+			fe.emit("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, envTy, env, k)
+			fe.emit("store %s %s, ptr %s", e.paramType(cf.Params[k]), fe.v(c), g)
+		}
+		a := fe.next("t")
+		fe.emit("%s = insertvalue { ptr, ptr } undef, ptr %s, 0", a, fnSym(i.Name))
+		fe.emit("%s = insertvalue { ptr, ptr } %s, ptr %s, 1", fe.v(i.Dst), a, env)
 	case *ir.FuncRef:
 		if f := e.mod.Func(i.Name); f != nil && f.Extern != "" {
 			fe.vals[i.Dst] = "@" + bareName(i.Name)

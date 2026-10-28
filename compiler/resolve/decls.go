@@ -164,6 +164,10 @@ type Info struct {
 	Consts         map[ast.Expr]bool // expressions that are compile-time constants
 	Fields         map[*ast.FieldExpr]*FieldDecl
 	Variants       map[*ast.Arm]*VariantDecl
+	Closures       map[*ast.ClosureExpr]*ClosureInfo
+	// Consumed maps a `move x` or `drop(x)` expression to the identifier
+	// record the resolver made for its variable (an entry of Idents).
+	Consumed map[ast.Expr]*ast.Ident
 	// Drops records, per exit point, the symbols whose scope ends there in
 	// destruction order: access bindings (AccessEnd, with release) and
 	// owned locals/parameters that are initialized at that point (Drop).
@@ -185,7 +189,7 @@ func newInfo() *Info {
 	return &Info{
 		Types: map[ast.Expr]Type{}, Idents: map[*ast.Ident]*Symbol{}, Calls: map[*ast.CallExpr]*CallInfo{},
 		Funcs: map[*ast.FuncDecl]*FuncDecl{}, Decls: map[any]*Symbol{}, Consts: map[ast.Expr]bool{}, ImportedConsts: map[*ast.FieldExpr]*ConstDecl{},
-		Fields: map[*ast.FieldExpr]*FieldDecl{}, Variants: map[*ast.Arm]*VariantDecl{},
+		Fields: map[*ast.FieldExpr]*FieldDecl{}, Variants: map[*ast.Arm]*VariantDecl{}, Closures: map[*ast.ClosureExpr]*ClosureInfo{}, Consumed: map[ast.Expr]*ast.Ident{},
 		Drops: map[any][]*Symbol{}, OutFieldDrops: map[any]map[*Symbol][]string{}, OwnedSubject: map[any]bool{},
 	}
 }
@@ -200,6 +204,23 @@ type CallInfo struct {
 	Ret         []Type
 	Release     bool
 	MultiAccess bool
+}
+
+// ClosureInfo describes a resolved closure expression (spec §4): its
+// closure type, its parameter symbols, and the enclosing function's
+// locals, parameters and bindings its body uses, each captured by view or,
+// when the body writes, edits or moves through it, by edit.
+type ClosureInfo struct {
+	Type     *Func
+	Params   []*Symbol
+	Captures []*Capture
+}
+
+// Capture is one captured symbol; Ident is its first use in the body.
+type Capture struct {
+	Sym   *Symbol
+	Edit  bool
+	Ident *ast.Ident
 }
 
 // SymbolKind classifies a symbol.
@@ -517,7 +538,7 @@ func (r *resolver) collect(m *Module) {
 				}
 				sc := r.typeScope(m, td.TypeParams)
 				for _, fl := range d.Fields {
-					td.Fields = append(td.Fields, &FieldDecl{Name: fl.Name, Type: r.resolveType(m, f.Name, sc, fl.Type), Pos: fl.Pos})
+					td.Fields = append(td.Fields, &FieldDecl{Name: fl.Name, Type: r.noClosure(f.Name, fl.Pos, r.resolveType(m, f.Name, sc, fl.Type), "field "+fl.Name+" stores a closure"), Pos: fl.Pos})
 				}
 			case *ast.UnionDecl:
 				td := m.Types[d.Name]
@@ -531,7 +552,7 @@ func (r *resolver) collect(m *Module) {
 				for i, v := range d.Variants {
 					vd := &VariantDecl{Name: v.Name, Index: i, Pos: v.Pos}
 					for _, fl := range v.Fields {
-						vd.Fields = append(vd.Fields, &FieldDecl{Name: fl.Name, Type: r.resolveType(m, f.Name, sc, fl.Type), Pos: fl.Pos})
+						vd.Fields = append(vd.Fields, &FieldDecl{Name: fl.Name, Type: r.noClosure(f.Name, fl.Pos, r.resolveType(m, f.Name, sc, fl.Type), "variant "+v.Name+" stores a closure"), Pos: fl.Pos})
 					}
 					td.Variants = append(td.Variants, vd)
 				}
@@ -759,8 +780,11 @@ func (r *resolver) resolveType(m *Module, file string, sc *scope, t ast.TypeExpr
 	case *ast.RawPtrType:
 		return &RawPtr{Elem: r.resolveType(m, file, sc, t.Elem)}
 	case *ast.FuncType:
-		f := &Func{}
+		f := &Func{Closure: t.Closure}
 		for _, p := range t.Params {
+			if t.Closure && p.Conv == ast.ConvOut {
+				r.errorf("TYPE_MISMATCH", file, p.Pos, "a closure parameter cannot be out")
+			}
 			f.Params = append(f.Params, FuncParam{Conv: p.Conv, Type: r.resolveType(m, file, sc, p.Type)})
 		}
 		for _, rt := range t.Ret {
@@ -816,7 +840,7 @@ func (r *resolver) instantiate(m *Module, file string, sc *scope, td *TypeDecl, 
 	}
 	n := &Named{Decl: td}
 	for i, a := range t.Args {
-		at := r.resolveType(m, file, sc, a)
+		at := r.noClosure(file, a.Span(), r.resolveType(m, file, sc, a), "a closure type cannot be a type argument")
 		n.Args = append(n.Args, at)
 		r.checkConstraints(file, a.Span(), at, td.TypeParams[i])
 	}
@@ -1088,6 +1112,9 @@ func (r *resolver) funcSig(m *Module, file string, outer *scope, d *ast.FuncDecl
 			}
 		} else {
 			pd.Type = r.resolveType(m, file, sc, p.Type)
+			if _, direct := pd.Type.(*Func); !direct && ContainsClosure(pd.Type) {
+				r.errorf("TYPE_MISMATCH", file, p.Type.Span(), "a closure type appears only as a parameter's own type")
+			}
 			if a, ok := pd.Type.(*Access); ok {
 				if a.Edit {
 					pd.Conv = ast.ConvEdit
@@ -1100,7 +1127,11 @@ func (r *resolver) funcSig(m *Module, file string, outer *scope, d *ast.FuncDecl
 		ft.Params = append(ft.Params, FuncParam{Conv: pd.Conv, Type: pd.Type})
 	}
 	for _, rt := range d.Ret {
-		fd.Ret = append(fd.Ret, r.resolveType(m, file, sc, rt))
+		t := r.resolveType(m, file, sc, rt)
+		if ContainsClosure(t) {
+			r.errorf("ACC_ESCAPE_RETURN", file, rt.Span(), "a closure cannot be returned")
+		}
+		fd.Ret = append(fd.Ret, t)
 	}
 	ft.Ret = fd.Ret
 	fd.Type = ft
@@ -1429,7 +1460,12 @@ func hasMarker(tp *TypeParamType, m string) bool {
 // fields, so recursive type graphs terminate.
 func markerOf(t Type, mk marker, visiting map[string]bool) bool {
 	switch x := t.(type) {
-	case *Prim, *Func, *Unit, *Bad:
+	case *Func:
+		if x.Closure {
+			return false // second-class: not Copy, not Send, not Share
+		}
+		return !mk.existential()
+	case *Prim, *Unit, *Bad:
 		return !mk.existential()
 	case *RawPtr:
 		switch mk {
@@ -1570,3 +1606,43 @@ func typeString(t Type) string {
 }
 
 var _ = fmt.Sprintf
+
+// ContainsClosure reports whether t is or holds a closure type (an array
+// or slice of closures, a function type is not a holder: its parameters
+// may be closures).
+func ContainsClosure(t Type) bool {
+	switch x := t.(type) {
+	case *Func:
+		return x.Closure
+	case *Array:
+		return ContainsClosure(x.Elem)
+	case *Slice:
+		return ContainsClosure(x.Elem)
+	case *Access:
+		return ContainsClosure(x.Elem)
+	case *RawPtr:
+		return ContainsClosure(x.Elem)
+	case *Tuple:
+		for _, e := range x.Elems {
+			if ContainsClosure(e) {
+				return true
+			}
+		}
+	case *Named:
+		for _, a := range x.Args {
+			if ContainsClosure(a) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// noClosure reports ACC_ESCAPE_STORE when t holds a closure type (a
+// second-class value stored), and returns t.
+func (r *resolver) noClosure(file string, pos ast.Pos, t Type, msg string) Type {
+	if ContainsClosure(t) {
+		r.errorf("ACC_ESCAPE_STORE", file, pos, "%s", msg)
+	}
+	return t
+}

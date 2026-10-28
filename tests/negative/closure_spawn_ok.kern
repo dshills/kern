@@ -1,0 +1,9 @@
+//! phase: 3
+//! expect: accept
+//! twin: closure_spawn
+module m
+func job(x: u64) -> u64 { return x + 1u64 }
+func start(f: closure(u64) -> u64) -> Result[u64, SpawnErr] {
+    t := thread.spawn(job, f(1u64))?
+    return Ok(t.join())
+}

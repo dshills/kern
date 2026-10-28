@@ -329,6 +329,15 @@ func main() -> i32 {
     return 0i32
 }
 `, "t.count"},
+		"closure param": {`module t
+func apply(f: closure(u64) -> u64, x: u64) -> u64 { return f(x) }
+func main() -> i32 {
+    k := 3u64
+    print_u64(apply(|x| x + k, 4u64))
+    println()
+    return 0i32
+}
+`, "t.apply"},
 		"out param": {`module t
 struct Cell { x: u64 }
 func fill(o: out Cell) { o.x = 7u64 }

@@ -561,7 +561,12 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 			}
 			rets = fn(it, args, callCtx{pos: fr.at(i.Pos), targs: i.TypeArgs})
 		case i.Fn != nil:
-			rets = it.callNamed(fr.vals[i.Fn.ID].(FuncVal).Name, args)
+			switch fv := fr.vals[i.Fn.ID].(type) {
+			case ClosureVal:
+				rets = it.callNamed(fv.Name, append(append([]Value(nil), fv.Env...), args...))
+			default:
+				rets = it.callNamed(fv.(FuncVal).Name, args)
+			}
 		default:
 			if callee := it.mod.Func(i.Callee); callee != nil && callee.Library {
 				// entering (or staying in) the library: traps report this call
@@ -639,6 +644,12 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 		fr.vals[i.Dst.ID] = mkInt("u32", uint64(r.get().(*Union).Tag))
 	case *ir.FuncRef:
 		fr.vals[i.Dst.ID] = FuncVal{Name: i.Name}
+	case *ir.MakeClosure:
+		env := make([]Value, len(i.Captures))
+		for k, c := range i.Captures {
+			env[k] = fr.vals[c.ID]
+		}
+		fr.vals[i.Dst.ID] = ClosureVal{Name: i.Name, Env: env}
 	case *ir.Trap:
 		it.trap(i.Kind, fr.at(i.Pos))
 	case *ir.Copy:

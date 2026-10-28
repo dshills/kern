@@ -53,7 +53,12 @@ type Func struct {
 	Library bool
 	// Inlined marks a function every call of which was inlined (opt.Inline)
 	// and that nothing references any more: not emitted, run or reported.
-	Inlined   bool
+	Inlined bool
+	// Closure marks the function a closure expression lowered to: its
+	// first Captures parameters are the captured accesses, supplied from
+	// the closure value's environment at every call through it (spec §4).
+	Closure   bool
+	Captures  int
 	Extern    string // C ABI symbol when an extern declaration
 	Contract  *ast.Contract
 	Pos       ast.Pos
@@ -306,6 +311,17 @@ type FuncRef struct {
 	Name string
 }
 
+// MakeClosure materializes a closure value: the closure function Name
+// over the open accesses Captures, which stay open while the value is
+// live (it is passed as an argument and dies with the call). The value is
+// second-class: never stored, returned or copied.
+type MakeClosure struct {
+	Dst      *Value
+	Name     string
+	Captures []*Value
+	Pos      ast.Pos
+}
+
 // Trap terminates with the given kind (spec §6).
 type Trap struct {
 	Kind string
@@ -349,6 +365,7 @@ func (*MakeArray) instr()     {}
 func (*Zero) instr()          {}
 func (*Tag) instr()           {}
 func (*FuncRef) instr()       {}
+func (*MakeClosure) instr()   {}
 func (*Trap) instr()          {}
 func (*UnsafeBegin) instr()   {}
 func (*UnsafeEnd) instr()     {}

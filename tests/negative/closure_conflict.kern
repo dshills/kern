@@ -1,0 +1,9 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: closure_conflict_ok
+module m
+func both(f: closure(u64), v: view[Vec[u64]]) { f(u64(v.len())) }
+func main() -> i32 {
+    v := Vec[u64].new()
+    both(|n| v.push(n), v)   // ACC_CONFLICT: the closure edits v while v is viewed by the same call
+    return 0i32
+}

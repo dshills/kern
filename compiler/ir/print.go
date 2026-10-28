@@ -236,6 +236,12 @@ func printInstr(in Instr) string {
 		return fmt.Sprintf("%s = tag %s", v(i.Dst), PlaceString(i.Place))
 	case *FuncRef:
 		return fmt.Sprintf("%s = funcref %s", v(i.Dst), i.Name)
+	case *MakeClosure:
+		var caps []string
+		for _, c := range i.Captures {
+			caps = append(caps, v(c))
+		}
+		return fmt.Sprintf("%s = closure %s(%s)", v(i.Dst), i.Name, strings.Join(caps, ", "))
 	case *Trap:
 		return fmt.Sprintf("trap %s", i.Kind)
 	case *UnsafeBegin:

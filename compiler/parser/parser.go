@@ -571,6 +571,25 @@ func IsPrim(name string) bool { return primNames[name] }
 
 func (p *parser) parseType() ast.TypeExpr {
 	t := p.cur()
+	if t.Kind == lexer.Ident && t.Text == "closure" && p.peekKind(1) == lexer.LParen {
+		// closure(P...) -> R, a second-class callable (contextual keyword)
+		p.next()
+		ft := &ast.FuncType{Pos: tokPos(t), Closure: true}
+		p.expect(lexer.LParen)
+		p.nesting++
+		for !p.at(lexer.RParen) {
+			conv, ty := p.parseParamType()
+			ft.Params = append(ft.Params, &ast.Param{Pos: ty.Span(), Conv: conv, Type: ty})
+			if !p.accept(lexer.Comma) {
+				break
+			}
+		}
+		p.nesting--
+		p.expect(lexer.RParen)
+		ft.Ret = p.parseRet()
+		ft.End = p.toks[p.pos-1].End
+		return ft
+	}
 	switch t.Kind {
 	case lexer.LBrack:
 		p.next()
@@ -955,6 +974,9 @@ func (p *parser) parseMul() ast.Expr {
 
 func (p *parser) parseUnary() ast.Expr {
 	t := p.cur()
+	if t.Kind == lexer.Pipe || t.Kind == lexer.OrOr {
+		return p.parseClosure()
+	}
 	if t.Kind == lexer.Minus || t.Kind == lexer.Bang {
 		p.next()
 		x := p.parseUnary()
@@ -966,6 +988,38 @@ func (p *parser) parseUnary() ast.Expr {
 		return &ast.Unary{Pos: span(tokPos(t), x.Span()), Op: t.Text, X: x}
 	}
 	return p.parsePostfix()
+}
+
+// parseClosure parses `|a, b: T| expr` or `|a| { ... }`; `||` (one token)
+// opens a closure without parameters.
+func (p *parser) parseClosure() ast.Expr {
+	t := p.next()
+	c := &ast.ClosureExpr{Pos: tokPos(t)}
+	if t.Kind == lexer.Pipe {
+		p.nesting++
+		for !p.at(lexer.Pipe) {
+			n := p.expect(lexer.Ident)
+			prm := &ast.Param{Pos: tokPos(n), Name: n.Text}
+			if p.accept(lexer.Colon) {
+				prm.Conv, prm.Type = p.parseParamType()
+				prm.End = prm.Type.Span().End
+			}
+			c.Params = append(c.Params, prm)
+			if !p.accept(lexer.Comma) {
+				break
+			}
+		}
+		p.nesting--
+		p.expect(lexer.Pipe)
+	}
+	if p.at(lexer.LBrace) {
+		c.Body = p.parseBlock()
+		c.End = c.Body.End
+		return c
+	}
+	c.Expr = p.parseExpr()
+	c.End = c.Expr.Span().End
+	return c
 }
 
 func (p *parser) parsePostfix() ast.Expr {

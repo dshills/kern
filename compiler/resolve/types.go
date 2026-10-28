@@ -52,10 +52,13 @@ type FuncParam struct {
 	Type Type
 }
 
-// Func is a function type.
+// Func is a function type; Closure marks the second-class form
+// `closure(P...) -> R` (spec §4): a value that may capture its creator's
+// locals, passable only as an argument, never stored or returned.
 type Func struct {
-	Params []FuncParam
-	Ret    []Type
+	Params  []FuncParam
+	Ret     []Type
+	Closure bool
 }
 
 // Named is an instantiated struct or union type.
@@ -114,7 +117,11 @@ func (f *Func) String() string {
 			parts[i] = p.Type.String()
 		}
 	}
-	s := "func(" + strings.Join(parts, ", ") + ")"
+	kw := "func"
+	if f.Closure {
+		kw = "closure"
+	}
+	s := kw + "(" + strings.Join(parts, ", ") + ")"
 	if len(f.Ret) == 1 {
 		s += " -> " + f.Ret[0].String()
 	} else if len(f.Ret) > 1 {
@@ -188,7 +195,7 @@ func Identical(a, b Type) bool {
 		return ok && Identical(x.Elem, y.Elem)
 	case *Func:
 		y, ok := b.(*Func)
-		if !ok || len(x.Params) != len(y.Params) || len(x.Ret) != len(y.Ret) {
+		if !ok || len(x.Params) != len(y.Params) || len(x.Ret) != len(y.Ret) || x.Closure != y.Closure {
 			return false
 		}
 		for i := range x.Params {
@@ -251,7 +258,7 @@ func Subst(t Type, m map[string]Type) Type {
 	case *RawPtr:
 		return &RawPtr{Elem: Subst(x.Elem, m)}
 	case *Func:
-		f := &Func{}
+		f := &Func{Closure: x.Closure}
 		for _, p := range x.Params {
 			f.Params = append(f.Params, FuncParam{Conv: p.Conv, Type: Subst(p.Type, m)})
 		}
@@ -308,7 +315,7 @@ func Unify(pattern, actual Type, params map[string]bool, m map[string]Type) bool
 		return ok && Unify(p.Elem, a.Elem, params, m)
 	case *Func:
 		a, ok := actual.(*Func)
-		if !ok || len(p.Params) != len(a.Params) || len(p.Ret) != len(a.Ret) {
+		if !ok || len(p.Params) != len(a.Params) || len(p.Ret) != len(a.Ret) || p.Closure != a.Closure {
 			return false
 		}
 		for i := range p.Params {

@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: closure_bind
+module m
+func apply(f: closure(u64) -> u64, x: u64) -> u64 { return f(x) }
+func twice(f: closure(u64) -> u64, x: u64) -> u64 { return apply(f, apply(f, x)) }

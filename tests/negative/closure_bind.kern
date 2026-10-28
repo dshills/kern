@@ -1,0 +1,7 @@
+//! expect: reject ACC_UNBOUND_PROJECTION rule=5.3.2
+//! twin: closure_bind_ok
+module m
+func apply(f: closure(u64) -> u64, x: u64) -> u64 {
+    g := f   // ACC_UNBOUND_PROJECTION: a closure cannot be bound to a local
+    return g(x)
+}

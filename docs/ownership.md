@@ -166,6 +166,7 @@ func sink(b: Box[u64]) { drop(b) }                                    // PARAM_O
 
 ### Rule 5.2.2 — Second-class restrictions
 `view` and `edit` are second-class. An access must not be stored in a struct, union, array or container; must not be returned except under the elision rule (Rule 5.3.4), and in particular never when derived from a local; must not be captured; must not be live across a thread spawn except a scoped spawn (Rule 5.5.3); and must not be live across any future suspension point. A `view struct` field (Rule 5.6.3) is rejected with the store code unless the extension is enabled.
+A non-escaping closure (spec §4) is second-class in the same way: its captures are accesses to the enclosing function's places, live for the call it is an argument of, and the closure value itself is never stored in a field (`ACC_ESCAPE_STORE`), bound with `:=` (`ACC_UNBOUND_PROJECTION`) or returned (`ACC_ESCAPE_RETURN`).
 Diagnostics: `ACC_ESCAPE_STORE`, `ACC_ESCAPE_RETURN`
 Accepted:
 ```kern

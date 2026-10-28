@@ -155,7 +155,7 @@ func (v *validator) join(b *Block, cur, in *vstate) bool {
 		if st != owOwned && cs != owOwned {
 			continue
 		}
-		if !l.Temp && !resolve.IsCopy(l.Type) {
+		if !l.Temp && !trivial(l.Type) {
 			v.errorf("%s: local %s is %s on one path and %s on another", blockName(b), localName(l), stName(st), stName(cs))
 		}
 		cur.own[l] = owMoved
@@ -226,11 +226,20 @@ func (v *validator) transfer(b *Block, st *vstate) *vstate {
 			if _, isAcc := i.Src.Type.(*resolve.Access); isAcc {
 				v.errorf("%s: second-class value %s stored into a place", blockName(b), v2(i.Src))
 			}
+			if ft, isFn := i.Src.Type.(*resolve.Func); isFn && ft.Closure {
+				v.errorf("%s: closure %s stored into a place", blockName(b), v2(i.Src))
+			}
 			if i.Place.Local != nil && len(i.Place.Path) == 0 {
-				if st.own[i.Place.Local] == owOwned && !resolve.IsCopy(i.Place.Local.Type) {
+				if st.own[i.Place.Local] == owOwned && !trivial(i.Place.Local.Type) {
 					v.errorf("%s: store over owned local %s without a drop", blockName(b), localName(i.Place.Local))
 				}
 				st.own[i.Place.Local] = owOwned
+			}
+		case *MakeClosure:
+			for _, c := range i.Captures {
+				if _, ok := st.open[c]; !ok {
+					v.errorf("%s: closure %s captures %s which is not an open access", blockName(b), i.Name, v2(c))
+				}
 			}
 		case *Init:
 			if i.Place.Local != nil && len(i.Place.Path) == 0 {
@@ -349,7 +358,7 @@ func (v *validator) transfer(b *Block, st *vstate) *vstate {
 	switch t := b.Term.(type) {
 	case *Ret:
 		for l, s := range st.own {
-			if s == owOwned && !resolve.IsCopy(l.Type) && !l.Temp && l.Conv != 4 {
+			if s == owOwned && !trivial(l.Type) && !l.Temp && l.Conv != 4 {
 				v.errorf("%s: local %s is still owned at return", blockName(b), localName(l))
 			}
 		}
@@ -463,4 +472,14 @@ func (v *validator) isAncestor(st *vstate, anc, from *Value) bool {
 		cur = oa.parent
 	}
 	return false
+}
+
+// trivial reports a type whose locals need no destruction: a Copy type,
+// or a closure (second-class: its function and environment, neither
+// owned by the local).
+func trivial(t resolve.Type) bool {
+	if ft, ok := t.(*resolve.Func); ok && ft.Closure {
+		return true
+	}
+	return resolve.IsCopy(t)
 }

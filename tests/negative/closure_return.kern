@@ -1,0 +1,4 @@
+//! expect: reject ACC_ESCAPE_RETURN rule=5.2.2
+//! twin: closure_return_ok
+module m
+func pick(f: closure(u64) -> u64) -> closure(u64) -> u64 { return f }   // ACC_ESCAPE_RETURN: a closure cannot be returned

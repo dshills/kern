@@ -50,7 +50,7 @@ func prove(f *ir.Func) {
 	if f.Entry == nil {
 		return
 	}
-	p := &prover{f: f, def: map[*ir.Value]ir.Instr{}, equiv: map[*ir.Value]*ir.Value{}, edits: map[*ir.Local]bool{}, accessed: map[*ir.Local]bool{}, alias: map[*ir.Value][]*ir.Value{}, clen: map[*ir.Value]uint64{}, out: map[*ir.Block]*facts{}, single: map[*ir.Local]*ir.Value{}, alens: map[string]*ir.Value{}, reborrow: map[*ir.Value]ir.Place{}}
+	p := &prover{f: f, def: map[*ir.Value]ir.Instr{}, equiv: map[*ir.Value]*ir.Value{}, edits: map[*ir.Local]bool{}, accessed: map[*ir.Local]bool{}, alias: map[*ir.Value][]*ir.Value{}, clen: map[*ir.Value]uint64{}, out: map[*ir.Block]*facts{}, single: map[*ir.Local]*ir.Value{}, alens: map[string]*ir.Value{}, reborrow: map[*ir.Value]ir.Place{}, closureCaps: map[*ir.Value][]*ir.Value{}}
 	stores := map[*ir.Local]int{}
 	unstable := map[*ir.Local]bool{}
 	for _, b := range f.Blocks {
@@ -145,7 +145,10 @@ type prover struct {
 	out      map[*ir.Block]*facts      // the state at the end of each processed block
 	single   map[*ir.Local]*ir.Value   // locals stored exactly once: the value they hold everywhere
 	alens    map[string]*ir.Value      // the first Len of each place rooted at an access value
-	reborrow map[*ir.Value]ir.Place    // the place each access value denotes: what it was opened on
+	reborrow map[*ir.Value]ir.Place
+	// closureCaps are the capture accesses of each closure value: a call
+	// that receives the closure may write through them
+	closureCaps map[*ir.Value][]*ir.Value    // the place each access value denotes: what it was opened on
 }
 
 // facts is the state at a program point.
@@ -304,6 +307,22 @@ func (p *prover) instr(s *facts, in ir.Instr) {
 			if _, isAcc := a.Type.(*resolve.Access); isAcc {
 				p.forgetReached(s, a)
 			}
+			for _, c := range p.closureCaps[a] {
+				p.forgetReached(s, c) // the callee may call the closure, which writes through its captures
+			}
+		}
+		p.invalidateEdits(s)
+	case *ir.MakeClosure:
+		p.closureCaps[i.Dst] = i.Captures
+		// the closure may write through its edit captures at any call
+		// through it; nothing is assumed about them from here on. Forgetting
+		// at creation covers the call: while a capture is open the checker
+		// admits no write to its place from this function (a view capture
+		// conflicts with an edit, an edit capture with everything), so no
+		// fact about the place can be learned between creation and the
+		// call that the closure's writes would stale
+		for _, a := range i.Captures {
+			p.forgetReached(s, a)
 		}
 		p.invalidateEdits(s)
 	case *ir.Len:

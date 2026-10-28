@@ -42,7 +42,9 @@ func (fl *fnLower) toValue(r operand, e ast.Expr) *ir.Value {
 	case r.isPlace():
 		// a place, possibly a path through a projection
 		v := fl.newValue(t)
-		if resolve.IsCopy(t) {
+		if resolve.IsCopy(t) || isClosure(t) {
+			// a closure parameter is read (its function and environment),
+			// never moved: it is second-class and dies with its call
 			fl.emit(&ir.Load{Dst: v, Place: r.pl, Pos: e.Span()})
 		} else {
 			fl.emit(&ir.Move{Dst: v, Src: r.pl})
@@ -120,6 +122,8 @@ func (fl *fnLower) expr(e ast.Expr, want resolve.Type) operand {
 		return operand{access: v, ownsAccess: false}
 	case *ast.Ident:
 		return fl.ident(x)
+	case *ast.ClosureExpr:
+		return fl.closure(x)
 	case *ast.FieldExpr:
 		if k := fl.l.info.ImportedConsts[x]; k != nil {
 			return fl.expr(k.Value, t) // an imported constant
@@ -698,7 +702,11 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 			argAccs = append(argAccs, acc)
 			outLocals = append(outLocals, loc)
 		default:
+			n := len(fl.closureAccs)
 			args = append(args, fl.value(a.X, pt))
+			// a closure argument's capture accesses end with the call
+			argAccs = append(argAccs, fl.closureAccs[n:]...)
+			fl.closureAccs = fl.closureAccs[:n]
 		}
 	}
 	var dsts []*ir.Value

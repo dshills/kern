@@ -51,4 +51,4 @@ starting point and must continue to pass the differential harness.
 ## Consequences
 
 - No `kern`-in-`kern` build target in Phase 5; packaging ships the Go binary.
-- The standard-library items named above are the first work of a self-hosting phase.
+- The standard-library items named above are the first work of a self-hosting phase. *(2026-10-28: non-escaping closures now exist, ADR-010 as amended; the library items remain.)*
