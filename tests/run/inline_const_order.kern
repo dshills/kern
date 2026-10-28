@@ -1,0 +1,23 @@
+//! phase: 1
+//! expect: output inline_const_order
+// The release inliner splices a call site's callee and the rest of its
+// block (a constant used by the loop after it, here K) in place of the
+// call. The splice must stay ahead of the loop's blocks: the backend learns
+// a constant's literal at its definition, and a splice appended after the
+// loop left the loop bound undefined (clang: use of undefined value).
+module run
+const K: u64 = 5u64
+struct T { a: Vec[u64]; n: usize }
+func mk(bits: u32) -> T {
+    n := 1usize << bits
+    a := Vec[u64].new()
+    a.resize(n, 0u64)
+    return T { a: move a, n: n }
+}
+func main() -> i32 {
+    t := mk(2u32)
+    total := 0u64
+    for k in 0u64..K { total = total + k }
+    print_u64(total + u64(t.n) + u64(t.a.len())); println()
+    return 0i32
+}

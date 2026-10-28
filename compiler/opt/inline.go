@@ -244,11 +244,14 @@ func callOrder(mod *ir.Module, funcs []*ir.Func) []*ir.Func {
 }
 
 // inlineInto rewrites the eligible call sites of f, in block then
-// instruction order, within the growth budget.
+// instruction order, within the growth budget. Sites are considered in the
+// original blocks' order and then in the spliced blocks' (work), while the
+// layout (f.Blocks) places each splice right after its call block.
 func inlineInto(mod *ir.Module, f *ir.Func, recursive map[*ir.Func]bool) {
 	growth := 0
-	for bi := 0; bi < len(f.Blocks); bi++ {
-		b := f.Blocks[bi]
+	work := append([]*ir.Block(nil), f.Blocks...)
+	for bi := 0; bi < len(work); bi++ {
+		b := work[bi]
 		for k := 0; k < len(b.Instrs); k++ {
 			c, ok := b.Instrs[k].(*ir.Call)
 			if !ok || c.Fn != nil || c.Intrinsic != "" {
@@ -263,7 +266,7 @@ func inlineInto(mod *ir.Module, f *ir.Func, recursive map[*ir.Func]bool) {
 				return // this site and the ones after it stay calls
 			}
 			before := size(f)
-			rewrite(f, b, k, c, g)
+			work = append(work, rewrite(f, b, k, c, g)...)
 			if size(f)-before != delta {
 				panic(fmt.Sprintf("opt: inline: growth of %s at %d is %d, estimated %d", c.Callee, c.Pos.Start, size(f)-before, delta))
 			}
@@ -518,7 +521,7 @@ func (m *copier) term(t ir.Term) ir.Term {
 
 // rewrite inlines the call c, the k-th instruction of block b of f, to g
 // (PLAN.md 6.3).
-func rewrite(f *ir.Func, b *ir.Block, k int, c *ir.Call, g *ir.Func) {
+func rewrite(f *ir.Func, b *ir.Block, k int, c *ir.Call, g *ir.Func) []*ir.Block {
 	m := &copier{f: f, vals: map[*ir.Value]*ir.Value{}, locs: map[*ir.Local]*ir.Local{}, blocks: map[*ir.Block]*ir.Block{}}
 	nextBlock := 0
 	for _, x := range f.Blocks {
@@ -628,10 +631,24 @@ func rewrite(f *ir.Func, b *ir.Block, k int, c *ir.Call, g *ir.Func) {
 	cont.Term = b.Term
 	b.Instrs = append([]ir.Instr(nil), b.Instrs[:k]...)
 	b.Term = &ir.Br{Target: m.blocks[g.Entry]}
+	// the splice goes right after b, so blocks stay in an order where a
+	// definition precedes the blocks after it: the backend records a
+	// constant's literal when it reaches the definition, and the rest of b
+	// (now cont) may define constants the blocks after b use
+	spliced := make([]*ir.Block, 0, len(g.Blocks)+1)
 	for _, blk := range g.Blocks {
-		f.Blocks = append(f.Blocks, m.blocks[blk])
+		spliced = append(spliced, m.blocks[blk])
 	}
-	f.Blocks = append(f.Blocks, cont)
+	spliced = append(spliced, cont)
+	at := len(f.Blocks)
+	for i, x := range f.Blocks {
+		if x == b {
+			at = i + 1
+			break
+		}
+	}
+	f.Blocks = append(f.Blocks[:at:at], append(spliced, f.Blocks[at:]...)...)
+	return spliced
 }
 
 // definedIn reports whether v is defined by an instruction of f.

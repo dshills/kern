@@ -99,3 +99,51 @@ only shared code they touch is `Vec.grow_to`, which `push` does not use.
 - `hash_table`'s `new_map` and other byte-building sites in the benchmarks
   still push element by element where a view is at hand; `extend` applies
   wherever the source is already a sequence.
+
+## Addendum (2026-10-28): the other byte-building sites, and an inliner fix
+
+The follow-up above was tried on the two remaining benchmarks that fill a
+`Vec` element by element.
+
+- **lock_protected_map** now zero-fills its three tables with `resize`, as
+  hash_table does, instead of three pushes per slot. The table doubles
+  once inside the timed section (from 2^19 to 2^20 slots as the workers'
+  inserts arrive), so the fill is on the measured path, though only once in
+  four million operations.
+- **packet_parser: no change.** Its 32-byte header copy is in `gen`, which
+  runs before the clock starts. `buf.extend(h)` kept the checksum and left
+  the timed code identical (same kern IR for `main`), yet measured about 2%
+  slower in interleaved runs. The likeliest cause is the shifted placement
+  of the functions after the smaller `gen`, not anything the change does,
+  and with nothing to gain on the measured path the benchmark was left as
+  it was.
+
+**Inliner bug found on the way.** With the push loop gone, `new_map` became
+small enough for the release inliner to splice into `main`, and the build
+failed in clang (`use of undefined value '%v4'`). The inliner appended the
+callee's blocks and the continuation (the rest of the call's block) to the
+end of the function. The continuation held the definition of the constant
+`K`, which the loop after it uses as its bound, and the LLVM backend records
+a constant's literal only when it reaches the definition in block order, so
+the loop, now emitted first, named a value that was never defined.
+`compiler/opt/inline.go` now places each splice right after its call block,
+which keeps every definition ahead of the blocks that follow it, while
+call sites are still considered in the same order as before (original
+blocks, then spliced ones) so no inlining decision changes.
+`tests/run/inline_const_order.kern` reproduces the failure on the old
+compiler and runs in the interpreter and both native configurations.
+
+Direct timings (release, three interleaved runs each, one-minute load 8.2;
+lock_protected_map is a four-thread row whose runs scatter widely at this
+load):
+
+| workload | before (ms) | after (ms) | best before → after (Mops/s) | p99 ns before → after | checksum |
+|---|---|---|---|---|---|
+| lock_protected_map | 184.8, 198.1, 251.1 | 172.7, 194.1, 191.2 | 21.6 → 23.2 | 22,042–23,542 → 17,916–20,750 | 1619761243042050329 |
+| packet_parser (`extend` tried, not kept) | 74.0, 72.6, 73.4 | 74.9, 74.6, 74.9 | 137.7 → 134.1 | 42 → 42 | 9459311143157445824 |
+
+The throughput gain on lock_protected_map is inside the row's scatter at
+this load; the p99 drop, consistent across the runs, is the one doubling
+inside the timed section now being a block store. wal is unchanged by the
+inliner fix (same checksum, 7.1 Mops/s in one run). The full harness is
+still owed on a quiet host.
