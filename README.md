@@ -130,7 +130,10 @@ go test ./...
 ```
 
 The fixture suite runs every program in both the interpreter and the native
-backend and requires them to agree. Freestanding fixtures run under QEMU when it
+backend and requires them to agree; three differential tests generate
+random programs (indexing under the proof pass's guards, integer
+arithmetic near the type limits, and a mix of the whole language with the
+`std/str` and `std/map` code) and require the same agreement. Freestanding fixtures run under QEMU when it
 is installed and are skipped otherwise; `KERN_REQUIRE_QEMU=1` (set in CI) turns
 the skip into a failure. `golangci-lint run ./...` is part of CI, which runs on
 Ubuntu and macOS (`.github/workflows/ci.yml`).
