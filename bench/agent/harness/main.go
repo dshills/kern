@@ -103,6 +103,7 @@ func main() {
 	budget := flag.Duration("budget", 30*time.Minute, "wall-clock budget per trial")
 	out := flag.String("out", "", "report path (default bench/agent/REPORT.md)")
 	dryRun := flag.Bool("dry-run", false, "validate tasks (hidden tests against the reference solutions) without calling any model")
+	reportFrom := flag.String("report-from", "", "score the trial records of an existing run directory into the report without calling any model (budgets are taken from the flags)")
 	flag.Parse()
 	root, err := findRoot()
 	if err != nil {
@@ -144,6 +145,11 @@ func main() {
 		}
 		return
 	}
+	if *reportFrom != "" {
+		records, n := loadRecords(*reportFrom, tasks)
+		writeReport(root, *out, writeAgentReport(records, tasks, n, *iterations, *budget, relRun(root, *reportFrom)), len(records), *reportFrom)
+		return
+	}
 	runDir := filepath.Join(root, "bench", "agent", "runs", time.Now().Format("20060102-150405"))
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		fatalf("%v", err)
@@ -170,15 +176,75 @@ func main() {
 			}
 		}
 	}
-	report := writeAgentReport(records, tasks, *trials, *iterations, *budget)
-	path := *out
+	writeReport(root, *out, writeAgentReport(records, tasks, *trials, *iterations, *budget, relRun(root, runDir)), len(records), runDir)
+}
+
+// relRun names a run directory relative to the repository root for the
+// report, falling back to the path as given.
+func relRun(root, dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	if rel, err := filepath.Rel(root, abs); err == nil && !strings.HasPrefix(rel, "..") {
+		return rel
+	}
+	return dir
+}
+
+// writeReport writes the report to path (default bench/agent/REPORT.md).
+func writeReport(root, path, report string, n int, runDir string) {
 	if path == "" {
 		path = filepath.Join(root, "bench", "agent", "REPORT.md")
 	}
 	if err := os.WriteFile(path, []byte(report), 0o644); err != nil {
 		fatalf("%v", err)
 	}
-	fmt.Printf("wrote %s (%d trials under %s)\n", path, len(records), runDir)
+	fmt.Printf("wrote %s (%d trials under %s)\n", path, n, runDir)
+}
+
+// loadRecords reads every trial record under a run directory and returns
+// them with the highest trial number seen, which is the trials-per-cell the
+// run was made with. A record for a task that is not in the task list is an
+// error, since the report would silently leave it out.
+func loadRecords(dir string, tasks []*task) ([]trialRecord, int) {
+	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	if err != nil || len(files) == 0 {
+		fatalf("no trial records under %s", dir)
+	}
+	known := map[string]bool{}
+	for _, t := range tasks {
+		known[t.Name] = true
+	}
+	var records []trialRecord
+	n := 0
+	seen := map[string]string{} // task|model|arm|trial -> file, so a copied record cannot count twice
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		var rec trialRecord
+		if err := json.Unmarshal(b, &rec); err != nil {
+			fatalf("%s: %v", f, err)
+		}
+		if !known[rec.Task] {
+			fatalf("%s: task %s is not under the task directory", f, rec.Task)
+		}
+		if rec.Trial <= 0 {
+			fatalf("%s: trial number %d is not positive", f, rec.Trial)
+		}
+		id := fmt.Sprintf("%s|%s|%s|%d", rec.Task, rec.Model, rec.Arm, rec.Trial)
+		if prev, dup := seen[id]; dup {
+			fatalf("%s and %s record the same trial (%s)", prev, f, id)
+		}
+		seen[id] = f
+		if rec.Trial > n {
+			n = rec.Trial
+		}
+		records = append(records, rec)
+	}
+	return records, n
 }
 
 // loadTasks reads <dir>/<name>/{task.md,hidden.json,start/,reference/}.

@@ -167,10 +167,11 @@ do not separate them. On the second (`bench/agent/tasks/`,
 whose requirements are stated in terms of what the compiler's analyses
 report, the structured arm succeeds in all 100 trials and the plain arm in
 90, failing where a requirement needs a count the text diagnostics do not
-carry; the queries cost iterations elsewhere, and the primary metric,
-which compares median speed with ties lost, records 0 wins of 10 on both
-suites. Open items are recorded in the reports and ADRs
-rather than in an issue tracker.
+carry; the queries cost iterations elsewhere. The primary metric, revised
+on 2026-10-28 to weigh successes before median iterations
+(`docs/reports/agent-metric-revision.md`), records 0 wins of 10 on the
+first suite and 1 on the second, below its threshold of 8. Open items are
+recorded in the reports and ADRs rather than in an issue tracker.
 
 Specification documents, the language reference and the ADRs are the
 authority; where the code disagrees with them, the code is wrong.
