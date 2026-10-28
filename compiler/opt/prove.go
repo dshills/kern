@@ -32,6 +32,12 @@ import (
 // nothing, a store through an access or a call forgets every local it may
 // reach (a call may write through any access it receives, an edit or a
 // view of an Interior value), and a global is opaque.
+// readOnlyIntrinsics read through their access argument and write nothing,
+// so they forget no fact.
+var readOnlyIntrinsics = map[string]bool{"load_be": true, "load_le": true,
+	"saturating_add": true, "saturating_sub": true, "saturating_mul": true,
+	"checked_add": true, "checked_sub": true, "checked_mul": true, "checked_div": true, "checked_rem": true, "checked_shl": true, "checked_shr": true}
+
 func Prove(mod *ir.Module) {
 	for _, f := range mod.Funcs {
 		if !f.Inlined {
@@ -288,6 +294,9 @@ func (p *prover) instr(s *facts, in ir.Instr) {
 			s.invalidate(root)
 		}
 	case *ir.Call:
+		if readOnlyIntrinsics[i.Intrinsic] {
+			return
+		}
 		// the callee may write through any access it receives: an edit, or a
 		// view of an Interior value (unsafe code in its declaring module);
 		// an argument whose origin is unknown may reach any accessed local

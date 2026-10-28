@@ -1,0 +1,78 @@
+//! phase: 3
+//! expect: output
+// The §4.1 alternative forms beyond wrapping_add/sub/mul: the wrapping
+// negation and shifts, the saturating forms at both limits, and every
+// checked form at the edge where the trapping form traps and just inside
+// it; the same values in both engines.
+module t
+func show(o: Option[u8]) {
+    match o {
+        Some(v) => print_u64(u64(v))
+        None => print_str("none")
+    }
+    println()
+}
+func showi(o: Option[i32]) {
+    match o {
+        Some(v) => print_i64(i64(v))
+        None => print_str("none")
+    }
+    println()
+}
+func main() -> i32 {
+    print_u64(u64(wrapping_neg(1u8)))
+    println()
+    print_i64(i64(wrapping_neg(-128i8)))
+    println()
+    print_u64(u64(wrapping_shl(1u8, 9u32)))
+    println()
+    print_u64(u64(wrapping_shr(128u8, 15u32)))
+    println()
+    print_i64(i64(wrapping_shr(-128i8, 7u32)))
+    println()
+    print_u64(u64(saturating_add(250u8, 10u8)))
+    println()
+    print_u64(u64(saturating_sub(3u8, 10u8)))
+    println()
+    print_u64(u64(saturating_mul(16u8, 16u8)))
+    println()
+    print_i64(i64(saturating_add(100i8, 100i8)))
+    println()
+    print_i64(i64(saturating_sub(-100i8, 100i8)))
+    println()
+    print_i64(i64(saturating_mul(-100i8, 2i8)))
+    println()
+    print_i64(i64(saturating_mul(-100i8, -2i8)))
+    println()
+    print_u64(saturating_add(18446744073709551615u64, 1u64))
+    println()
+    print_i64(saturating_sub(-9223372036854775807i64, 2i64))
+    println()
+    show(checked_add(250u8, 5u8))
+    show(checked_add(250u8, 6u8))
+    show(checked_sub(5u8, 6u8))
+    show(checked_mul(16u8, 15u8))
+    show(checked_mul(16u8, 16u8))
+    show(checked_div(7u8, 2u8))
+    show(checked_div(7u8, 0u8))
+    show(checked_rem(7u8, 0u8))
+    show(checked_shl(1u8, 7u32))
+    show(checked_shl(1u8, 8u32))
+    show(checked_shl(3u8, 7u32))
+    show(checked_shr(128u8, 7u32))
+    show(checked_shr(1u8, 8u32))
+    showi(checked_div(-2147483648i32, -1i32))
+    showi(checked_rem(-2147483648i32, -1i32))
+    showi(checked_div(-7i32, 2i32))
+    showi(checked_rem(-7i32, 2i32))
+    showi(checked_add(2147483647i32, 1i32))
+    showi(checked_sub(-2147483648i32, 1i32))
+    showi(checked_mul(-65536i32, 32768i32))
+    showi(checked_mul(65536i32, 32768i32))
+    showi(checked_shr(-8i32, 1u32))
+    showi(checked_shl(-1i32, 31u32))
+    showi(checked_shl(-1i32, 1u32))
+    showi(checked_shl(-2i32, 1u32))
+    showi(checked_shl(1073741823i32, 1u32))
+    return 0i32
+}

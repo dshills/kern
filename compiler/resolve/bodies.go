@@ -92,7 +92,7 @@ func (r *resolver) checkFunc(m *Module, file string, fd *FuncDecl, _ *scope) {
 }
 
 func (c *fnCtx) declareParams(sc *scope) {
-	for _, p := range c.fd.Params {
+	for i, p := range c.fd.Params {
 		sym := &Symbol{Kind: SymParam, Name: p.Name, Type: p.Type, Conv: p.Conv, Pos: p.Pos, ID: c.newID(), File: c.file}
 		if a, ok := p.Type.(*Access); ok {
 			sym.Type = a.Elem
@@ -103,6 +103,9 @@ func (c *fnCtx) declareParams(sc *scope) {
 		if p.Conv == ast.ConvValue && !IsCopy(p.Type) {
 			if _, isTP := p.Type.(*TypeParamType); !isTP || !hasMarker(p.Type.(*TypeParamType), "Copy") {
 				c.r.errorf("PARAM_OWN_REQUIRED", c.file, p.Pos, "parameter %s has move-only type %s and must be declared own", p.Name, p.Type)
+				if a := c.fd.AST; a != nil && i < len(a.Params) && a.Params[i].Type != nil && a.Params[i].Name == p.Name {
+					c.fix(diag.InsertAt(c.file, a.Params[i].Type.Span().Start, "own "))
+				}
 			}
 		}
 		sc.vars[p.Name] = sym
@@ -118,6 +121,11 @@ func (c *fnCtx) newID() int { c.nextID++; return c.nextID }
 func (c *fnCtx) errorf(code diag.Code, pos ast.Pos, format string, args ...any) {
 	c.r.errorf(code, c.file, pos, format, args...)
 }
+
+// fix attaches a machine-applicable edit to the diagnostic just reported.
+func (c *fnCtx) fix(ops ...diag.StructuredEditOp) { c.r.fix(ops...) }
+
+func span(p ast.Pos) diag.Span { return diag.Span{Start: p.Start, End: p.End} }
 
 func (c *fnCtx) declare(sc *scope, node any, name string, kind SymbolKind, t Type, conv ast.Conv, pos ast.Pos) *Symbol {
 	if name == "_" {

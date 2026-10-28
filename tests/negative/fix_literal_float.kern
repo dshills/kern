@@ -1,0 +1,8 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: fix_literal_float_ok
+//! fix: clean
+module m
+func f() -> f32 {
+    var x: f32 = -1.5f64   // TYPE_MISMATCH: the fix rewrites the literal behind the sign
+    return x
+}

@@ -1,0 +1,18 @@
+//! phase: 3
+//! expect: output
+//! twin: load_order_bounds
+module t
+func word(p: view[]u8, at: usize) -> u16 {
+    if len(p) < 4usize { return 0u16 }
+    return load_be[u16](p, at)
+}
+func main() -> i32 {
+    var b: [4]u8 = zero()
+    b[1usize] = 7u8
+    b[3usize] = 9u8
+    print_u64(u64(word(b, 0usize)))
+    println()
+    print_u64(u64(word(b, 2usize)))
+    println()
+    return 0i32
+}

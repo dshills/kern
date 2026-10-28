@@ -490,6 +490,102 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	case "ptr_view", "ptr_edit":
 		// an access on raw memory is the pointer itself
 		fe.vals[dst()] = fe.v(a[0])
+	case "saturating_add", "saturating_sub":
+		t := fe.elemType(c, 0)
+		lt := e.mty(t)
+		_, sg := intBits(t)
+		pre, name := "u", "add"
+		if sg {
+			pre = "s"
+		}
+		if c.Intrinsic == "saturating_sub" {
+			name = "sub"
+		}
+		intr := fmt.Sprintf("llvm.%s%s.sat.%s", pre, name, lt)
+		e.declare(intr, fmt.Sprintf("%s (%s, %s)", lt, lt, lt))
+		fe.emit("%s = call %s @%s(%s %s, %s %s)", fe.v(dst()), lt, intr, lt, fe.v(a[0]), lt, fe.v(a[1]))
+	case "saturating_mul":
+		t := fe.elemType(c, 0)
+		lt := e.mty(t)
+		bits, sg := intBits(t)
+		res, ov := fe.withOverflow("mul", t, a[0], a[1])
+		if !sg {
+			fe.emit("%s = select i1 %s, %s -1, %s %s", fe.v(dst()), ov, lt, lt, res)
+			break
+		}
+		// the limit in the direction of the overflow: the product's sign
+		sl, sr, neg, lim := fe.next("t"), fe.next("t"), fe.next("t"), fe.next("t")
+		fe.emit("%s = icmp slt %s %s, 0", sl, lt, fe.v(a[0]))
+		fe.emit("%s = icmp slt %s %s, 0", sr, lt, fe.v(a[1]))
+		fe.emit("%s = xor i1 %s, %s", neg, sl, sr)
+		fe.emit("%s = select i1 %s, %s %d, %s %d", lim, neg, lt, minOf(bits), lt, maxOf(bits))
+		fe.emit("%s = select i1 %s, %s %s, %s %s", fe.v(dst()), ov, lt, lim, lt, res)
+	case "checked_add", "checked_sub", "checked_mul":
+		t := fe.elemType(c, 0)
+		res, ov := fe.withOverflow(strings.TrimPrefix(c.Intrinsic, "checked_"), t, a[0], a[1])
+		fe.option(dst(), e.mty(t), ov, res)
+	case "checked_div", "checked_rem":
+		t := fe.elemType(c, 0)
+		lt := e.mty(t)
+		bits, sg := intBits(t)
+		ov := fe.next("t")
+		fe.emit("%s = icmp eq %s %s, 0", ov, lt, fe.v(a[1]))
+		if sg {
+			m1, m2, m, o2 := fe.next("t"), fe.next("t"), fe.next("t"), fe.next("t")
+			fe.emit("%s = icmp eq %s %s, %d", m1, lt, fe.v(a[0]), minOf(bits))
+			fe.emit("%s = icmp eq %s %s, -1", m2, lt, fe.v(a[1]))
+			fe.emit("%s = and i1 %s, %s", m, m1, m2)
+			fe.emit("%s = or i1 %s, %s", o2, ov, m)
+			ov = o2
+		}
+		// the division runs on safe operands when it would trap, so the
+		// untaken result is never undefined
+		sl, sr, res := fe.next("t"), fe.next("t"), fe.next("t")
+		fe.emit("%s = select i1 %s, %s 0, %s %s", sl, ov, lt, lt, fe.v(a[0]))
+		fe.emit("%s = select i1 %s, %s 1, %s %s", sr, ov, lt, lt, fe.v(a[1]))
+		op := map[bool]map[string]string{true: {"checked_div": "sdiv", "checked_rem": "srem"}, false: {"checked_div": "udiv", "checked_rem": "urem"}}[sg][c.Intrinsic]
+		fe.emit("%s = %s %s %s, %s", res, op, lt, sl, sr)
+		fe.option(dst(), lt, ov, res)
+	case "checked_shl", "checked_shr":
+		t := fe.elemType(c, 0)
+		lt := e.mty(t)
+		bits, sg := intBits(t)
+		big := fe.next("t")
+		fe.emit("%s = icmp uge i32 %s, %d", big, fe.v(a[1]), bits)
+		cnt := fe.shiftCount(a[1], lt, bits, "wrapping") // masked: never poison
+		res, ov := fe.next("t"), big
+		if c.Intrinsic == "checked_shl" {
+			back, lost, o2 := fe.next("t"), fe.next("t"), fe.next("t")
+			fe.emit("%s = shl %s %s, %s", res, lt, fe.v(a[0]), cnt)
+			// the representation's bits come back logically, as the trapping
+			// form checks them (a set bit shifted out is an overflow)
+			fe.emit("%s = lshr %s %s, %s", back, lt, res, cnt)
+			fe.emit("%s = icmp ne %s %s, %s", lost, lt, back, fe.v(a[0]))
+			fe.emit("%s = or i1 %s, %s", o2, big, lost)
+			ov = o2
+		} else if sg {
+			fe.emit("%s = ashr %s %s, %s", res, lt, fe.v(a[0]), cnt)
+		} else {
+			fe.emit("%s = lshr %s %s, %s", res, lt, fe.v(a[0]), cnt)
+		}
+		fe.option(dst(), lt, ov, res)
+	case "load_be", "load_le":
+		// one load of the integer's width at byte offset a[1] of the view,
+		// unaligned, byte-swapped for big-endian (the targets are little-endian)
+		t := fe.elemType(c, 0)
+		ty := e.mty(t)
+		p := fe.next("t")
+		fe.emit("%s = extractvalue { ptr, i64 } %s, 0", p, fe.v(a[0]))
+		q := fe.next("t")
+		fe.emit("%s = getelementptr i8, ptr %s, i64 %s", q, p, fe.v(a[1]))
+		if c.Intrinsic == "load_le" || layout.Of(t).Size == 1 {
+			fe.emit("%s = load %s, ptr %s, align 1", fe.v(dst()), ty, q)
+		} else {
+			r := fe.next("t")
+			fe.emit("%s = load %s, ptr %s, align 1", r, ty, q)
+			e.declare("llvm.bswap."+ty, ty+" ("+ty+")")
+			fe.emit("%s = call %s @llvm.bswap.%s(%s %s)", fe.v(dst()), ty, ty, ty, r)
+		}
 	case "ptr_view_seq", "ptr_edit_seq":
 		s1 := fe.next("t")
 		fe.emit("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", s1, fe.v(a[0]))
@@ -716,3 +812,40 @@ func (fe *fnEmit) spawn(c *ir.Call) {
 	}
 	fe.loadResult(d, out)
 }
+
+// withOverflow applies LLVM's overflow-reporting add, sub or mul to l and r
+// in t's width and signedness, returning the result and overflow flag names.
+func (fe *fnEmit) withOverflow(name string, t resolve.Type, l, r *ir.Value) (res, ov string) {
+	lt := fe.e.mty(t)
+	_, sg := intBits(t)
+	pre := "u"
+	if sg {
+		pre = "s"
+	}
+	intr := fmt.Sprintf("llvm.%s%s.with.overflow.%s", pre, name, lt)
+	fe.e.declare(intr, fmt.Sprintf("{ %s, i1 } (%s, %s)", lt, lt, lt))
+	p := fe.next("t")
+	fe.emit("%s = call { %s, i1 } @%s(%s %s, %s %s)", p, lt, intr, lt, fe.v(l), lt, fe.v(r))
+	res, ov = fe.next("t"), fe.next("t")
+	fe.emit("%s = extractvalue { %s, i1 } %s, 0", res, lt, p)
+	fe.emit("%s = extractvalue { %s, i1 } %s, 1", ov, lt, p)
+	return res, ov
+}
+
+// option stores an Option[T] result: None (tag 1) when ov, else Some (tag 0)
+// of res at the payload offset, and loads it into d.
+func (fe *fnEmit) option(d *ir.Value, lt, ov, res string) {
+	out, off := fe.unionOut(d)
+	fe.emit("store %s zeroinitializer, ptr %s", fe.e.namedType(d.Type.(*resolve.Named)), out)
+	tag := fe.next("t")
+	fe.emit("%s = select i1 %s, i8 1, i8 0", tag, ov)
+	fe.emit("store i8 %s, ptr %s", tag, out)
+	pp := fe.next("t")
+	fe.emit("%s = getelementptr i8, ptr %s, i64 %d", pp, out, off)
+	fe.emit("store %s %s, ptr %s", lt, res, pp)
+	fe.loadResult(d, out)
+}
+
+// minOf and maxOf are the limits of a signed integer of bits width.
+func minOf(bits int) int64 { return -(int64(1) << uint(bits-1)) }
+func maxOf(bits int) int64 { return int64(1)<<uint(bits-1) - 1 }

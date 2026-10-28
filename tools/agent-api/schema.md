@@ -88,7 +88,7 @@ Every command reads one JSON request on standard input and writes one JSON respo
 | `File` | `file` | string | Empty only for `API_*` and `INTERNAL` diagnostics that have no source location, with `span` `{0, 0}`. |
 | `Span` | `span` | span |  |
 | `Related` | `related` | [`Related`] | Secondary locations in the same file. |
-| `Fix` | `fix` | `Edit` \| null | A machine-applicable structured edit, or `null`. |
+| `Fix` | `fix` | `StructuredEdit` \| null | A machine-applicable structured edit, or `null`. |
 | `OpIndex` | `op_index` | int \| null | Zero-based index into the request's `edit.ops` for `EDIT_*` diagnostics; `null` otherwise. |
 
 #### `Related`
@@ -98,22 +98,6 @@ Every command reads one JSON request on standard input and writes one JSON respo
 | `Label` | `label` | string |  |
 | `Start` | `start` | int |  |
 | `End` | `end` | int |  |
-
-#### `Edit`
-
-| Field | JSON | Type | Notes |
-|---|---|---|---|
-| `Ops` | `ops` | [`EditOp`] |  |
-
-#### `EditOp`
-
-| Field | JSON | Type | Notes |
-|---|---|---|---|
-| `Op` | `op` | string |  |
-| `File` | `file` | string |  |
-| `Span` | `span` | span | Optional. |
-| `At` | `at` | int | Optional. |
-| `Text` | `text` | string | Optional. |
 
 ## Commands
 

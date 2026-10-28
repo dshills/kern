@@ -500,6 +500,13 @@ func (e *emitter) function(f *ir.Func) {
 		if coldLibrary[baseName(f.Name)] {
 			attrs = " noinline cold" // a growth or allocation path: kept out of the hot operations that call it
 		}
+	} else if e.mod.Entry != "" && f.Extern == "" {
+		// a program's own functions are reached only from the module (the
+		// entry through its wrapper, the rest by call or function value), so
+		// they are private too, except one exported under a C name: LLVM then
+		// inlines a function called from one place whatever its size and
+		// discards the copy (docs/reports/gap-diagnosis.md)
+		linkage = "internal "
 	}
 	fmt.Fprintf(&e.sb, "define %s%s %s(%s)%s%s%s {\nentry:\n%s%s}\n\n", linkage, e.retType(f), e.symOf(f), strings.Join(ps, ", "), attrs, e.attrRef(), dbgSuffix, entry, fe.body.String())
 }
@@ -1163,12 +1170,11 @@ func (fe *fnEmit) checkOverflow(i *ir.CheckOverflow) {
 			c := fe.shiftCount(i.R, lt, bits, "")
 			s := fe.next("t")
 			fe.emit("%s = shl %s %s, %s", s, lt, l, c)
+			// a set bit of the representation shifted out traps (spec §4.1),
+			// for signed values too: the bits come back logically, so
+			// -1 << 1 traps where an arithmetic shift back would pass it
 			back := fe.next("t")
-			if _, signed := intBits(t); signed {
-				fe.emit("%s = ashr %s %s, %s", back, lt, s, c)
-			} else {
-				fe.emit("%s = lshr %s %s, %s", back, lt, s, c)
-			}
+			fe.emit("%s = lshr %s %s, %s", back, lt, s, c)
 			ne := fe.next("t")
 			fe.emit("%s = icmp ne %s %s, %s", ne, lt, back, l)
 			fe.check(ne, "overflow", i.Pos)

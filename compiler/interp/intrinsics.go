@@ -286,6 +286,18 @@ func init() {
 		"ptr_edit": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}}
 		},
+		"saturating_add": saturating("+"),
+		"saturating_sub": saturating("-"),
+		"saturating_mul": saturating("*"),
+		"checked_add":    checked("+"),
+		"checked_sub":    checked("-"),
+		"checked_mul":    checked("*"),
+		"checked_div":    checked("/"),
+		"checked_rem":    checked("%"),
+		"checked_shl":    checked("<<"),
+		"checked_shr":    checked(">>"),
+		"load_be":        func(it *Interp, a []Value, c callCtx) []Value { return []Value{it.loadWide(a, c, true)} },
+		"load_le":        func(it *Interp, a []Value, c callCtx) []Value { return []Value{it.loadWide(a, c, false)} },
 		"ptr_view_seq": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{&Access{Seq: &seqRef{raw: &rawSeq{it: it, base: u64(a[0]), elem: c.targ(0)}, lo: 0, hi: int(u64(a[1]))}}}
 		},
@@ -513,4 +525,80 @@ func (it *Interp) spawned(name string, args []Value, finish func(Value, *Trap)) 
 		}
 		finish(result, trapped)
 	}()
+}
+
+// loadWide reads the bytes of an integer of the call's type argument from a
+// sequence access at an offset, in big- or little-endian order, and decodes
+// them as the interpreter's memory representation (little-endian); the
+// bounds check on the last byte precedes the call.
+func (it *Interp) loadWide(a []Value, c callCtx, be bool) Value {
+	t := c.targ(0)
+	acc := a[0].(*Access)
+	seq := acc.Seq
+	if seq == nil {
+		// an access opened on an array: in raw memory, or a local
+		if rr, ok := acc.Ref.(rawRef); ok {
+			seq = rr.elems()
+		} else {
+			arr := acc.Ref.get().(*Array)
+			seq = &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(arr.Elems)}
+		}
+	}
+	at := int(u64(a[1]))
+	n := layout.Of(t).Size
+	buf := make([]byte, n)
+	for i := range n {
+		b := byte(u64(seq.at(at + i).get()))
+		if be {
+			buf[n-1-i] = b
+		} else {
+			buf[i] = b
+		}
+	}
+	return it.decode(buf, t)
+}
+
+// checked is a §4.1 checked form: None where the trapping form would trap,
+// Some(result) otherwise (Option's variants are Some then None).
+func checked(op string) func(*Interp, []Value, callCtx) []Value {
+	return func(it *Interp, a []Value, _ callCtx) []Value {
+		x, y := a[0].(Int), a[1].(Int)
+		if arithTrap(op, x, y) != "" {
+			return []Value{&Union{Tag: 1}}
+		}
+		return []Value{&Union{Tag: 0, Fields: []Value{it.binary(op, x, y, "wrapping")}}}
+	}
+}
+
+// saturating is a §4.1 saturating form: the result when it fits, else the
+// type's limit in the direction of the overflow.
+func saturating(op string) func(*Interp, []Value, callCtx) []Value {
+	return func(it *Interp, a []Value, _ callCtx) []Value {
+		x, y := a[0].(Int), a[1].(Int)
+		if arithTrap(op, x, y) == "" {
+			return []Value{it.binary(op, x, y, "wrapping")}
+		}
+		ty := x.Ty
+		w := width(ty)
+		if !signed(ty) {
+			if op == "-" {
+				return []Value{mkInt(ty, 0)}
+			}
+			return []Value{mkInt(ty, ^uint64(0))}
+		}
+		sx, sy := signedOf(x), signedOf(y)
+		toMax := false
+		switch op {
+		case "+":
+			toMax = sy > 0
+		case "-":
+			toMax = sy < 0
+		case "*":
+			toMax = (sx < 0) == (sy < 0)
+		}
+		if toMax {
+			return []Value{mkInt(ty, uint64(maxSigned(w)))}
+		}
+		return []Value{mkInt(ty, uint64(minSigned(w)))}
+	}
 }

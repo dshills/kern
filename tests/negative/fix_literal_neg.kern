@@ -1,0 +1,8 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: fix_literal_neg_ok
+//! fix: clean
+module m
+func f() -> i32 {
+    var x: i32 = -5i64   // TYPE_MISMATCH: the fix keeps the sign
+    return x
+}

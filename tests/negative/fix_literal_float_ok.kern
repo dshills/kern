@@ -1,0 +1,8 @@
+//! phase: 1
+//! expect: accept
+//! twin: fix_literal_float
+module m
+func f() -> f32 {
+    var x: f32 = -1.5f32
+    return x
+}

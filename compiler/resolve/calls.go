@@ -2,6 +2,7 @@ package resolve
 
 import (
 	"github.com/dshills/kern/compiler/ast"
+	"github.com/dshills/kern/compiler/diag"
 	"strings"
 )
 
@@ -20,11 +21,16 @@ func isUnsafeOp(f *FuncDecl) bool {
 }
 
 // wrappingIntrinsics are the prelude's wrapping arithmetic forms (§4.1).
-var wrappingIntrinsics = map[string]bool{"wrapping_add": true, "wrapping_sub": true, "wrapping_mul": true}
+var wrappingIntrinsics = map[string]bool{"wrapping_add": true, "wrapping_sub": true, "wrapping_mul": true, "wrapping_neg": true, "wrapping_shl": true, "wrapping_shr": true,
+	"saturating_add": true, "saturating_sub": true, "saturating_mul": true,
+	"checked_add": true, "checked_sub": true, "checked_mul": true, "checked_div": true, "checked_rem": true, "checked_shl": true, "checked_shr": true}
 
 // bitCountIntrinsics are the prelude's bit-count operations, integer-only
 // like the wrapping forms.
 var bitCountIntrinsics = map[string]bool{"count_trailing_zeros": true, "count_leading_zeros": true, "count_ones": true}
+
+// loadIntrinsics are the prelude's byte-order reads, integer-only too.
+var loadIntrinsics = map[string]bool{"load_be": true, "load_le": true}
 
 func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 	info := &CallInfo{}
@@ -162,6 +168,10 @@ func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 				return c.callValue(sc, x, info, valueOf(ft))
 			}
 			c.errorf("NAME_UNRESOLVED", fn.Pos, "%s has no method %s", td.Name, fn.Name)
+			if s := nearest(fn.Name, keys(td.Methods)); s != "" {
+				// the field expression spans the receiver too; the name is its tail
+				c.fix(diag.Replace(c.file, diag.Span{Start: fn.End - len(fn.Name), End: fn.End}, s))
+			}
 			return &Bad{}
 		}
 		if len(m.Params) == 0 || !m.Params[0].Self {
@@ -255,7 +265,7 @@ func (c *fnCtx) callFunc(sc *scope, x *ast.CallExpr, info *CallInfo, f *FuncDecl
 	if strings.HasPrefix(f.Name, "simd_") && f.Module == "core" {
 		c.checkSIMD(x, f, m)
 	}
-	if (wrappingIntrinsics[f.Name] || bitCountIntrinsics[f.Name]) && f.Module == "core" {
+	if (wrappingIntrinsics[f.Name] || bitCountIntrinsics[f.Name] || loadIntrinsics[f.Name]) && f.Module == "core" {
 		if t, ok := m["T"]; ok && !IsInteger(t) {
 			c.errorf("TYPE_MISMATCH", x.Pos, "%s requires an integer type, found %s", f.Name, typeString(t))
 		}

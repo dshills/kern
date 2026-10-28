@@ -356,6 +356,13 @@ func (r *resolver) errorf(code diag.Code, file string, pos ast.Pos, format strin
 	r.prog.Diags = append(r.prog.Diags, diag.New(code, file, diag.Span{Start: pos.Start, End: pos.End}, format, args...))
 }
 
+// fix attaches a machine-applicable edit to the diagnostic just reported.
+func (r *resolver) fix(ops ...diag.StructuredEditOp) {
+	if n := len(r.prog.Diags); n > 0 {
+		r.prog.Diags[n-1].Fix = &diag.StructuredEdit{Ops: ops}
+	}
+}
+
 // PreludeSource returns the text of the embedded prelude (std/core.kern).
 func PreludeSource() []byte {
 	b, err := preludeFS.ReadFile("prelude/core.kern")

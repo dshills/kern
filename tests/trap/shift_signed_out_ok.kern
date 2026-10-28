@@ -1,0 +1,14 @@
+//! phase: 3
+//! expect: output
+//! twin: shift_signed_out
+module t
+func sh(x: i32, n: u32) -> i32 { return x << n }
+func main() -> i32 {
+    print_i64(i64(sh(-1i32, 0u32)))
+    println()
+    print_i64(i64(sh(3i32, 29u32)))
+    println()
+    print_i64(i64(wrapping_shl(-1i32, 1u32)))
+    println()
+    return 0i32
+}

@@ -1,0 +1,21 @@
+//! phase: 3
+//! expect: trap bounds
+//! twin: load_order_bounds_ok
+// A byte-order read checks its last byte: a two-byte read at the last
+// index of a four-byte view traps with kind bounds at the read, in both
+// engines and both configurations (the first read, under the guard, is
+// proven in release and still checked by the interpreter).
+module t
+func word(p: view[]u8, at: usize) -> u16 {
+    if len(p) < 4usize { return 0u16 }
+    return load_be[u16](p, at)
+}
+func main() -> i32 {
+    var b: [4]u8 = zero()
+    b[1usize] = 7u8
+    print_u64(u64(word(b, 0usize)))
+    println()
+    print_u64(u64(word(b, 3usize)))
+    println()
+    return 0i32
+}

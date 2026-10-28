@@ -1,0 +1,8 @@
+//! phase: 1
+//! expect: accept
+//! twin: fix_literal_range
+module m
+func f() -> u8 {
+    var x: u8 = 200u8
+    return x
+}

@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: accept
+//! twin: fix_out_result
+module m
+struct P { x: u64 }
+func init_p(p: out P) -> Result[(), u8] { p.x = 1u64; return Ok(()) }
+func g() -> Result[u64, u8] {
+    var p: P
+    init_p(out p)?
+    return Ok(p.x)
+}
