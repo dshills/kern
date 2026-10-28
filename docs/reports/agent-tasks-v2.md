@@ -1,9 +1,11 @@
 # Agent benchmark, second task suite
 
-**Date:** 2026-10-28. **Follows:** `bench/agent/REPORT.md` (the full matrix
-on the first suite: 0 wins of 10, every trial succeeding in both arms) and
-the research report's conclusion that the next experiment needs tasks the
-plain arm fails. **Plan:** PLAN.md 4.2, spec §2.3 and §9.
+**Date:** 2026-10-28. **Follows:** the full matrix on the first suite
+(0 wins of 10, every trial succeeding in both arms) and the research
+report's conclusion that the next experiment needs tasks the plain arm
+fails. **Result:** the matrix on this suite is `bench/agent/REPORT.md`
+and the last section of this report. **Plan:** PLAN.md 4.2, spec §2.3
+and §9.
 
 ## Why the first suite could not separate the arms
 
@@ -152,11 +154,63 @@ that hard-codes eleven lines per input instead of fixing the program is
 not a behaviour the first matrix showed, and the transcripts are
 recorded, so such a trial would be visible.
 
-## Not done
+## The matrix
 
-The matrix has not been run on this suite: 10 tasks × 2 models × 2 arms ×
-5 trials is 200 model-driven trials, a cost decision for the owner. A
-pilot of one task, one model and one trial per arm
-(`go run ./bench/agent/harness -tasks t03_proven_checks -models anthropic:claude-opus-5-5 -trials 1`)
-would show whether the plain arm's first DONE fails the budget as
-designed before the full run is paid for.
+The full matrix ran on 2026-10-28 (`go run ./bench/agent/harness`, both
+models, both arms, 5 trials per cell, 200 trials, records under
+`bench/agent/runs/20261028-104427/`; the table is `bench/agent/REPORT.md`).
+The primary metric records **0 wins of 10**, as on the first suite, but
+for the opposite reason.
+
+**Successes.** The structured arm passed all 100 of its trials. The plain
+arm passed 90: it failed t03 on 4 of 5 GPT trials and 2 of 5 Claude
+trials, and t10 on 4 of 5 Claude trials. Every one of the ten failures has
+the same shape, the one the suite was written to produce: the program
+checks cleanly and prints the expected output, the agent replies DONE
+(after 2 to 9 iterations), and the hidden count of runtime-checked bounds
+checks is over the budget. The plain arm has no way to count what the
+pass proved, so it stops at the first version that runs. The structured
+arm called `show_bounds_checks` and rewrote until the count fit. Those
+are the two tasks whose requirement the compiler alone can measure and
+whose starting program is furthest from meeting it; on the other eight,
+both arms met the budget at or near the first attempt.
+
+**Iterations and wall-clock.** The rule asks for strictly fewer median
+iterations and strictly less median wall-clock time in both models, with
+ties losing, so the structured arm's extra tool calls count against it
+wherever they do not avert a failure. The query tools were used in 37 of
+Claude's 50 structured trials and 39 of GPT's. Claude's medians tie on
+seven tasks (3 iterations in both arms on six of them), beat the plain
+arm on t08 (4 against 5) and t10 (5 against the scored 20), and lose on
+t07 (6 against 4, where the structured trials took one more rewrite
+cycle each; only two of the five called a query, `explain_ownership`
+once apiece, so the difference there is trial-to-trial variance in a
+task both arms solve, not query cost). GPT's structured
+medians are one to five iterations higher than its plain medians on seven
+tasks (t02 is 9 against 5, t08 is 10 against 5), tie on t06, and win on
+t03 (7 against the scored 20) and t07 (8 against 9). No task is a win in
+both models, which is what the rule requires.
+
+**Reading.** The suite does what the first could not: the plain arm now
+fails, and only where the requirement needs a measurement the text
+diagnostics do not carry. What the matrix shows is that the queries buy
+reliability on those tasks (a failure rate of 10 of 100 goes to 0 of 100)
+and cost speed on the rest, because a model that is given a measuring
+tool uses it even when the task does not need it, and each use is an
+iteration. The primary metric as written in spec §9 measures speed and
+counts a tie as a loss, so it cannot register the reliability gain, and
+under it the experiment fails. Whether the metric should weigh successes
+before medians is a specification question and is left to the owner; the
+report records the result under the rule as it stands. The token medians
+in the report show the same trade: the structured arm's trials are
+longer where it queried (GPT's t08 at 296 k input tokens against 140 k)
+and no shorter where it did not.
+
+Two cautions. The failure shape depends on the agent declaring DONE on
+the strength of `run` alone; a plain-arm agent that distrusted its own
+count of indexed reads could rewrite defensively and pass, and Claude did
+so on three t03 trials. And the queries' cost is partly the prompt's: the
+structured system prompt names the five queries without saying when they
+are worth calling, so the models call them on sight. A prompt that said
+"query only what the task bounds" would narrow the iteration gap, and
+would also be a different experiment.
