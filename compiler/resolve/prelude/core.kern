@@ -369,9 +369,12 @@ impl Vec[T] {
     // store. A vector with nothing allocated takes zeroed storage first and
     // writes one copy: when that copy's bytes are all zero the rest of the
     // storage already holds it, so the fill is skipped and the pages stay
-    // untouched until used (Rust's vec![0; n]). A copy whose bytes are all
-    // zero owns no allocation (Box and Shared copies never are; a Vec copy
-    // is then the empty vector), so bitwise duplicates of it are its copies.
+    // untouched until used (Rust's vec![0; n]). copy(x) runs no user code:
+    // it is a load, a core container's clone or the field-wise clone, so it
+    // is deterministic, and its one side effect (Shared.clone's count) comes
+    // with a non-null pointer. A copy whose bytes are all zero therefore owns
+    // nothing and changed nothing (a Vec copy is then the empty vector), and
+    // bitwise duplicates of it are exactly what further copies would be.
     contract { requires "data addresses cap elements of which the first size are live; an all-zero copy of x owns nothing" }
     func resize(edit self, n: usize, x: own T) {
         while self.size > n {
