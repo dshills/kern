@@ -52,13 +52,34 @@ first "DONE" is a guess.
 The two bounds-check tasks rest on what the proof pass accepts
 (`compiler/opt/prove.go`): a comparison of the index, or the index plus a
 constant, against `len(x)` of the same sequence that dominates the access;
-a constant index under a dominating length check; a `for` loop. The
-prompts state those three forms. They do not state what the pass does not
-accept, which the structured arm sees and the plain arm must discover by
-reasoning: a length copied into a local (`n := len(buf)`) is not the same
-length, `<=` establishes nothing, facts do not survive a join (`a && b` in
-a loop condition), and a store through an edit access forgets what the
-guard established, so a guarded sequence of writes proves only its first.
+a constant index under a dominating length check; a `for` loop. What it
+does not accept is what the structured arm sees and the plain arm must
+discover by reasoning: a length copied into a local (`n := len(buf)`) is
+not the same length, `<=` establishes nothing, facts do not survive a
+join (`a && b` in a loop condition) or a call, and a store through an
+edit access forgets what the guard established, so a guarded sequence of
+writes proves only its first.
+
+## Pilot, and the tightening it forced
+
+A first pilot (t03, claude-opus-5-5, one trial per arm) succeeded in both
+arms in 3 iterations, the plain arm in 20 s and the structured arm in
+25 s. The plain arm met the budget at its first attempt by folding `rd16`
+and `frame_ok` into the two loops, so that every index sat directly under
+the loop guard and none of the pass's limits applied; the prompt had
+stated the three proof forms, and the required functions named only the
+three that `main` calls. The structured arm made the same rewrite and
+spent its extra seconds on two `show_bounds_checks` calls.
+
+So the prompts no longer state any rule (the proof forms in t03 and t10,
+what counts as an allocation site in t02, Rule 4.1.5 in t04, "copies
+where it only needs to look" in t01): the language reference every arm
+receives is the rule's only source. And where the pass's limits are the
+point, the helpers are required with their signatures: t03 keeps
+`rd16(buf, at)` and `frame_ok(buf, at)` called as they are, so a proof
+must be established inside each helper; t10's start declares `rd16`,
+`rd32` and `byte_sum(buf, start, end)` as stubs that `decode` must read
+through, where the `[start, end)` loop is the join case.
 
 The kinds follow §9 (implementation ×3, debugging ×2, refactoring,
 optimization ×3, unsafe-contract review), as the first suite did.

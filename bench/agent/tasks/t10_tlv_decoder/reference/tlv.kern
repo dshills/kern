@@ -9,11 +9,13 @@ struct Summary { records: u64; counters: u64; flags: u32; bytes: u64; skipped: u
 // decode walks the records of buf and returns their summary: the number of
 // records, the sum of the counters, the OR of the flag words, the sum of the
 // raw bytes and the number of skipped records; None for a malformed buffer.
+// rd16 reads the big-endian 16-bit value at `at`.
 func rd16(buf: view[[]u8], at: usize) -> u64 {
     if at + 1usize < len(buf) { return u64(buf[at]) * 256u64 + u64(buf[at + 1usize]) }
     return 0u64
 }
 
+// rd32 reads the big-endian 32-bit value at `at`.
 func rd32(buf: view[[]u8], at: usize) -> u32 {
     if at + 3usize < len(buf) {
         return u32(buf[at]) << 24u32 | u32(buf[at + 1usize]) << 16u32 | u32(buf[at + 2usize]) << 8u32 | u32(buf[at + 3usize])
@@ -21,6 +23,7 @@ func rd32(buf: view[[]u8], at: usize) -> u32 {
     return 0u32
 }
 
+// byte_sum sums the bytes of buf from `start` up to (not including) `end`.
 func byte_sum(buf: view[[]u8], start: usize, end: usize) -> u64 {
     t := 0u64
     i := start

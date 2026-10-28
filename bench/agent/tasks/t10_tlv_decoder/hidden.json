@@ -5,6 +5,9 @@
  "max_runtime_bounds_checks": 5,
  "no_unsafe_added": true,
  "required_functions": [
-  "tlv.decode"
+  "tlv.decode",
+  "tlv.rd16",
+  "tlv.rd32",
+  "tlv.byte_sum"
  ]
 }

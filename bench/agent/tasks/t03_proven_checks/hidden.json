@@ -5,6 +5,8 @@
  "max_runtime_bounds_checks": 4,
  "no_unsafe_added": true,
  "required_functions": [
+  "frames.rd16",
+  "frames.frame_ok",
   "frames.total_values",
   "frames.largest_tag",
   "frames.byte_sum"
