@@ -1,0 +1,15 @@
+//! phase: 1
+//! expect: output mutex_recursive_ok
+//! twin: mutex_recursive
+
+// The same two owners locked one after the other: each lock is released
+// before the next, so nothing traps.
+module t
+func main() -> i32 {
+    a := Shared[Mutex[u64]].new(Mutex[u64].new(1u64))
+    b := a.clone()
+    with g := a.get().lock() { g = g + 1u64 }
+    with h := b.get().lock() { h = h + 1u64 }
+    with g := a.get().lock() { print_u64(copy(g)); println() }
+    return 0i32
+}

@@ -53,3 +53,34 @@ A default mutex alone would deadlock where kern now traps. A fix would
 keep the trap with cheaper bookkeeping, for example the owning thread
 held in an atomic beside a default mutex and checked before locking. The
 rest of thread_pool's gap (0.75) is not diagnosed.
+
+## Applied: default mutex with an owner check
+
+`kern_mutex` is now a default pthread mutex plus an atomic owner word: the
+address of the holding thread's thread-local `kern_mutex_self`, stored
+after locking and cleared before unlocking. A lock that finds its own
+thread's address there traps `explicit`, as the error-checking mutex's
+`EDEADLK` did and as the interpreter already did with its owner field. A
+thread only ever reads its own last write or another thread's address, so
+the relaxed accesses cannot report a lock taken by another thread as
+recursive. New fixtures, `tests/trap/mutex_recursive.kern` (two `Shared`
+owners of one `Mutex` locked inside each other) and its twin
+`mutex_recursive_ok`, give the same trap kind and span in the interpreter
+and both native builds. The ThreadSanitizer fixtures
+(`tests/concurrency/mutex_counter`, `shared_handoff`) pass.
+
+Release builds, Mops/s, six or seven interleaved runs, load 6.5 to 8 (a
+busy host, so C's rows also move between sets):
+
+| | C | error-checking (before) | owner check (now) | default, no check |
+|---|---|---|---|---|
+| thread_pool | 39.6-41.4 | 23.7-24.8 | 29.3-31.3 | 28.7-29.9 |
+| lock_protected_map | 31.2-36.3 | 20.4-21.9 | 23.5-26.8 | 26.5-29.7 |
+
+The owner check recovers most of what the error-checking mutex cost:
+thread_pool +25%, lock_protected_map +16%. On thread_pool it costs nothing
+over an unchecked default mutex; on lock_protected_map about 10%. Moving
+the owner word in front of the mutex did not help. Both rows still miss
+the target, at about 0.74 of C on this run. The rest of the gap is not
+diagnosed, and the ratio should be confirmed by a quiet-host harness run.
+Checksums are unchanged.

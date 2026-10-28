@@ -238,24 +238,37 @@ void kern_test_shared_seed_count(kern_shared *s, int64_t n) { atomic_store(&s->c
 
 // ---- Mutex ----
 
-typedef struct { pthread_mutex_t m; int64_t size; char data[]; } kern_mutex;
+// A Mutex is a default pthread mutex plus its owner: the address of the
+// holding thread's kern_mutex_self, written after locking and cleared
+// before unlocking. A thread that finds its own address there is acquiring
+// the mutex it holds, which traps (spec §13 accepted decision, as the
+// interpreter does). Only the holder writes its own address, and a thread
+// always reads its own last write, so the relaxed load never mistakes
+// another thread's lock for a recursive one. This replaces an
+// error-checking mutex, whose lock path cost thread_pool and
+// lock_protected_map a quarter of their throughput
+// (docs/reports/quiet-harness-2026-10-28.md).
+typedef struct { pthread_mutex_t m; _Atomic(uintptr_t) owner; int64_t size; char data[]; } kern_mutex;
+static _Thread_local char kern_mutex_self;
 void *kern_mutex_new(int64_t size, const void *src) {
     kern_mutex *mx = kern_alloc(sizeof *mx + (size_t)size, 0, 0);
-    pthread_mutexattr_t at;
-    pthread_mutexattr_init(&at);
-    pthread_mutexattr_settype(&at, PTHREAD_MUTEX_ERRORCHECK);
-    pthread_mutex_init(&mx->m, &at);
-    pthread_mutexattr_destroy(&at);
+    pthread_mutex_init(&mx->m, NULL);
+    atomic_init(&mx->owner, 0);
     mx->size = size;
     memcpy(mx->data, src, (size_t)size);
     return mx;
 }
 void *kern_mutex_lock(kern_mutex *mx, int64_t start, int64_t end) {
-    int rc = pthread_mutex_lock(&mx->m);
-    if (rc != 0) kern_trap(11, start, end); // EDEADLK: recursive acquisition (spec §5.5), or a broken mutex
+    uintptr_t self = (uintptr_t)&kern_mutex_self;
+    if (atomic_load_explicit(&mx->owner, memory_order_relaxed) == self) kern_trap(11, start, end); // recursive acquisition
+    if (pthread_mutex_lock(&mx->m) != 0) kern_trap(11, start, end); // a broken mutex
+    atomic_store_explicit(&mx->owner, self, memory_order_relaxed);
     return mx->data;
 }
-void kern_mutex_unlock(kern_mutex *mx) { pthread_mutex_unlock(&mx->m); }
+void kern_mutex_unlock(kern_mutex *mx) {
+    atomic_store_explicit(&mx->owner, 0, memory_order_relaxed);
+    pthread_mutex_unlock(&mx->m);
+}
 void kern_mutex_drop(kern_mutex *mx, kern_glue g) { if (mx == NULL) return; if (g) g(mx->data); pthread_mutex_destroy(&mx->m); free(mx); }
 
 // ---- threads (spec §5.5) ----

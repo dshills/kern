@@ -1,0 +1,17 @@
+//! phase: 1
+//! expect: trap explicit
+//! twin: mutex_recursive_ok
+
+// Two Shared owners of one Mutex are different roots for the checker, so
+// locking through the second while the first lock is held compiles; at
+// runtime it is a recursive acquisition and traps instead of deadlocking.
+module t
+func main() -> i32 {
+    a := Shared[Mutex[u64]].new(Mutex[u64].new(1u64))
+    b := a.clone()
+    with g := a.get().lock() {
+        with h := b.get().lock() { h = h + 1u64 }
+        g = g + 1u64
+    }
+    return 0i32
+}
