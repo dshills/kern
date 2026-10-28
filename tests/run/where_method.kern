@@ -1,0 +1,42 @@
+//! phase: 1
+//! expect: output
+// A method with a where clause on its impl's type parameter: inside the
+// body T is Copy, so copy(self.a) is permitted; the method is callable on
+// Pair[u64] and on a Pair of a Copy struct, and Vec.extend, declared the
+// same way in the prelude, copies u64 elements.
+module t
+struct Pt { x: u64; y: u64 }
+struct Pair[T] { a: T; b: T }
+impl Pair[T] {
+    func first(view self) -> T where T: Copy { return copy(self.a) }
+    // the receiver's fields are Copy under the bound: a read is a copy
+    func second(view self) -> T where T: Copy { return self.b }
+    func swap(edit self) where T: Copy {
+        t := copy(self.a)
+        self.a = copy(self.b)
+        self.b = t
+    }
+    func size(view self) -> usize { return 2usize }
+}
+func main() -> i32 {
+    p := Pair[u64] { a: 7u64, b: 9u64 }
+    p.swap()
+    print_u64(p.first() + p.second())
+    println()
+    q := Pair[Pt] { a: Pt { x: 1u64, y: 2u64 }, b: Pt { x: 3u64, y: 4u64 } }
+    r := q.first()
+    print_u64(r.x + r.y)
+    println()
+    print_u64(u64(q.size()))
+    println()
+    v := Vec[u64].new()
+    var src: [3]u64 = zero()
+    src[0usize] = 10u64
+    src[1usize] = 20u64
+    src[2usize] = 30u64
+    v.extend(src)
+    v.extend(src)
+    print_u64(u64(v.len()))
+    println()
+    return 0i32
+}

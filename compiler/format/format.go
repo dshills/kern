@@ -430,6 +430,22 @@ func (p *printer) funcHeader(d *ast.FuncDecl) {
 	}
 	p.w(")")
 	p.ret(d.Ret)
+	for i, tp := range d.Where {
+		if i == 0 {
+			p.w(" where ")
+		} else {
+			p.w(", ")
+		}
+		p.w(tp.Name)
+		for j, c := range tp.Constraints {
+			if j == 0 {
+				p.w(": ")
+			} else {
+				p.w(" + ")
+			}
+			p.typeName(c)
+		}
+	}
 	if d.Release != "" {
 		p.w(" release ")
 		p.w(d.Release)

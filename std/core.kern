@@ -355,12 +355,12 @@ impl Vec[T] {
         self.reserve(want)
     }
     // extend appends the elements of src, whose type must be Copy (the
-    // resolver requires it at the call, CONSTRAINT_UNSATISFIED otherwise):
-    // one reservation for size + len(src) (checked, so the sum cannot wrap),
+    // where clause; CONSTRAINT_UNSATISFIED at a call otherwise): one
+    // reservation for size + len(src) (checked, so the sum cannot wrap),
     // one block copy of the elements, then the size update. This is the
     // memcpy / extend_from_slice form of a loop of pushes.
     contract { requires "data addresses cap elements of which the first size are live; src does not overlap the spare capacity" }
-    func extend(edit self, src: view[]T) {
+    func extend(edit self, src: view[]T) where T: Copy {
         total := self.size + len(src)
         if total > self.cap { self.grow_to(total) }
         unsafe {

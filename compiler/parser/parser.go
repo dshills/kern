@@ -401,6 +401,26 @@ func (p *parser) parseFunc(withBody bool) *ast.FuncDecl {
 	d.TypeParams = p.parseTypeParams()
 	d.Params = p.parseParams()
 	d.Ret = p.parseRet()
+	if p.at(lexer.Ident) && p.cur().Text == "where" { // contextual keyword
+		p.next()
+		for {
+			n := p.expect(lexer.Ident)
+			tp := &ast.TypeParam{Pos: tokPos(n), Name: n.Text}
+			p.expect(lexer.Colon)
+			for {
+				c := p.parseTypeName()
+				tp.Constraints = append(tp.Constraints, c)
+				tp.End = c.End
+				if !p.accept(lexer.Plus) {
+					break
+				}
+			}
+			d.Where = append(d.Where, tp)
+			if !p.accept(lexer.Comma) {
+				break
+			}
+		}
+	}
 	if p.at(lexer.Ident) && p.cur().Text == "release" { // contextual keyword
 		p.next()
 		d.Release = p.expect(lexer.Ident).Text

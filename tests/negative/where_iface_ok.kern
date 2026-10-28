@@ -1,0 +1,12 @@
+//! phase: 1
+//! expect: accept
+//! twin: where_iface
+module m
+interface First[T] { func first(view self) -> T }
+struct Pair[T] { a: T; b: T }
+impl First[T] for Pair[T] {
+    func first(view self) -> T { return copy(self.a) }
+}
+impl Pair[T] {
+    func second(view self) -> T where T: Copy { return copy(self.b) }
+}

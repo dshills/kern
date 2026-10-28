@@ -79,6 +79,7 @@ type FuncDecl struct {
 	Params      []*ParamDecl
 	Ret         []Type
 	Release     string
+	Where       []*TypeParamType // where-clause bounds on the owner's type parameters, checked at each call
 	Contract    *ast.Contract
 	Extern      string
 	Receiver    *TypeDecl // non-nil for methods
@@ -1029,6 +1030,49 @@ func (r *resolver) funcSig(m *Module, file string, outer *scope, d *ast.FuncDecl
 	sc := outer.child()
 	for _, tp := range fd.TypeParams {
 		sc.vars[tp.Name] = &Symbol{Kind: SymTypeParam, Name: tp.Name, TParam: tp}
+	}
+	// A where clause adds constraints to one of the function's own type
+	// parameters (then it is simply part of that parameter) or to one of
+	// the owner's (spec/types.md): the body sees the parameter with the
+	// added constraints, and every call checks the bound on the owner's
+	// argument, as it checks the parameters' own constraints.
+	if len(d.Where) > 0 && selfT != nil {
+		// a bound on an interface method would be bypassed by a call through
+		// the interface's constraint, which knows only the interface's signature
+		r.errorf("TYPE_MISMATCH", file, d.Where[0].Pos, "where clause on interface method %s: an interface's methods are unconditional", d.Name)
+		d.Where = nil
+	}
+	strengthened := map[string]Type{}
+	for i, b := range r.typeParams(m, file, d.Where, d.Name) {
+		var own, owner *TypeParamType
+		for _, tp := range fd.TypeParams {
+			if tp.Name == b.Name {
+				own = tp
+			}
+		}
+		for _, tp := range ownerParams {
+			if tp.Name == b.Name {
+				owner = tp
+			}
+		}
+		switch {
+		case own != nil:
+			own.Constraints = append(own.Constraints, b.Constraints...)
+		case owner != nil:
+			bound := &TypeParamType{Name: owner.Name, Owner: owner.Owner, Constraints: b.Constraints}
+			fd.Where = append(fd.Where, bound)
+			seen := &TypeParamType{Name: owner.Name, Owner: owner.Owner, Constraints: append(append([]*Constraint{}, owner.Constraints...), b.Constraints...)}
+			sc.vars[b.Name] = &Symbol{Kind: SymTypeParam, Name: b.Name, TParam: seen}
+			strengthened[b.Name] = seen
+		default:
+			r.errorf("NAME_UNRESOLVED", file, d.Where[i].Pos, "where clause names %s, which is not a type parameter of %s or its owner", b.Name, d.Name)
+		}
+	}
+	if len(strengthened) > 0 && recv != nil {
+		// the receiver's fields see the strengthened parameter too; the
+		// parameter is Identical to the owner's (same name and owner), so
+		// the method still matches every call
+		recv = Subst(recv, strengthened)
 	}
 	ft := &Func{}
 	for _, p := range d.Params {

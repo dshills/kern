@@ -130,7 +130,8 @@ type FuncDecl struct {
 	TypeParams []*TypeParam
 	Params     []*Param
 	Ret        []TypeExpr // 0 = unit, 1 = type, >1 = tuple of accesses
-	Release    string     // release function name, "" if none
+	Where      []*TypeParam // `where T: Copy, ...`: constraints on the owner's or the function's type parameters
+	Release    string       // release function name, "" if none
 	Body       *Block     // nil for interface methods and extern
 	Extern     string     // ABI name, e.g. "C", for extern decls
 }

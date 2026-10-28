@@ -31,7 +31,8 @@ extern_decl   = "extern" string_lit "func" ident "(" [ params ] ")" [ "->" type 
 tls_decl      = "thread_local" ident ":" type "=" expr newline ;   (* Copy type; literal or zero() *)
 
 func_decl     = [ contract ] "func" ident [ type_params ] "(" [ params ] ")" [ "->" ret_type ]
-                [ "release" ident ] block ;
+                [ "where" where_bound { "," where_bound } ] [ "release" ident ] block ;
+where_bound   = ident ":" constraint { "+" constraint } ;   (* a type parameter of the function or of its impl *)
 func_sig      = "func" ident [ type_params ] "(" [ params ] ")" [ "->" ret_type ] ;
 contract      = "contract" "{" { contract_clause sep } "}" ;
 contract_clause = ( "invariant" | "requires" | "ensures" ) string_lit ;

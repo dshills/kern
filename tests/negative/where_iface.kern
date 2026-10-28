@@ -1,0 +1,8 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: where_iface_ok
+module m
+interface First[T] { func first(view self) -> T }
+struct Pair[T] { a: T; b: T }
+impl First[T] for Pair[T] {
+    func first(view self) -> T where T: Copy { return copy(self.a) }   // TYPE_MISMATCH: an interface method cannot add a bound
+}

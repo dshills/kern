@@ -1,0 +1,8 @@
+//! phase: 1
+//! expect: accept
+//! twin: where_unknown
+module m
+struct Pair[T] { a: T; b: T }
+impl Pair[T] {
+    func first(view self) -> T where T: Copy { return copy(self.a) }
+}

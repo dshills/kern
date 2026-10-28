@@ -1,0 +1,7 @@
+//! expect: reject NAME_UNRESOLVED rule=T.1
+//! twin: where_unknown_ok
+module m
+struct Pair[T] { a: T; b: T }
+impl Pair[T] {
+    func first(view self) -> T where U: Copy { return copy(self.a) }   // NAME_UNRESOLVED: U is not a type parameter
+}
