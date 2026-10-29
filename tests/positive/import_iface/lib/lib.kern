@@ -1,0 +1,16 @@
+module lib
+interface Shape {
+    func area(view self) -> u64
+}
+struct Square { Side: u64 }
+impl Shape for Square {
+    func area(view self) -> u64 { return self.Side * self.Side }
+}
+func Total[T: Shape](xs: view[[]T]) -> u64 {
+    var s: u64 = 0u64
+    for x in xs { s = s + x.area() }
+    return s
+}
+func Describe[T: Shape](x: view[T]) -> u64 {
+    return x.area() + 1u64
+}

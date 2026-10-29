@@ -1,0 +1,11 @@
+//! expect: reject NAME_PRIVATE rule=T.1
+//! twin: import_iface_private_ok
+// A module-private interface (lowercase) cannot be implemented from
+// another module.
+module app
+import "lib"
+struct A { x: u64 }
+impl lib.hidden for A {   // NAME_PRIVATE
+    func v(view self) -> u64 { return self.x }
+}
+func main() -> i32 { return 0i32 }

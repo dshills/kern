@@ -800,19 +800,48 @@ func (r *resolver) dup(m *Module, file, name string, pos ast.Pos) bool {
 	return false
 }
 
+// lookupIface resolves an interface named as a constraint or in an impl:
+// one of this module's, or an exported one of an imported module through
+// its alias (`impl lib.Shape for Rect`, `T: lib.Shape`). It reports an
+// unknown module, interface or private name and returns nil.
+func (r *resolver) lookupIface(m *Module, file string, t *ast.TypeName) *InterfaceDecl {
+	mod := m
+	if t.Pkg != "" {
+		im, ok := m.Imports[t.Pkg]
+		if !ok {
+			r.errorf("NAME_UNRESOLVED", file, t.Pos, "unknown module %s", t.Pkg)
+			return nil
+		}
+		mod = im
+	}
+	id, ok := mod.Ifaces[t.Name]
+	if !ok {
+		if t.Pkg != "" {
+			r.errorf("NAME_UNRESOLVED", file, t.Pos, "unknown interface %s.%s", t.Pkg, t.Name)
+		} else {
+			r.errorf("NAME_UNRESOLVED", file, t.Pos, "unknown interface %s", t.Name)
+		}
+		return nil
+	}
+	if mod != m && !isExported(t.Name) && !mod.Std {
+		r.errorf("NAME_PRIVATE", file, t.Pos, "%s.%s is private to module %s", t.Pkg, t.Name, mod.Name)
+		return nil
+	}
+	return id
+}
+
 func (r *resolver) typeParams(m *Module, file string, tps []*ast.TypeParam, owner string) []*TypeParamType {
 	var out []*TypeParamType
 	for _, tp := range tps {
 		t := &TypeParamType{Name: tp.Name, Owner: owner}
 		for _, c := range tp.Constraints {
-			switch c.Name {
-			case "Copy", "Send", "Share":
+			switch {
+			case c.Pkg == "" && (c.Name == "Copy" || c.Name == "Send" || c.Name == "Share"):
 				t.Constraints = append(t.Constraints, &Constraint{Marker: c.Name})
 			default:
-				if id, ok := m.Ifaces[c.Name]; ok {
+				// an interface of this module or, qualified, of an imported one
+				if id := r.lookupIface(m, file, c); id != nil {
 					t.Constraints = append(t.Constraints, &Constraint{Iface: id})
-				} else {
-					r.errorf("NAME_UNRESOLVED", file, c.Pos, "unknown constraint %s", c.Name)
 				}
 			}
 		}
@@ -1347,9 +1376,8 @@ func (r *resolver) collectImpl(m *Module, file string, d *ast.ImplDecl) {
 	var iface *InterfaceDecl
 	ifaceArgs := map[string]Type{}
 	if d.Iface != nil {
-		iface = m.Ifaces[d.Iface.Name]
+		iface = r.lookupIface(m, file, d.Iface)
 		if iface == nil {
-			r.errorf("NAME_UNRESOLVED", file, d.Iface.Pos, "unknown interface %s", d.Iface.Name)
 			return
 		}
 		if len(d.Iface.Args) != len(iface.TypeParams) {

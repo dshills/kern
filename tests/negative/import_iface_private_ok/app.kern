@@ -1,0 +1,11 @@
+//! phase: 3
+//! expect: accept
+//! twin: import_iface_private
+// The twin of import_iface_private: the interface is exported.
+module app
+import "lib"
+struct A { x: u64 }
+impl lib.Visible for A {
+    func v(view self) -> u64 { return self.x }
+}
+func main() -> i32 { return 0i32 }

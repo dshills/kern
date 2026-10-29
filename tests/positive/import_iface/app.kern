@@ -1,0 +1,34 @@
+//! phase: 3
+//! expect: output import_iface
+// An imported interface is implemented through its module alias
+// (`impl lib.Shape for Rect`), names a constraint the same way
+// (`T: lib.Shape`), and the exporting module's generic functions accept
+// the implementing type (regression: the impl's interface was looked up in
+// the implementing module only, NAME_UNRESOLVED).
+module app
+import "lib"
+struct Rect { w: u64; h: u64 }
+impl lib.Shape for Rect {
+    func area(view self) -> u64 { return self.w * self.h }
+}
+func biggest[T: lib.Shape](xs: view[[]T]) -> u64 {
+    var m: u64 = 0u64
+    for x in xs {
+        a := x.area()
+        if a > m { m = a }
+    }
+    return m
+}
+func main() -> i32 {
+    sq := [lib.Square{Side: 2u64}, lib.Square{Side: 3u64}]
+    print_u64(lib.Total(sq[0usize:2usize]))
+    println()
+    rs := [Rect{w: 2u64, h: 5u64}, Rect{w: 3u64, h: 3u64}]
+    print_u64(lib.Total(rs[0usize:2usize]))
+    println()
+    print_u64(lib.Describe(rs[1usize]))
+    println()
+    print_u64(biggest(rs[0usize:2usize]) + biggest(sq[0usize:2usize]))
+    println()
+    return 0i32
+}

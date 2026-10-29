@@ -1,0 +1,4 @@
+module lib
+interface hidden {
+    func v(view self) -> u64
+}

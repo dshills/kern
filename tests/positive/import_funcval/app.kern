@@ -1,0 +1,39 @@
+//! phase: 3
+//! expect: output import_funcval
+// An imported module's function is a value through its module path: spawned
+// as a thread's function, passed where a function value is expected, and
+// held in a variable (regression: the lowering failed on `lib.Worker`,
+// "unsupported field expression"). Also a thread_local of an imported
+// module (fresh in the spawned thread), a closure passed to an imported
+// function, and an out parameter filled by one.
+module app
+import "lib"
+func spawned() -> Result[u64, SpawnErr] {
+    t := thread.spawn(lib.Worker, 5u64)?
+    return Ok(t.join())
+}
+func main() -> i32 {
+    print_u64(lib.Bump(1u64))
+    println()
+    match spawned() {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    print_u64(lib.Bump(1u64))
+    println()
+    print_u64(lib.Apply(lib.Twice, 21u64))
+    println()
+    f := lib.Twice
+    print_u64(f(4u64))
+    println()
+    k := 7u64
+    total := 0u64
+    lib.Each(4u64, |i| { total = total + i + k })
+    print_u64(total)
+    println()
+    var v: u64
+    lib.Fill(out v, 21u64)
+    print_u64(v)
+    println()
+    return 0i32
+}

@@ -355,8 +355,19 @@ func (fl *fnLower) field(x *ast.FieldExpr) operand {
 		}
 	}
 	if fl.l.info.Fields[x] == nil {
+		// an imported module's function as a value (module.f): a reference
+		// to it, as a bare identifier is for this module's functions
+		if id, ok := x.X.(*ast.Ident); ok {
+			if sym := fl.l.info.Idents[id]; sym != nil && sym.Kind == resolve.SymModule && sym.Module != nil {
+				if fd := sym.Module.Funcs[x.Name]; fd != nil {
+					v := fl.newValue(t)
+					fl.emit(&ir.FuncRef{Dst: v, Name: fl.l.request(fd, nil, fl.file)})
+					return operand{val: v}
+				}
+			}
+		}
 		// a function value through a static reference (Type.func) is not
-		// supported in Phase 1; module.func is handled by call()
+		// supported in Phase 1
 		fl.fail(x.Pos, "unsupported field expression %s", x.Name)
 	}
 	base := fl.expr(x.X, nil)

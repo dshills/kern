@@ -1,0 +1,4 @@
+module lib
+interface Visible {
+    func v(view self) -> u64
+}
