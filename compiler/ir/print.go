@@ -13,6 +13,13 @@ func Print(m *Module) string {
 	if m.Entry != "" {
 		fmt.Fprintf(&sb, "entry %s\n", m.Entry)
 	}
+	for _, g := range m.Globals {
+		kind := "thread_local"
+		if g.ReadOnly {
+			kind = "const"
+		}
+		fmt.Fprintf(&sb, "%s @%s: %s = %s\n", kind, g.Name, g.Type, initString(g.Init))
+	}
 	for _, f := range m.Funcs {
 		if f.Inlined {
 			continue // every call was inlined; nothing emits, runs or reports it
@@ -298,4 +305,20 @@ func printTerm(t Term) string {
 		return "<no terminator>"
 	}
 	return fmt.Sprintf("?%T", t)
+}
+
+// initString renders a global's folded initializer: a scalar, zero for
+// nil, and an aggregate's elements or fields in brackets.
+func initString(init any) string {
+	switch v := init.(type) {
+	case nil:
+		return "zero"
+	case []any:
+		parts := make([]string, len(v))
+		for i, el := range v {
+			parts[i] = initString(el)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	}
+	return fmt.Sprint(init)
 }
