@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/lower"
 	"github.com/dshills/kern/compiler/opt"
+	"github.com/dshills/kern/compiler/project"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
@@ -29,6 +31,35 @@ type BuildOptions struct {
 	Env        string // hosted | freestanding
 	TestHooks  bool
 	StackBytes int
+	// optSet and envSet record an explicit --opt or --env, which overrides
+	// the manifest's value (specs/module-discovery/SPEC.md R23).
+	optSet, envSet bool
+}
+
+// applyManifest takes the manifest's opt and env where no flag set them.
+func (o *BuildOptions) applyManifest(m *project.Manifest) {
+	if m == nil {
+		return
+	}
+	if !o.optSet && m.Opt != nil {
+		o.Opt = *m.Opt
+	}
+	if !o.envSet && m.Env != nil {
+		o.Env = *m.Env
+	}
+}
+
+// load discovers the program's files from the named ones, or from the
+// manifest when none is named, and writes the single JSON response for a
+// failure. It returns the result and whether the caller may go on.
+func load(files []string, stdout io.Writer) (project.Result, bool) {
+	cwd, _ := os.Getwd()
+	pr := project.Load(cwd, files)
+	if len(pr.Diags) > 0 {
+		_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: pr.Diags})
+		return pr, false
+	}
+	return pr, true
 }
 
 // Build resolves, checks, lowers and validates a program. Diagnostics are
@@ -80,12 +111,12 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 				if v != "debug" && v != "release" {
 					return opts, nil, nil, fmt.Errorf("--opt must be debug or release")
 				}
-				opts.Opt = v
+				opts.Opt, opts.optSet = v, true
 			case "--env":
 				if v != "hosted" && v != "freestanding" {
 					return opts, nil, nil, fmt.Errorf("--env must be hosted or freestanding")
 				}
-				opts.Env = v
+				opts.Env, opts.envSet = v, true
 			case "--stack-bytes":
 				n, err := strconv.Atoi(v)
 				if err != nil || n <= 0 {
@@ -102,28 +133,26 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 	if opts.TestHooks && opts.Opt == "release" {
 		return opts, nil, nil, fmt.Errorf("--test-hooks requires --opt debug")
 	}
-	if len(files) == 0 {
-		return opts, nil, nil, fmt.Errorf("run requires at least one file")
-	}
-	return opts, files, prog, nil
+	return opts, files, prog, nil // no file named: the manifest's entry (project.Load)
 }
 
 // runProgram implements `kern run`: check failures write the JSON response
 // to stdout and exit 2; otherwise stdout belongs to the program, a trap
 // writes its record to stderr and exits 134.
 func runProgram(args []string, stdout, stderr io.Writer) int {
-	opts, files, progArgs, err := parseRunArgs(args)
+	opts, named, progArgs, err := parseRunArgs(args)
 	if err != nil {
 		return fail(stdout, "CLI_INVALID_FLAGS", "%v", err)
 	}
-	var srcs []*source.File
-	for _, name := range files {
-		f, err := source.Load(name)
-		if err != nil {
-			return fail(stdout, "API_FILE_NOT_FOUND", "cannot read %s: %v", name, err)
-		}
-		srcs = append(srcs, f)
+	pr, ok := load(named, stdout)
+	if !ok {
+		return 2
 	}
+	opts.applyManifest(pr.Manifest)
+	if opts.TestHooks && opts.Opt == "release" {
+		return fail(stdout, "CLI_INVALID_FLAGS", "--test-hooks requires --opt debug")
+	}
+	srcs, files := pr.Files, pr.Names()
 	mod, ds, err := Build(srcs, opts.Opt)
 	req := Request{SchemaVersion: diag.SchemaVersion, Command: "run", Files: files}
 	if err != nil {

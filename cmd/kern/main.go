@@ -22,6 +22,7 @@ import (
 	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/format"
 	"github.com/dshills/kern/compiler/incremental"
+	"github.com/dshills/kern/compiler/project"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
@@ -35,7 +36,8 @@ func main() {
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: kern <check|format|emit-ir|explain-ownership|run|build> [files...]")
+		_, _ = fmt.Fprintln(stderr, "usage: kern <check|format|emit-ir|explain-ownership|show-*|run|build> [flags] [files...]")
+		_, _ = fmt.Fprintln(stderr, "  files default to the entry of kern.mod, the manifest that marks the project root and may set entry, opt, env, target and output; imports are found under that root")
 		return 2
 	}
 	cmd := args[0]
@@ -53,6 +55,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cacheDir := ""
 	lineSpan := 0
 	cfg := incremental.Config{Opt: "debug", Env: "hosted"}
+	optSet, envSet := false, false
 	var files []string
 	for _, a := range args[1:] {
 		if a == "--human" {
@@ -82,9 +85,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				return fail(stdout, "CLI_INVALID_FLAGS", "%s must be %s", k, map[string]string{"--opt": "debug or release", "--env": "hosted or freestanding"}[k])
 			}
 			if k == "--opt" {
-				cfg.Opt = v
+				cfg.Opt, optSet = v, true
 			} else {
-				cfg.Env = v
+				cfg.Env, envSet = v, true
 			}
 			continue
 		}
@@ -101,14 +104,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		req = Request{SchemaVersion: diag.SchemaVersion, Command: cmd, Files: files}
 	} else {
 		dec := json.NewDecoder(stdin)
-		if err := dec.Decode(&req); err != nil {
+		switch err := dec.Decode(&req); {
+		case errors.Is(err, io.EOF):
+			// no request on standard input: the manifest's entry files
+			req = Request{SchemaVersion: diag.SchemaVersion, Command: cmd}
+		case err != nil:
 			return fail(stdout, "API_MALFORMED_REQUEST", "request is not valid JSON: %v", err)
-		}
-		if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
-			return fail(stdout, "API_MALFORMED_REQUEST", "request must be exactly one JSON document")
-		}
-		if req.Command != "" && req.Command != cmd {
-			return fail(stdout, "API_UNKNOWN_COMMAND", "request command %q does not match %q", req.Command, cmd)
+		default:
+			if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+				return fail(stdout, "API_MALFORMED_REQUEST", "request must be exactly one JSON document")
+			}
+			if req.Command != "" && req.Command != cmd {
+				return fail(stdout, "API_UNKNOWN_COMMAND", "request command %q does not match %q", req.Command, cmd)
+			}
 		}
 	}
 	if req.SchemaVersion != diag.SchemaVersion {
@@ -117,11 +125,38 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if req.Command != "" && req.Command != cmd {
 		return fail(stdout, "API_UNKNOWN_COMMAND", "unknown command %q", req.Command)
 	}
-	if len(req.Files) == 0 {
-		return fail(stdout, "API_NO_FILES", "request names no files")
-	}
 	if cliTarget != "" && req.Target != "" && cliTarget != req.Target {
 		return fail(stdout, "API_TARGET_CONFLICT", "CLI --target %s differs from the request target %s", cliTarget, req.Target)
+	}
+	// the program's files: the request's, or the manifest's entry, and the
+	// files of every module they import (specs/module-discovery/SPEC.md)
+	cwd, _ := os.Getwd()
+	if len(req.Files) == 0 {
+		// an empty file list is the manifest's entry; without a manifest
+		// the request names no files, as before discovery
+		if _, _, found := project.FindRoot(cwd, nil); !found {
+			return fail(stdout, "API_NO_FILES", "request names no files and no %s is in the working directory or its ancestors", project.ManifestName)
+		}
+	}
+	var pr project.Result
+	if cmd == "format" {
+		pr = project.Entries(cwd, req.Files) // formatting rewrites the entry files and needs no other
+	} else {
+		pr = project.Load(cwd, req.Files)
+	}
+	if len(pr.Diags) > 0 {
+		return endWith(human, pr.Diags, stdout)
+	}
+	if m := pr.Manifest; m != nil {
+		if cliTarget == "" && req.Target == "" && m.Target != nil {
+			req.Target = *m.Target
+		}
+		if !optSet && m.Opt != nil {
+			cfg.Opt = *m.Opt
+		}
+		if !envSet && m.Env != nil {
+			cfg.Env = *m.Env
+		}
 	}
 	cliOpt = cfg.Opt
 	if cliTarget != "" {
@@ -130,14 +165,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if req.Target == "" {
 		req.Target = native.HostTriple()
 	}
-	var srcs []*source.File
-	for _, name := range req.Files {
-		f, err := source.Load(name)
-		if err != nil {
-			return fail(stdout, "API_FILE_NOT_FOUND", "cannot read %s: %v", name, err)
-		}
-		srcs = append(srcs, f)
-	}
+	srcs := pr.Files
+	req.Files = pr.Names()
 	if lineSpan > 0 && len(srcs) > 0 {
 		req.Span = &diag.RequestSpan{File: srcs[0].Name, Start: lineStart(srcs[0].Bytes, lineSpan), End: lineEnd(srcs[0].Bytes, lineSpan)}
 	}
@@ -235,6 +264,19 @@ func internal(req Request, err error, stdout, stderr io.Writer) int {
 	d := diag.New("INTERNAL", req.Files[0], diag.Span{}, "%v", ie)
 	_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: []diag.Diagnostic{d}})
 	return 3
+}
+
+// endWith writes diagnostics that end a command before its own work: the
+// human rendering under --human, else the single JSON response; exit 2.
+func endWith(human bool, ds []diag.Diagnostic, w io.Writer) int {
+	if human {
+		for _, d := range ds {
+			_, _ = fmt.Fprintln(w, diag.Render(d))
+		}
+		return 2
+	}
+	_ = diag.Write(w, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: ds})
+	return 2
 }
 
 func fail(w io.Writer, code diag.Code, format string, args ...any) int {

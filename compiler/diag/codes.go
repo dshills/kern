@@ -72,6 +72,7 @@ var Registry = map[Code]Info{
 	// general language errors (spec §4, types.md)
 	"SYNTAX":                  {"4.0", CatLang, 0, "syntax error"},
 	"MODULE_MISMATCH":         {"T.1", CatLang, 0, "files of one directory declare different module names"},
+	"MODULE_NOT_FOUND":        {"T.1", CatLang, 0, "an import names no module directory with .kern files under the project root"},
 	"NAME_UNRESOLVED":         {"T.1", CatLang, 0, "name not found"},
 	"NAME_PRIVATE":            {"T.1", CatLang, 1, "module-private name used from another module"},
 	"NAME_SHADOWS_PARAM":      {"T.1", CatLang, 0, "local shadows a parameter"},
@@ -102,6 +103,8 @@ var Registry = map[Code]Info{
 	"EDIT_INVALID_SPAN":      {"16.2", CatEdit, 4, "structured-edit span or offset is invalid"},
 	// CLI (PLAN.md §0)
 	"CLI_INVALID_FLAGS": {"P.0", CatCLI, 0, "invalid or incompatible command-line flags"},
+	"PROJECT_NOT_FOUND": {"P.1", CatCLI, 0, "no file named and no kern.mod in the working directory or its ancestors"},
+	"PROJECT_INVALID":   {"P.2", CatCLI, 0, "kern.mod cannot be read as a manifest, or lacks the entry the command needs"},
 	// internal
 	"INTERNAL": {"7.failure", CatInternal, 0, "internal compiler error"},
 }

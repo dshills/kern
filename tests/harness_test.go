@@ -325,7 +325,7 @@ func TestRegistryCoverage(t *testing.T) {
 	}
 	// Codes whose rejecting input cannot be a committed fixture file are
 	// covered by generated tests in this package; each names its test.
-	generated := map[string]string{"TYPE_TOO_MANY_VARIANTS": "TestTooManyVariants"}
+	generated := map[string]string{"TYPE_TOO_MANY_VARIANTS": "TestTooManyVariants", "MODULE_NOT_FOUND": "TestModuleNotFound"}
 	for code := range generated {
 		covered[code] = true
 	}
