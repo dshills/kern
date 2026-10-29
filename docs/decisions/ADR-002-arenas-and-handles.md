@@ -35,7 +35,8 @@ arenas, pools, handles and synchronization as library types built on it.
   first needs lifetimes, the second is runtime borrow tracking with a reference count, and
   Rust's own arena and graph crates settle on indices anyway.
 - **Chosen: owned containers with `Copy` handles.** `Arena[T]` (bump, freed as a whole),
-  `Pool[T]` (free list with generation counters) and `Slab[T]` are standard-library owned
+  `Pool[T]` (free list with generation counters; a slot whose generation would wrap is
+  retired) are standard-library owned
   values with audited unsafe internals; nothing in the checker knows about them.
 
 ## Invariants
@@ -117,7 +118,7 @@ only semantics the spec fixes, and they are the same for every container.
   growth, and two simultaneous edits into one pool.
 - PLAN.md 0.5: `examples/btree/btree.kern` (split and merge via `Pool.get2`) and
   `examples/arena_ast/ast.kern` (`Arena` handles).
-- PLAN.md 1.2 and 1.4: `Arena`/`Pool`/`Slab` intrinsics with the check order, tag counter and
+- PLAN.md 1.2 and 1.4: `Arena`/`Pool` intrinsics with the check order, tag counter and
   tag-0 rule; trap fixtures `bounds`, `generation`, `vacant`, `identity` (restricted to
   `opt=debug`, with an `opt=release` accept twin showing the foreign-handle access completing
   memory-safely) and `disjoint`, each with a completing twin; `alloc_with` failure fixtures.
@@ -127,7 +128,7 @@ only semantics the spec fixes, and they are the same for every container.
 
 ## Conclusion
 
-No regions in the type system. `Arena[T]`, `Pool[T]` and `Slab[T]` are owned library
+No regions in the type system. `Arena[T]` and `Pool[T]` are owned library
 containers; `Copy` handles are the only stored reference-like data in safe code; dereference
 is a checked projection. The `view struct` extension of §5.6 is the only reserved addition
 and is unrelated to regions; a Phase 0 workload count above two reopens ADR-001, not this

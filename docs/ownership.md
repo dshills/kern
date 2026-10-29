@@ -421,7 +421,7 @@ func f(a: view[Atomic[u64]]) -> u64 { return a.load(Ordering.release) }   // ATO
 
 ## 5.6 Arenas and handles (library, not type system)
 ### Rule 5.6.1 — Arenas, pools and handles
-There are no regions in the type system. `Arena[T]` (bump, freed as a whole), `Pool[T]` (free list with generation counters) and `Slab[T]` are standard-library owned containers with audited unsafe internals. A handle (`ArenaId[T]`, `PoolId[T]`) is a `Copy` integer-like value that is permitted to be stored anywhere, including inside objects in the same container; this is how trees, graphs, parent pointers and cycles are expressed in safe code. Dereference is a projection: `get(id) -> view[T]`, `at(id) -> edit[T]`, `get2(a, b) -> (edit[T], edit[T])` (traps when `a == b`). A container destroys its live contents when destroyed. (Arena AST, evaluation §8.2.)
+There are no regions in the type system. `Arena[T]` (bump, freed as a whole) and `Pool[T]` (free list with generation counters; a slot whose generation would wrap is retired) are standard-library owned containers with audited unsafe internals. A handle (`ArenaId[T]`, `PoolId[T]`) is a `Copy` integer-like value that is permitted to be stored anywhere, including inside objects in the same container; this is how trees, graphs, parent pointers and cycles are expressed in safe code. Dereference is a projection: `get(id) -> view[T]`, `at(id) -> edit[T]`, `get2(a, b) -> (edit[T], edit[T])` (traps when `a == b`). A container destroys its live contents when destroyed. (Arena AST, evaluation §8.2.)
 Accepted:
 ```kern
 module ast

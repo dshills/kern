@@ -1,8 +1,13 @@
 # `Slab[T]`: named in the spec, absent from the library
 
 **Date:** 2026-10-29. **Raised by:** the feature sweep of the same day
-(`docs/reports/multi-module-sweep.md`, "Found, not done"). **Status:** a
-decision for the owner; this report changes no spec, doc or code.
+(`docs/reports/multi-module-sweep.md`, "Found, not done"). **Status:** option
+(a) chosen by the owner on 2026-10-29 and applied in the commit that
+carries this line: the name is dropped from the spec, the types reference,
+the ownership doc, the ADR, the plan and the two compiler lists, with
+`Pool` named as the container that retires slots. The Phase 0 evaluation
+(`specs/initial/ARCHITECTURE_EVALUATION.md`) keeps its wording as the
+historical record.
 
 ## What the documents say
 
