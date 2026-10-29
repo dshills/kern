@@ -103,3 +103,18 @@ speccritic took two rounds (the wrapping-recomputation contradiction, the
 slice lower-bound predicate, literal equivalence); plancritic's one
 blocking finding was the solver's definition, now in the plan's §0 in
 full. prism's findings and the phase review are recorded in the commit.
+
+## Phase review
+
+- prism (gpt-6.1-sol): the findings in the commit message, all fixed; the
+  pass itself reviewed alone in smaller chunks after the full-diff review
+  twice timed out on its chunk, with no finding.
+- realitycheck (gpt-6.1-sol, spec and plan against `compiler/opt`,
+  `compiler/lower/stmts.go`, `compiler/ir/validate.go` and their tests):
+  PARTIALLY_ALIGNED, score 100, no drift and no violation; every item
+  IMPLEMENTED, PARTIAL or UNCLEAR, the last two for the tool's usual
+  reason, an inventory of declarations without bodies.
+- verifier (offline): risk score 12, twelve low name-matching findings
+  (`Validate`, `Run`, `Inline`, `OptionsFor`, exercised by the fixture
+  harness and the inliner tests under other names). Nothing acted on.
+- clarion: not used by this project.
