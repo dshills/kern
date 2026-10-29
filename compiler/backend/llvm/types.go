@@ -15,12 +15,13 @@ import (
 type emitter struct {
 	mod      *ir.Module
 	opts     Options
-	sb       strings.Builder // function bodies
-	decls    strings.Builder // type and global declarations
-	types    map[string]bool // emitted named types
-	strs     []string        // string literal globals
-	glue     map[string]bool // emitted drop glue
-	eqs      map[string]bool // emitted equality glue
+	sb       strings.Builder   // function bodies
+	decls    strings.Builder   // type and global declarations
+	types    map[string]bool   // emitted named types
+	strs     []string          // string literal globals
+	files    map[string]string // file-name constants for trap records, by file
+	glue     map[string]bool   // emitted drop glue
+	eqs      map[string]bool   // emitted equality glue
 	glueBody strings.Builder
 	runtime  map[string]bool // declared runtime functions
 	errs     []error
@@ -245,7 +246,7 @@ func (e *emitter) namedGlue(b *strings.Builder, n *resolve.Named) {
 		// library function, with no call site to report: an empty span)
 		span := ""
 		if df.Library {
-			span = ", i64 0, i64 0"
+			span = ", i64 0, i64 0, ptr null"
 		}
 		fmt.Fprintf(b, "  call void %s(ptr %%p%s)\n", fnSym(n.String()+".destructor"), span)
 	}

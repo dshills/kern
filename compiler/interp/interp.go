@@ -29,6 +29,7 @@ func (t *Trap) Error() string { return "trap " + t.Kind }
 type Interp struct {
 	mod        *ir.Module
 	file       string
+	cur        *frame // the running activation, whose file a trap reports
 	out        io.Writer
 	errOut     io.Writer
 	TestHooks  bool
@@ -88,6 +89,7 @@ func (it *Interp) child() *Interp {
 	c.stackUsed = 0
 	c.globals = it.freshGlobals()
 	c.inTrap = false
+	c.cur = nil
 	it.sh.mu.Lock()
 	it.sh.nextTid++
 	c.tid = it.sh.nextTid
@@ -290,7 +292,7 @@ type trapRecordJSON struct {
 func (it *Interp) trapRecord(tr *Trap) {
 	var rec trapRecordJSON
 	rec.Trap.Kind = tr.Kind
-	rec.Trap.File = it.file
+	rec.Trap.File = tr.File
 	rec.Trap.Span.Start = tr.Pos.Start
 	rec.Trap.Span.End = tr.Pos.End
 	rec.Trap.Thread = it.tid
@@ -335,7 +337,11 @@ func trapKindIndex(k string) int {
 }
 
 func (it *Interp) trap(kind string, pos ast.Pos) {
-	panic(&Trap{Kind: kind, Pos: pos, File: it.file})
+	file := it.file
+	if it.cur != nil && it.cur.file != "" {
+		file = it.cur.file
+	}
+	panic(&Trap{Kind: kind, Pos: pos, File: file})
 }
 
 // frame is one activation.
@@ -343,6 +349,9 @@ type frame struct {
 	f      *ir.Func
 	locals []Value
 	vals   []Value
+	// file is the one a trap in this frame reports: the function's own, or
+	// for a library activation its caller's (with span), as natively.
+	file string
 	// span is set for a library (std/core) activation: the position of the
 	// user-level call that entered the library, which every trap inside
 	// reports in place of its own position.
@@ -397,10 +406,19 @@ func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
 		panic(fmt.Sprintf("interp: no intrinsic for %s", f.Name))
 	}
 	frameBytes := frameSize(f)
-	fr := &frame{f: f}
+	fr := &frame{f: f, file: f.File}
+	prev := it.cur
+	it.cur = fr
+	defer func() { it.cur = prev }()
 	if f.Library {
+		// a library activation reports its caller's span and file; with no
+		// call site (drop glue, a function value) an empty span and the
+		// program's file, as natively
+		fr.file = ""
 		if span == nil {
-			span = &ast.Pos{} // no call site (drop glue, a function value): an empty span, as natively
+			span = &ast.Pos{}
+		} else if prev != nil {
+			fr.file = prev.file
 		}
 		fr.span = span
 	}

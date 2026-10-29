@@ -164,12 +164,12 @@ static size_t kern_cat(char *b, size_t n, const char *s) { size_t l = strlen(s);
 // kern_trap_at runs the trap protocol: build TrapInfo, select the handler
 // with one seq_cst load, run it at most once, terminate by SIGABRT. It uses
 // no stdio, lock or allocation, so it may run in signal context.
-static void kern_trap_at(int32_t kind, int64_t start, int64_t end, int in_signal) {
+static void kern_trap_at(int32_t kind, int64_t start, int64_t end, const char *file, int in_signal) {
     if (kern_in_trap) kern_die(); // a trap inside the handler terminates
     kern_in_trap = 1;
     if (!in_signal) kern_flush();
     kern_info.kind = (uint8_t)kind;
-    kern_info.file = kern_file;
+    kern_info.file = file ? file : kern_file; // the trapping function's file, or the program's
     kern_info.start = (uint64_t)start;
     kern_info.end = (uint64_t)end;
     kern_info.thread_id = kern_tid;
@@ -180,7 +180,7 @@ static void kern_trap_at(int32_t kind, int64_t start, int64_t end, int in_signal
         n = kern_cat(b, n, "{\"trap\":{\"kind\":\"");
         n = kern_cat(b, n, kern_trap_names[kind]);
         n = kern_cat(b, n, "\",\"file\":\"");
-        for (const char *c = kern_file; *c && n < 400; c++) {
+        for (const char *c = kern_info.file; *c && n < 400; c++) {
             if (*c == '"' || *c == '\\') b[n++] = '\\';
             b[n++] = *c;
         }
@@ -198,15 +198,15 @@ static void kern_trap_at(int32_t kind, int64_t start, int64_t end, int in_signal
     kern_die();
 }
 
-void kern_trap(int32_t kind, int64_t start, int64_t end) { kern_trap_at(kind, start, end, 0); }
+void kern_trap(int32_t kind, int64_t start, int64_t end, const char *file) { kern_trap_at(kind, start, end, file, 0); }
 
 // the fault handler classifies the fault as `stack` iff the address lies in
 // the thread's guard range; any other fault in safe code is `unreachable`
 static void kern_segv(int sig, siginfo_t *si, void *ctx) {
     (void)sig; (void)ctx;
     uintptr_t addr = (uintptr_t)si->si_addr;
-    if (kern_stack_lo != 0 && addr < kern_stack_lo + 4096 && addr + (1 << 20) >= kern_stack_lo) kern_trap_at(10, 0, 0, 1);
-    kern_trap_at(12, 0, 0, 1);
+    if (kern_stack_lo != 0 && addr < kern_stack_lo + 4096 && addr + (1 << 20) >= kern_stack_lo) kern_trap_at(10, 0, 0, NULL, 1);
+    kern_trap_at(12, 0, 0, NULL, 1);
 }
 
 static void kern_thread_init(void *altstack) {
@@ -249,9 +249,9 @@ void kern_test_fail_next_alloc(void) { atomic_store(&kern_fail_next, 1); }
 void kern_test_require_hooks(void) {}
 #endif
 static void *kern_alloc(size_t n, int64_t start, int64_t end) {
-    if (atomic_exchange(&kern_fail_next, 0)) kern_trap(9, start, end);
+    if (atomic_exchange(&kern_fail_next, 0)) kern_trap(9, start, end, NULL);
     void *p = malloc(n ? n : 1);
-    if (p == NULL) kern_trap(9, start, end);
+    if (p == NULL) kern_trap(9, start, end, NULL);
     return p;
 }
 
@@ -282,7 +282,7 @@ void *kern_shared_get(kern_shared *s) { return s->data; }
 void *kern_shared_clone(kern_shared *s) {
     uint64_t c = atomic_load(&s->count);
     for (;;) {
-        if (c == UINT64_MAX) kern_trap(1, 0, 0);
+        if (c == UINT64_MAX) kern_trap(1, 0, 0, NULL);
         if (atomic_compare_exchange_weak(&s->count, &c, c + 1)) return s;
     }
 }
@@ -318,8 +318,8 @@ void *kern_mutex_new(int64_t size, const void *src) {
 }
 void *kern_mutex_lock(kern_mutex *mx, int64_t start, int64_t end) {
     uintptr_t self = (uintptr_t)&kern_mutex_self;
-    if (atomic_load_explicit(&mx->owner, memory_order_relaxed) == self) kern_trap(11, start, end); // recursive acquisition
-    if (pthread_mutex_lock(&mx->m) != 0) kern_trap(11, start, end); // a broken mutex
+    if (atomic_load_explicit(&mx->owner, memory_order_relaxed) == self) kern_trap(11, start, end, NULL); // recursive acquisition
+    if (pthread_mutex_lock(&mx->m) != 0) kern_trap(11, start, end, NULL); // a broken mutex
     atomic_store_explicit(&mx->owner, self, memory_order_relaxed);
     return mx->data;
 }
@@ -339,18 +339,18 @@ void kern_mutex_drop(kern_mutex *mx, kern_glue g) { if (mx == NULL) return; if (
 typedef struct { pthread_cond_t c; _Atomic(uintptr_t) mutex; } kern_condvar;
 void *kern_condvar_new(void) {
     kern_condvar *cv = kern_alloc(sizeof *cv, 0, 0);
-    if (pthread_cond_init(&cv->c, NULL) != 0) { free(cv); kern_trap(11, 0, 0); } // no resources: an uninitialized condition variable must not be published
+    if (pthread_cond_init(&cv->c, NULL) != 0) { free(cv); kern_trap(11, 0, 0, NULL); } // no resources: an uninitialized condition variable must not be published
     atomic_init(&cv->mutex, 0);
     return cv;
 }
 void kern_condvar_wait(kern_condvar *cv, void *data, int64_t start, int64_t end) {
     kern_mutex *mx = (kern_mutex *)((char *)data - offsetof(kern_mutex, data));
     uintptr_t self = (uintptr_t)&kern_mutex_self;
-    if (atomic_load_explicit(&mx->owner, memory_order_relaxed) != self) kern_trap(11, start, end); // the lock is not held by this thread
+    if (atomic_load_explicit(&mx->owner, memory_order_relaxed) != self) kern_trap(11, start, end, NULL); // the lock is not held by this thread
     uintptr_t want = 0;
-    if (!atomic_compare_exchange_strong(&cv->mutex, &want, (uintptr_t)mx) && want != (uintptr_t)mx) kern_trap(11, start, end); // a second Mutex on one Condvar
+    if (!atomic_compare_exchange_strong(&cv->mutex, &want, (uintptr_t)mx) && want != (uintptr_t)mx) kern_trap(11, start, end, NULL); // a second Mutex on one Condvar
     atomic_store_explicit(&mx->owner, 0, memory_order_relaxed);
-    if (pthread_cond_wait(&cv->c, &mx->m) != 0) kern_trap(11, start, end);
+    if (pthread_cond_wait(&cv->c, &mx->m) != 0) kern_trap(11, start, end, NULL);
     atomic_store_explicit(&mx->owner, self, memory_order_relaxed);
 }
 void kern_condvar_notify_one(kern_condvar *cv) { pthread_cond_signal(&cv->c); }
@@ -454,7 +454,7 @@ typedef struct { int unused; } kern_sysalloc;
 void *kern_sysalloc_new(void) { static kern_sysalloc a; return &a; }
 void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off) {
     (void)a;
-    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0);
+    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0, NULL);
     if (atomic_exchange(&kern_fail_next, 0)) { out[0] = 1; return; } // the armed failure: Err(OutOfMemory)
     // aligned_alloc needs an alignment of at least sizeof(void *) and a size
     // that is a multiple of it (macOS rejects smaller alignments): the
@@ -472,7 +472,7 @@ void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *ou
 // else by aligned_alloc, copy and free; on failure the old allocation stays.
 void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t size, int64_t align, char *out, int64_t off) {
     (void)a;
-    if (old_size < 0 || size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0);
+    if (old_size < 0 || size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0, NULL);
     if (atomic_exchange(&kern_fail_next, 0)) { out[0] = 1; return; }
     size_t al = (size_t)align < sizeof(void *) ? sizeof(void *) : (size_t)align;
     if ((uint64_t)size > SIZE_MAX - (al - 1)) { out[0] = 1; return; }
@@ -493,7 +493,7 @@ void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t 
 // from fresh zero pages without a memset), else aligned_alloc and memset.
 void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off) {
     (void)a;
-    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0);
+    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0, NULL);
     if (atomic_exchange(&kern_fail_next, 0)) { out[0] = 1; return; }
     size_t al = (size_t)align < sizeof(void *) ? sizeof(void *) : (size_t)align;
     if ((uint64_t)size > SIZE_MAX - (al - 1)) { out[0] = 1; return; }

@@ -39,14 +39,14 @@ type Options struct {
 
 // EmitWith renders a module for the given options.
 func EmitWith(mod *ir.Module, opts Options) (string, []error) {
-	e := &emitter{mod: mod, opts: opts, types: map[string]bool{}, glue: map[string]bool{}, runtime: map[string]bool{}}
+	e := &emitter{mod: mod, opts: opts, types: map[string]bool{}, glue: map[string]bool{}, runtime: map[string]bool{}, files: map[string]string{}}
 	if opts.Sources != nil {
 		e.dbg = newDebugInfo(opts.Sources)
 	}
 	// a trap never returns and its block is cold, which keeps the checks
 	// out of the inliner's cost and the hot path's layout
 	e.runtime["kern_trap"] = true
-	e.decls.WriteString("declare void @kern_trap(i32, i64, i64) noreturn cold\n")
+	e.decls.WriteString("declare void @kern_trap(i32, i64, i64, ptr) noreturn cold\n")
 	if opts.StackCheck {
 		e.decls.WriteString("@kern_stack_limit = external global ptr\n")
 		e.declare("llvm.stacksave.p0", "ptr ()")
@@ -78,10 +78,17 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 		}
 		// a hosted program's main receives argc and argv and hands them to
 		// the runtime for std/io's args(); a freestanding image has none
+		// the program's file, which a trap raised by the runtime itself
+		// (a stack check, a mutex misuse) names in its record: the file
+		// declaring main
 		params, setArgs := "", ""
+		if entry.File != "" {
+			setArgs = fmt.Sprintf("  call void @kern_set_file(ptr %s)\n", e.fileSym(entry.File))
+			e.declare("kern_set_file", "void (ptr)")
+		}
 		if !opts.Freestanding {
 			params = "i32 %argc, ptr %argv"
-			setArgs = "  call void @kern_set_args(i32 %argc, ptr %argv)\n"
+			setArgs += "  call void @kern_set_args(i32 %argc, ptr %argv)\n"
 			e.declare("kern_set_args", "void (i32, ptr)")
 		}
 		if ret == "void" {
@@ -474,9 +481,9 @@ func (e *emitter) function(f *ir.Func) {
 		ps = append(ps, e.paramDecls(f, p, i)...)
 	}
 	if f.Library {
-		// the span of the user-level call that entered the library: every
-		// trap inside reports it
-		ps = append(ps, "i64 %span.s", "i64 %span.e")
+		// the span and file of the user-level call that entered the
+		// library: every trap inside reports them
+		ps = append(ps, "i64 %span.s", "i64 %span.e", "ptr %span.f")
 	}
 	// locals: allocas for every slot; parameters are stored into theirs
 	for _, l := range f.Locals {
@@ -539,7 +546,7 @@ func (e *emitter) function(f *ir.Func) {
 		fe.emit("%%trap.kind = phi i32 %s", strings.Join(kinds, ", "))
 		fe.emit("%%trap.start = phi i64 %s", strings.Join(starts, ", "))
 		fe.emit("%%trap.end = phi i64 %s", strings.Join(ends, ", "))
-		fe.emit("call void @kern_trap(i32 %%trap.kind, i64 %%trap.start, i64 %%trap.end)")
+		fe.emit("call void @kern_trap(i32 %%trap.kind, i64 %%trap.start, i64 %%trap.end, ptr %s)", fe.file())
 		fe.emit("unreachable")
 	}
 	// the entry block: allocas (a stack-pointer adjustment only), then in
@@ -549,7 +556,7 @@ func (e *emitter) function(f *ir.Func) {
 	// no stack probes are emitted in that mode), then the parameter stores
 	entry := fe.allocas.String()
 	if e.opts.StackCheck {
-		entry += fmt.Sprintf("  %%sp = call ptr @llvm.stacksave.p0()\n  %%lim = load ptr, ptr @kern_stack_limit\n  %%ovf = icmp ult ptr %%sp, %%lim\n  br i1 %%ovf, label %%stackovf, label %%frame\nstackovf:\n  call void @kern_trap(i32 %d, i64 %d, i64 %d)\n  unreachable\nframe:\n", trapKind("stack"), f.Pos.Start, f.Pos.End)
+		entry += fmt.Sprintf("  %%sp = call ptr @llvm.stacksave.p0()\n  %%lim = load ptr, ptr @kern_stack_limit\n  %%ovf = icmp ult ptr %%sp, %%lim\n  br i1 %%ovf, label %%stackovf, label %%frame\nstackovf:\n  call void @kern_trap(i32 %d, %s)\n  unreachable\nframe:\n", trapKind("stack"), fe.spanFile(f.Pos))
 	}
 	entry += fe.pstores.String() + fmt.Sprintf("  br label %%bb%d\n", f.Entry.ID)
 	dbgSuffix := ""
@@ -1008,7 +1015,7 @@ func (fe *fnEmit) instr(in ir.Instr) {
 			fe.vals[i.Dst] = fnSym(i.Name)
 		}
 	case *ir.Trap:
-		fe.emit("call void @kern_trap(i32 %d, %s)", trapKind(i.Kind), fe.span(i.Pos))
+		fe.emit("call void @kern_trap(i32 %d, %s)", trapKind(i.Kind), fe.spanFile(i.Pos))
 	case *ir.Copy:
 		if a, ok := fe.addrs[i.Src]; ok {
 			fe.loadLarge(i.Dst, a)
@@ -1472,7 +1479,7 @@ func (fe *fnEmit) term(t ir.Term) {
 
 // libraryThunk emits, once, a wrapper with the plain signature of a library
 // function (no span parameters) so that it can be taken as a function value;
-// traps inside report an empty span.
+// traps inside report an empty span and the program's file.
 func (e *emitter) libraryThunk(f *ir.Func) string {
 	name := f.Name + ".fnptr"
 	sym := fnSym(name)
@@ -1486,7 +1493,7 @@ func (e *emitter) libraryThunk(f *ir.Func) string {
 		ps = append(ps, decls...)
 		args = append(args, decls...)
 	}
-	args = append(args, "i64 0", "i64 0")
+	args = append(args, "i64 0", "i64 0", "ptr null")
 	ret := e.retType(f)
 	var b strings.Builder
 	fmt.Fprintf(&b, "define internal %s %s(%s) {\nentry:\n", ret, sym, strings.Join(ps, ", "))

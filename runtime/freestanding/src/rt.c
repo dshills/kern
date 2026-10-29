@@ -85,18 +85,19 @@ static const char *kern_trap_names[] = {"bounds", "overflow", "div_zero", "shift
 
 // kern_trap writes the record to the console (the default handler), runs a
 // custom handler once instead when installed, and halts with code 134.
-void kern_trap(int32_t kind, int64_t start, int64_t end) {
+void kern_trap(int32_t kind, int64_t start, int64_t end, const char *file) {
     if (kern_in_trap) kern_halt(134);
     kern_in_trap = 1;
+    if (!file) file = kern_file; // the trapping function's file, or the program's
     void (*h)(void *) = (void (*)(void *))kern_handler;
     if (h == 0) {
         kern_puts("{\"trap\":{\"kind\":\""); kern_puts(kern_trap_names[kind]);
-        kern_puts("\",\"file\":\""); kern_putjson(kern_file);
+        kern_puts("\",\"file\":\""); kern_putjson(file);
         kern_puts("\",\"span\":{\"start\":"); kern_putu((uint64_t)start);
         kern_puts(",\"end\":"); kern_putu((uint64_t)end);
         kern_puts("},\"thread\":0}}\n");
     } else {
-        kern_trapinfo info = {(uint8_t)kind, {0}, kern_file, (uint64_t)start, (uint64_t)end, 0};
+        kern_trapinfo info = {(uint8_t)kind, {0}, file, (uint64_t)start, (uint64_t)end, 0};
         h(&info);
     }
     kern_halt(134);
@@ -201,13 +202,13 @@ static size_t kern_block_size(int64_t size) {
 }
 static size_t kern_block_align(int64_t align) { return (size_t)align < KERN_HEAP_GRAIN ? KERN_HEAP_GRAIN : (size_t)align; }
 static void kern_check_request(int64_t size, int64_t align) {
-    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0);
+    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0, 0);
 }
 // kern_check_block traps unless p with n bytes lies in the arena on a grain
 // boundary: a pointer that was not one allocation's.
 static void kern_check_block(const void *p, size_t n) {
     uintptr_t a = (uintptr_t)p, lo = (uintptr_t)kern_heap, hi = lo + KERN_HEAP_SIZE;
-    if (a < lo || a >= hi || n > hi - a || (a & (KERN_HEAP_GRAIN - 1)) != 0) kern_trap(11, 0, 0);
+    if (a < lo || a >= hi || n > hi - a || (a & (KERN_HEAP_GRAIN - 1)) != 0) kern_trap(11, 0, 0, 0);
 }
 
 // kern_heap_take carves n bytes at alignment al (both multiples of the
@@ -285,7 +286,7 @@ void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t 
     kern_check_request(old_size, align);
     kern_heap_init();
     size_t on = kern_block_size(old_size), n = kern_block_size(size), al = kern_block_align(align);
-    if (on == 0) kern_trap(11, 0, 0); // larger than the arena: not one allocation's size
+    if (on == 0) kern_trap(11, 0, 0, 0); // larger than the arena: not one allocation's size
     kern_check_block(p, on);
     uint8_t *q = p;
     if (n == 0) { out[0] = 1; return; }
@@ -305,7 +306,7 @@ void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align) 
     kern_check_request(size, align);
     kern_heap_init();
     size_t n = kern_block_size(size);
-    if (n == 0) kern_trap(11, 0, 0);
+    if (n == 0) kern_trap(11, 0, 0, 0);
     kern_check_block(p, n);
     kern_heap_release(p, n);
 }

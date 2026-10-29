@@ -149,7 +149,6 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("backend: %v", errs[0])
 	}
-	text = withProgramName(text, srcs[0].Name, opts.Freestanding)
 	if opts.EmitLLVM != "" {
 		if err := os.WriteFile(opts.EmitLLVM, []byte(text), 0o644); err != nil {
 			return nil, err
@@ -233,9 +232,6 @@ func EmitAsm(srcs []*source.File, triple string) (string, []diag.Diagnostic, err
 	if len(errs) > 0 {
 		return "", nil, fmt.Errorf("backend: %v", errs[0])
 	}
-	if mod.Entry != "" {
-		text = withProgramName(text, srcs[0].Name, false)
-	}
 	clang, err := exec.LookPath("clang")
 	if err != nil {
 		return "", nil, ErrNoClang
@@ -265,18 +261,6 @@ func EmitAsm(srcs []*source.File, triple string) (string, []diag.Diagnostic, err
 		return "", nil, err
 	}
 	return string(b), nil, nil
-}
-
-// withProgramName embeds the program's file name for the trap record.
-func withProgramName(text, name string, freestanding bool) string {
-	esc := strings.NewReplacer("\\", "\\5C", "\"", "\\22").Replace(name)
-	global := fmt.Sprintf("@kern.progname = private constant [%d x i8] c\"%s\\00\"\n", len(name)+1, esc)
-	entry := "define i32 @main() {\nentry:\n"
-	if freestanding {
-		entry = "define i32 @kern_main() {\nentry:\n"
-	}
-	text = strings.Replace(text, "declare void @kern_start()", "declare void @kern_start()\ndeclare void @kern_set_file(ptr)", 1)
-	return strings.Replace(text, entry, global+entry+"  call void @kern_set_file(ptr @kern.progname)\n", 1)
 }
 
 // buildFreestanding compiles the program, the freestanding runtime and the

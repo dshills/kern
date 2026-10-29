@@ -63,7 +63,7 @@ func main() -> i32 { return 0i32 }
 		"thread_local global i32 0",
 		"define i64 @kern_entry(i64 %p0) #0",
 		"fmul double",
-		"declare void @kern_trap(i32, i64, i64)",
+		"declare void @kern_trap(i32, i64, i64, ptr)",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("emitted text lacks %q\n%s", want, text)

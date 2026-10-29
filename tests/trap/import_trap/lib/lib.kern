@@ -1,0 +1,16 @@
+module lib
+struct Guard nocopy {
+    Id: u64
+}
+impl Guard {
+    destructor(edit self) {
+        print_str("destructor ran")
+        println()
+    }
+}
+func Make(id: u64) -> Guard {
+    return Guard{Id: id}
+}
+func Pick(xs: view[[]u64], i: usize) -> u64 {
+    return xs[i]
+}

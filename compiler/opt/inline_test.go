@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -73,8 +74,13 @@ func run(t *testing.T, mod *ir.Module) (string, int) {
 	var out, errb bytes.Buffer
 	it := interp.New(mod, "t.kern", &out, &errb)
 	status := it.Run()
-	return out.String() + errb.String(), status
+	// a trap record names the file by the path the module was loaded from,
+	// a different temporary directory for each module: compare base names
+	rec := recordDir.ReplaceAllString(errb.String(), `"file":"`)
+	return out.String() + rec, status
 }
+
+var recordDir = regexp.MustCompile(`"file":"[^"]*/`)
 
 // calls lists the direct callees of a function, in order.
 func calls(f *ir.Func) []string {

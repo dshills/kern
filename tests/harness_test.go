@@ -44,6 +44,7 @@ type header struct {
 	testHooks bool
 	config    string // config: opt=debug|release — the fixture is valid in that configuration only
 	noRecord  bool   // trap-record: none — a custom handler writes no default record
+	trapFile  string // trap-file: the file the trap record must name (a suffix), for a multi-file fixture
 	cfile     string // c: the C counterpart of an FFI fixture (native-only execution)
 	native    bool   // native-only: true — the interpreter cannot execute it (inline assembly)
 	env       string // env: freestanding — run under the freestanding emulation and build bare-metal
@@ -87,6 +88,8 @@ func parseHeader(t *testing.T, f *source.File) header {
 			h.config = val
 		case "trap-record":
 			h.noRecord = val == "none"
+		case "trap-file":
+			h.trapFile = val
 		case "c":
 			h.cfile = val
 		case "native-only":
@@ -428,11 +431,15 @@ func execute(t *testing.T, path string, files []*source.File, h header) {
 		var rec struct {
 			Trap struct {
 				Kind string `json:"kind"`
+				File string `json:"file"`
 			} `json:"trap"`
 		}
 		line := bytes.SplitN(errb.Bytes(), []byte("\n"), 2)[0]
 		if err := json.Unmarshal(line, &rec); err != nil || rec.Trap.Kind != h.code {
 			t.Fatalf("expected trap record of kind %s, got %q", h.code, errb.String())
+		}
+		if h.trapFile != "" && !strings.HasSuffix(rec.Trap.File, h.trapFile) {
+			t.Fatalf("expected the trap record to name %s, got %q", h.trapFile, errb.String())
 		}
 		if bytes.Count(bytes.TrimSpace(errb.Bytes()), []byte("\n")) != 0 {
 			t.Fatalf("expected exactly one trap record, got %q", errb.String())
@@ -760,6 +767,7 @@ func nativeRunOpt(t *testing.T, files []*source.File, h header, wantOut, wantErr
 type trapRecord struct {
 	Trap struct {
 		Kind string `json:"kind"`
+		File string `json:"file"`
 		Span struct {
 			Start int `json:"start"`
 			End   int `json:"end"`
@@ -789,5 +797,8 @@ func compareTrapRecords(t *testing.T, want, got []byte) {
 	}
 	if w.Trap.Kind != "stack" && w.Trap.Span != g.Trap.Span {
 		t.Fatalf("trap span: interpreter %v, native %v", w.Trap.Span, g.Trap.Span)
+	}
+	if w.Trap.File != g.Trap.File {
+		t.Fatalf("trap file: interpreter %q, native %q", w.Trap.File, g.Trap.File)
 	}
 }

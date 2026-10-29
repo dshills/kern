@@ -333,12 +333,44 @@ func (fe *fnEmit) spanParts(p ast.Pos) (string, string) {
 	return fmt.Sprintf("%d", p.Start), fmt.Sprintf("%d", p.End)
 }
 
-// withSpan appends the span arguments a library callee takes.
+// spanFile renders a span and the file it is in, as a trap record names
+// them: the arguments of kern_trap and of a library callee.
+func (fe *fnEmit) spanFile(p ast.Pos) string {
+	return fe.span(p) + ", ptr " + fe.file()
+}
+
+// file renders the file-name operand of a trap record: inside a library
+// function the one its caller passed (with the span), otherwise this
+// function's own file; null, for a function without one, names the
+// program's file in the record.
+func (fe *fnEmit) file() string {
+	if fe.f.Library {
+		return "%span.f"
+	}
+	if fe.f.File == "" {
+		return "null"
+	}
+	return fe.e.fileSym(fe.f.File)
+}
+
+// fileSym is the constant holding a file's name, emitted once.
+func (e *emitter) fileSym(name string) string {
+	if s, ok := e.files[name]; ok {
+		return s
+	}
+	s := fmt.Sprintf("@kern.file.%d", len(e.files))
+	e.files[name] = s
+	esc := strings.NewReplacer("\\", "\\5C", "\"", "\\22").Replace(name)
+	fmt.Fprintf(&e.decls, "%s = private constant [%d x i8] c\"%s\\00\"\n", s, len(name)+1, esc)
+	return s
+}
+
+// withSpan appends the span and file arguments a library callee takes.
 func (fe *fnEmit) withSpan(args string, p ast.Pos) string {
 	if args == "" {
-		return fe.span(p)
+		return fe.spanFile(p)
 	}
-	return args + ", " + fe.span(p)
+	return args + ", " + fe.spanFile(p)
 }
 
 // spill stores a value to a temporary and returns its address.
