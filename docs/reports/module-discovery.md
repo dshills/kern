@@ -81,3 +81,20 @@ and this change fixed: `format` blocked by a missing import, a named file
 in an imported directory escaping the module-name check, an absolute
 manifest path joined to the working directory, and DEL accepted in an
 import path.
+
+## Phase review
+
+- prism (gpt-6.1-sol, staged): the findings above, all fixed; the final
+  pass had none left unanswered.
+- realitycheck (gpt-6.1-sol, spec and plan against `compiler/project`,
+  `compiler/parser/prologue.go`, `cmd/kern` and the project tests):
+  PARTIALLY_ALIGNED, score 100, no drift and no violation; every
+  requirement and plan step is IMPLEMENTED, PARTIAL or UNCLEAR, the last
+  two because the tool's inventory carries declarations without bodies
+  ("assertions … not supplied", "signatures … not provided"), not because
+  it found anything missing.
+- verifier (offline): risk score 12, twelve low findings, all
+  name-matching ("no test named for `ParsePrologue`", whose test is
+  `TestParsePrologueMatchesParse`; `Entries` and `Names`, covered inside
+  the discovery tests). No gap acted on.
+- clarion: not used by this project (no `docs/clarion-meta.json`).
