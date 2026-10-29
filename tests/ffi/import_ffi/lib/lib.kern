@@ -1,0 +1,7 @@
+module lib
+extern "C" func lib_fill(p: RawPtr[u8], n: usize, v: u8) -> usize
+extern "C" func lib_sum(p: RawPtr[u8], n: usize) -> u64
+contract { requires "p addresses n writable bytes owned by the caller" }
+func Fill(p: RawPtr[u8], n: usize, v: u8) -> usize { unsafe { return lib_fill(p, n, v) } }
+contract { requires "p addresses n readable bytes owned by the caller" }
+func Sum(p: RawPtr[u8], n: usize) -> u64 { unsafe { return lib_sum(p, n) } }

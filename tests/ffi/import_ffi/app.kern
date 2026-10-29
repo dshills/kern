@@ -1,0 +1,24 @@
+//! phase: 3
+//! expect: output import_ffi
+//! c: import_ffi/ffi_lib.c
+// extern "C" functions declared by an imported module, wrapped in its safe
+// functions with contracts, called from the importing module.
+module app
+import "lib"
+contract { requires "the allocator obligations of §6 hold for every call" }
+func main() -> i32 {
+    alloc := SystemAllocator.new()
+    unsafe {
+        match alloc.alloc(8usize, 8usize) {
+            Ok(p) => {
+                print_u64(u64(lib.Fill(p, 8usize, 1u8)))
+                println()
+                print_u64(lib.Sum(p, 8usize))
+                println()
+                alloc.free(p, 8usize, 8usize)
+            }
+            Err(e) => { print_str("alloc failed"); println() }
+        }
+    }
+    return 0i32
+}
