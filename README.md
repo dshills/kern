@@ -97,6 +97,24 @@ Build a release binary:
 ./kern build --opt=release -o vector examples/vector/vector.kern
 ```
 
+Name only the entry file: the modules it imports are found under the project
+root. `import "lib"` is the `.kern` files of `<root>/lib/`, each declaring
+`module lib`; the root is the nearest ancestor directory of the entry file
+holding a file named `kern.mod`, else the working directory. `kern.mod` may be
+empty, or hold a JSON object with `entry` (the file or files to start from),
+`opt`, `env`, `target` and `output`, so that a project runs and builds with no
+arguments; a flag always overrides the manifest. For a two-module program:
+
+```text
+proj/kern.mod            {"entry": "app.kern", "output": "app"}
+proj/app.kern            module app  /  import "lib"  /  ... lib.Twice(21u64) ...
+proj/lib/lib.kern        module lib  /  func Twice(x: u64) -> u64 { return x * 2u64 }
+```
+
+```bash
+cd proj && kern run && kern build
+```
+
 Check a file and read the diagnostics as text rather than JSON:
 
 ```bash
