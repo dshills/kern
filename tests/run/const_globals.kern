@@ -1,0 +1,96 @@
+//! phase: 2
+//! expect: output const_globals
+// An array or struct const whose initializer folds to literals is one
+// read-only global shared by every function and thread, not a value rebuilt
+// at each use: `len(TAB)` and `TAB[i]` then name one place, so a guard on a
+// const array is proven. A field or an element of such a const folds too.
+// A const whose initializer does not fold (a call) is still lowered as an
+// expression at each use, with the same values.
+module run
+const TAB: [4]u8 = [1u8, 2u8, 3u8, 4u8]
+const GRID: [2][3]u16 = [[1u16, 2u16, 3u16], [4u16, 5u16, 6u16]]
+const ORIGIN: Point = Point{x: 7u32, ys: [5u32, 6u32], ok: true}
+const BOX: Box = Box{lo: ORIGIN, hi: Point{x: 9u32, ys: zero(), ok: false}, tag: TAB}
+const PTS: [2]Point = [ORIGIN, BOX.hi]
+const ZEROS: [3]u32 = zero()
+const HALVES: [2]f32 = [0.5f32, 1.5f32]
+const CALC: [2]u8 = [bump(1u8), bump(2u8)]
+const TAG3: u8 = BOX.tag[3usize]
+const LO: Point = BOX.lo
+struct Point {
+    x: u32
+    ys: [2]u32
+    ok: bool
+}
+struct Box {
+    lo: Point
+    hi: Point
+    tag: [4]u8
+}
+func bump(x: u8) -> u8 {
+    return x + 10u8
+}
+func pick(i: usize) -> u8 {
+    if i < len(TAB) {
+        return TAB[i]
+    }
+    return 0u8
+}
+func cell(r: usize, c: usize) -> u16 {
+    if r < len(GRID) {
+        if c < len(GRID[r]) {
+            return GRID[r][c]
+        }
+    }
+    return 0u16
+}
+func total() -> u64 {
+    var s: u64 = 0u64
+    for x in TAB {
+        s = s + u64(x)
+    }
+    return s
+}
+func worker(i: usize) -> u64 {
+    return u64(pick(i)) * 100u64 + total()
+}
+func spawned(i: usize) -> Result[u64, SpawnErr] {
+    t := thread.spawn(worker, i)?
+    return Ok(t.join())
+}
+func main() -> i32 {
+    print_u64(u64(pick(3usize)))
+    println()
+    print_u64(u64(pick(4usize)))
+    println()
+    print_u64(u64(cell(1usize, 2usize)) + u64(cell(2usize, 0usize)) + u64(cell(0usize, 3usize)))
+    println()
+    print_u64(total())
+    println()
+    match spawned(1usize) {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    print_u64(u64(ORIGIN.x) + u64(ORIGIN.ys[1usize]))
+    println()
+    print_bool(ORIGIN.ok)
+    println()
+    print_u64(u64(BOX.lo.ys[0usize]) + u64(BOX.hi.x) + u64(BOX.hi.ys[1usize]) + u64(BOX.tag[3usize]))
+    println()
+    print_bool(BOX.hi.ok)
+    println()
+    print_u64(u64(PTS[1usize].x) + u64(PTS[0usize].ys[0usize]))
+    println()
+    print_u64(u64(ZEROS[2usize]) + u64(len(ZEROS)))
+    println()
+    print_bool(HALVES[1usize] - HALVES[0usize] == 1.0f32)
+    println()
+    print_u64(u64(CALC[1usize]) + u64(len(CALC)))
+    println()
+    print_u64(u64(TAG3) + u64(LO.x))
+    println()
+    copy_of := TAB
+    print_u64(u64(copy_of[2usize]) + u64(TAB[2usize]))
+    println()
+    return 0i32
+}

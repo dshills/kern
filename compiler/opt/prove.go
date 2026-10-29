@@ -468,8 +468,10 @@ func (p *prover) resolve(pl ir.Place) ir.Place {
 
 // placeKey names a place after resolving reborrows: "l<id>|path" with the
 // root local when it reaches one, "a<id>|path" with no root when it stays
-// rooted at an access value (a parameter or a returned projection), and
-// "" for a global.
+// rooted at an access value (a parameter or a returned projection),
+// "g<id>|path" with no root for a read-only global (an aggregate constant,
+// never written, so immutable like an access's referent), and "" for a
+// thread_local.
 func (p *prover) placeKey(pl ir.Place) (string, *ir.Local) {
 	pl = p.resolve(pl)
 	switch {
@@ -477,6 +479,8 @@ func (p *prover) placeKey(pl ir.Place) (string, *ir.Local) {
 		return fmt.Sprintf("l%d|", pl.Local.ID) + p.pathKey(pl.Path), pl.Local
 	case pl.Access != nil:
 		return fmt.Sprintf("a%d|", pl.Access.ID) + p.pathKey(pl.Path), nil
+	case pl.Global != nil && pl.Global.ReadOnly:
+		return fmt.Sprintf("g%d|", pl.Global.ID) + p.pathKey(pl.Path), nil
 	}
 	return "", nil
 }
@@ -519,10 +523,22 @@ func arrayLen(pl ir.Place) (uint64, bool) {
 			return 0, false
 		}
 		t = a.Elem
+	case pl.Global != nil:
+		t = pl.Global.Type
 	default:
 		return 0, false
 	}
 	for _, e := range pl.Path {
+		if e.Kind == ir.PathIndex {
+			// an element of an array: its type is the array's element type
+			// whatever the index
+			a, ok := t.(*resolve.Array)
+			if !ok {
+				return 0, false
+			}
+			t = a.Elem
+			continue
+		}
 		if e.Kind != ir.PathField {
 			return 0, false
 		}

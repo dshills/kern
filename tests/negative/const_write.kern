@@ -1,0 +1,10 @@
+//! expect: reject ASSIGN_IMMUTABLE rule=T.5
+//! twin: const_write_ok
+// A const is read-only: an element of an array const cannot be assigned
+// (the lowering gives an aggregate const a shared read-only place).
+module m
+const TAB: [4]u8 = [1u8, 2u8, 3u8, 4u8]
+func main() -> i32 {
+    TAB[0usize] = 9u8   // ASSIGN_IMMUTABLE
+    return 0i32
+}

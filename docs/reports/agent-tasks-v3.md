@@ -146,6 +146,7 @@ second suite's matrix and is unchanged.
   instead. Fixed on 2026-10-29 (`tests/run/const_array.kern`): a const is
   lowered as its initializer at every use, so an array const is a value,
   and indexing, slicing, `len` and `for` now give it a place first. Each
-  use still rebuilds the array, and `len(TAB)` and `TAB[i]` build two
-  different temporaries, so a guard on a const array is never proven; a
-  read-only global for aggregate consts would fix both and is not done.
+  use still rebuilt the array, and `len(TAB)` and `TAB[i]` built two
+  different temporaries, so a guard on a const array was never proven; on
+  the same day an array or struct const whose initializer folds became one
+  read-only global (`docs/reports/const-globals.md`), which fixes both.

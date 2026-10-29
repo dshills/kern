@@ -1,0 +1,17 @@
+//! phase: 2
+//! expect: accept
+//! twin: const_edit_slice
+// The twin of const_edit_slice: a slice of a const is passed as a view.
+module m
+const TAB: [4]u8 = [1u8, 2u8, 3u8, 4u8]
+func sum(xs: view[[]u8]) -> u64 {
+    var s: u64 = 0u64
+    for x in xs {
+        s = s + u64(x)
+    }
+    return s
+}
+func main() -> i32 {
+    print_u64(sum(TAB[0usize:4usize]))
+    return 0i32
+}

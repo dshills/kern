@@ -1,0 +1,13 @@
+//! phase: 2
+//! expect: accept
+//! twin: const_write
+// The twin of const_write: a const element is read into a variable, which
+// is then assigned.
+module m
+const TAB: [4]u8 = [1u8, 2u8, 3u8, 4u8]
+func main() -> i32 {
+    var x: u8 = TAB[0usize]
+    x = 9u8
+    print_u64(u64(x))
+    return 0i32
+}

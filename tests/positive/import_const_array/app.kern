@@ -1,0 +1,18 @@
+//! phase: 3
+//! expect: output import_const_array
+// An imported array or struct constant is the same read-only global in the
+// importing module as in its own: indexed through the module path, measured
+// with len, and read through the exporting module's functions.
+module app
+import "lib"
+func main() -> i32 {
+    var s: u64 = 0u64
+    var i: usize = 0usize
+    while i < len(lib.Weights) {
+        s = s + lib.Weights[i] * lib.Weight(i)
+        i = i + 1usize
+    }
+    print_u64(s + lib.Base.Hi - lib.Base.Lo)
+    println()
+    return 0i32
+}

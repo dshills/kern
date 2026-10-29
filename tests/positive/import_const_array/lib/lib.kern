@@ -1,0 +1,13 @@
+module lib
+const Weights: [3]u64 = [2u64, 3u64, 5u64]
+const Base: Pair = Pair{Lo: 10u64, Hi: 20u64}
+struct Pair {
+    Lo: u64
+    Hi: u64
+}
+func Weight(i: usize) -> u64 {
+    if i < len(Weights) {
+        return Weights[i]
+    }
+    return 0u64
+}

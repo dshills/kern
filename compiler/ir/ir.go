@@ -108,13 +108,18 @@ type Place struct {
 	Path   []PathElem
 }
 
-// Global is a thread_local module variable (spec §6 TLS): a Copy type with
-// a constant initializer (an integer, a float, a bool, or nil for zero).
+// Global is a module variable of a Copy type with a constant initializer:
+// a thread_local (spec §6 TLS), one instance per thread, or with ReadOnly
+// an aggregate constant (an array or a struct const whose initializer
+// folds), one instance shared by every thread and never written. Init is
+// an integer, a float, a bool, nil for zero, or for an aggregate a []any
+// of its elements or fields in declaration order (resolve.FoldConst).
 type Global struct {
-	ID   int
-	Name string
-	Type resolve.Type
-	Init any
+	ID       int
+	Name     string
+	Type     resolve.Type
+	Init     any
+	ReadOnly bool
 }
 
 // PathKind classifies a path element.

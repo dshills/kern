@@ -126,6 +126,9 @@ func (fl *fnLower) expr(e ast.Expr, want resolve.Type) operand {
 		return fl.closure(x)
 	case *ast.FieldExpr:
 		if k := fl.l.info.ImportedConsts[x]; k != nil {
+			if g := fl.l.constGlobal(k); g != nil {
+				return operand{pl: ir.Place{Global: g}, perm: ast.ConvView}
+			}
 			return fl.expr(k.Value, t) // an imported constant
 		}
 		return fl.field(x)
@@ -311,6 +314,9 @@ func (fl *fnLower) ident(x *ast.Ident) operand {
 		}
 		return operand{pl: ir.Place{Access: acc}, perm: permOf(acc)}
 	case resolve.SymConst:
+		if g := fl.l.constGlobal(sym.Const); g != nil {
+			return operand{pl: ir.Place{Global: g}, perm: ast.ConvView}
+		}
 		return fl.expr(sym.Const.Value, t)
 	case resolve.SymGlobal:
 		return operand{pl: ir.Place{Global: fl.l.global(sym.Global)}, perm: ast.ConvEdit}

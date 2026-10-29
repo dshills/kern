@@ -190,16 +190,37 @@ func (it *Interp) freshGlobals() []Value {
 	return gs
 }
 
-func globalInit(g *ir.Global) Value {
-	switch v := g.Init.(type) {
+func globalInit(g *ir.Global) Value { return constValue(g.Type, g.Init) }
+
+// constValue builds a global's initial value from its folded initializer
+// (ir.Global): a scalar, or for an aggregate the []any of its elements or
+// fields, with nil the zero value at any depth.
+func constValue(t resolve.Type, init any) Value {
+	switch v := init.(type) {
 	case int64:
-		return mkInt(g.Type.(*resolve.Prim).Name, uint64(v))
+		return mkInt(t.(*resolve.Prim).Name, uint64(v))
 	case float64:
-		return mkFloat(g.Type.(*resolve.Prim).Name, v)
+		return mkFloat(t.(*resolve.Prim).Name, v)
 	case bool:
 		return Bool(v)
+	case []any:
+		switch x := t.(type) {
+		case *resolve.Array:
+			a := &Array{Elems: make([]Value, len(v))}
+			for i, el := range v {
+				a.Elems[i] = constValue(x.Elem, el)
+			}
+			return a
+		case *resolve.Named:
+			args := typeArgs(x)
+			s := &Struct{Fields: make([]Value, len(v))}
+			for i, f := range x.Decl.Fields {
+				s.Fields[i] = constValue(resolve.Subst(f.Type, args), v[i])
+			}
+			return s
+		}
 	}
-	return zeroOf(g.Type)
+	return zeroOf(t)
 }
 
 func (it *Interp) Run() (status int) {

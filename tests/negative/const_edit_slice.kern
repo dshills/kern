@@ -1,0 +1,12 @@
+//! expect: reject ACC_PERMISSION_ESCALATION rule=5.3.4
+//! twin: const_edit_slice_ok
+// A slice of a const cannot be passed where an edit access is required.
+module m
+const TAB: [4]u8 = [1u8, 2u8, 3u8, 4u8]
+func bump(xs: edit[[]u8]) {
+    xs[0usize] = 9u8
+}
+func main() -> i32 {
+    bump(TAB[0usize:4usize])   // ACC_PERMISSION_ESCALATION
+    return 0i32
+}

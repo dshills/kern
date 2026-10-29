@@ -77,6 +77,8 @@ type lowerError struct {
 
 type lowerer struct {
 	globals map[*resolve.GlobalDecl]*ir.Global
+	consts  map[*resolve.ConstDecl]*ir.Global // nil for a constant lowered as an expression
+	folder  *resolve.ConstFolder
 	prog    *resolve.Program
 	info    *resolve.Info
 	mod     *ir.Module
@@ -139,6 +141,44 @@ func (l *lowerer) global(g *resolve.GlobalDecl) *ir.Global {
 	l.globals[g] = x
 	l.mod.Globals = append(l.mod.Globals, x)
 	return x
+}
+
+// constGlobal returns the read-only global that holds an aggregate
+// constant, creating it once, or nil when the constant stays an expression
+// lowered at each use: a scalar (a literal in the IR), a non-Copy type (a
+// fresh value is moved at each use) or an initializer that does not fold.
+// Through a global an array constant is built once, and `len(K)` and
+// `K[i]` name one place, so the proof pass relates them.
+func (l *lowerer) constGlobal(k *resolve.ConstDecl) *ir.Global {
+	if l.consts == nil {
+		l.consts = map[*resolve.ConstDecl]*ir.Global{}
+		l.folder = resolve.NewConstFolder()
+	}
+	if x, ok := l.consts[k]; ok {
+		return x
+	}
+	var g *ir.Global
+	if aggregate(k.Type) && resolve.IsCopy(k.Type) {
+		if m := l.prog.Modules[k.Module]; m != nil {
+			if init, ok := l.folder.Fold(m, k); ok {
+				g = &ir.Global{ID: len(l.mod.Globals), Name: k.Module + "." + k.Name, Type: k.Type, Init: init, ReadOnly: true}
+				l.mod.Globals = append(l.mod.Globals, g)
+			}
+		}
+	}
+	l.consts[k] = g
+	return g
+}
+
+// aggregate reports whether t is an array or a struct.
+func aggregate(t resolve.Type) bool {
+	switch x := t.(type) {
+	case *resolve.Array:
+		return true
+	case *resolve.Named:
+		return x.Decl.Kind == resolve.KindStruct
+	}
+	return false
 }
 
 // request schedules an instantiation and returns its IR name.

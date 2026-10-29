@@ -53,6 +53,10 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 	}
 	triple := opts.Triple
 	for _, g := range mod.Globals {
+		if g.ReadOnly {
+			fmt.Fprintf(&e.decls, "%s = constant %s %s\n", globalSym(g), e.mty(g.Type), e.globalInit(g))
+			continue
+		}
 		fmt.Fprintf(&e.decls, "%s = thread_local global %s %s\n", globalSym(g), e.mty(g.Type), e.globalInit(g))
 	}
 	for _, f := range mod.Funcs {
@@ -354,21 +358,50 @@ func accessPlace(reg string, t resolve.Type) pl {
 	return pl{ptr: reg, ty: elem}
 }
 
-// globalSym is the symbol of a thread_local global.
+// globalSym is the symbol of a global: a thread_local or an aggregate constant.
 func globalSym(g *ir.Global) string { return "@" + quote("g."+g.Name) }
 
-// globalInit renders a thread_local's constant initializer.
-func (e *emitter) globalInit(g *ir.Global) string {
-	switch v := g.Init.(type) {
+// globalInit renders a global's constant initializer.
+func (e *emitter) globalInit(g *ir.Global) string { return e.constInit(g.Type, g.Init) }
+
+// constInit renders a folded initializer (ir.Global) as an LLVM constant of
+// the memory type of t: a scalar, or an array or struct aggregate whose
+// elements are rendered recursively, each with its own type; nil is the
+// zero value at any depth.
+func (e *emitter) constInit(t resolve.Type, init any) string {
+	switch v := init.(type) {
 	case int64:
 		return fmt.Sprintf("%d", v)
 	case float64:
-		return fconst(g.Type, v)
+		return fconst(t, v)
 	case bool:
 		if v {
 			return "1"
 		}
 		return "0"
+	case []any:
+		switch x := t.(type) {
+		case *resolve.Array:
+			parts := make([]string, len(v))
+			for i, el := range v {
+				parts[i] = e.mty(x.Elem) + " " + e.constInit(x.Elem, el)
+			}
+			return "[" + strings.Join(parts, ", ") + "]"
+		case *resolve.Named:
+			if len(x.Decl.Fields) == 0 {
+				return "zeroinitializer" // an empty struct is laid out as one byte
+			}
+			args := typeArgs(x)
+			parts := make([]string, len(v))
+			for i, f := range x.Decl.Fields {
+				ft := resolve.Subst(f.Type, args)
+				parts[i] = e.mty(ft) + " " + e.constInit(ft, v[i])
+			}
+			if x.Decl.Packed {
+				return "<{ " + strings.Join(parts, ", ") + " }>"
+			}
+			return "{ " + strings.Join(parts, ", ") + " }"
+		}
 	}
 	return "zeroinitializer"
 }
