@@ -147,9 +147,16 @@ func (l *lowerer) request(fd *resolve.FuncDecl, subst map[string]resolve.Type, f
 	if _, ok := l.done[name]; ok {
 		return name
 	}
+	// the body is lowered against its own file: a library's embedded
+	// source, or the user file that declares it (a caller in another file
+	// or module names the callee by its file so that traps and the inliner's
+	// same-file rule see the declaration's file, not the call's)
 	library := l.prog.IsStd(fd.Module) && !fd.Intrinsic
-	if library {
+	switch {
+	case library:
 		file = "std/" + fd.Module + ".kern"
+	case fd.File != "":
+		file = fd.File
 	}
 	f := &ir.Func{Name: name, Release: fd.Release, Contract: fd.Contract, Pos: fd.Pos, File: file, Extern: fd.Extern, Intrinsic: fd.Intrinsic, Library: library}
 	l.done[name] = f
@@ -161,7 +168,11 @@ func (l *lowerer) request(fd *resolve.FuncDecl, subst map[string]resolve.Type, f
 	for _, r := range fd.Ret {
 		f.Rets = append(f.Rets, resolve.Subst(r, subst))
 	}
-	if fd.AST != nil && fd.AST.Body != nil && (fd.Module == l.prog.Main.Name || library) {
+	// every function with a body is lowered: the main module's, an imported
+	// user module's and a library's (regression: an imported user module's
+	// functions were declared with no body, so a call to one crashed the
+	// interpreter and the backend)
+	if fd.AST != nil && fd.AST.Body != nil {
 		l.queue = append(l.queue, &pending{fd: fd, subst: subst, name: name, file: file})
 	}
 	return name
@@ -193,10 +204,14 @@ func (l *lowerer) requestDestructor(n *resolve.Named, file string) string {
 		f.Blocks = []*ir.Block{f.Entry}
 		f.Locals = []*ir.Local{f.Params[0]}
 	case n.Decl.Destructor != nil && hasKernDestructor(n, l.prog.Main.Name):
-		if n.Decl.Std {
+		switch {
+		case n.Decl.Std:
 			file = "std/" + n.Decl.Module + ".kern"
 			f.File = file
 			f.Library = true
+		case n.Decl.DestructorFile != "":
+			file = n.Decl.DestructorFile
+			f.File = file
 		}
 		l.queue = append(l.queue, &pending{name: name, subst: subst, file: file, dtor: n})
 	default:
@@ -581,10 +596,10 @@ func hasKernDestructor(n *resolve.Named, main string) bool {
 	if n.Decl.Destructor == nil {
 		return false
 	}
-	if n.Decl.Module == main {
-		return true
+	if n.Decl.Module == main || !n.Decl.Std {
+		return true // declared in kern by the program's own modules
 	}
-	return n.Decl.Std && !layout.Opaque(n)
+	return !layout.Opaque(n) // a library type, unless the runtime provides it
 }
 
 // maxExpansion bounds the growing instantiations of one declaration along

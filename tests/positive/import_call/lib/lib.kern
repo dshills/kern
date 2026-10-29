@@ -1,0 +1,36 @@
+module lib
+struct Token nocopy {
+    Id: u64
+}
+impl Token {
+    destructor(edit self) {
+        print_str("drop ")
+        print_u64(self.Id)
+        println()
+    }
+    func Twice(view self) -> u64 {
+        return self.Id * 2u64
+    }
+}
+func Make(id: u64) -> Token {
+    return Token{Id: id}
+}
+func Largest[T: Copy](xs: view[[]T], less: func(T, T) -> bool) -> Option[T] {
+    var best: Option[T] = None
+    for x in xs {
+        match best {
+            Some(b) => { if less(b, x) { best = Some(x) } }
+            None => { best = Some(x) }
+        }
+    }
+    return best
+}
+func less_u64(a: u64, b: u64) -> bool {
+    return a < b
+}
+func Max(xs: view[[]u64]) -> u64 {
+    match Largest(xs, less_u64) {
+        Some(v) => { return v }
+        None => { return 0u64 }
+    }
+}

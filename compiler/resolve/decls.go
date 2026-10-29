@@ -99,6 +99,7 @@ type TypeDecl struct {
 	Packed                                  bool
 	View                                    bool
 	Destructor                              *ast.Destructor
+	DestructorFile                          string // the source file of the impl that declares the destructor
 	Methods                                 map[string]*FuncDecl    // inherent and interface methods by name
 	Impls                                   map[*InterfaceDecl]bool // interfaces implemented
 	AssertSend, AssertShare, AssertInterior bool
@@ -135,6 +136,7 @@ type FuncDecl struct {
 	Intrinsic   bool // declared without body in the prelude
 	AST         *ast.FuncDecl
 	Type        *Func // function type with receiver as first param when a method
+	File        string // the source file of the declaration (its body is lowered against it)
 }
 
 // ParamDecl is one resolved parameter.
@@ -1134,7 +1136,7 @@ func (r *resolver) primImpls(prim string, iface *InterfaceDecl) bool {
 // funcSig resolves a function signature. recv is the receiver type for
 // methods (nil otherwise); selfT is the Self type parameter for interfaces.
 func (r *resolver) funcSig(m *Module, file string, outer *scope, d *ast.FuncDecl, recv Type, selfT *TypeParamType, ownerParams []*TypeParamType) *FuncDecl {
-	fd := &FuncDecl{Name: d.Name, Module: m.Name, Pos: d.Pos, Release: d.Release, Contract: d.Contract, Extern: d.Extern, AST: d, OwnerParams: ownerParams}
+	fd := &FuncDecl{Name: d.Name, Module: m.Name, Pos: d.Pos, Release: d.Release, Contract: d.Contract, Extern: d.Extern, AST: d, OwnerParams: ownerParams, File: file}
 	fd.TypeParams = r.typeParams(m, file, d.TypeParams, d.Name)
 	sc := outer.child()
 	for _, tp := range fd.TypeParams {
@@ -1365,6 +1367,7 @@ func (r *resolver) collectImpl(m *Module, file string, d *ast.ImplDecl) {
 			r.errorf("NAME_DUPLICATE", file, d.Destructor.Pos, "type %s already has a destructor", td.Name)
 		}
 		td.Destructor = d.Destructor
+		td.DestructorFile = file
 	}
 	var selfT *TypeParamType
 	if iface != nil {

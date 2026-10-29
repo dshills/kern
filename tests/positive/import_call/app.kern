@@ -1,0 +1,17 @@
+//! phase: 3
+//! expect: output import_call
+// Functions, methods, generic functions and destructors of an imported user
+// module run when called from the importing module (regression: an
+// imported module's functions were declared with no body, so the first
+// call crashed the interpreter and the backend).
+module app
+import "lib"
+func main() -> i32 {
+    t := lib.Make(21u64)
+    print_u64(t.Twice())
+    println()
+    xs := [4u64, 9u64, 2u64]
+    print_u64(lib.Max(xs[0usize:3usize]))
+    println()
+    return 0i32
+}
