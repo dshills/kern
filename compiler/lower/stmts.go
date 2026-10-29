@@ -497,14 +497,44 @@ func elemTypeOf(t resolve.Type) resolve.Type {
 	return t
 }
 
+// condBr branches on a condition: `a && b` tests b only when a holds,
+// `a || b` only when a fails, `!a` swaps the targets, and any other
+// condition is evaluated to a value. Each comparison then terminates its
+// own block, so the proof pass reads every operand's bound on the edge it
+// establishes (specs/prove-guards/SPEC.md F2); the operands are evaluated
+// in source order, each at most once, as the value lowering evaluates
+// them.
+func (fl *fnLower) condBr(e ast.Expr, then, els *ir.Block) {
+	switch x := e.(type) {
+	case *ast.Binary:
+		if x.Op == "&&" || x.Op == "||" {
+			rhs := fl.newBlock("cond.rhs")
+			if x.Op == "&&" {
+				fl.condBr(x.L, rhs, els)
+			} else {
+				fl.condBr(x.L, then, rhs)
+			}
+			fl.cur = rhs
+			fl.condBr(x.R, then, els)
+			return
+		}
+	case *ast.Unary:
+		if x.Op == "!" {
+			fl.condBr(x.X, els, then)
+			return
+		}
+	}
+	cond := fl.value(e, &resolve.Prim{Name: "bool"})
+	fl.terminate(&ir.CondBr{Cond: cond, Then: then, Else: els})
+}
+
 func (fl *fnLower) whileStmt(s *ast.While) {
 	head := fl.newBlock("while.head")
 	body := fl.newBlock("while.body")
 	exit := fl.newBlock("while.exit")
 	fl.terminate(&ir.Br{Target: head})
 	fl.cur = head
-	cond := fl.value(s.Cond, &resolve.Prim{Name: "bool"})
-	fl.terminate(&ir.CondBr{Cond: cond, Then: body, Else: exit})
+	fl.condBr(s.Cond, body, exit)
 	fl.cur = body
 	lf := fl.pushFrame()
 	lf.isLoop = true
@@ -519,14 +549,13 @@ func (fl *fnLower) whileStmt(s *ast.While) {
 }
 
 func (fl *fnLower) ifStmt(s *ast.If) {
-	cond := fl.value(s.Cond, &resolve.Prim{Name: "bool"})
 	then := fl.newBlock("if.then")
 	join := fl.newBlock("if.join")
 	els := join
 	if s.Else != nil {
 		els = fl.newBlock("if.else")
 	}
-	fl.terminate(&ir.CondBr{Cond: cond, Then: then, Else: els})
+	fl.condBr(s.Cond, then, els)
 	fl.cur = then
 	fl.block(s.Then)
 	if fl.cur != nil {

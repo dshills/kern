@@ -2,7 +2,7 @@
  "main": "pkt.kern",
  "expected_output": "true\n60\n10\nfalse\n0\nnone\nfalse\n0\nnone\ntrue\n0\nnone\nfalse\n0\nnone\ntrue\n60\n10\n",
  "must_check_clean": true,
- "max_runtime_bounds_checks": 6,
+ "max_runtime_bounds_checks": 0,
  "no_unsafe_added": true,
  "required_functions": [
   "pkt.rd16",

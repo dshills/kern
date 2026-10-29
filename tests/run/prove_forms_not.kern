@@ -1,0 +1,56 @@
+//! phase: 6
+//! expect: output prove_forms_not
+// The forms the proof pass does not prove (specs/prove-guards/SPEC.md §3):
+// every index check below stays runtime-checked, and the program's
+// output is the same under the interpreter and the native builds.
+module run
+// lockstep without a length equality: b[i] is not covered by a's guard
+func lockstep(a: view[]u64, b: view[]u64) -> u64 {
+    var s: u64 = 0u64
+    var i: usize = 0usize
+    while i < len(a) {
+        s = s + a[i] * b[i]
+        i = i + 1usize
+    }
+    return s
+}
+// a wrapping operation read as an offset
+func wrapped(xs: view[]u8, i: usize) -> u8 {
+    if i + 1usize < len(xs) { return xs[wrapping_add(i, 1usize)] }
+    return 0u8
+}
+// a guard with !=
+func not_equal(xs: view[]u8, i: usize) -> u8 {
+    if i != len(xs) {
+        if i < 100usize { return xs[i] }
+    }
+    return 0u8
+}
+// a container's method is not a length value
+func vec_len(v: view[Vec[u64]], i: usize) -> u64 {
+    if i < v.len() { return v.as_view()[i] }
+    return 0u64
+}
+// a signed comparison
+func signed(xs: view[]u8, i: i64) -> u8 {
+    if i >= 0i64 {
+        if i < i64(len(xs)) { return xs[usize(i)] }
+    }
+    return 0u8
+}
+func main() -> i32 {
+    xs := [1u64, 2u64, 3u64]
+    ys := [10u64, 20u64, 30u64]
+    bytes := [1u8, 2u8, 3u8, 4u8]
+    print_u64(lockstep(xs[0usize:3usize], ys[0usize:3usize]))
+    println()
+    print_u64(u64(wrapped(bytes[0usize:4usize], 2usize)) + u64(not_equal(bytes[0usize:4usize], 3usize)))
+    println()
+    v := Vec[u64].new()
+    v.push(7u64)
+    print_u64(vec_len(v, 0usize) + vec_len(v, 1usize))
+    println()
+    print_u64(u64(signed(bytes[0usize:4usize], 1i64)) + u64(signed(bytes[0usize:4usize], -1i64)))
+    println()
+    return 0i32
+}

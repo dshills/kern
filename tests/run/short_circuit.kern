@@ -1,0 +1,35 @@
+//! phase: 6
+//! expect: output short_circuit
+// Conditions lowered as branches (specs/prove-guards/SPEC.md F2): the
+// operands of && and || are evaluated in source order, each at most once,
+// and the second operand of a short-circuit is not evaluated when the
+// first decides; the second operands below would trap if they ran.
+module run
+func t(name: view[]u8, v: bool) -> bool {
+    print_str(name)
+    return v
+}
+func main() -> i32 {
+    xs := [1u8, 2u8]
+    var i: usize = 5usize
+    if t("a", false) && xs[i] == 1u8 { print_str("!") }
+    println()
+    if t("b", true) || xs[i] == 1u8 { print_str("+") }
+    println()
+    if t("c", true) && t("d", false) || t("e", true) { print_str("+") }
+    println()
+    if !(t("f", false) || t("g", false)) && !t("h", false) { print_str("+") }
+    println()
+    var n: u64 = 0u64
+    var k: usize = 0usize
+    while k < 3usize && (k != 2usize || t("w", false)) {
+        n = n + 1u64
+        k = k + 1usize
+    }
+    print_u64(n)
+    println()
+    z := 0u64
+    if i > 1usize || 1u64 / z == 0u64 { print_str("s") }
+    println()
+    return 0i32
+}

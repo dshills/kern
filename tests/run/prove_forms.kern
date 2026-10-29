@@ -1,0 +1,194 @@
+//! phase: 6
+//! expect: output prove_forms
+// The guard forms the proof pass proves (specs/prove-guards/SPEC.md F1–F9),
+// one function each; `show-bounds-checks` labels every index and slice
+// check below proven. The output is the same under the interpreter, which
+// executes every check, and the native builds, which leave the proven ones
+// out.
+module run
+struct Ring {
+    buf: [8]u32
+    head: usize
+}
+func sum(xs: view[]u64) -> u64 {
+    var s: u64 = 0u64
+    for x in xs { s = s + x }
+    return s
+}
+func sum32(xs: view[]u32) -> u64 {
+    var s: u64 = 0u64
+    for x in xs { s = s + u64(x) }
+    return s
+}
+// F1: a cached length in a loop head
+func cached(xs: view[]u64) -> u64 {
+    n := len(xs)
+    var i: usize = 0usize
+    var s: u64 = 0u64
+    while i < n {
+        s = s + xs[i]
+        i = i + 1usize
+    }
+    return s
+}
+// F1: an if between the guard and the store
+func join_store(tab: edit[]u8, v: u8) {
+    var i: usize = 0usize
+    while i < len(tab) {
+        c := v
+        if c > 9u8 { c = 9u8 }
+        tab[i] = c
+        i = i + 1usize
+    }
+}
+// F1: a range loop over the length
+func range_loop(xs: view[]u64) -> u64 {
+    var s: u64 = 0u64
+    for i in 0usize..len(xs) { s = s + xs[i] }
+    return s
+}
+// F2: both operands of && guard the body
+func lockstep_both(a: view[]u64, b: view[]u64) -> u64 {
+    var s: u64 = 0u64
+    var i: usize = 0usize
+    while i < len(a) && i < len(b) {
+        s = s + a[i] * b[i]
+        i = i + 1usize
+    }
+    return s
+}
+// F2: the second operand of || runs under the first's negation
+func first_zero(xs: view[]u8, i: usize) -> bool {
+    if i >= len(xs) || xs[i] == 0u8 { return true }
+    return false
+}
+// F3: a non-strict guard
+func window(xs: view[]u64) -> u64 {
+    var s: u64 = 0u64
+    var i: usize = 0usize
+    while i + 2usize <= len(xs) {
+        s = s + xs[i] + xs[i + 1usize]
+        i = i + 2usize
+    }
+    return s
+}
+// F4: equality with a literal
+func exactly4(xs: view[]u8) -> u8 {
+    if len(xs) == 4usize { return xs[3usize] }
+    return 0u8
+}
+// F4: two equal lengths
+func lockstep_eq(a: view[]u64, b: view[]u64) -> u64 {
+    var s: u64 = 0u64
+    if len(a) == len(b) {
+        var i: usize = 0usize
+        while i < len(a) {
+            s = s + a[i] * b[i]
+            i = i + 1usize
+        }
+    }
+    return s
+}
+// F5: a literal equal to the array's length
+func ring_get(r: view[Ring], idx: usize) -> u32 {
+    if idx < 8usize { return r.buf[idx] }
+    return 0u32
+}
+// F6: a recomputed index expression
+func stride6(xs: view[]u8, i: usize) -> u8 {
+    if i * 6usize + 5usize < len(xs) { return xs[i * 6usize + 5usize] }
+    return 0u8
+}
+func ring_at(r: view[Ring], i: usize) -> u32 {
+    if (r.head + i) % len(r.buf) < len(r.buf) { return r.buf[(r.head + i) % len(r.buf)] }
+    return 0u32
+}
+func classify(tab: view[]u8, b: u8) -> u8 {
+    if usize(b) < len(tab) { return tab[usize(b)] }
+    return 0u8
+}
+// F7: an index minus a constant
+func prev(xs: view[]u64, i: usize) -> u64 {
+    if i < len(xs) {
+        if i >= 1usize { return xs[i - 1usize] }
+    }
+    return 0u64
+}
+// F8: two stores under one guard; an access after a call
+func put2(dst: edit[]u8, i: usize, a: u8, b: u8) -> bool {
+    if i + 1usize < len(dst) {
+        dst[i] = a
+        dst[i + 1usize] = b
+        return true
+    }
+    return false
+}
+func fill(xs: edit[]u8, v: u8) {
+    var i: usize = 0usize
+    while i < len(xs) {
+        xs[i] = v
+        i = i + 1usize
+    }
+}
+func after_call(xs: edit[]u8, i: usize) -> u8 {
+    if i < len(xs) {
+        fill(xs, 1u8)
+        return xs[i]
+    }
+    return 0u8
+}
+// F9: slices under a guard, to the length, and with literal bounds
+func mid(xs: view[]u64, i: usize) -> u64 {
+    if i + 2usize <= len(xs) { return sum(xs[i:i + 2usize]) }
+    return 0u64
+}
+func tail_sum(xs: view[]u64, i: usize) -> u64 {
+    if i < len(xs) { return sum(xs[i:len(xs)]) }
+    return 0u64
+}
+func head2(r: view[Ring]) -> u64 {
+    return sum32(r.buf[0usize:2usize])
+}
+func main() -> i32 {
+    xs := [1u64, 2u64, 3u64, 4u64, 5u64]
+    ys := [10u64, 20u64, 30u64, 40u64, 50u64]
+    var bytes: [6]u8 = [1u8, 0u8, 3u8, 4u8, 5u8, 6u8]
+    var r: Ring = Ring{buf: [1u32, 2u32, 3u32, 4u32, 5u32, 6u32, 7u32, 8u32], head: 6usize}
+    print_u64(cached(xs[0usize:5usize]) + range_loop(xs[0usize:5usize]))
+    println()
+    join_store(bytes[0usize:6usize], 12u8)
+    print_u64(u64(bytes[0usize]) + u64(bytes[5usize]))
+    println()
+    print_u64(lockstep_both(xs[0usize:5usize], ys[0usize:3usize]))
+    println()
+    print_bool(first_zero(bytes[0usize:6usize], 1usize))
+    print_bool(first_zero(bytes[0usize:6usize], 9usize))
+    print_bool(first_zero(bytes[0usize:6usize], 2usize))
+    println()
+    print_u64(window(xs[0usize:5usize]))
+    println()
+    print_u64(u64(exactly4(bytes[0usize:4usize])) + u64(exactly4(bytes[0usize:5usize])))
+    println()
+    print_u64(lockstep_eq(xs[0usize:5usize], ys[0usize:5usize]) + lockstep_eq(xs[0usize:5usize], ys[0usize:4usize]))
+    println()
+    print_u64(u64(ring_get(r, 7usize)) + u64(ring_get(r, 8usize)))
+    println()
+    print_u64(u64(stride6(bytes[0usize:6usize], 0usize)) + u64(stride6(bytes[0usize:6usize], 1usize)))
+    println()
+    print_u64(u64(ring_at(r, 3usize)))
+    println()
+    print_u64(u64(classify(bytes[0usize:6usize], 2u8)) + u64(classify(bytes[0usize:6usize], 200u8)))
+    println()
+    print_u64(prev(xs[0usize:5usize], 4usize) + prev(xs[0usize:5usize], 0usize))
+    println()
+    var dst: [4]u8 = zero()
+    print_bool(put2(dst[0usize:4usize], 2usize, 7u8, 8u8))
+    print_bool(put2(dst[0usize:4usize], 3usize, 7u8, 8u8))
+    print_u64(u64(dst[2usize]) + u64(dst[3usize]))
+    println()
+    print_u64(u64(after_call(dst[0usize:4usize], 1usize)))
+    println()
+    print_u64(mid(xs[0usize:5usize], 3usize) + mid(xs[0usize:5usize], 4usize) + tail_sum(xs[0usize:5usize], 2usize) + head2(r))
+    println()
+    return 0i32
+}

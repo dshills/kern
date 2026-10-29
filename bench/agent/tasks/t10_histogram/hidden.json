@@ -2,7 +2,7 @@
  "main": "hist.kern",
  "expected_output": "108\n11\n272\n0\n108\n14\n214\n214\nnone\n0\n0\n0\n97\n3\n0\n0\n",
  "must_check_clean": true,
- "max_runtime_bounds_checks": 1,
+ "max_runtime_bounds_checks": 0,
  "no_unsafe_added": true,
  "required_functions": [
   "hist.bump",

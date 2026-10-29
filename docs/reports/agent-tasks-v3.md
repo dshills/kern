@@ -65,6 +65,11 @@ runtime-checked:
 Each is proven by the same move: compute the index into a local once, and
 compare that local against `len()` of the place being indexed immediately
 before the access, re-guarding a second store or an access after a call.
+**Superseded on 2026-10-29:** the pass now proves every idiom in this
+table except the lockstep `b[i]` and the `Vec.len()` guard
+(`docs/reports/prove-guards.md`); the budgets of this suite were lowered
+to the references' new counts, which are 0 on every task, and the table
+stays as the record of what the suite was designed against.
 Slicing (`xs[lo:hi]`) is itself a runtime-checked bounds check in every
 form, which is why each budget counts the slices in `main`.
 

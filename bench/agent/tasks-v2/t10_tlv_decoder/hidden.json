@@ -2,7 +2,7 @@
  "main": "tlv.kern",
  "expected_output": "7\n500\n65799\n60\n1\n0\n0\n0\n0\n0\nmalformed\nmalformed\n",
  "must_check_clean": true,
- "max_runtime_bounds_checks": 5,
+ "max_runtime_bounds_checks": 0,
  "no_unsafe_added": true,
  "required_functions": [
   "tlv.decode",

@@ -55,7 +55,7 @@ func tools(arm string) []toolDef {
 			toolDef{Name: "explain_ownership", Description: "Explain the ownership state, accesses and drop points of every place intersecting a byte span of a file (JSON).", Params: map[string]string{"file": "file name", "start": "byte offset", "end": "byte offset"}},
 			toolDef{Name: "show_copies", Description: "List every bitwise and explicit copy in the program with its location, type and size (JSON).", Params: map[string]string{}},
 			toolDef{Name: "show_allocations", Description: "List every allocation site in the program (JSON).", Params: map[string]string{}},
-			toolDef{Name: "show_bounds_checks", Description: "List every bounds and overflow check in the program, each labelled proven (with what proved it: a constant index under a length check, a dominating comparison against the same length, or a for loop's bound) or runtime-checked (JSON).", Params: map[string]string{}},
+			toolDef{Name: "show_bounds_checks", Description: "List every bounds and overflow check in the program, each labelled proven (with what proved it: a literal index or slice under a length the type gives, a dominating comparison against the same length reaching the check through joins and loops, counting a recomputed index expression and an equal length as the same, or a for loop's bound) or runtime-checked (JSON).", Params: map[string]string{}},
 			toolDef{Name: "show_layout", Description: "Give the size, alignment and field offsets of every struct and union in the program (JSON).", Params: map[string]string{}},
 		)
 	}

@@ -97,15 +97,22 @@ func (v *validator) run() []error {
 		}
 	}
 	v.in = map[*Block]*vstate{v.f.Entry: entry}
-	// worklist over the CFG; joins must agree (static moves), so at most a
-	// few iterations are needed
+	// worklist over the CFG; joins must agree (static moves), so a block's
+	// state settles after each predecessor has contributed once, plus a
+	// few iterations for the loops it is in
+	preds := map[*Block]int{}
+	for _, b := range v.f.Blocks {
+		for _, succ := range successors(b) {
+			preds[succ]++
+		}
+	}
 	work := []*Block{v.f.Entry}
 	visited := map[*Block]int{}
 	for len(work) > 0 {
 		b := work[0]
 		work = work[1:]
 		visited[b]++
-		if visited[b] > 8 {
+		if visited[b] > 8+preds[b] {
 			v.errorf("%s: ownership state does not converge", blockName(b))
 			continue
 		}

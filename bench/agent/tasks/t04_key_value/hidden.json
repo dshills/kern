@@ -2,7 +2,7 @@
  "main": "kv.kern",
  "expected_output": "33\n500\n900\nnone\n1298\n1200\n20\n90\nnone\n500\nnone\nnone\n1200\n1200\n20\n90\nnone\nnone\nnone\nnone\n0\nnone\nnone\nnone\n",
  "must_check_clean": true,
- "max_runtime_bounds_checks": 5,
+ "max_runtime_bounds_checks": 0,
  "no_unsafe_added": true,
  "required_functions": [
   "kv.find",

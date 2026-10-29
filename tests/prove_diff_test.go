@@ -124,9 +124,103 @@ func tail(p: view[]u64) -> u64 {
     if len(p) >= 2usize { return p[len(p) - 2usize] }
     return 7u64
 }
+func cached(p: view[]u64) -> u64 {
+    m := len(p)
+    s := 0u64
+    i := 0usize
+    while i < m {
+        s = wrapping_add(s, p[i])
+        i = i + 1usize
+    }
+    return s
+}
+func window(p: view[]u64) -> u64 {
+    s := 0u64
+    i := 0usize
+    while i + 2usize <= len(p) {
+        s = wrapping_add(s, wrapping_add(p[i], p[i + 1usize]))
+        i = i + 2usize
+    }
+    return s
+}
+func window_past(p: view[]u64) -> u64 {
+    s := 0u64
+    i := 0usize
+    while i + 2usize <= len(p) {
+        s = wrapping_add(s, p[i + 2usize])
+        i = i + 2usize
+    }
+    return s
+}
+func eq4(p: view[]u64) -> u64 {
+    if len(p) == 4usize { return p[3usize] }
+    return p[4usize]
+}
+func both(p: view[]u64, q: view[]u64) -> u64 {
+    s := 0u64
+    i := 0usize
+    while i < len(p) && i < len(q) {
+        s = wrapping_add(s, wrapping_mul(p[i], q[i]))
+        i = i + 1usize
+    }
+    return s
+}
+func lockstep(p: view[]u64, q: view[]u64) -> u64 {
+    s := 0u64
+    i := 0usize
+    while i < len(p) {
+        s = wrapping_add(s, wrapping_add(p[i], q[i]))
+        i = i + 1usize
+    }
+    return s
+}
+func either(p: view[]u64, i: usize) -> u64 {
+    if i >= len(p) || p[i] == 0u64 { return 1u64 }
+    return p[i]
+}
+func prev(p: view[]u64, i: usize) -> u64 {
+    if i < len(p) {
+        if i >= 1usize { return p[i - 1usize] }
+    }
+    return 5u64
+}
+func stride(p: view[]u64, i: usize) -> u64 {
+    if i * 2usize + 1usize < len(p) { return p[i * 2usize + 1usize] }
+    return p[i * 2usize]
+}
+func put2(e: edit[]u64, i: usize, a: u64, b: u64) {
+    if i + 1usize < len(e) {
+        e[i] = a
+        e[i + 1usize] = b
+    } else {
+        e[i] = a
+    }
+}
+func after(e: edit[]u64, i: usize) -> u64 {
+    if i < len(e) {
+        wr(e, 0usize, 9u64)
+        return e[i]
+    }
+    return e[i]
+}
+func mid(p: view[]u64, i: usize) -> u64 {
+    if i + 2usize <= len(p) { return sum_to(p[i : i + 2usize], 2usize) }
+    return sum_to(p[i : len(p)], 1usize)
+}
+func arr8(idx: usize) -> u64 {
+    var a: [8]u64 = zero()
+    a[2usize] = 4u64
+    if idx < 8usize { return a[idx] }
+    return a[idx - 8usize]
+}
 func main() -> i32 {
     v := Vec[u64].new()
+    q := Vec[u64].new()
 `)
+	qn := r.Intn(7)
+	for range qn {
+		fmt.Fprintf(&b, "    q.push(%du64)\n", r.Intn(100))
+	}
 	for range n {
 		fmt.Fprintf(&b, "    v.push(%du64)\n", r.Intn(100))
 	}
@@ -134,7 +228,31 @@ func main() -> i32 {
 	stmts := 2 + r.Intn(6)
 	for k := 0; k < stmts; k++ {
 		idx := func() int { return r.Intn(live + 2) } // 0..live+1: past the end about a third of the time
-		switch r.Intn(15) {
+		switch r.Intn(26) {
+		case 15:
+			b.WriteString("    with d := v.as_view() { print_u64(cached(d)) }\n")
+		case 16:
+			b.WriteString("    with d := v.as_view() { print_u64(window(d)) }\n")
+		case 17:
+			// p[i + 2] under `i + 2 <= len` must stay checked: it traps whenever the loop runs
+			b.WriteString("    with d := v.as_view() { print_u64(window_past(d)) }\n")
+		case 18:
+			b.WriteString("    with d := v.as_view() { print_u64(eq4(d)) }\n")
+		case 19:
+			b.WriteString("    with d := v.as_view() { with e := q.as_view() { print_u64(both(d, e)) } }\n")
+		case 20:
+			// q[i] under p's guard alone must stay checked: it traps when q is shorter
+			b.WriteString("    with d := v.as_view() { with e := q.as_view() { print_u64(lockstep(d, e)) } }\n")
+		case 21:
+			fmt.Fprintf(&b, "    with d := v.as_view() { print_u64(wrapping_add(either(d, %dusize), prev(d, %dusize))) }\n", idx(), idx())
+		case 22:
+			fmt.Fprintf(&b, "    with d := v.as_view() { print_u64(stride(d, %dusize)) }\n", r.Intn(4))
+		case 23:
+			fmt.Fprintf(&b, "    with e := v.as_edit() { put2(e, %dusize, %du64, %du64) }\n", idx(), r.Intn(100), r.Intn(100))
+		case 24:
+			fmt.Fprintf(&b, "    with e := v.as_edit() { print_u64(after(e, %dusize)) }\n", idx())
+		case 25:
+			fmt.Fprintf(&b, "    with d := v.as_view() { print_u64(wrapping_add(mid(d, %dusize), arr8(%dusize))) }\n", idx(), r.Intn(10))
 		case 0:
 			fmt.Fprintf(&b, "    with d := v.as_view() { print_u64(rd(d, %dusize)) }\n", idx())
 		case 1:
