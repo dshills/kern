@@ -54,3 +54,19 @@ speccritic's warnings were wording and one scope note on the cache key;
 plancritic asked for copy semantics in the 0.2 writer and for the
 negotiated version to be explicit rather than package state, both done.
 prism's findings and the phase review are recorded below.
+
+## Phase review
+
+- prism (gpt-6.1-sol, staged): one medium finding, the successful
+  structured-edit response still written at 0.3, fixed with a test; the
+  final pass had none.
+- realitycheck (gpt-6.1-sol, spec and plan against `compiler/diag` and
+  `cmd/kern`): PARTIALLY_ALIGNED, score 100, no drift and no violation;
+  every item IMPLEMENTED, PARTIAL or UNCLEAR for the tool's usual reason,
+  an inventory of declarations without bodies.
+- verifier (offline): risk score 41, forty-one low name-matching findings
+  on helpers that predate this change (`InsertAt`, `Replace`,
+  `MarshalJSON`, the generators), exercised by the schema and edit tests
+  under other names; the functions this change added are not among them.
+  Nothing acted on.
+- clarion: not used by this project.
