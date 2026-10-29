@@ -1,0 +1,98 @@
+//! phase: 3
+//! expect: output mutex_parked
+//! tsan: clean
+// The runtime's parked path (specs/perf-gaps/SPEC.md R13): four scoped
+// threads contend for one Mutex[u64] with a critical section long enough
+// (two hundred wrapping multiplications) that the others fail the fast
+// path and park, so the parked acquisition and the unpark on release run
+// under ThreadSanitizer; then two threads hand 500 values through a
+// one-slot Mutex[Slot] with two Condvars, each waiting in a loop as the
+// spec's spurious wakeups require. The totals are deterministic:
+// 2,000 x (1 + 2 + 3 + 4) = 20000 and 1 + ... + 500 = 125250. Each adder
+// also returns its own deterministic spin value, so the spin cannot be
+// removed as dead; the sum of the four is the third line.
+module mp
+struct Slot { v: u64; full: bool; done: bool }
+struct Chan { s: Mutex[Slot]; full: Condvar; empty: Condvar }
+
+func spin(x: u64) -> u64 {
+    y := x
+    for i in 0u64..200u64 { y = wrapping_add(wrapping_mul(y, 6364136223846793005u64), i) }
+    return y
+}
+
+func adder(m: view[Mutex[u64]], t: u64) -> u64 {
+    junk := t
+    for i in 0u64..2000u64 {
+        with g := m.lock() {
+            junk = spin(junk)
+            g = g + t + 1u64
+        }
+    }
+    return junk
+}
+
+func producer(c: view[Chan], n: u64) -> u64 {
+    i := 1u64
+    while i <= n {
+        with g := c.s.lock() {
+            while g.full { c.empty.wait(g) }
+            g.v = i
+            g.full = true
+        }
+        c.full.notify_one()
+        i = i + 1u64
+    }
+    with g := c.s.lock() { g.done = true }
+    c.full.notify_all()
+    return n
+}
+
+func consumer(c: view[Chan]) -> u64 {
+    sum := 0u64
+    while true {
+        var got: Option[u64] = None
+        finished := false
+        with g := c.s.lock() {
+            while !g.full && !g.done { c.full.wait(g) }
+            if g.full {
+                got = Some(g.v)
+                g.full = false
+            } else {
+                finished = true
+            }
+        }
+        match got {
+            Some(v) => { sum = sum + v; c.empty.notify_one() }
+            None => { if finished { return sum } }
+        }
+    }
+    return sum
+}
+
+func run(m: view[Mutex[u64]], c: view[Chan]) -> Result[u64, SpawnErr] {
+    with s := thread.scope() {
+        a0 := s.spawn(adder, m, 0u64)?
+        a1 := s.spawn(adder, m, 1u64)?
+        a2 := s.spawn(adder, m, 2u64)?
+        a3 := s.spawn(adder, m, 3u64)?
+        k := s.spawn(consumer, c)?
+        p := s.spawn(producer, c, 500u64)?
+        junk := wrapping_add(wrapping_add(a0.get(), a1.get()), wrapping_add(a2.get(), a3.get()))
+        print_u64(k.get() + p.get() - 500u64); println()
+        return Ok(junk)
+    }
+}
+
+func main() -> i32 {
+    m := Mutex[u64].new(0u64)
+    c := Chan { s: Mutex[Slot].new(Slot { v: 0u64, full: false, done: false }), full: Condvar.new(), empty: Condvar.new() }
+    match run(m, c) {
+        Ok(junk) => {
+            with g := m.lock() { print_u64(g); println() }
+            print_u64(junk); println()
+        }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}

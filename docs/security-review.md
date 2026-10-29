@@ -21,7 +21,7 @@ in writing with its rationale.
 |---|---|---|
 | Size arithmetic | vector growth and allocation sizes overflow checked against `SIZE_MAX`/`INT64_MAX`; pool growth is transactional | closed (Phase 2 review) |
 | Trap path | `write(2)`-only default handler on preallocated per-thread buffers; file names JSON-escaped (hosted and freestanding); nested traps abort | closed |
-| Mutex | error-checking pthread mutex; recursive acquisition traps instead of deadlocking | closed |
+| Mutex | the runtime's own parking lock (a 32-bit state threads park on, the holder's id beside it, written only by the holder); recursive acquisition traps `explicit` before any wait instead of deadlocking; a wait without the lock or with a second Mutex on one Condvar traps | closed (`docs/reports/perf-gaps.md`) |
 | Reference counts and atomics | compare-exchange loops; narrow read-modify-writes are single atomic updates | closed |
 | Test hooks | linked only with `--test-hooks` (`-DKERN_TEST_HOOKS`); release builds cannot reference them | closed |
 | Console device (freestanding) | polls the UART status before each byte; no buffering | closed |
