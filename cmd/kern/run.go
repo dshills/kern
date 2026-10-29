@@ -156,7 +156,7 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 	mod, ds, err := Build(srcs, opts.Opt)
 	req := Request{SchemaVersion: diag.SchemaVersion, Command: "run", Files: files}
 	if err != nil {
-		return internal(req, err, stdout, stderr)
+		return internal(req, diag.SchemaVersion, err, stdout, stderr)
 	}
 	if len(ds) > 0 {
 		_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: ds})
@@ -175,17 +175,17 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 }
 
 // emitIR implements the emit-ir machine command.
-func emitIR(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
+func emitIR(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {
 	mod, ds, err := Build(srcs, cliOpt)
 	if err != nil {
-		return internal(req, err, stdout, stderr)
+		return internal(req, wire, err, stdout, stderr)
 	}
 	if len(ds) > 0 {
-		_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: ds})
+		_ = diag.WriteAt(stdout, wire, diag.Response{OK: false, Result: nil, Diagnostics: ds})
 		return 2
 	}
-	resp := diag.Response{SchemaVersion: diag.SchemaVersion, OK: true, Result: diag.EmitIRResult{IR: ir.Print(mod)}, Diagnostics: []diag.Diagnostic{}}
-	if err := diag.Write(stdout, resp); err != nil {
+	resp := diag.Response{OK: true, Result: diag.EmitIRResult{IR: ir.Print(mod)}, Diagnostics: []diag.Diagnostic{}}
+	if err := diag.WriteAt(stdout, wire, resp); err != nil {
 		return 3
 	}
 	return 0

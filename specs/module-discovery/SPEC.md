@@ -256,7 +256,7 @@ manifest with every default: it marks the project root and nothing else.
 
 | field | type | meaning | default |
 |---|---|---|---|
-| `schema_version` | string | must be `"0.2"` when present | `"0.2"` |
+| `schema_version` | string | must be a schema version the compiler accepts (`diag.Accepted`: 0.2 and 0.3 at the time of writing) when present | the newest |
 | `entry` | string, or array of one or more strings | the entry file(s), each a relative path with no `..` component, resolved under the project root | none |
 | `opt` | string | `"debug"` or `"release"` | `"debug"` |
 | `env` | string | `"hosted"` or `"freestanding"` | `"hosted"` |

@@ -43,6 +43,7 @@ Rule identifiers are `section.bullet` into the specification (`T.n` = spec/types
 | `INTERNAL` | 7.failure | internal | 0 | internal compiler error |
 | `MATCH_NOT_EXHAUSTIVE` | T.5 | lang | 0 | match does not cover every variant |
 | `MODULE_MISMATCH` | T.1 | lang | 0 | files of one directory declare different module names |
+| `MODULE_NOT_FOUND` | T.1 | lang | 0 | an import names no module directory with .kern files under the project root |
 | `NAME_DUPLICATE` | T.1 | lang | 0 | name declared twice in one scope |
 | `NAME_PRIVATE` | T.1 | lang | 1 | module-private name used from another module |
 | `NAME_SHADOWS_PARAM` | T.1 | lang | 0 | local shadows a parameter |
@@ -53,6 +54,8 @@ Rule identifiers are `section.bullet` into the specification (`T.n` = spec/types
 | `OWN_USE_AFTER_MOVE` | 5.1.4 | lang | 0 | value used after it was moved |
 | `PARAM_OWN_REQUIRED` | 5.2.1 | lang | 0 | move-only parameter must be declared own |
 | `PLACE_REQUIRED` | T.5 | lang | 0 | a place expression is required here |
+| `PROJECT_INVALID` | P.2 | cli | 0 | kern.mod cannot be read as a manifest, or lacks the entry the command needs |
+| `PROJECT_NOT_FOUND` | P.1 | cli | 0 | no file named and no kern.mod in the working directory or its ancestors |
 | `SEND_NOT_SEND` | 5.5.2 | lang | 0 | value moved to another thread is not Send |
 | `SHARE_NOT_SHARE` | 5.5.3 | lang | 0 | value viewed from another thread is not Share |
 | `SYNTAX` | 4.0 | lang | 0 | syntax error |

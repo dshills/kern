@@ -1,4 +1,4 @@
-# kern machine API (`schema_version` 0.2)
+# kern machine API (`schema_version` 0.3)
 
 Generated from `compiler/diag/schema.go` by `go generate ./compiler/diag`; do not edit.
 This is the human-readable copy of spec §16; `tools/agent-api/schema.json` is the normative JSON Schema and the two must agree.
@@ -90,6 +90,7 @@ Every command reads one JSON request on standard input and writes one JSON respo
 | `Related` | `related` | [`Related`] | Secondary locations in the same file. |
 | `Fix` | `fix` | `StructuredEdit` \| null | A machine-applicable structured edit, or `null`. |
 | `OpIndex` | `op_index` | int \| null | Zero-based index into the request's `edit.ops` for `EDIT_*` diagnostics; `null` otherwise. |
+| `Message` | `message` | string | Optional. The compiler's one-sentence message for the diagnostic, the text the human rendering prints; present from `schema_version` 0.3 and absent in a 0.2 response. Not stable across compiler versions, unlike `code` and `rule`. |
 
 #### `Related`
 

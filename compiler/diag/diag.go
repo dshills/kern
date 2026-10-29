@@ -8,7 +8,23 @@ import (
 )
 
 // SchemaVersion is the machine-API schema version this compiler speaks (spec §16).
-const SchemaVersion = "0.2"
+const SchemaVersion = "0.3"
+
+// Accepted lists the request schema versions the compiler answers: the
+// newest (SchemaVersion), whose diagnostics carry a message, and 0.2,
+// answered at 0.2 with the diagnostics' messages left out
+// (specs/diag-message/SPEC.md F4).
+var Accepted = []string{"0.2", SchemaVersion}
+
+// Supported reports whether a request's schema_version is answered.
+func Supported(v string) bool {
+	for _, a := range Accepted {
+		if a == v {
+			return true
+		}
+	}
+	return false
+}
 
 // Span is a half-open byte range [Start, End) within a file.
 type Span struct {
@@ -23,8 +39,9 @@ type Related struct {
 	End   int    `json:"end"`
 }
 
-// Diagnostic is one §16 diagnostic. Message is not part of the wire format
-// (the schema has no message field); it is kept for human renderings only.
+// Diagnostic is one §16 diagnostic. Message is the compiler's sentence
+// for it, the text the human rendering prints; it is on the wire from
+// schema_version 0.3 and left out of a 0.2 response (WriteAt).
 type Diagnostic struct {
 	Code     Code            `json:"code"`
 	Severity string          `json:"severity"`
@@ -34,7 +51,7 @@ type Diagnostic struct {
 	Related  []Related       `json:"related"`
 	Fix      *StructuredEdit `json:"fix"`
 	OpIndex  *int            `json:"op_index"`
-	Message  string          `json:"-"`
+	Message  string          `json:"message,omitempty"`
 }
 
 // Replace is a replace_span fix operation on file.
@@ -88,16 +105,27 @@ func Sort(ds []Diagnostic) {
 	})
 }
 
-// Write encodes a response as one JSON document followed by a newline.
-func Write(w io.Writer, r Response) error {
-	if r.Diagnostics == nil {
-		r.Diagnostics = []Diagnostic{}
-	}
-	for i := range r.Diagnostics {
-		if r.Diagnostics[i].Related == nil {
-			r.Diagnostics[i].Related = []Related{}
+// Write encodes a response as one JSON document followed by a newline, at
+// the newest schema version.
+func Write(w io.Writer, r Response) error { return WriteAt(w, SchemaVersion, r) }
+
+// WriteAt encodes a response at a wire version: the response says that
+// version, and at 0.2 its diagnostics carry no message, so that a 0.2
+// consumer sees exactly the 0.2 shape. The caller's response and its
+// diagnostics are left as they are: the diagnostics are copied.
+func WriteAt(w io.Writer, version string, r Response) error {
+	r.SchemaVersion = version
+	ds := make([]Diagnostic, len(r.Diagnostics))
+	copy(ds, r.Diagnostics)
+	for i := range ds {
+		if ds[i].Related == nil {
+			ds[i].Related = []Related{}
+		}
+		if version == "0.2" {
+			ds[i].Message = ""
 		}
 	}
+	r.Diagnostics = ds
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	return enc.Encode(r)

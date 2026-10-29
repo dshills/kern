@@ -64,7 +64,7 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 	req := Request{SchemaVersion: diag.SchemaVersion, Command: "build", Files: pr.Names()}
 	ds, err := buildHook(srcs, out, opts)
 	if err != nil {
-		return internal(req, &InternalError{Err: err}, stdout, stderr)
+		return internal(req, diag.SchemaVersion, &InternalError{Err: err}, stdout, stderr)
 	}
 	if len(ds) > 0 {
 		_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: ds})

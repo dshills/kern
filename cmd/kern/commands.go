@@ -21,7 +21,7 @@ var phase2Commands = map[string]bool{
 	"show-effects": true, "apply-structured-edit": true,
 }
 
-type command func(req Request, srcs []*source.File, stdout, stderr io.Writer) int
+type command func(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int
 
 // analysisCommands are the §16 commands of PLAN.md 2.5.
 var analysisCommands = map[string]command{
@@ -34,27 +34,28 @@ var analysisCommands = map[string]command{
 	"apply-structured-edit": applyStructuredEdit,
 }
 
-// respond writes a success response, or the diagnostics with exit 2.
-func respond(stdout io.Writer, result any, ds []diag.Diagnostic) int {
+// respond writes a success response, or the diagnostics with exit 2, at
+// the wire version.
+func respond(stdout io.Writer, wire string, result any, ds []diag.Diagnostic) int {
 	if len(ds) > 0 {
-		_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: ds})
+		_ = diag.WriteAt(stdout, wire, diag.Response{OK: false, Result: nil, Diagnostics: ds})
 		return 2
 	}
-	if err := diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: true, Result: result, Diagnostics: []diag.Diagnostic{}}); err != nil {
+	if err := diag.WriteAt(stdout, wire, diag.Response{OK: true, Result: result, Diagnostics: []diag.Diagnostic{}}); err != nil {
 		return 3
 	}
 	return 0
 }
 
-func showLayout(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
+func showLayout(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {
 	prog, ds, err := resolveChecked(srcs)
 	if err != nil {
-		return internal(req, err, stdout, stderr)
+		return internal(req, wire, err, stdout, stderr)
 	}
 	if len(ds) > 0 {
-		return respond(stdout, nil, ds)
+		return respond(stdout, wire, nil, ds)
 	}
-	return respond(stdout, analysis.Layout(prog, req.Target), nil)
+	return respond(stdout, wire, analysis.Layout(prog, req.Target), nil)
 }
 
 // resolveChecked resolves and checks, converting panics to InternalError.
@@ -71,64 +72,64 @@ func resolveChecked(srcs []*source.File) (prog *resolve.Program, ds []diag.Diagn
 	return prog, check.Check(prog), nil
 }
 
-func showCopies(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
+func showCopies(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {
 	mod, ds, err := Build(srcs, cliOpt)
 	if err != nil {
-		return internal(req, err, stdout, stderr)
+		return internal(req, wire, err, stdout, stderr)
 	}
 	if len(ds) > 0 {
-		return respond(stdout, nil, ds)
+		return respond(stdout, wire, nil, ds)
 	}
-	return respond(stdout, analysis.Copies(mod, req.Target), nil)
+	return respond(stdout, wire, analysis.Copies(mod, req.Target), nil)
 }
 
-func showAllocations(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
+func showAllocations(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {
 	mod, ds, err := Build(srcs, cliOpt)
 	if err != nil {
-		return internal(req, err, stdout, stderr)
+		return internal(req, wire, err, stdout, stderr)
 	}
 	if len(ds) > 0 {
-		return respond(stdout, nil, ds)
+		return respond(stdout, wire, nil, ds)
 	}
-	return respond(stdout, analysis.Allocations(mod), nil)
+	return respond(stdout, wire, analysis.Allocations(mod), nil)
 }
 
-func showBoundsChecks(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
+func showBoundsChecks(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {
 	mod, ds, err := Build(srcs, cliOpt)
 	if err != nil {
-		return internal(req, err, stdout, stderr)
+		return internal(req, wire, err, stdout, stderr)
 	}
 	if len(ds) > 0 {
-		return respond(stdout, nil, ds)
+		return respond(stdout, wire, nil, ds)
 	}
-	return respond(stdout, analysis.BoundsChecks(mod), nil)
+	return respond(stdout, wire, analysis.BoundsChecks(mod), nil)
 }
 
-func emitAsm(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
+func emitAsm(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {
 	asm, ds, err := native.EmitAsm(srcs, req.Target)
 	if err != nil {
-		return internal(req, &InternalError{Err: err}, stdout, stderr)
+		return internal(req, wire, &InternalError{Err: err}, stdout, stderr)
 	}
 	if len(ds) > 0 {
-		return respond(stdout, nil, ds)
+		return respond(stdout, wire, nil, ds)
 	}
-	return respond(stdout, diag.EmitAsmResult{Target: req.Target, Asm: asm}, nil)
+	return respond(stdout, wire, diag.EmitAsmResult{Target: req.Target, Asm: asm}, nil)
 }
 
-func showEffects(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
+func showEffects(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {
 	mod, ds, err := Build(srcs, cliOpt)
 	if err != nil {
-		return internal(req, err, stdout, stderr)
+		return internal(req, wire, err, stdout, stderr)
 	}
 	if len(ds) > 0 {
-		return respond(stdout, nil, ds)
+		return respond(stdout, wire, nil, ds)
 	}
-	return respond(stdout, analysis.Effects(mod, req.Target), nil)
+	return respond(stdout, wire, analysis.Effects(mod, req.Target), nil)
 }
 
 // applyStructuredEdit implements apply-structured-edit (§16): all-or-nothing
 // application, then the new sources with the diagnostics of a check on them.
-func applyStructuredEdit(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
+func applyStructuredEdit(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {
 	if req.Edit == nil {
 		return fail(stdout, "API_MALFORMED_REQUEST", "apply-structured-edit requires an edit")
 	}
@@ -137,7 +138,7 @@ func applyStructuredEdit(req Request, srcs []*source.File, stdout, stderr io.Wri
 		d := diag.New(failure.Code, req.Files[0], diag.Span{}, "%s", failure.Message)
 		idx := failure.Index
 		d.OpIndex = &idx
-		return respond(stdout, nil, []diag.Diagnostic{d})
+		return respond(stdout, wire, nil, []diag.Diagnostic{d})
 	}
 	var edited []*source.File
 	result := diag.ApplyEditResult{Files: []diag.EditedFile{}, Applied: len(req.Edit.Ops)}
@@ -156,12 +157,12 @@ func applyStructuredEdit(req Request, srcs []*source.File, stdout, stderr io.Wri
 	}
 	ds, err := CheckFiles(edited)
 	if err != nil {
-		return internal(req, err, stdout, stderr)
+		return internal(req, wire, err, stdout, stderr)
 	}
 	if ds == nil {
 		ds = []diag.Diagnostic{}
 	}
-	if err := diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: true, Result: result, Diagnostics: ds}); err != nil {
+	if err := diag.WriteAt(stdout, wire, diag.Response{OK: true, Result: result, Diagnostics: ds}); err != nil {
 		return 3
 	}
 	return 0

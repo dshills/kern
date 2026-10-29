@@ -54,6 +54,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cliTarget := ""
 	cacheDir := ""
 	lineSpan := 0
+	wire := diag.SchemaVersion // the response's wire version: the request's once read, else the newest
 	cfg := incremental.Config{Opt: "debug", Env: "hosted"}
 	optSet, envSet := false, false
 	var files []string
@@ -114,19 +115,25 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
 				return fail(stdout, "API_MALFORMED_REQUEST", "request must be exactly one JSON document")
 			}
+			// a request of a known version is answered at that version
+			// from here on, failures included
+			if diag.Supported(req.SchemaVersion) {
+				wire = req.SchemaVersion
+			}
 			if req.Command != "" && req.Command != cmd {
-				return fail(stdout, "API_UNKNOWN_COMMAND", "request command %q does not match %q", req.Command, cmd)
+				return failAt(stdout, wire, "API_UNKNOWN_COMMAND", "request command %q does not match %q", req.Command, cmd)
 			}
 		}
 	}
-	if req.SchemaVersion != diag.SchemaVersion {
-		return fail(stdout, "API_UNSUPPORTED_SCHEMA", "schema_version %q is not supported (want %s)", req.SchemaVersion, diag.SchemaVersion)
+	if !diag.Supported(req.SchemaVersion) {
+		return fail(stdout, "API_UNSUPPORTED_SCHEMA", "schema_version %q is not supported (want one of %s)", req.SchemaVersion, strings.Join(diag.Accepted, ", "))
 	}
+	wire = req.SchemaVersion
 	if req.Command != "" && req.Command != cmd {
-		return fail(stdout, "API_UNKNOWN_COMMAND", "unknown command %q", req.Command)
+		return failAt(stdout, wire, "API_UNKNOWN_COMMAND", "unknown command %q", req.Command)
 	}
 	if cliTarget != "" && req.Target != "" && cliTarget != req.Target {
-		return fail(stdout, "API_TARGET_CONFLICT", "CLI --target %s differs from the request target %s", cliTarget, req.Target)
+		return failAt(stdout, wire, "API_TARGET_CONFLICT", "CLI --target %s differs from the request target %s", cliTarget, req.Target)
 	}
 	// the program's files: the request's, or the manifest's entry, and the
 	// files of every module they import (specs/module-discovery/SPEC.md)
@@ -135,7 +142,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// an empty file list is the manifest's entry; without a manifest
 		// the request names no files, as before discovery
 		if _, _, found := project.FindRoot(cwd, nil); !found {
-			return fail(stdout, "API_NO_FILES", "request names no files and no %s is in the working directory or its ancestors", project.ManifestName)
+			return failAt(stdout, wire, "API_NO_FILES", "request names no files and no %s is in the working directory or its ancestors", project.ManifestName)
 		}
 	}
 	var pr project.Result
@@ -145,7 +152,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		pr = project.Load(cwd, req.Files)
 	}
 	if len(pr.Diags) > 0 {
-		return endWith(human, pr.Diags, stdout)
+		return endWith(human, wire, pr.Diags, stdout)
 	}
 	if m := pr.Manifest; m != nil {
 		if cliTarget == "" && req.Target == "" && m.Target != nil {
@@ -171,16 +178,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		req.Span = &diag.RequestSpan{File: srcs[0].Name, Start: lineStart(srcs[0].Bytes, lineSpan), End: lineEnd(srcs[0].Bytes, lineSpan)}
 	}
 	if cmd == "format" {
-		return runFormat(req, srcs, human, stdout, stderr)
+		return runFormat(req, wire, srcs, human, stdout, stderr)
 	}
 	if cmd == "emit-ir" {
-		return emitIR(req, srcs, stdout, stderr)
+		return emitIR(req, wire, srcs, stdout, stderr)
 	}
 	if cmd == "explain-ownership" {
-		return explainOwnership(req, srcs, stdout, stderr)
+		return explainOwnership(req, wire, srcs, stdout, stderr)
 	}
 	if fn, ok := analysisCommands[cmd]; ok {
-		return fn(req, srcs, stdout, stderr)
+		return fn(req, wire, srcs, stdout, stderr)
 	}
 	var ds []diag.Diagnostic
 	var err error
@@ -195,7 +202,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		ds, err = checkHook(srcs)
 	}
 	if err != nil {
-		if code := internal(req, err, stdout, stderr); code != 0 {
+		if code := internal(req, wire, err, stdout, stderr); code != 0 {
 			return code
 		}
 	}
@@ -208,8 +215,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	resp := diag.Response{SchemaVersion: diag.SchemaVersion, OK: len(ds) == 0, Result: diag.CheckResult{Files: req.Files}, Diagnostics: ds}
-	if err := diag.Write(stdout, resp); err != nil {
+	resp := diag.Response{OK: len(ds) == 0, Result: diag.CheckResult{Files: req.Files}, Diagnostics: ds}
+	if err := diag.WriteAt(stdout, wire, resp); err != nil {
 		return 3
 	}
 	if len(ds) > 0 {
@@ -220,10 +227,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 // runFormat formats every requested file. Any parse failure makes the whole
 // request fail with the parse diagnostics (ok=false, exit 2) and no result.
-func runFormat(req Request, srcs []*source.File, human bool, stdout, stderr io.Writer) int {
+func runFormat(req Request, wire string, srcs []*source.File, human bool, stdout, stderr io.Writer) int {
 	files, ds, err := formatHook(srcs)
 	if err != nil {
-		if code := internal(req, err, stdout, stderr); code != 0 {
+		if code := internal(req, wire, err, stdout, stderr); code != 0 {
 			return code
 		}
 	}
@@ -243,8 +250,8 @@ func runFormat(req Request, srcs []*source.File, human bool, stdout, stderr io.W
 	if len(ds) == 0 {
 		result = map[string]any{"files": files}
 	}
-	resp := diag.Response{SchemaVersion: diag.SchemaVersion, OK: len(ds) == 0, Result: result, Diagnostics: ds}
-	if err := diag.Write(stdout, resp); err != nil {
+	resp := diag.Response{OK: len(ds) == 0, Result: result, Diagnostics: ds}
+	if err := diag.WriteAt(stdout, wire, resp); err != nil {
 		return 3
 	}
 	if len(ds) > 0 {
@@ -253,35 +260,44 @@ func runFormat(req Request, srcs []*source.File, human bool, stdout, stderr io.W
 	return 0
 }
 
-// internal reports a compiler panic wrapped as InternalError (exit 3); it
-// returns 0 for any other error.
-func internal(req Request, err error, stdout, stderr io.Writer) int {
+// internal reports a compiler panic wrapped as InternalError (exit 3) at
+// the wire version; it returns 0 for any other error.
+func internal(req Request, wire string, err error, stdout, stderr io.Writer) int {
 	var ie *InternalError
 	if !errors.As(err, &ie) {
 		return 0
 	}
 	_, _ = fmt.Fprintf(stderr, "{\"level\":\"error\",\"internal\":%q}\n", ie.Error())
 	d := diag.New("INTERNAL", req.Files[0], diag.Span{}, "%v", ie)
-	_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: []diag.Diagnostic{d}})
+	_ = diag.WriteAt(stdout, wire, diag.Response{OK: false, Result: nil, Diagnostics: []diag.Diagnostic{d}})
 	return 3
 }
 
 // endWith writes diagnostics that end a command before its own work: the
-// human rendering under --human, else the single JSON response; exit 2.
-func endWith(human bool, ds []diag.Diagnostic, w io.Writer) int {
+// human rendering under --human, else the single JSON response at the
+// wire version; exit 2.
+func endWith(human bool, wire string, ds []diag.Diagnostic, w io.Writer) int {
 	if human {
 		for _, d := range ds {
 			_, _ = fmt.Fprintln(w, diag.Render(d))
 		}
 		return 2
 	}
-	_ = diag.Write(w, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: ds})
+	_ = diag.WriteAt(w, wire, diag.Response{OK: false, Result: nil, Diagnostics: ds})
 	return 2
 }
 
+// fail writes one failure diagnostic at the newest wire version: for the
+// commands without a request (run, build, debug) and for a machine
+// command before its request's version is known.
 func fail(w io.Writer, code diag.Code, format string, args ...any) int {
+	return failAt(w, diag.SchemaVersion, code, format, args...)
+}
+
+// failAt writes one failure diagnostic at a wire version; exit 2.
+func failAt(w io.Writer, wire string, code diag.Code, format string, args ...any) int {
 	d := diag.New(code, "", diag.Span{}, format, args...)
-	_ = diag.Write(w, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: []diag.Diagnostic{d}})
+	_ = diag.WriteAt(w, wire, diag.Response{OK: false, Result: nil, Diagnostics: []diag.Diagnostic{d}})
 	return 2
 }
 

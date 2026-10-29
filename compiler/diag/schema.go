@@ -360,6 +360,7 @@ var Notes = map[string]string{
 	"Diagnostic.related":        "Secondary locations in the same file.",
 	"Diagnostic.fix":            "A machine-applicable structured edit, or `null`.",
 	"Diagnostic.op_index":       "Zero-based index into the request's `edit.ops` for `EDIT_*` diagnostics; `null` otherwise.",
+	"Diagnostic.message":        "The compiler's one-sentence message for the diagnostic, the text the human rendering prints; present from `schema_version` 0.3 and absent in a 0.2 response. Not stable across compiler versions, unlike `code` and `rule`.",
 	"Span.start":                "Byte offset, inclusive.",
 	"Span.end":                  "Byte offset, exclusive.",
 	"Place.state":               "`owned`, `moved`, `uninitialized` or `access`.",

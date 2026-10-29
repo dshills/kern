@@ -1,6 +1,7 @@
 package diag
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -229,6 +230,7 @@ func TestSchemaRejects(t *testing.T) {
 		"ok=false without diagnostic": func(r *Response) { r.Diagnostics = []Diagnostic{} },
 		"ok=true with null result":    func(r *Response) { r.OK = true; r.Result = nil },
 		"wrong schema_version":        func(r *Response) { r.SchemaVersion = "0.1" },
+		"diagnostic without message":  func(r *Response) { r.Diagnostics[0].Message = "" },
 		"foreign result":              func(r *Response) { r.Result = EmitIRResult{IR: ""} },
 		"extra result field":          func(r *Response) { r.Result = map[string]any{"files": []string{}, "extra": 1} },
 		"fix op without span": func(r *Response) {
@@ -369,5 +371,66 @@ func TestResultFieldsMatchSchema(t *testing.T) {
 				t.Errorf("%s: Go field %s absent from schema.json", name, f)
 			}
 		}
+	}
+}
+
+// TestWriteAtVersions checks the two wire versions (specs/diag-message/SPEC.md
+// F3, F4): a 0.3 response carries every diagnostic's message and validates
+// against schema.json; a 0.2 response says 0.2, carries exactly the 0.2
+// fields of a diagnostic and no message; and neither write changes the
+// caller's response.
+func TestWriteAtVersions(t *testing.T) {
+	resp := sampleCheckResponse()
+	msg := resp.Diagnostics[0].Message
+	if msg == "" {
+		t.Fatal("the sample diagnostic has no message")
+	}
+	var out bytes.Buffer
+	if err := WriteAt(&out, "0.3", resp); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["schema_version"] != "0.3" {
+		t.Errorf("0.3 response says %v", got["schema_version"])
+	}
+	d := got["diagnostics"].([]any)[0].(map[string]any)
+	if d["message"] != msg {
+		t.Errorf("0.3 diagnostic message %v, want %q", d["message"], msg)
+	}
+	if err := compileSchema(t, "#/$defs/response").Validate(roundTrip(t, resp)); err != nil {
+		t.Errorf("0.3 response does not validate: %v", err)
+	}
+	out.Reset()
+	if err := WriteAt(&out, "0.2", resp); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["schema_version"] != "0.2" {
+		t.Errorf("0.2 response says %v", got["schema_version"])
+	}
+	d = got["diagnostics"].([]any)[0].(map[string]any)
+	keys := make([]string, 0, len(d))
+	for k := range d {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if want := "code file fix op_index related rule severity span"; strings.Join(keys, " ") != want {
+		t.Errorf("0.2 diagnostic fields %q, want %q", strings.Join(keys, " "), want)
+	}
+	if resp.Diagnostics[0].Message != msg || resp.SchemaVersion != SchemaVersion {
+		t.Errorf("WriteAt changed the caller's response: %+v", resp)
+	}
+	for _, v := range []string{"0.2", "0.3"} {
+		if !Supported(v) {
+			t.Errorf("%s is not supported", v)
+		}
+	}
+	if Supported("0.4") || Supported("") {
+		t.Errorf("an unknown version is supported")
 	}
 }

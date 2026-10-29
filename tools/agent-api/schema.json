@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/dshills/kern/tools/agent-api/schema.json",
-  "title": "kern machine API, schema_version 0.2",
-  "description": "Hand-maintained transcription of spec §7 (Machine API) and §16 (result schemas and structured-edit format). This file is the normative machine-readable copy for schema_version 0.2; tools/agent-api/schema.md is generated from compiler/diag/schema.go and must agree with it.",
+  "title": "kern machine API, schema_version 0.3",
+  "description": "Hand-maintained transcription of spec §7 (Machine API) and §16 (result schemas and structured-edit format). This file is the normative machine-readable copy for schema_version 0.3 (a 0.2 response differs only by the absence of the diagnostic message); tools/agent-api/schema.md is generated from compiler/diag/schema.go and must agree with it.",
   "$comment": "Validate a request against #/$defs/request, a response against #/$defs/response, and a response of a known command against #/$defs/responses/$defs/<command>. The result object of each command is #/$defs/results/$defs/<command>.",
   "oneOf": [
     { "$ref": "#/$defs/request" },
@@ -11,7 +11,7 @@
   "$defs": {
     "schema_version": {
       "type": "string",
-      "const": "0.2",
+      "const": "0.3",
       "description": "Schema version carried by every request and response (§7)."
     },
     "command": {
@@ -78,7 +78,7 @@
     },
     "diagnostic": {
       "type": "object",
-      "description": "One §16 diagnostic. Exactly these fields and nothing more.",
+      "description": "One §16 diagnostic. Exactly these fields and nothing more; a schema_version 0.2 response omits message.",
       "properties": {
         "code": {
           "type": "string",
@@ -112,9 +112,14 @@
             { "type": "null" },
             { "type": "integer", "minimum": 0 }
           ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The compiler's one-sentence message for the diagnostic, the text the human rendering prints; not stable across compiler versions, unlike code and rule."
         }
       },
-      "required": ["code", "severity", "rule", "file", "span", "related", "fix", "op_index"],
+      "required": ["code", "severity", "rule", "file", "span", "related", "fix", "op_index", "message"],
       "additionalProperties": false,
       "allOf": [
         {

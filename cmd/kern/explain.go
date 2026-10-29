@@ -18,9 +18,9 @@ import (
 // §16): for every owned local, parameter or access binding whose declaration
 // intersects the request span, its owner, state, the accesses the IR opens on
 // it, its static drop point, and the contract of the function (when any).
-func explainOwnership(req Request, srcs []*source.File, stdout, stderr io.Writer) int {
+func explainOwnership(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {
 	if req.Span == nil {
-		return fail(stdout, "API_MISSING_SPAN", "explain-ownership requires a span")
+		return failAt(stdout, wire, "API_MISSING_SPAN", "explain-ownership requires a span")
 	}
 	var target *source.File
 	for _, f := range srcs {
@@ -29,7 +29,7 @@ func explainOwnership(req Request, srcs []*source.File, stdout, stderr io.Writer
 		}
 	}
 	if target == nil || req.Span.Start < 0 || req.Span.Start > req.Span.End || req.Span.End > len(target.Bytes) || !target.OnBoundary(req.Span.Start) || !target.OnBoundary(req.Span.End) {
-		return fail(stdout, "API_INVALID_SPAN", "span does not name a request file or violates the span rules")
+		return failAt(stdout, wire, "API_INVALID_SPAN", "span does not name a request file or violates the span rules")
 	}
 	prog := resolve.Resolve(srcs)
 	ds := prog.Diags
@@ -37,18 +37,18 @@ func explainOwnership(req Request, srcs []*source.File, stdout, stderr io.Writer
 		ds = check.Check(prog)
 	}
 	if len(ds) > 0 {
-		_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: ds})
+		_ = diag.WriteAt(stdout, wire, diag.Response{OK: false, Result: nil, Diagnostics: ds})
 		return 2
 	}
 	mod, lds := lower.Lower(prog)
 	if len(lds) > 0 {
-		return internal(req, &InternalError{Err: fmt.Errorf("%s", lds[0].Message)}, stdout, stderr)
+		return internal(req, wire, &InternalError{Err: fmt.Errorf("%s", lds[0].Message)}, stdout, stderr)
 	}
 	// ownership is explained on the lowered IR as written: inlining would
 	// rename a helper's locals and drop its body, and the symbols below
 	// are matched to IR locals by name
 	if errs := ir.Validate(mod); len(errs) > 0 {
-		return internal(req, &InternalError{Err: fmt.Errorf("IR validation: %v", errs[0])}, stdout, stderr)
+		return internal(req, wire, &InternalError{Err: fmt.Errorf("IR validation: %v", errs[0])}, stdout, stderr)
 	}
 	res := diag.ExplainOwnershipResult{Places: []diag.Place{}}
 	intersects := func(p ast.Pos) bool { return p.Start < req.Span.End && req.Span.Start < p.End }
@@ -120,8 +120,8 @@ func explainOwnership(req Request, srcs []*source.File, stdout, stderr io.Writer
 		}
 		res.Places = append(res.Places, p)
 	}
-	resp := diag.Response{SchemaVersion: diag.SchemaVersion, OK: true, Result: res, Diagnostics: []diag.Diagnostic{}}
-	if err := diag.Write(stdout, resp); err != nil {
+	resp := diag.Response{OK: true, Result: res, Diagnostics: []diag.Diagnostic{}}
+	if err := diag.WriteAt(stdout, wire, resp); err != nil {
 		return 3
 	}
 	return 0

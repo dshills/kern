@@ -48,8 +48,9 @@ func TestAPIFixtures(t *testing.T) {
 		// the command under test is the request's own; malformed requests go to check
 		cmd := "check"
 		var probe struct {
-			Command string   `json:"command"`
-			CLI     []string `json:"_cli"` // extra command-line flags for the fixture
+			SchemaVersion string   `json:"schema_version"`
+			Command       string   `json:"command"`
+			CLI           []string `json:"_cli"` // extra command-line flags for the fixture
 		}
 		if json.Unmarshal(b, &probe) == nil && probe.Command != "" && probe.Command != "frobnicate" {
 			cmd = probe.Command
@@ -58,8 +59,14 @@ func TestAPIFixtures(t *testing.T) {
 		if code != 2 || resp.OK || len(resp.Diagnostics) != 1 || string(resp.Diagnostics[0].Code) != want {
 			t.Errorf("%s: exit %d, resp %+v", f, code, resp)
 		}
-		if resp.SchemaVersion != diag.SchemaVersion {
-			t.Errorf("%s: schema_version %q", f, resp.SchemaVersion)
+		// a request at a known version is answered at that version; one whose
+		// version is unknown or unreadable at the newest
+		wantVersion := diag.SchemaVersion
+		if probe.SchemaVersion == "0.2" && want != "API_UNSUPPORTED_SCHEMA" && want != "API_MALFORMED_REQUEST" {
+			wantVersion = "0.2"
+		}
+		if resp.SchemaVersion != wantVersion {
+			t.Errorf("%s: schema_version %q, want %q", f, resp.SchemaVersion, wantVersion)
 		}
 	}
 }

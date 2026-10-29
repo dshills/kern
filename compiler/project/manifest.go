@@ -88,8 +88,8 @@ func ParseManifest(path string, b []byte) (*Manifest, []diag.Diagnostic) {
 	if m.SchemaVersion, ds = str("schema_version"); ds != nil {
 		return nil, ds
 	}
-	if m.SchemaVersion != nil && *m.SchemaVersion != diag.SchemaVersion {
-		return nil, invalid("%s: field %q must be %q", ManifestName, "schema_version", diag.SchemaVersion)
+	if m.SchemaVersion != nil && !diag.Supported(*m.SchemaVersion) {
+		return nil, invalid("%s: field %q must be one of %s", ManifestName, "schema_version", strings.Join(diag.Accepted, ", "))
 	}
 	if v, ok := raw["entry"]; ok {
 		var one string

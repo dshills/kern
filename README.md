@@ -126,11 +126,13 @@ Check a file and read the diagnostics as text rather than JSON:
 Every command other than `run`, `build` and `debug` reads one JSON request on
 standard input (or takes files on the command line) and writes one JSON response
 on standard output; `--human` renders the response as text. The schema is in
-`tools/agent-api/schema.md`.
+`tools/agent-api/schema.md`. A request names its `schema_version`: 0.3, the
+current one, whose diagnostics carry a `message`, or 0.2, answered in the 0.2
+shape without it; files on the command line get 0.3.
 
 | Command | What it does |
 |---|---|
-| `check` | Parse, resolve, type-check and ownership-check; diagnostics carry a code, a rule number and, where one exists, a machine-applicable fix |
+| `check` | Parse, resolve, type-check and ownership-check; diagnostics carry a code, a rule number, a one-sentence message and, where one exists, a machine-applicable fix |
 | `format` | Canonical formatting (`spec/format.md`): idempotent and diagnostic-preserving |
 | `emit-ir`, `emit-asm` | The semantic IR, or the LLVM IR the backend produces |
 | `explain-ownership` | For a span or `--line=N`: each place's ownership state, drop point and accesses |

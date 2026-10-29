@@ -308,8 +308,8 @@ The skeptical architecture review this document originally requested has been pe
 - **TLS** — thread-local storage.
 - **WAL** — write-ahead log; a database durability structure.
 
-## 16. Machine API schemas (normative, `schema_version` 0.2)
-Common types: `span = {"start": int, "end": int}` (byte offsets, half-open); `loc = {"file": string, "span": span}`; `label = "proven" | "runtime-checked" | "assumed-unsafe" | "estimated" | "unknown"`; `diagnostic = {"code": string, "severity": "error" | "warning" | "info", "rule": string, "file": string, "span": span, "related": [{"label": string, "start": int, "end": int}], "fix": edit | null, "op_index": int | null}`; `op_index` is the zero-based index into the request's `ops` for `EDIT_*` diagnostics and `null` otherwise.
+## 16. Machine API schemas (normative, `schema_version` 0.3)
+Common types: `span = {"start": int, "end": int}` (byte offsets, half-open); `loc = {"file": string, "span": span}`; `label = "proven" | "runtime-checked" | "assumed-unsafe" | "estimated" | "unknown"`; `diagnostic = {"code": string, "severity": "error" | "warning" | "info", "rule": string, "file": string, "span": span, "related": [{"label": string, "start": int, "end": int}], "fix": edit | null, "op_index": int | null, "message": string}`; `op_index` is the zero-based index into the request's `ops` for `EDIT_*` diagnostics and `null` otherwise; `message` is the compiler's one-sentence text for the diagnostic, the one the human rendering prints, and is not stable across compiler versions as `code` and `rule` are. A request at `schema_version` 0.2 is answered at 0.2, whose diagnostics lack `message` and are otherwise the same.
 
 | Command | `result` object |
 |---|---|

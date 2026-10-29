@@ -46,12 +46,12 @@ func debugCommand(args []string, stdout, stderr io.Writer) int {
 	}
 	dir, err := os.MkdirTemp("", "kern-debug-")
 	if err != nil {
-		return internal(Request{Files: files}, &InternalError{Err: err}, stdout, stderr)
+		return internal(Request{Files: files}, diag.SchemaVersion, &InternalError{Err: err}, stdout, stderr)
 	}
 	exe := filepath.Join(dir, "prog")
 	ds, err := native.Build(srcs, exe, native.Options{Opt: opts.Opt, Debug: true, TestHooks: opts.TestHooks, ElideChecks: opts.ElideChecks})
 	if err != nil {
-		return internal(Request{Files: files}, &InternalError{Err: err}, stdout, stderr)
+		return internal(Request{Files: files}, diag.SchemaVersion, &InternalError{Err: err}, stdout, stderr)
 	}
 	if len(ds) > 0 {
 		_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: ds})
@@ -59,7 +59,7 @@ func debugCommand(args []string, stdout, stderr io.Writer) int {
 	}
 	script := filepath.Join(dir, "kern_lldb.py")
 	if err := os.WriteFile(script, []byte(lldbScript), 0o644); err != nil {
-		return internal(Request{Files: files}, &InternalError{Err: err}, stdout, stderr)
+		return internal(Request{Files: files}, diag.SchemaVersion, &InternalError{Err: err}, stdout, stderr)
 	}
 	self, _ := os.Executable()
 	cmds := filepath.Join(dir, "kern.lldb")
@@ -67,7 +67,7 @@ func debugCommand(args []string, stdout, stderr io.Writer) int {
 	// works when lldb is started by hand with `-s`
 	body := fmt.Sprintf("script import os; os.environ[\"KERN_BIN\"] = %s; os.environ[\"KERN_FILES\"] = %s\ncommand script import %q\n", pyString(self), pyString(joinFiles(files)), script)
 	if err := os.WriteFile(cmds, []byte(body), 0o644); err != nil {
-		return internal(Request{Files: files}, &InternalError{Err: err}, stdout, stderr)
+		return internal(Request{Files: files}, diag.SchemaVersion, &InternalError{Err: err}, stdout, stderr)
 	}
 	lldb, err := exec.LookPath("lldb")
 	if err != nil {
