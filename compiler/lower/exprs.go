@@ -390,21 +390,32 @@ func (fl *fnLower) extend(base operand, el ir.PathElem) operand {
 		return operand{pl: ir.Place{Access: base.access, Path: []ir.PathElem{el}}, perm: permOf(base.access), access: base.access, ownsAccess: base.ownsAccess, release: base.release}
 	}
 	if base.val != nil {
-		// a temporary value: materialize it so a path can be taken
-		tmp := fl.newTemp(base.val.Type)
-		fl.emit(&ir.Store{Place: ir.Place{Local: tmp}, Src: base.val})
-		fl.emit(&ir.Init{Place: ir.Place{Local: tmp}})
-		if !resolve.IsCopy(base.val.Type) {
-			fl.top().temps = append(fl.top().temps, tmp)
-		}
-		return operand{pl: ir.Place{Local: tmp, Path: []ir.PathElem{el}}, perm: ast.ConvEdit}
+		return fl.extend(fl.materialize(base), el)
 	}
 	fl.fail(ast.Pos{}, "field of a non-place")
 	return operand{}
 }
 
+// materialize gives a temporary value a place, so that it can be projected,
+// indexed, sliced, measured or iterated like a variable. A module-level
+// const is lowered as its initializer at every use (ident), so an array or
+// struct const is such a value; so is any array or struct literal used
+// directly. Place and access operands are returned unchanged.
+func (fl *fnLower) materialize(base operand) operand {
+	if base.val == nil || base.isPlace() || base.access != nil {
+		return base
+	}
+	tmp := fl.newTemp(base.val.Type)
+	fl.emit(&ir.Store{Place: ir.Place{Local: tmp}, Src: base.val})
+	fl.emit(&ir.Init{Place: ir.Place{Local: tmp}})
+	if !resolve.IsCopy(base.val.Type) {
+		fl.top().temps = append(fl.top().temps, tmp)
+	}
+	return operand{pl: ir.Place{Local: tmp}, perm: ast.ConvEdit}
+}
+
 func (fl *fnLower) index(x *ast.IndexExpr) operand {
-	base := fl.expr(x.X, nil)
+	base := fl.materialize(fl.expr(x.X, nil))
 	usize := &resolve.Prim{Name: "usize"}
 	idx := fl.value(x.Args[0], usize)
 	var seq ir.Place
@@ -423,7 +434,7 @@ func (fl *fnLower) index(x *ast.IndexExpr) operand {
 }
 
 func (fl *fnLower) slice(x *ast.SliceExpr) operand {
-	base := fl.expr(x.X, nil)
+	base := fl.materialize(fl.expr(x.X, nil))
 	usize := &resolve.Prim{Name: "usize"}
 	var seq ir.Place
 	switch {
@@ -573,13 +584,15 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 		fl.emit(&ir.Call{Dsts: []*ir.Value{v}, Intrinsic: "simd_reduce_add", Args: []*ir.Value{fl.value(x.Args[0].X, vt)}, Pos: x.Pos, TypeArgs: []resolve.Type{vt}})
 		return operand{val: v}
 	case "len":
-		base := fl.expr(x.Args[0].X, nil)
+		base := fl.materialize(fl.expr(x.Args[0].X, nil))
 		var seq ir.Place
 		switch {
 		case base.isPlace():
 			seq = base.pl
 		case base.access != nil:
 			seq = ir.Place{Access: base.access}
+		default:
+			fl.fail(x.Pos, "len of a non-place")
 		}
 		v := fl.newValue(t)
 		fl.emit(&ir.Len{Dst: v, Place: seq})

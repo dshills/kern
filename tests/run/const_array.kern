@@ -1,0 +1,49 @@
+//! phase: 2
+//! expect: output const_array
+// A module-level const is lowered as its initializer at every use, so an
+// array or struct const is a temporary value where a variable would be a
+// place. Indexing, slicing, measuring and iterating it must give the value
+// a place first (regression: lowering failed with "index of a non-place").
+module run
+const TAB: [4]u8 = [1u8, 2u8, 3u8, 4u8]
+const ORIGIN: Point = Point{x: 7u32, ys: [5u32, 6u32]}
+struct Point {
+    x: u32
+    ys: [2]u32
+}
+func pick(i: usize) -> u8 {
+    if i < len(TAB) {
+        return TAB[i]
+    }
+    return 0u8
+}
+func sum(xs: view[[]u8]) -> u64 {
+    var s: u64 = 0u64
+    for x in xs {
+        s = s + u64(x)
+    }
+    return s
+}
+func main() -> i32 {
+    print_u64(u64(pick(2usize)))
+    println()
+    print_u64(u64(pick(9usize)))
+    println()
+    print_u64(u64(TAB[0usize]))
+    println()
+    print_u64(u64(len(TAB)))
+    println()
+    print_u64(sum(TAB[1usize:3usize]))
+    println()
+    var total: u64 = 0u64
+    for x in TAB {
+        total = total + u64(x)
+    }
+    print_u64(total)
+    println()
+    print_u64(u64(ORIGIN.x + ORIGIN.ys[1usize]))
+    println()
+    print_u64(u64(len(ORIGIN.ys)))
+    println()
+    return 0i32
+}

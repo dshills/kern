@@ -140,6 +140,12 @@ second suite's matrix and is unchanged.
   the budget by luck. The forms were chosen so that luck is needed on
   several sites per task, not one.
 - **A found compiler fault, not used by the suite.** Indexing a
-  module-level `const` array (`const TAB: [4]u8 = …; TAB[i]`) fails in
-  lowering with an internal error, `index of a non-place`, in both `check`
-  and `run`; the suite passes its tables as views instead.
+  module-level `const` array (`const TAB: [4]u8 = …; TAB[i]`) failed in
+  lowering with an internal error, `index of a non-place`, under `run` and
+  `build` (`check` accepted it); the suite passes its tables as views
+  instead. Fixed on 2026-10-29 (`tests/run/const_array.kern`): a const is
+  lowered as its initializer at every use, so an array const is a value,
+  and indexing, slicing, `len` and `for` now give it a place first. Each
+  use still rebuilds the array, and `len(TAB)` and `TAB[i]` build two
+  different temporaries, so a guard on a const array is never proven; a
+  read-only global for aggregate consts would fix both and is not done.

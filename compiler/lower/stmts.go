@@ -389,8 +389,9 @@ func (fl *fnLower) forStmt(s *ast.For) {
 		fl.cur = exit
 		return
 	}
-	// iteration over an array place or a sequence access
-	r := fl.expr(s.Iter, nil)
+	// iteration over an array place or a sequence access; an array value
+	// (a const, or a literal) is given a place first
+	r := fl.materialize(fl.expr(s.Iter, nil))
 	var seq ir.Place
 	var seqAccess *ir.Value
 	edit := false
