@@ -62,6 +62,7 @@ under both backends, and every trap was the same kind, span and file.
   `docs/ownership.md` but no longer exists in `std/core.kern`; `Pool`
   carries the retired-slot flag (`PoolSlotMeta.retired`) that PLAN.md 1.x
   describes for `Slab`. Either the name is stale in the documents or the
-  container is missing; the spec is the owner's.
+  container is missing; the spec is the owner's. The history and the two
+  options are in `docs/reports/slab-drift.md`.
 - `alloc_with` and `new_with` (PLAN.md 1.x fixed signatures) are not in
   the library; an earlier proposal to implement them is open.
