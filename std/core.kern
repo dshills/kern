@@ -59,6 +59,11 @@ func ptr_edit2[T](a: RawPtr[T], b: RawPtr[T]) -> (edit[T], edit[T])
 // storage is uninitialized again. p must address storage for one T that
 // holds no live value (specs/in-place-init/SPEC.md).
 func ptr_init[T, E](p: RawPtr[T], init: func(out T) -> Result[(), E]) -> Result[(), E]
+// ptr_init_ctx is ptr_init with a context: init is called with the raw
+// storage at p as its out parameter and ctx, the caller's view access,
+// unchanged, as its second argument; everything else is ptr_init's
+// (specs/init-context/SPEC.md R1).
+func ptr_init_ctx[T, C, E](p: RawPtr[T], init: func(out T, view[C]) -> Result[(), E], ctx: view[C]) -> Result[(), E]
 // ptr_store_seq writes the len(src) elements of a sequence view into raw
 // memory at p, each in its §4.1 layout (so the elements are duplicated
 // bitwise); the destination must not overlap the source. Vec.extend's block
@@ -268,6 +273,22 @@ impl Box[T] {
         unsafe {
             p := ptr_cast[T, u8](heap_alloc(size_of[T](), align_of[T]()))
             match ptr_init(p, init) {
+                Ok(u) => return Ok(Box[T] { p: p })
+                Err(e) => {
+                    heap_free(ptr_cast[u8, T](p), size_of[T](), align_of[T]())
+                    return Err(e)
+                }
+            }
+        }
+    }
+    // new_with_ctx is new_with with a context: init is called with the
+    // storage as its out parameter and ctx, unchanged, as its second
+    // argument (specs/init-context/SPEC.md R2).
+    contract { requires "init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func new_with_ctx[C, E](init: func(out T, view[C]) -> Result[(), E], ctx: view[C]) -> Result[Box[T], E] {
+        unsafe {
+            p := ptr_cast[T, u8](heap_alloc(size_of[T](), align_of[T]()))
+            match ptr_init_ctx(p, init, ctx) {
                 Ok(u) => return Ok(Box[T] { p: p })
                 Err(e) => {
                     heap_free(ptr_cast[u8, T](p), size_of[T](), align_of[T]())
@@ -670,6 +691,44 @@ impl Pool[T] {
         return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen, phantom_tag: self.identity }) //@debug
         return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen }) //@release
     }
+    // alloc_with_ctx is alloc_with with a context: init is called with the
+    // storage as its out parameter and ctx, unchanged, as its second
+    // argument (specs/init-context/SPEC.md R3).
+    contract { requires "the two buffers hold cap entries; the first count slots are initialized; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func alloc_with_ctx[C, E](edit self, init: func(out T, view[C]) -> Result[(), E], ctx: view[C]) -> Result[PoolId[T], AllocOrInit[E]] {
+        var idx: usize = 0usize
+        var gen: u32 = 0u32
+        unsafe {
+            if self.nfree > 0usize {
+                self.nfree = self.nfree - 1usize
+                idx = usize(ptr_load(ptr_offset(self.free_list, truncate[isize](self.nfree))))
+                gen = ptr_load(self.meta_at(idx)).gen
+            } else {
+                if self.count == self.cap {
+                    if !self.grow() { return Err(Alloc(OutOfMemory)) }
+                }
+                idx = self.count
+                self.count = self.count + 1usize
+                ptr_store(self.meta_at(idx), PoolSlotMeta { gen: 0u32, live: false, retired: false })
+            }
+            match ptr_init_ctx(self.elem_at(idx), init, ctx) {
+                Ok(u) => {
+                    mp := self.meta_at(idx)
+                    m := ptr_load(mp)
+                    m.live = true
+                    ptr_store(mp, m)
+                }
+                Err(e) => {
+                    ptr_store(ptr_offset(self.free_list, truncate[isize](self.nfree)), truncate[u32](idx))
+                    self.nfree = self.nfree + 1usize
+                    return Err(Init(e))
+                }
+            }
+        }
+        self.live = self.live + 1usize
+        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen, phantom_tag: self.identity }) //@debug
+        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen }) //@release
+    }
     // check validates a handle in the §5.6 order (bounds, identity, vacant,
     // generation) and returns its slot index.
     contract { requires "the two buffers hold cap entries; the first count slots are initialized" }
@@ -840,6 +899,25 @@ impl Arena[T] {
         }
         unsafe {
             match ptr_init(ptr_offset(self.data, truncate[isize](self.size)), init) {
+                Ok(u) => {}
+                Err(e) => return Err(Init(e))
+            }
+        }
+        id := ArenaId[T] { index: truncate[u32](self.size), phantom_tag: self.identity } //@debug
+        id := ArenaId[T] { index: truncate[u32](self.size) } //@release
+        self.size = self.size + 1usize
+        return Ok(id)
+    }
+    // alloc_with_ctx is alloc_with with a context: init is called with the
+    // storage as its out parameter and ctx, unchanged, as its second
+    // argument (specs/init-context/SPEC.md R4).
+    contract { requires "data addresses cap elements of which the first size are live; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func alloc_with_ctx[C, E](edit self, init: func(out T, view[C]) -> Result[(), E], ctx: view[C]) -> Result[ArenaId[T], AllocOrInit[E]] {
+        if self.size == self.cap {
+            if !self.grow() { return Err(Alloc(OutOfMemory)) }
+        }
+        unsafe {
+            match ptr_init_ctx(ptr_offset(self.data, truncate[isize](self.size)), init, ctx) {
                 Ok(u) => {}
                 Err(e) => return Err(Init(e))
             }

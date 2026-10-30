@@ -128,3 +128,72 @@ func TestInPlaceInitCopiesAndEffects(t *testing.T) {
 		}
 	}
 }
+
+// No copy of a 4,096-byte Page built in place from a context by each
+// _with_ctx method, and a function calling ptr_init_ctx has unknown
+// effects (specs/init-context/SPEC.md R6, R9).
+func TestInitContextCopiesAndEffects(t *testing.T) {
+	prog := `module ctx
+struct Page { id: u64; data: [4096]u8 }
+struct Spec { id: u64 }
+union IoErr { Short }
+func fill(p: out Page, s: view[Spec]) -> Result[(), IoErr] {
+    p.id = s.id
+    p.data = zero()
+    return Ok(())
+}
+func boxed(s: view[Spec]) -> Result[u64, IoErr] {
+    b := Box[Page].new_with_ctx(fill, s)?
+    return Ok(b.get().id)
+}
+func pooled(pool: edit[Pool[Page]], s: view[Spec]) -> Result[PoolId[Page], AllocOrInit[IoErr]] {
+    return pool.alloc_with_ctx(fill, s)
+}
+func arena(a: edit[Arena[Page]], s: view[Spec]) -> Result[ArenaId[Page], AllocOrInit[IoErr]] {
+    return a.alloc_with_ctx(fill, s)
+}
+contract { requires "p addresses storage for one Page that holds no live value" }
+func direct(p: RawPtr[Page], s: view[Spec]) -> Result[(), IoErr] {
+    unsafe { return ptr_init_ctx(p, fill, s) }
+}
+func main() -> i32 {
+    s := Spec { id: 3u64 }
+    p := Pool[Page].new()
+    match pooled(p, s) {
+        Ok(id) => print_u64(p.get(id).id)
+        Err(e) => print_str("failed")
+    }
+    r := Arena[Page].new()
+    match arena(r, s) {
+        Ok(id) => print_u64(r.get(id).id)
+        Err(e) => print_str("failed")
+    }
+    match boxed(s) {
+        Ok(v) => print_u64(v)
+        Err(e) => print_str("failed")
+    }
+    return 0i32
+}
+`
+	for _, level := range []string{"debug", "release"} {
+		mod := lowerFiles(t, map[string]string{"ctx.kern": prog}, level)
+		for _, c := range analysis.Copies(mod, "host").Copies {
+			if c.Type == "Page" {
+				t.Errorf("%s: a copy of %s at %+v", level, c.Type, c.Loc)
+			}
+		}
+		found := false
+		for _, f := range analysis.Effects(mod, "host").Functions {
+			if f.Name == "ctx.direct" {
+				found = true
+				if f.Label != diag.LabelUnknown || !f.Allocates || !f.Traps || !f.Spawns {
+					t.Errorf("%s: effects of direct %+v, want unknown with every effect", level, f)
+				}
+			}
+		}
+		// release's inliner marks the uncalled direct dead; debug reports it
+		if !found && level == "debug" {
+			t.Errorf("%s: no effects entry for ctx.direct", level)
+		}
+	}
+}

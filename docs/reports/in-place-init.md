@@ -110,6 +110,10 @@ failure-rule analysis inside closure bodies; or give the methods an
 explicit context argument, `init: func(out T, view[C]) -> Result[(),
 E]`, which changes the fixed signature. Neither is done here.
 
+*Decided 2026-10-30:* the owner chose the context argument, added beside
+the fixed methods as `new_with_ctx` and `alloc_with_ctx`
+(`specs/init-context/SPEC.md`, `docs/reports/init-context.md`).
+
 ## Review
 
 - **speccritic** (gpt-6.1-sol, profile general, ADR-005 as context):
@@ -130,7 +134,7 @@ E]`, which changes the fixed signature. Neither is done here.
 
 ## Not done
 
-- Initializers with context (above).
+- Initializers with context (above): done since in `docs/reports/init-context.md`.
 - `bench/kern/btree` still builds `Node.empty()` by value and moves it
   into the pool slot; `docs/workloads/btree.md` suggests `alloc_with`,
   but benchmark programs are not rewritten by this change.

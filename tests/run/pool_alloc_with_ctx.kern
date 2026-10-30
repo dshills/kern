@@ -1,0 +1,55 @@
+//! phase: 3
+//! expect: output pool_alloc_with_ctx
+// Pool.alloc_with_ctx constructs in the slot from a context
+// (specs/init-context/SPEC.md R3): two contexts give two slots with their
+// values; a failing initializer destroys its partial field, Node's own
+// destructor does not run, len() is unchanged and the slot is reused; the
+// context is unchanged after the calls.
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop tok "); print_u64(self.id); println() }
+}
+struct Node nocopy { key: u64; tok: Tok }
+impl Node {
+    destructor(edit self) { print_str("drop node "); print_u64(self.key); println() }
+}
+struct Cfg { key: u64; tok: u64 }
+union E { Bad }
+func init_node(n: out Node, c: view[Cfg]) -> Result[(), E] {
+    n.key = c.key
+    n.tok = Tok { id: c.tok }
+    return Ok(())
+}
+func init_fail(n: out Node, c: view[Cfg]) -> Result[(), E] {
+    n.tok = Tok { id: c.tok }
+    return Err(Bad)
+}
+func run() -> Result[u64, AllocOrInit[E]] {
+    p := Pool[Node].new()
+    first := Cfg { key: 1u64, tok: 10u64 }
+    second := Cfg { key: 2u64, tok: 20u64 }
+    a := p.alloc_with_ctx(init_node, first)?
+    print_str("len "); print_u64(u64(p.len())); println()
+    bad := Cfg { key: 9u64, tok: 99u64 }
+    match p.alloc_with_ctx(init_fail, bad) {
+        Ok(x) => { print_str("unexpected"); println() }
+        Err(e) => {
+            match e {
+                Alloc(x) => { print_str("alloc error"); println() }
+                Init(i) => { print_str("init error, len "); print_u64(u64(p.len())); println() }
+            }
+        }
+    }
+    b := p.alloc_with_ctx(init_node, second)?
+    print_str("len "); print_u64(u64(p.len())); println()
+    print_str("contexts "); print_u64(first.key); print_str(" "); print_u64(second.tok); print_str(" "); print_u64(bad.tok); println()
+    return Ok(p.get(a).key * 10u64 + p.get(b).tok.id)
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => { print_str("ok "); print_u64(v); println() }
+        Err(e) => { print_str("unexpected"); println() }
+    }
+    return 0i32
+}

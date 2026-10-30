@@ -1,0 +1,49 @@
+//! phase: 3
+//! expect: output box_new_with_ctx
+// Box.new_with_ctx builds the boxed value in place from a context
+// (specs/init-context/SPEC.md R2): the fields come from the context; an
+// initializer that fails after initializing a field destroys that field
+// once and Page's own destructor does not run.
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop tok "); print_u64(self.id); println() }
+}
+struct Page nocopy { id: u64; tok: Tok; data: [4096]u8 }
+impl Page {
+    destructor(edit self) { print_str("drop page "); print_u64(self.id); println() }
+}
+struct Spec { id: u64; last: u8 }
+union E { Bad }
+func init_from(p: out Page, s: view[Spec]) -> Result[(), E] {
+    p.id = s.id
+    p.tok = Tok { id: s.id * 10u64 }
+    p.data = zero()
+    p.data[4095usize] = s.last
+    return Ok(())
+}
+func init_partial(p: out Page, s: view[Spec]) -> Result[(), E] {
+    p.id = s.id
+    p.tok = Tok { id: s.id * 10u64 }
+    return Err(Bad)
+}
+func build(init: func(out Page, view[Spec]) -> Result[(), E], s: view[Spec]) -> Result[u64, E] {
+    b := Box[Page].new_with_ctx(init, s)?
+    with g := b.get() {
+        return Ok(g.id * 1000u64 + u64(g.data[4095usize]))
+    }
+}
+func show(r: Result[u64, E]) {
+    match r {
+        Ok(v) => { print_str("ok "); print_u64(v); println() }
+        Err(e) => { print_str("init failed"); println() }
+    }
+}
+func main() -> i32 {
+    s := Spec { id: 4u64, last: 7u8 }
+    show(build(init_from, s))
+    t := Spec { id: 5u64, last: 0u8 }
+    show(build(init_partial, t))
+    print_str("spec "); print_u64(s.id); println()
+    return 0i32
+}

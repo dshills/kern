@@ -1,0 +1,13 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: ctx_conflict_user_ok
+// A user function with alloc_with_ctx's parameter conventions, called the
+// same way, gets the same code (specs/init-context/SPEC.md R5).
+module m
+union E { Bad }
+func init_n(n: out u64, c: view[Pool[u64]]) -> Result[(), E] { n = u64(c.len()); return Ok(()) }
+func put(p: edit[Pool[u64]], init: func(out u64, view[Pool[u64]]) -> Result[(), E], c: view[Pool[u64]]) -> u64 { return 0u64 }
+func main() -> i32 {
+    p := Pool[u64].new()
+    x := put(p, init_n, p)   // ACC_CONFLICT
+    return 0i32
+}

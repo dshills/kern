@@ -1,0 +1,44 @@
+//! phase: 3
+//! expect: output pool_alloc_with_ctx_oom
+//! test-hooks: true
+// When the container cannot grow, alloc_with_ctx returns
+// Alloc(OutOfMemory) before the initializer runs
+// (specs/init-context/SPEC.md R3, R4).
+module t
+union E { Bad }
+func init_n(n: out u64, v: view[u64]) -> Result[(), E] {
+    print_str("init ran")
+    println()
+    n = v
+    return Ok(())
+}
+func report(r: Result[u32, AllocOrInit[E]]) {
+    match r {
+        Ok(x) => { print_str("allocated"); println() }
+        Err(e) => {
+            match e {
+                Alloc(a) => { print_str("out of memory"); println() }
+                Init(i) => { print_str("init error"); println() }
+            }
+        }
+    }
+}
+func pool() -> Result[u32, AllocOrInit[E]] {
+    p := Pool[u64].new()
+    v := 7u64
+    testing.fail_next_alloc()
+    id := p.alloc_with_ctx(init_n, v)?
+    return Ok(0u32)
+}
+func arena() -> Result[u32, AllocOrInit[E]] {
+    r := Arena[u64].new()
+    v := 7u64
+    testing.fail_next_alloc()
+    id := r.alloc_with_ctx(init_n, v)?
+    return Ok(0u32)
+}
+func main() -> i32 {
+    report(pool())
+    report(arena())
+    return 0i32
+}

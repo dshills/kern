@@ -1,0 +1,16 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: alloc_with_ctx_conflict_ok
+// The context is an ordinary view argument: one rooted in the pool the
+// call edits conflicts with the call's edit of the pool
+// (specs/init-context/SPEC.md R5).
+module m
+union E { Bad }
+func init_n(n: out u64, c: view[Pool[u64]]) -> Result[(), E] { n = u64(c.len()); return Ok(()) }
+func main() -> i32 {
+    p := Pool[u64].new()
+    match p.alloc_with_ctx(init_n, p) {   // ACC_CONFLICT
+        Ok(id) => {}
+        Err(e) => {}
+    }
+    return 0i32
+}

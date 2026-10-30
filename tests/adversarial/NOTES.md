@@ -226,7 +226,10 @@ func pooled(pool: edit[Pool[Page]]) -> Result[PoolId[Page], AllocOrInit[IoErr]] 
 (As implemented, 2026-10-30: an initializer is a function value with one
 `out` parameter, so per-call data such as an `id` cannot be passed to it;
 the earlier draft's `alloc_with(init_page, id)` is not the fixed
-signature. `docs/reports/in-place-init.md` records the open question.)
+signature. `docs/reports/in-place-init.md` records the open question.
+Since 2026-10-30 the id travels as a context:
+`pool.alloc_with_ctx(init_page, spec)` with `init_page(p: out Page,
+s: view[Spec])`, `specs/init-context/SPEC.md`.)
 Reject twin: `r := init_page(out p, 7u64)` followed by a use of `r`.
 
 ## Closing note: callbacks and async

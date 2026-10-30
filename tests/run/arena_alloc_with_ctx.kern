@@ -1,0 +1,43 @@
+//! phase: 3
+//! expect: output arena_alloc_with_ctx
+// Arena.alloc_with_ctx constructs in the next slot from a context
+// (specs/init-context/SPEC.md R4): a failed initializer leaves the arena
+// as it was, and the next allocation takes the same index.
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop tok "); print_u64(self.id); println() }
+}
+struct Cell nocopy { v: u64; tok: Tok }
+union E { Bad }
+func init_cell(c: out Cell, v: view[u64]) -> Result[(), E] {
+    c.v = v
+    c.tok = Tok { id: v }
+    return Ok(())
+}
+func init_fail(c: out Cell, v: view[u64]) -> Result[(), E] {
+    c.v = v
+    c.tok = Tok { id: v }
+    return Err(Bad)
+}
+func run() -> Result[u64, AllocOrInit[E]] {
+    r := Arena[Cell].new()
+    one := 1u64
+    two := 2u64
+    three := 3u64
+    a := r.alloc_with_ctx(init_cell, one)?
+    match r.alloc_with_ctx(init_fail, two) {
+        Ok(x) => { print_str("unexpected"); println() }
+        Err(e) => { print_str("init error, len "); print_u64(u64(r.len())); println() }
+    }
+    b := r.alloc_with_ctx(init_cell, three)?
+    print_str("len "); print_u64(u64(r.len())); println()
+    return Ok(r.get(a).v * 10u64 + r.get(b).v)
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => { print_str("ok "); print_u64(v); println() }
+        Err(e) => { print_str("unexpected"); println() }
+    }
+    return 0i32
+}

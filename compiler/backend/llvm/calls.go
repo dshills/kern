@@ -629,6 +629,14 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 			return
 		}
 		fe.directCall(c.Dsts, ft.Ret, fe.v(a[1]), "ptr "+fe.v(a[0]))
+	case "ptr_init_ctx":
+		// as ptr_init, with the context rendered as a call's view argument
+		ft, ok := a[1].Type.(*resolve.Func)
+		if !ok || ft.Closure {
+			fe.fail("ptr_init_ctx through %s", a[1].Type)
+			return
+		}
+		fe.directCall(c.Dsts, ft.Ret, fe.v(a[1]), "ptr "+fe.v(a[0])+", "+fe.typedArgs(a[2:3]))
 	case "saturating_add", "saturating_sub":
 		t := fe.elemType(c, 0)
 		lt := e.mty(t)

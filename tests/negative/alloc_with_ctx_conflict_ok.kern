@@ -1,0 +1,15 @@
+//! phase: 1
+//! expect: accept
+//! twin: alloc_with_ctx_conflict
+module m
+union E { Bad }
+func init_n(n: out u64, c: view[Pool[u64]]) -> Result[(), E] { n = u64(c.len()); return Ok(()) }
+func main() -> i32 {
+    p := Pool[u64].new()
+    other := Pool[u64].new()
+    match p.alloc_with_ctx(init_n, other) {
+        Ok(id) => {}
+        Err(e) => {}
+    }
+    return 0i32
+}

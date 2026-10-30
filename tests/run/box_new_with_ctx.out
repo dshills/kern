@@ -1,0 +1,6 @@
+drop page 4
+drop tok 40
+ok 4007
+drop tok 50
+init failed
+spec 4

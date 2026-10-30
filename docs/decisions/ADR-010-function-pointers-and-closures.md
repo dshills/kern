@@ -119,7 +119,10 @@ Excluded: escaping closures would need lifetimes, which is the whole of what ADR
   a closure would have been required; this count is the input that closes the record.
 - PLAN.md 1.2 and 1.4: Phase 1 accept fixtures for function values (function name as value,
   generic instantiation before use, call through a `func` field of a struct), and the
-  `Box.new_with(init: func(out T) -> Result[(), E])` construction path (ADR-005).
+  `Box.new_with(init: func(out T) -> Result[(), E])` construction path (ADR-005). An
+  initializer that needs per-call data follows invariant 2: `new_with_ctx` and the two
+  `alloc_with_ctx` take the function and a `view[C]` context (`specs/init-context/SPEC.md`,
+  2026-10-30), rather than `out` parameters on closures.
 - PLAN.md Phase 1 key decisions and `docs/reports/phase-1.md`: the closing entry, recording
   that function pointers are first-class `Copy` and that closures are not in Phase 1.
 - PLAN.md 4.1: `show-effects` with the `unknown` label for calls through function pointers.

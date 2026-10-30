@@ -132,6 +132,10 @@ exactly as it does for scope exit.
   fixtures `tests/run/{box_new_with,pool_alloc_with,arena_alloc_with,pool_alloc_with_oom,
   out_whole_then_err}`, `tests/trap/{box_new_with_trap,pool_alloc_with_stale}`, and
   `tests/adversarial/large_object_out` (no `Page` copy in `show-copies`).
+  *Extended 2026-10-30* (`specs/init-context/SPEC.md`, `docs/reports/init-context.md`):
+  `Box.new_with_ctx`, `Pool.alloc_with_ctx` and `Arena.alloc_with_ctx` take an initializer
+  `func(out T, view[C]) -> Result[(), E]` and its context, over the unsafe
+  `ptr_init_ctx`, so per-call data reaches an initializer.
 - PLAN.md 2.1 and 2.5: static lowering of `out` cleanup with no landing pads; `show-copies`
   on the `Page` construction path; `show-layout` against C `offsetof` for `out` storage.
 - PLAN.md 2.6 and 3.4: vector and buffer-pool benchmark rows (copies and heap allocation

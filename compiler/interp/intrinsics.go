@@ -487,6 +487,12 @@ func init() {
 			out := &Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}
 			return it.callNamed(a[1].(FuncVal).Name, []Value{out})
 		},
+		// ptr_init_ctx: as ptr_init, with the context access passed on as
+		// the initializer's second argument
+		"ptr_init_ctx": func(it *Interp, a []Value, c callCtx) []Value {
+			out := &Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}
+			return it.callNamed(a[1].(FuncVal).Name, []Value{out, a[2]})
+		},
 		"saturating_add": saturating("+"),
 		"saturating_sub": saturating("-"),
 		"saturating_mul": saturating("*"),

@@ -73,9 +73,10 @@ func Effects(mod *ir.Module, target string) diag.ShowEffectsResult {
 					d.e.unsafe = true
 				case *ir.Call:
 					switch {
-					case i.Fn != nil || i.Intrinsic == "ptr_init":
-						// a call through a function value (ptr_init calls its
-						// initializer through one): any effect, unknown
+					case i.Fn != nil || i.Intrinsic == "ptr_init" || i.Intrinsic == "ptr_init_ctx":
+						// a call through a function value (ptr_init and
+						// ptr_init_ctx call their initializer through one):
+						// any effect, unknown
 						d.e.allocates, d.e.traps, d.e.spawns, d.e.unsafe = true, true, true, true
 						d.e.label = diag.LabelUnknown
 					case i.Intrinsic != "":

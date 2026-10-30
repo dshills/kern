@@ -1,0 +1,10 @@
+//! expect: reject UNSAFE_OP_OUTSIDE_UNSAFE rule=6.4
+//! twin: ptr_init_ctx_safe_ok
+// ptr_init_ctx is unsafe by the ptr_ name rule, as ptr_init is
+// (specs/init-context/SPEC.md R1).
+module m
+union E { Bad }
+func init_n(n: out u64, v: view[u64]) -> Result[(), E] { n = v; return Ok(()) }
+func f(p: RawPtr[u64], v: view[u64]) -> Result[(), E] {
+    return ptr_init_ctx(p, init_n, v)   // UNSAFE_OP_OUTSIDE_UNSAFE
+}
