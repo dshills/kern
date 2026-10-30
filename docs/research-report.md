@@ -16,25 +16,25 @@ The Phase 0 gate was **GO** (`docs/reports/phase-0.md`): the checker prototype a
 
 ## 3. Performance (Phases 2 and 3)
 
-`bench/REPORT.md` (generated; 5 runs per row, 95% confidence intervals, Apple M4 Pro, clang 23.1.4, rustc 1.99.0, go 1.27.3; the run of 2026-10-29 at a one-minute load of 3.4 to 4.7, `docs/reports/perf-gaps.md`) measures all thirteen §8 workloads in C, Rust [rust-reference] and kern with the same checksums. kern release against the better of C and Rust:
+`bench/REPORT.md` (generated; 5 runs per row, 95% confidence intervals, Apple M4 Pro, clang 23.1.4, rustc 1.99.0, go 1.27.3; the run of 2026-10-30 at a one-minute load of 2.1 to 2.4, `docs/reports/thread-pool-job-path.md`) measures all thirteen §8 workloads in C, Rust [rust-reference] and kern with the same checksums. kern release against the better of C and Rust:
 
 | Workload | throughput ratio | RSS ratio | 10% targets met |
 |---|---|---|---|
-| vector | 1.03 | 1.00 | both |
-| hash_table | 0.92 | 1.06 | both |
-| btree | 0.99 | 1.23 | throughput |
-| arena_ast | 0.88 | 0.99 | RSS |
-| ring_buffer | 1.02 | 1.03 | both |
-| wal | 1.00 | 1.00 | both |
-| packet_parser | 0.93 | 1.05 | both |
-| buffer_pool | 0.96 | 1.01 | both |
-| page_frame_allocator | 0.95 | 1.03 | both |
-| intrusive_run_queue | 1.01 | 1.03 | both |
-| thread_pool | 0.88 | 1.02 | RSS |
-| lock_protected_map | 1.02 | 1.06 | both |
-| lock_free_queue | 1.03 | 1.03 | both |
+| vector | 1.17 | 1.00 | both |
+| hash_table | 0.91 | 1.06 | both |
+| btree | 0.87 | 1.23 | neither |
+| arena_ast | 0.91 | 0.99 | both |
+| ring_buffer | 1.16 | 1.03 | both |
+| wal | 0.99 | 1.00 | both |
+| packet_parser | 0.92 | 1.06 | both |
+| buffer_pool | 0.97 | 1.01 | both |
+| page_frame_allocator | 0.97 | 1.03 | both |
+| intrusive_run_queue | 0.96 | 1.04 | both |
+| thread_pool | 0.94 | 1.02 | both |
+| lock_protected_map | 1.25 | 1.06 | both |
+| lock_free_queue | 0.85 | 1.03 | RSS |
 
-Ten workloads meet both targets, eleven meet the throughput target and twelve the memory target. The first report of this phase (`docs/reports/phase-4.md`, 2026-10-26) had three workloads meeting both, with the container-heavy ones at 0.25 to 0.52 of C; the difference is the sequence of engineering reports under `docs/reports/`: the containers rewritten in kern over the raw-pointer core (`containers-in-kern.md`), `Pool` growth through `realloc` (`btree-rss.md`), internal linkage and a union layout without a padding slot (`gap-diagnosis.md`), kern-level inlining with callees judged as lowered and loops admitted (`inliner.md`, `inliner-sizing.md`, `inliner-loops.md`), bit-count and byte-order intrinsics (`throughput-gaps.md`, `byte-order-reads.md`, `byte-order-stores.md`), `Vec.extend` and zeroed `Vec.resize` (`vec-extend.md`, `hash-table-gap.md`), release handles without identity tags and `Pool` slot metadata beside the element (`release-handles.md`), an owner-checked default mutex and condition variables (`quiet-harness-2026-10-28.md`, `condvar.md`), and the runtime's own parking lock in place of the pthread mutex (`perf-gaps.md`). None of these changed the ownership model: the gap was the C runtime boundary, the shape of the generated code and the synchronisation primitives, as the §9 separations had attributed it. What remains is the memory of a checked handle (btree, ADR-014) and thread_pool at 0.88 of C: lock_protected_map went from 0.57 to 0.76 with the cheaper mutex and to 1.02 with the runtime-owned lock, whose owner word shares the lock's line and is written only by the holder, while thread_pool went from 0.59 to 0.88 with condition variables and did not move with the lock, every variant of which measures the same on it, so its residual is in the worker's per-job path rather than the primitives. The `[unproven]` aliasing experiment still measures no throughput change from the §5.4 `noalias`/`readonly` attributes.
+Eleven workloads meet both targets, eleven meet the throughput target and twelve the memory target; the two throughput misses of this run, btree at 0.87 and lock_free_queue at 0.85, read 1.01 and 0.93 when C and kern are interleaved on the same host minutes later (`docs/reports/thread-pool-job-path.md`), so they are the harness's row ordering rather than the programs, and are counted as the run measured them. The first report of this phase (`docs/reports/phase-4.md`, 2026-10-26) had three workloads meeting both, with the container-heavy ones at 0.25 to 0.52 of C; the difference is the sequence of engineering reports under `docs/reports/`: the containers rewritten in kern over the raw-pointer core (`containers-in-kern.md`), `Pool` growth through `realloc` (`btree-rss.md`), internal linkage and a union layout without a padding slot (`gap-diagnosis.md`), kern-level inlining with callees judged as lowered and loops admitted (`inliner.md`, `inliner-sizing.md`, `inliner-loops.md`), bit-count and byte-order intrinsics (`throughput-gaps.md`, `byte-order-reads.md`, `byte-order-stores.md`), `Vec.extend` and zeroed `Vec.resize` (`vec-extend.md`, `hash-table-gap.md`), release handles without identity tags and `Pool` slot metadata beside the element (`release-handles.md`), an owner-checked default mutex and condition variables (`quiet-harness-2026-10-28.md`, `condvar.md`), and the runtime's own parking lock in place of the pthread mutex (`perf-gaps.md`). None of these changed the ownership model: the gap was the C runtime boundary, the shape of the generated code and the synchronisation primitives, as the §9 separations had attributed it. What remains is the memory of a checked handle (btree, ADR-014) and the harness's own between-run variance: lock_protected_map went from 0.57 to 0.76 with the cheaper mutex and to 1.25 with the runtime-owned lock, whose owner word shares the lock's line and is written only by the holder, while thread_pool went from 0.59 to 0.88 with condition variables and to 0.94 on a quiet host, its remaining checks attributed at one or two points each and the C pool's own speed found to vary by 15% with the host's state (`thread-pool-job-path.md`). The `[unproven]` aliasing experiment still measures no throughput change from the §5.4 `noalias`/`readonly` attributes.
 
 ## 4. The agent experiment (Phase 4)
 
