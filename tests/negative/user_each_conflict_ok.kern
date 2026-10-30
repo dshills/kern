@@ -1,0 +1,12 @@
+//! phase: 3
+//! expect: accept
+//! twin: user_each_conflict
+module t
+import "std/map"
+func visit(m: edit[map.Map[u64, u64]], f: closure(view[u64], edit[u64])) { }
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    var n: usize = 0usize
+    visit(m, |k, v| { n = n + 1usize })
+    return 0i32
+}

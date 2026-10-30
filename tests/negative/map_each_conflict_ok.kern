@@ -1,0 +1,12 @@
+//! phase: 3
+//! expect: accept
+//! twin: map_each_conflict
+module t
+import "std/map"
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    m.insert(1u64, 10u64)
+    var n: usize = 0usize
+    m.each_mut(|k, v| { n = n + 1usize })
+    return 0i32
+}

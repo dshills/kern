@@ -1,0 +1,13 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: user_each_conflict_ok
+// A user function with each_mut's parameter conventions, called the same
+// way, gets the same code (specs/std-gaps R5).
+module t
+import "std/map"
+func visit(m: edit[map.Map[u64, u64]], f: closure(view[u64], edit[u64])) { }
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    var n: usize = 0usize
+    visit(m, |k, v| { n = m.len() })   // ACC_CONFLICT
+    return 0i32
+}

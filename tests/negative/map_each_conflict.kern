@@ -1,0 +1,13 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: map_each_conflict_ok
+// A closure that reaches the map being visited conflicts with the visit's
+// own access to it (specs/std-gaps R5).
+module t
+import "std/map"
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    m.insert(1u64, 10u64)
+    var n: usize = 0usize
+    m.each_mut(|k, v| { n = m.len() })   // ACC_CONFLICT
+    return 0i32
+}

@@ -1,0 +1,83 @@
+//! phase: 3
+//! expect: output
+// std/str UTF-8 (specs/std-gaps R7-R9): every boundary scalar value encoded
+// with push_rune and decoded back, each malformed sequence rejected, and
+// push_rune refusing a surrogate and a value above U+10FFFF, in both
+// engines.
+module t
+import "std/str"
+func show(s: view[]u8) {
+    for b in s {
+        str_hex(b)
+    }
+}
+func str_hex(b: u8) {
+    t := str.String.new()
+    if b < 16u8 { t.push(48u8) }
+    t.push_hex(u64(b))
+    print_str(t.as_view())
+    print_str(" ")
+}
+func decoded(s: view[]u8) {
+    match str.utf8_decode(s, 0usize) {
+        Some(r) => {
+            t := str.String.new()
+            t.push_hex(u64(r.code))
+            print_str(t.as_view())
+            print_str("/")
+            print_u64(u64(r.len))
+        }
+        None => print_str("none")
+    }
+    print_str(" valid=")
+    if str.utf8_valid(s) { print_str("yes") } else { print_str("no") }
+    print_str(" count=")
+    match str.utf8_count(s) {
+        Some(n) => print_u64(u64(n))
+        None => print_str("none")
+    }
+    println()
+}
+func main() -> i32 {
+    codes := [0u32, 127u32, 128u32, 2047u32, 2048u32, 55295u32, 57344u32, 65535u32, 65536u32, 1114111u32]
+    all := str.String.new()
+    for c in codes {
+        s := str.String.new()
+        ok := s.push_rune(c)
+        ok2 := all.push_rune(c)
+        if !ok || !ok2 { print_str("refused ") }
+        show(s.as_view())
+        print_str("-> ")
+        decoded(s.as_view())
+    }
+    print_str("all: ")
+    decoded(all.as_view())
+    overlong2 := [192u8, 128u8]
+    overlong3 := [224u8, 128u8, 128u8]
+    overlong4 := [240u8, 128u8, 128u8, 128u8]
+    surrogate := [237u8, 160u8, 128u8]
+    too_big := [244u8, 144u8, 128u8, 128u8]
+    stray := [128u8]
+    lead_f5 := [245u8]
+    lead_ff := [255u8]
+    cut := [226u8, 130u8]
+    bad_cont := [226u8, 40u8, 161u8]
+    decoded(overlong2[0usize:2usize])
+    decoded(overlong3[0usize:3usize])
+    decoded(overlong4[0usize:4usize])
+    decoded(surrogate[0usize:3usize])
+    decoded(too_big[0usize:4usize])
+    decoded(stray[0usize:1usize])
+    decoded(lead_f5[0usize:1usize])
+    decoded(lead_ff[0usize:1usize])
+    decoded(cut[0usize:2usize])
+    decoded(bad_cont[0usize:3usize])
+    empty := str.String.new()
+    decoded(empty.as_view())
+    r := str.String.new()
+    a := r.push_rune(55296u32)
+    b := r.push_rune(1114112u32)
+    if a || b || r.len() != 0usize { print_str("accepted") } else { print_str("refused both") }
+    println()
+    return 0i32
+}

@@ -1,0 +1,100 @@
+//! phase: 3
+//! expect: output
+// std/map borrowed lookups and visits (specs/std-gaps R1-R4): find borrows
+// its key, find_text looks a String-keyed map up by bytes, the slot
+// accessors view and edit an entry, each and each_mut visit every entry in
+// slot order, in both engines.
+module t
+import "std/map"
+import "std/str"
+func build(names: view[[4]str.String]) -> map.Map[str.String, u64] {
+    m := map.Map[str.String, u64].new()
+    var i: usize = 0usize
+    for n in names {
+        i = i + 1usize
+        m.insert(n.clone(), u64(i) * 100u64)
+    }
+    return m
+}
+func show(m: view[map.Map[str.String, u64]], key: view[]u8) {
+    match map.find_text(m, key) {
+        Some(s) => {
+            print_str(m.key_at(s).as_view())
+            print_str(" = ")
+            print_u64(m.value_at(s))
+        }
+        None => {
+            print_str(key)
+            print_str(" absent")
+        }
+    }
+    println()
+}
+func main() -> i32 {
+    names := [str.String.from("ash"), str.String.from("birch"), str.String.from("cedar"), str.String.from("dogwood")]
+    m := build(names)
+    // find borrows the key: the String is still ours afterwards
+    k := str.String.from("cedar")
+    match m.find(k) {
+        Some(s) => {
+            print_u64(m.value_at(s))
+            println()
+            with v := m.value_at_mut(s) { v = 333u64 }
+        }
+        None => { print_str("missing"); println() }
+    }
+    print_str(k.as_view())
+    println()
+    absent := str.String.from("elm")
+    match m.find(absent) {
+        Some(s) => { print_str("unexpected"); println() }
+        None => { print_str("elm absent"); println() }
+    }
+    show(m, "cedar")
+    show(m, "birch")
+    show(m, "fir")
+    // find and find_text agree on the slot
+    match m.find(names[1usize]) {
+        Some(a) => {
+            match map.find_text(m, "birch") {
+                Some(b) => { if a == b { print_str("same slot") } else { print_str("different slots") } }
+                None => { print_str("text missing") }
+            }
+        }
+        None => { print_str("find missing") }
+    }
+    println()
+    var total: u64 = 0u64
+    var n: u64 = 0u64
+    m.each(|key, v| {
+        total = total + v
+        n = n + 1u64
+    })
+    print_u64(n)
+    print_str(" entries, total ")
+    print_u64(total)
+    println()
+    m.each_mut(|key, v| { v = v + u64(key.len()) })
+    m.each(|key, v| {
+        print_str(key.as_view())
+        print_str(":")
+        print_u64(v)
+        print_str(" ")
+    })
+    println()
+    // the same inserts give the same visit order
+    m2 := build(names)
+    var order: u64 = 0u64
+    var order2: u64 = 0u64
+    m.each(|key, v| { order = order * 7u64 + u64(key.len()) })
+    m2.each(|key, v| { order2 = order2 * 7u64 + u64(key.len()) })
+    if order == order2 { print_str("same order") } else { print_str("different order") }
+    println()
+    // an empty map is never visited
+    e := map.Map[u64, u64].new()
+    var calls: u64 = 0u64
+    e.each(|key, v| { calls = calls + 1u64 })
+    print_u64(calls)
+    println()
+    return 0i32
+}

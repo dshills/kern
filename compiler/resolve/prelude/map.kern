@@ -122,6 +122,85 @@ impl Map[K, V] {
         }
     }
 
+    // find is a lookup that borrows its key: the slot holding key, or
+    // None. The caller keeps an owned key such as a String. A slot stays
+    // valid until the next insert or remove: insert may rebuild the table
+    // and move every entry to another slot.
+    func find(view self, key: view[K]) -> Option[usize] where K: Hashable {
+        i := self.slot(key)
+        if self.states.get(i) == 2u8 { return Some(i) }
+        return None
+    }
+
+    // key_at, value_at and value_at_mut view or edit the entry in a live
+    // slot (one find returned); a slot past the table traps bounds, a slot
+    // that holds no entry traps explicit.
+    func key_at(view self, slot: usize) -> view[K] {
+        if self.states.get(slot) != 2u8 { trap() }
+        match self.keys.get(slot) {
+            Some(k) => return k
+            None => trap()
+        }
+    }
+    func value_at(view self, slot: usize) -> view[V] {
+        if self.states.get(slot) != 2u8 { trap() }
+        match self.vals.get(slot) {
+            Some(v) => return v
+            None => trap()
+        }
+    }
+    func value_at_mut(edit self, slot: usize) -> edit[V] {
+        if self.states.get(slot) != 2u8 { trap() }
+        match self.vals.at(slot) {
+            Some(v) => return v
+            None => trap()
+        }
+    }
+
+    // each calls f with every entry's key and value, in slot order: the
+    // same for two maps built by the same inserts and removals. f cannot
+    // reach the map itself (its access would conflict with this call's).
+    func each(view self, f: closure(view[K], view[V])) {
+        i := 0usize
+        while i < self.cap {
+            if self.states.get(i) == 2u8 {
+                match self.keys.get(i) {
+                    Some(k) => {
+                        match self.vals.get(i) {
+                            Some(v) => f(k, v)
+                            None => { }
+                        }
+                    }
+                    None => { }
+                }
+            }
+            i = i + 1usize
+        }
+    }
+
+    // each_mut is each with an edit of every value.
+    func each_mut(edit self, f: closure(view[K], edit[V])) {
+        i := 0usize
+        while i < self.cap {
+            if self.states.get(i) == 2u8 {
+                with k := self.keys.get(i) {
+                    with v := self.vals.at(i) {
+                        match k {
+                            Some(kk) => {
+                                match v {
+                                    Some(vv) => f(kk, vv)
+                                    None => { }
+                                }
+                            }
+                            None => { }
+                        }
+                    }
+                }
+            }
+            i = i + 1usize
+        }
+    }
+
     // insert stores val under key and returns the value it replaced, if any.
     func insert(edit self, key: own K, val: own V) -> Option[V] where K: Hashable {
         if (self.used + 1usize) * 4usize >= self.cap * 3usize {
@@ -174,6 +253,27 @@ impl Map[K, V] {
         }
         self = bigger
     }
+}
+
+// find_text finds the slot of a String key by its bytes, without building
+// a String: the hash and the equality String's Hashable uses.
+func find_text[V](m: view[Map[str.String, V]], key: view[]u8) -> Option[usize] {
+    mask := m.cap - 1usize
+    i := usize(str.hash(key) >> (64u32 - m.bits))
+    probes := 0usize
+    while probes < m.cap {
+        st := m.states.get(i)
+        if st == 0u8 { return None }
+        if st == 2u8 {
+            match m.keys.get(i) {
+                Some(k) => { if k.equals(key) { return Some(i) } }
+                None => { }
+            }
+        }
+        i = (i + 1usize) & mask
+        probes = probes + 1usize
+    }
+    return None
 }
 
 // insert_opt inserts kk with the value in v, if any (grow's helper).

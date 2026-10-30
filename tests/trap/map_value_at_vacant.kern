@@ -1,0 +1,19 @@
+//! phase: 3
+//! expect: trap explicit
+// value_at on a slot below the capacity that holds no entry traps
+// explicit (specs/std-gaps R2).
+module t
+import "std/map"
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    m.insert(7u64, 70u64)
+    var free: usize = 0usize
+    k := 7u64
+    match m.find(k) {
+        Some(s) => { if s == 0usize { free = 1usize } }
+        None => { }
+    }
+    print_u64(m.value_at(free))
+    println()
+    return 0i32
+}

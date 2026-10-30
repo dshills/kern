@@ -1,0 +1,12 @@
+//! phase: 3
+//! expect: trap bounds
+// value_at on a slot past the table traps bounds (specs/std-gaps R2).
+module t
+import "std/map"
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    m.insert(7u64, 70u64)
+    print_u64(m.value_at(1000usize))
+    println()
+    return 0i32
+}

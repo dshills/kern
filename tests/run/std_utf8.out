@@ -1,0 +1,23 @@
+00 -> 0/1 valid=yes count=1
+7f -> 7f/1 valid=yes count=1
+c2 80 -> 80/2 valid=yes count=1
+df bf -> 7ff/2 valid=yes count=1
+e0 a0 80 -> 800/3 valid=yes count=1
+ed 9f bf -> d7ff/3 valid=yes count=1
+ee 80 80 -> e000/3 valid=yes count=1
+ef bf bf -> ffff/3 valid=yes count=1
+f0 90 80 80 -> 10000/4 valid=yes count=1
+f4 8f bf bf -> 10ffff/4 valid=yes count=1
+all: 0/1 valid=yes count=10
+none valid=no count=none
+none valid=no count=none
+none valid=no count=none
+none valid=no count=none
+none valid=no count=none
+none valid=no count=none
+none valid=no count=none
+none valid=no count=none
+none valid=no count=none
+none valid=no count=none
+none valid=yes count=0
+refused both

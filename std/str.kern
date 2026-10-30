@@ -34,6 +34,72 @@ impl String {
             self.bytes.push(digits[n])
         }
     }
+    // push_i64 appends v in decimal, with a leading - when negative; the
+    // magnitude is taken in u64, so the minimum i64 needs no wider type.
+    func push_i64(edit self, v: i64) {
+        if v < 0i64 {
+            self.bytes.push(45u8)
+            self.push_u64(u64(0i64 - (v + 1i64)) + 1u64)
+            return
+        }
+        self.push_u64(u64(v))
+    }
+    // push_hex appends v in lowercase hexadecimal, no prefix, no leading
+    // zeros; 0 for zero.
+    func push_hex(edit self, v: u64) {
+        if v == 0u64 { self.bytes.push(48u8); return }
+        var digits: [16]u8 = zero()
+        n := 0usize
+        x := v
+        while x > 0u64 {
+            d := truncate[u8](x & 15u64)
+            if d < 10u8 { digits[n] = d + 48u8 } else { digits[n] = d + 87u8 }
+            x = x >> 4u32
+            n = n + 1usize
+        }
+        while n > 0usize {
+            n = n - 1usize
+            self.bytes.push(digits[n])
+        }
+    }
+    // push_padded appends v in decimal right-aligned in width bytes, filled
+    // on the left with fill; a wider number is appended whole.
+    func push_padded(edit self, v: u64, width: usize, fill: u8) {
+        digits := 1usize
+        x := v / 10u64
+        while x > 0u64 {
+            digits = digits + 1usize
+            x = x / 10u64
+        }
+        while digits < width {
+            self.bytes.push(fill)
+            digits = digits + 1usize
+        }
+        self.push_u64(v)
+    }
+    // push_rune appends the UTF-8 encoding of a scalar value and returns
+    // true; a surrogate (U+D800 to U+DFFF) or a value above U+10FFFF
+    // appends nothing and returns false.
+    func push_rune(edit self, code: u32) -> bool {
+        if code >= 55296u32 && code <= 57343u32 { return false }
+        if code > 1114111u32 { return false }
+        if code < 128u32 {
+            self.bytes.push(truncate[u8](code))
+        } else if code < 2048u32 {
+            self.bytes.push(192u8 | truncate[u8](code >> 6u32))
+            self.bytes.push(128u8 | truncate[u8](code & 63u32))
+        } else if code < 65536u32 {
+            self.bytes.push(224u8 | truncate[u8](code >> 12u32))
+            self.bytes.push(128u8 | truncate[u8]((code >> 6u32) & 63u32))
+            self.bytes.push(128u8 | truncate[u8](code & 63u32))
+        } else {
+            self.bytes.push(240u8 | truncate[u8](code >> 18u32))
+            self.bytes.push(128u8 | truncate[u8]((code >> 12u32) & 63u32))
+            self.bytes.push(128u8 | truncate[u8]((code >> 6u32) & 63u32))
+            self.bytes.push(128u8 | truncate[u8](code & 63u32))
+        }
+        return true
+    }
     func clear(edit self) { self.bytes.clear() }
     func clone(view self) -> String { return String { bytes: self.bytes.clone() } }
     func byte(view self, i: usize) -> u8 { b := self.bytes.get(i); return b }
@@ -125,3 +191,72 @@ func trim(s: view[]u8) -> Bounds {
 }
 
 func is_space(b: u8) -> bool { return b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8 }
+
+// Rune is one decoded scalar value and the length of its encoding.
+struct Rune { code: u32; len: usize }
+
+// utf8_decode decodes the scalar value encoded at byte at of s: None when
+// at is not below len(s) or the bytes from at do not begin a well-formed
+// sequence (Unicode Table 3-7, which rules out overlong forms, surrogates
+// and values above U+10FFFF through the second byte's range).
+func utf8_decode(s: view[]u8, at: usize) -> Option[Rune] {
+    if at >= len(s) { return None }
+    b0 := s[at]
+    if b0 < 128u8 { return Some(Rune { code: u32(b0), len: 1usize }) }
+    var n: usize = 0usize
+    var lo: u8 = 128u8
+    var hi: u8 = 191u8
+    var code: u32 = 0u32
+    if b0 >= 194u8 && b0 <= 223u8 {
+        n = 2usize
+        code = u32(b0 & 31u8)
+    } else if b0 >= 224u8 && b0 <= 239u8 {
+        n = 3usize
+        code = u32(b0 & 15u8)
+        if b0 == 224u8 { lo = 160u8 }
+        if b0 == 237u8 { hi = 159u8 }
+    } else if b0 >= 240u8 && b0 <= 244u8 {
+        n = 4usize
+        code = u32(b0 & 7u8)
+        if b0 == 240u8 { lo = 144u8 }
+        if b0 == 244u8 { hi = 143u8 }
+    } else {
+        return None
+    }
+    if len(s) - at < n { return None }
+    i := 1usize
+    while i < n {
+        b := s[at + i]
+        if b < lo || b > hi { return None }
+        lo = 128u8
+        hi = 191u8
+        code = (code << 6u32) | u32(b & 63u8)
+        i = i + 1usize
+    }
+    return Some(Rune { code: code, len: n })
+}
+
+// utf8_count is the number of scalar values in s, or None when s is not
+// well-formed UTF-8.
+func utf8_count(s: view[]u8) -> Option[usize] {
+    i := 0usize
+    n := 0usize
+    while i < len(s) {
+        match utf8_decode(s, i) {
+            Some(r) => {
+                i = i + r.len
+                n = n + 1usize
+            }
+            None => return None
+        }
+    }
+    return Some(n)
+}
+
+// utf8_valid reports whether s is well-formed UTF-8 (the empty view is).
+func utf8_valid(s: view[]u8) -> bool {
+    match utf8_count(s) {
+        Some(n) => return true
+        None => return false
+    }
+}
