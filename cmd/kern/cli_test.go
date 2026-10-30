@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -491,5 +492,47 @@ func main() -> i32 {
 	}
 	if n != 2 || labels["runtime-checked"] != 2 {
 		t.Fatalf("a retained body keeps its reads runtime-checked: got %d entries %v", n, labels)
+	}
+}
+
+// TestExplainOwnershipDeclaringFunction: a place reports the accesses of
+// its own function only, not those of a same-named local elsewhere or
+// of library code (specs/language-server/SPEC.md R13).
+func TestExplainOwnershipDeclaringFunction(t *testing.T) {
+	src := "module app\nfunc total(v: own Vec[u64]) -> u64 {\n    return v.get(0usize)\n}\nfunc main() -> i32 {\n    v := Vec[u64].new()\n    v.push(1u64)\n    n := total(move v)\n    print_u64(n)\n    return 0i32\n}\n"
+	file := filepath.Join(t.TempDir(), "app.kern")
+	if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	explain := func(decl string) diag.Place {
+		t.Helper()
+		at := strings.Index(src, decl)
+		req := fmt.Sprintf(`{"schema_version":"0.3","command":"explain-ownership","files":[%q],"span":{"file":%q,"start":%d,"end":%d}}`, file, file, at, at+1)
+		var out, errb bytes.Buffer
+		if code := run([]string{"explain-ownership"}, strings.NewReader(req), &out, &errb); code != 0 {
+			t.Fatalf("explain-ownership: exit %d %s", code, out.String())
+		}
+		var resp struct {
+			Result diag.ExplainOwnershipResult `json:"result"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &resp); err != nil || len(resp.Result.Places) != 1 {
+			t.Fatalf("explain-ownership of %q: %v %s", decl, err, out.String())
+		}
+		return resp.Result.Places[0]
+	}
+	kinds := func(p diag.Place) string {
+		var ks []string
+		for _, a := range p.Accesses {
+			ks = append(ks, a.Kind+"@"+strconv.Itoa(a.Span.Start))
+		}
+		return strings.Join(ks, " ")
+	}
+	param := explain("v: own")
+	if got, want := kinds(param), "view@"+strconv.Itoa(strings.Index(src, "v.get")); got != want || param.DropAt == nil || param.Contract != nil {
+		t.Errorf("parameter: accesses %q (want %q), drop %v, contract %v", got, want, param.DropAt, param.Contract)
+	}
+	local := explain("v := ")
+	if got := kinds(local); got != "edit@"+strconv.Itoa(strings.Index(src, "v.push"))+" consume@"+strconv.Itoa(strings.Index(src, "v := ")) || local.DropAt != nil || local.Contract != nil {
+		t.Errorf("local: accesses %q, drop %v, contract %v", got, local.DropAt, local.Contract)
 	}
 }

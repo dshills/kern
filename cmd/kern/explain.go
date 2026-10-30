@@ -3,9 +3,8 @@ package main
 import (
 	"fmt"
 	"io"
-	"sort"
 
-	"github.com/dshills/kern/compiler/ast"
+	"github.com/dshills/kern/compiler/analysis"
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/ir"
@@ -50,76 +49,7 @@ func explainOwnership(req Request, wire string, srcs []*source.File, stdout, std
 	if errs := ir.Validate(mod); len(errs) > 0 {
 		return internal(req, wire, &InternalError{Err: fmt.Errorf("IR validation: %v", errs[0])}, stdout, stderr)
 	}
-	res := diag.ExplainOwnershipResult{Places: []diag.Place{}}
-	intersects := func(p ast.Pos) bool { return p.Start < req.Span.End && req.Span.Start < p.End }
-	// symbols by position, in order
-	type entry struct {
-		sym *resolve.Symbol
-	}
-	var entries []entry
-	for key, sym := range prog.Info.Decls {
-		if sym == nil || sym.File != req.Span.File || !intersects(sym.Pos) {
-			continue
-		}
-		switch sym.Kind {
-		case resolve.SymLocal, resolve.SymParam, resolve.SymAccess:
-		default:
-			continue
-		}
-		_ = key
-		entries = append(entries, entry{sym: sym})
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].sym.Pos.Start != entries[j].sym.Pos.Start {
-			return entries[i].sym.Pos.Start < entries[j].sym.Pos.Start
-		}
-		return entries[i].sym.ID < entries[j].sym.ID
-	})
-	for _, e := range entries {
-		sym := e.sym
-		loc := diag.Loc{File: req.Span.File, Span: diag.Span{Start: sym.Pos.Start, End: sym.Pos.End}}
-		p := diag.Place{Loc: loc, Owner: loc, State: "owned", Accesses: []diag.AccessEntry{}, Label: diag.LabelProven}
-		if sym.Kind == resolve.SymAccess || (sym.Kind == resolve.SymParam && (sym.Conv == ast.ConvView || sym.Conv == ast.ConvEdit)) {
-			p.State = "access"
-		}
-		for _, f := range mod.Funcs {
-			var local *ir.Local
-			for _, l := range f.Locals {
-				if l.Name == sym.Name && !l.Temp {
-					local = l
-				}
-			}
-			if local == nil {
-				continue
-			}
-			for _, b := range f.Blocks {
-				for _, in := range b.Instrs {
-					switch i := in.(type) {
-					case *ir.AccessBegin:
-						if i.Place.Local == local {
-							kind := "view"
-							if i.Edit {
-								kind = "edit"
-							}
-							p.Accesses = append(p.Accesses, diag.AccessEntry{Kind: kind, Span: diag.Span{Start: i.Pos.Start, End: i.Pos.End}, Root: loc})
-						}
-					case *ir.Move:
-						if i.Src.Local == local && len(i.Src.Path) == 0 {
-							p.Accesses = append(p.Accesses, diag.AccessEntry{Kind: "consume", Span: diag.Span{Start: sym.Pos.Start, End: sym.Pos.End}, Root: loc})
-						}
-					case *ir.Drop:
-						if i.Place.Local == local && len(i.Place.Path) == 0 && p.DropAt == nil {
-							p.DropAt = &diag.Loc{File: req.Span.File, Span: diag.Span{Start: i.Pos.Start, End: i.Pos.End}}
-						}
-					}
-				}
-			}
-			if f.Contract != nil {
-				p.Contract = &diag.Contract{Invariant: f.Contract.Invariant, Requires: f.Contract.Requires, Ensures: f.Contract.Ensures}
-			}
-		}
-		res.Places = append(res.Places, p)
-	}
+	res := analysis.ExplainOwnership(prog, mod, req.Span.File, diag.Span{Start: req.Span.Start, End: req.Span.End})
 	resp := diag.Response{OK: true, Result: res, Diagnostics: []diag.Diagnostic{}}
 	if err := diag.WriteAt(stdout, wire, resp); err != nil {
 		return 3

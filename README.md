@@ -123,7 +123,7 @@ Check a file and read the diagnostics as text rather than JSON:
 
 ## Commands
 
-Every command other than `run`, `build`, `debug` and `test` reads one JSON request on
+Every command other than `run`, `build`, `debug`, `test` and `lsp` reads one JSON request on
 standard input (or takes files on the command line) and writes one JSON response
 on standard output; `--human` renders the response as text. The schema is in
 `tools/agent-api/schema.md`. A request names its `schema_version`: 0.3, the
@@ -143,6 +143,7 @@ shape without it; files on the command line get 0.3.
 | `build` | Produce an executable or freestanding image; `--debug` emits DWARF line tables |
 | `debug` | Build with debug info and launch lldb with a `kern-own` command that shows ownership state at the current line |
 | `test` | Run the program's tests in the interpreter and natively, in debug and release, and compare the runs; `--opt=`, `--engine=interp\|native`, `--run=<regexp>`, `--timeout=<seconds>`, `--human` |
+| `lsp` | A language server on standard input and output: diagnostics as you type, formatting, the compiler's fixes as quick fixes, and ownership facts on hover; setup for Neovim, Helix and Emacs is in [docs/editors.md](docs/editors.md) |
 
 ### Tests
 

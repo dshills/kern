@@ -38,17 +38,40 @@ func (r Result) Names() []string {
 // the manifest's entry when none is named) and then every file of every
 // module the set imports by a user import path (spec §4.3). Relative names
 // are accessed under cwd and kept as display names.
-func Load(cwd string, named []string) Result { return load(cwd, named, true, false) }
+func Load(cwd string, named []string) Result {
+	return LoadWith(cwd, named, Options{Discover: true})
+}
+
+// Options selects what LoadWith does.
+type Options struct {
+	Discover bool // add the files of every imported module (Load)
+	Tests    bool // the test-file rule of `kern test` (LoadTests)
+	// Overlay, when not nil, supplies a file's text in place of the
+	// disk's: it is asked with the file's identity, its cleaned
+	// absolute path, before every file read. The manifest and the
+	// directory listings are always read from disk
+	// (specs/language-server/SPEC.md §2).
+	Overlay func(abs string) ([]byte, bool)
+}
+
+// LoadWith is the loader the other entry points call: Load is
+// Options{Discover: true}, LoadTests adds Tests, and Entries is the
+// zero Options.
+func LoadWith(cwd string, named []string, o Options) Result {
+	return load(cwd, named, o)
+}
 
 // LoadTests is Load for `kern test` (specs/test-command/SPEC.md §2.1): it
 // also loads the test files (TestFile) of every module directory discovery
 // enters, and those of each entry file's directory that declare the entry
 // file's module, which join the entry files.
-func LoadTests(cwd string, named []string) Result { return load(cwd, named, true, true) }
+func LoadTests(cwd string, named []string) Result {
+	return LoadWith(cwd, named, Options{Discover: true, Tests: true})
+}
 
 // Entries is Load without discovery: the root, the manifest and the entry
 // files only, for a command that works on the named files alone (format).
-func Entries(cwd string, named []string) Result { return load(cwd, named, false, false) }
+func Entries(cwd string, named []string) Result { return LoadWith(cwd, named, Options{}) }
 
 // TestFile reports whether a file name is a test file's: its base name
 // ends in _test.kern. Discovery leaves test files out of a module
@@ -56,7 +79,8 @@ func Entries(cwd string, named []string) Result { return load(cwd, named, false,
 // whatever its name.
 func TestFile(name string) bool { return strings.HasSuffix(filepath.Base(name), "_test.kern") }
 
-func load(cwd string, named []string, discover, tests bool) Result {
+func load(cwd string, named []string, o Options) Result {
+	discover, tests := o.Discover, o.Tests
 	var r Result
 	root, mpath, found := FindRoot(cwd, named)
 	r.Root = root
@@ -83,7 +107,7 @@ func load(cwd string, named []string, discover, tests bool) Result {
 	}
 	seen := map[string]*source.File{} // the files in the set, by identity
 	for _, name := range named {
-		f, err := source.Load(onDisk(cwd, name))
+		f, err := readFile(cwd, name, o)
 		if err != nil {
 			r.Diags = []diag.Diagnostic{diag.New("API_FILE_NOT_FOUND", name, diag.Span{}, "cannot read %s: %v", name, err)}
 			return r
@@ -95,7 +119,7 @@ func load(cwd string, named []string, discover, tests bool) Result {
 		}
 	}
 	if tests {
-		more, ds := entryTests(cwd, r.Files, seen)
+		more, ds := entryTests(cwd, r.Files, seen, o)
 		r.Files = append(r.Files, more...)
 		if len(ds) > 0 {
 			r.Diags = append(r.Diags, ds...)
@@ -148,7 +172,7 @@ func load(cwd string, named []string, discover, tests bool) Result {
 					already = append(already, have)
 					continue
 				}
-				src, err := source.Load(onDisk(cwd, name))
+				src, err := readFile(cwd, name, o)
 				if err != nil {
 					r.Diags = append(r.Diags, diag.New("MODULE_NOT_FOUND", f.Name, at, "import %q: cannot read %s: %v", imp.Path, name, err))
 					failed = true
@@ -206,7 +230,7 @@ func ValidImportPath(p string) bool {
 // the file silently skipped; a directory that cannot be listed or a test
 // file that cannot be read is an API_FILE_NOT_FOUND diagnostic, for the
 // same reason.
-func entryTests(cwd string, entries []*source.File, seen map[string]*source.File) ([]*source.File, []diag.Diagnostic) {
+func entryTests(cwd string, entries []*source.File, seen map[string]*source.File, o Options) ([]*source.File, []diag.Diagnostic) {
 	modules := map[string]map[string]bool{} // directory -> modules its entry files declare
 	var dirs []string
 	for _, f := range entries {
@@ -245,7 +269,7 @@ func entryTests(cwd string, entries []*source.File, seen map[string]*source.File
 			if !st.Mode().IsRegular() {
 				continue // a directory or a device named like a test file
 			}
-			src, err := source.Load(onDisk(cwd, name))
+			src, err := readFile(cwd, name, o)
 			if err != nil {
 				ds = append(ds, diag.New("API_FILE_NOT_FOUND", name, diag.Span{}, "cannot read test file %s: %v", name, err))
 				continue
@@ -298,3 +322,20 @@ func onDisk(cwd, name string) string {
 // identity is the file identity of a display name (spec §2): its cleaned
 // absolute form; no symbolic link is resolved.
 func identity(cwd, name string) string { return filepath.Clean(onDisk(cwd, name)) }
+
+// readFile loads a file by display name: from the overlay when it holds
+// the file's identity, else from disk. The name is kept as the display
+// name.
+func readFile(cwd, name string, o Options) (*source.File, error) {
+	if o.Overlay != nil {
+		if b, ok := o.Overlay(identity(cwd, name)); ok {
+			return &source.File{Name: name, Bytes: b}, nil
+		}
+	}
+	f, err := source.Load(onDisk(cwd, name))
+	if err != nil {
+		return nil, err
+	}
+	f.Name = name
+	return f, nil
+}

@@ -385,3 +385,36 @@ func TestTestFileDangling(t *testing.T) {
 		t.Errorf("got %v", r.Diags)
 	}
 }
+
+func TestLoadOverlay(t *testing.T) {
+	cwd := tree(t, t.TempDir(), map[string]string{
+		"app.kern":   app,
+		"lib/l.kern": lib,
+	})
+	abs := func(name string) string { return filepath.Clean(filepath.Join(cwd, name)) }
+	edited := "module app\nimport \"lib\"\nfunc main() -> i32 { return 1i32 }\n"
+	libEdited := "module lib\nfunc F() -> u64 { return 2u64 }\n"
+	unsaved := "module app\nimport \"lib\"\nfunc main() -> i32 { return 2i32 }\n"
+	overlay := map[string]string{abs("app.kern"): edited, abs("lib/l.kern"): libEdited, abs("new.kern"): unsaved}
+	o := Options{Discover: true, Overlay: func(p string) ([]byte, bool) {
+		s, ok := overlay[p]
+		return []byte(s), ok
+	}}
+	r := LoadWith(cwd, []string{"app.kern"}, o)
+	if codes(r) != "" || strings.Join(r.Names(), " ") != "app.kern lib/l.kern" {
+		t.Fatalf("overlay load: %v %v", codes(r), r.Names())
+	}
+	if string(r.Files[0].Bytes) != edited || string(r.Files[1].Bytes) != libEdited {
+		t.Errorf("overlay text not used: %q %q", r.Files[0].Bytes, r.Files[1].Bytes)
+	}
+	// a named file that exists only in the overlay loads, with its imports
+	n := LoadWith(cwd, []string{"new.kern"}, o)
+	if codes(n) != "" || strings.Join(n.Names(), " ") != "new.kern lib/l.kern" || string(n.Files[0].Bytes) != unsaved {
+		t.Errorf("overlay-only file: %v %v", codes(n), n.Names())
+	}
+	// a nil overlay is Load
+	plain, viaWith := Load(cwd, []string{"app.kern"}), LoadWith(cwd, []string{"app.kern"}, Options{Discover: true})
+	if strings.Join(plain.Names(), " ") != strings.Join(viaWith.Names(), " ") || string(viaWith.Files[0].Bytes) != app {
+		t.Errorf("nil overlay differs from Load: %v %v", plain.Names(), viaWith.Names())
+	}
+}
