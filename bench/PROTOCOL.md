@@ -30,13 +30,35 @@ ops=<N> ns=<total elapsed nanoseconds> p50=<ns per op> p99=<ns per op> checksum=
 | wal | 2,000,000 | append of 64-byte records to an in-memory log with a running CRC, then replay |
 | packet_parser | 10,000,000 | parse of a 32-byte header from a byte buffer into a header struct and a checksum over the payload view |
 
-The harness (`bench/harness`, Go) builds every implementation, runs each row
-five times, and reports in `bench/REPORT.md`: throughput (ops/s), p50/p99,
-peak RSS (rusage), text-section bytes, compile time, unsafe source lines,
-allocation and copy counts from `kern show-allocations`/`show-copies`, the
-ownership graph size from `explain-ownership`, and whether the reserved
-extension was used (always "no" in Phase 2), with 95% confidence intervals
-over the five runs. kern rows exist for `--opt release` (primary) and
+The harness (`bench/harness`, Go) builds every implementation, then measures
+them in interleaved rounds (`-runs`, default 10, at least 5): each round runs
+every row once, workload after workload, with a workload's rows in an order
+rotated by one each round, so the rows compared with each other run seconds
+apart in every round and a burst of load on the host lands on all of them
+rather than on every run of one row. It reports in `bench/REPORT.md`:
+throughput (ops/s), p50/p99, peak RSS (rusage), text-section bytes, compile
+time, unsafe source lines, allocation and copy counts from
+`kern show-allocations`/`show-copies`, the ownership graph size from
+`explain-ownership`, and whether the reserved extension was used (always "no"
+in Phase 2), with 95% confidence intervals over the rounds.
+
+The targets compare kern's release row with its reference, the C or Rust
+release row with the higher mean throughput (or the lower mean peak RSS;
+C on a tie), round by round: each round in which both rows ran gives a
+paired ratio, and the report gives the ratios' geometric mean and its 95%
+interval (the mean of their logarithms ± Student's t at n−1 degrees of
+freedom times the standard error, mapped back with exp). The throughput
+target (at least 0.90 of the reference) is **met** when the interval's
+lower bound is at least 0.90, **missed** when its upper bound is below 0.90,
+and **undecided** otherwise; the memory target (at most 1.10) is met when
+the upper bound is at most 1.10, missed when the lower bound is above 1.10,
+undecided otherwise; fewer than two paired rounds is undecided. The
+report's header gives the one-minute load at the start of every round as a
+range. `-max-load X` makes the harness wait before each round until the
+load is at most X (polling every 15 s, for at most `-load-wait`, default
+30 minutes, after which the round starts and the report says so);
+timings meant for a report are taken on a quiet host, with nothing else
+benchmarking (`specs/bench-interleave/SPEC.md`). kern rows exist for `--opt release` (primary) and
 `--opt debug`; the user-level handle code and the library's internals are
 reported as separate rows where the workload has both (§2.3(a)/(b)).
 

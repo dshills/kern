@@ -1,8 +1,13 @@
 // Command harness builds, runs and reports the benchmark workloads of
 // PLAN.md 2.6 and 3.4 (see bench/PROTOCOL.md for the per-program output line).
 //
-//	go run ./bench/harness [-runs 5] [-out bench/REPORT.md] [-only workload[,...]]
-//	    [-lang c,rust,kern] [-experiment]
+//	go run ./bench/harness [-runs 10] [-out bench/REPORT.md] [-only workload[,...]]
+//	    [-lang c,rust,kern] [-experiment] [-max-load 3.5] [-load-wait 30m]
+//
+// Every row is built first; then the rows are measured in -runs interleaved
+// rounds, each running every row once with a workload's rows rotated by the
+// round number, and the targets compare kern with its reference round by
+// round (specs/bench-interleave/SPEC.md, bench/PROTOCOL.md).
 //
 // Rows are grouped by workload, then build configuration, then language.
 // C is built with `clang -O2`, Rust with `cargo build --release`, kern with
@@ -61,6 +66,7 @@ type runResult struct {
 	hasFailures                 bool // the line carried a failures= field
 	rss                         float64
 	wall                        time.Duration
+	round                       int // the interleaved round it ran in (specs/bench-interleave)
 }
 
 // row is one (workload, configuration, program) measurement; name is the
@@ -113,14 +119,16 @@ type toolchain struct {
 var protoRE = regexp.MustCompile(`^ops=(\d+) ns=(\d+) p50=(\d+) p99=(\d+) checksum=(\d+)(?: failures=(\d+))?$`)
 
 func main() {
-	runs := flag.Int("runs", 5, "repetitions per row")
+	runs := flag.Int("runs", 10, "interleaved rounds: each round runs every row once (at least 5)")
+	maxLoad := flag.Float64("max-load", 0, "wait before each round until the one-minute load is at most this (0: never wait)")
+	loadWait := flag.Duration("load-wait", 30*time.Minute, "longest wait for the load before a round starts anyway")
 	out := flag.String("out", "bench/REPORT.md", "report path (relative to the repository root)")
 	only := flag.String("only", "", "comma-separated workloads to run (default: all)")
 	langs := flag.String("lang", "c,rust,kern", "comma-separated languages to run")
 	experiment := flag.Bool("experiment", false, "run the [unproven] aliasing experiment on the vector workload")
 	flag.Parse()
-	if *runs < 1 {
-		fatalf("-runs must be at least 1")
+	if err := validateRuns(*runs); err != nil {
+		fatalf("%v", err)
 	}
 
 	root, err := findRoot()
@@ -181,19 +189,40 @@ func main() {
 		build(root, buildDir, kernBin, r)
 		if r.buildErr != "" {
 			logf("  build failed: %s", firstLine(r.buildErr))
+		}
+	}
+
+	// interleaved rounds (specs/bench-interleave): every row once per
+	// round, a workload's rows rotated by the round number
+	gate := &loadGate{max: *maxLoad, wait: *loadWait, poll: 15 * time.Second, read: oneMinuteLoad,
+		sleep: time.Sleep, now: time.Now, warn: func(m string) { logf("warning: %s", m) }}
+	var loads []roundLoad
+	round := -1
+	for _, s := range schedule(workloads, rows, *runs) {
+		if s.round != round {
+			round = s.round
+			load, known, expired := gate.before()
+			loads = append(loads, roundLoad{load: load, known: known, expired: expired})
+			logf("round %d of %d (load %s)", round+1, *runs, map[bool]string{true: strconv.FormatFloat(load, 'f', 2, 64), false: "unavailable"}[known])
+		}
+		r := s.r
+		res, err := runOnce(root, r.bin, nil)
+		if err != nil {
+			r.errs = append(r.errs, err.Error())
+			logf("  %s/%s failed: %v", r.workload, r.key(), err)
 			continue
 		}
-		for i := 0; i < *runs; i++ {
-			res, err := runOnce(root, r.bin, nil)
-			if err != nil {
-				r.errs = append(r.errs, err.Error())
-				logf("  run %d failed: %v", i+1, err)
-				continue
-			}
-			r.runs = append(r.runs, res)
+		res.round = s.round
+		r.runs = append(r.runs, res)
+		logf("  %s/%s %.1f Mops/s", r.workload, r.key(), float64(res.ops)/float64(res.ns)*1e3)
+	}
+
+	for _, r := range rows {
+		if !built(r) {
+			continue
 		}
 		if len(r.runs) > 0 {
-			logf("  %s", summary(r))
+			logf("%s/%s: %s", r.workload, r.key(), summary(r))
 		}
 		if failureWorkloads[r.workload] {
 			res, err := runOnce(root, r.bin, []string{"KERN_BENCH_FAIL=1"})
@@ -216,7 +245,7 @@ func main() {
 		exp += separations(root, buildDir, kernBin, *runs, rows)
 	}
 
-	report := writeReport(root, tc, workloads, rows, *runs, exp)
+	report := writeReport(root, tc, workloads, rows, *runs, exp, loadSummary(loads, *maxLoad))
 	outPath := *out
 	if !filepath.IsAbs(outPath) {
 		outPath = filepath.Join(root, outPath)
@@ -561,44 +590,51 @@ func checksumLine(rows []*row) string {
 // targetLine compares kern release against the better of C and Rust on
 // throughput (within 10% below) and peak RSS (within 10% above).
 func targetLine(rows []*row) string {
-	var kern *row
-	bestTP, bestTPLang := 0.0, ""
-	bestRSS, bestRSSLang := math.Inf(1), ""
+	var kern, tpRef, rssRef *row
+	bestTP, bestRSS := 0.0, math.Inf(1)
 	for _, r := range rows {
-		if len(r.runs) == 0 {
+		if r.lang == "kern" && r.cfg == "release" && r.isMain() {
+			kern = r // the workload's main program by name
 			continue
 		}
-		tp, _ := meanCI(mapRuns(r.runs, func(x runResult) float64 { return float64(x.ops) / float64(x.ns) * 1e3 }))
-		rss, _ := meanCI(mapRuns(r.runs, func(x runResult) float64 { return x.rss / (1 << 20) }))
-		switch {
-		case r.lang == "kern" && r.cfg == "release" && r.isMain():
-			kern = r // the workload's main program by name
-		case r.lang == "c" || r.lang == "rust":
-			if tp > bestTP {
-				bestTP, bestTPLang = tp, r.lang
-			}
-			if rss < bestRSS {
-				bestRSS, bestRSSLang = rss, r.lang
-			}
+		if (r.lang != "c" && r.lang != "rust") || len(r.runs) == 0 {
+			continue
+		}
+		// C comes before Rust in the plan, so a tie keeps C
+		tp, _ := meanCI(mapRuns(r.runs, throughput))
+		rss, _ := meanCI(mapRuns(r.runs, peakRSS))
+		if tp > bestTP {
+			bestTP, tpRef = tp, r
+		}
+		if rss < bestRSS {
+			bestRSS, rssRef = rss, r
 		}
 	}
-	if bestTPLang == "" {
+	if tpRef == nil {
 		return "Targets: no C or Rust baseline was measured.\n\n"
 	}
-	if kern == nil {
-		return fmt.Sprintf("Targets: kern release row not measured; best C/Rust throughput %.1f Mops/s (%s), lowest peak RSS %.1f MiB (%s).\n\n", bestTP, bestTPLang, bestRSS, bestRSSLang)
+	if kern == nil || len(kern.runs) == 0 {
+		return fmt.Sprintf("Targets: kern release row not measured; throughput reference %s, peak RSS reference %s.\n\n", tpRef.lang, rssRef.lang)
 	}
-	tp, _ := meanCI(mapRuns(kern.runs, func(x runResult) float64 { return float64(x.ops) / float64(x.ns) * 1e3 }))
-	rss, _ := meanCI(mapRuns(kern.runs, func(x runResult) float64 { return x.rss / (1 << 20) }))
-	verdict := func(ok bool) string {
-		if ok {
-			return "meets"
+	part := func(what string, ref *row, measure func(runResult) float64, verdict func(lo, hi float64, ok bool) string) string {
+		ratios := pairedRatios(kern, ref, measure)
+		mean, lo, hi, ok := geoMeanCI(ratios)
+		v := verdict(lo, hi, ok)
+		if !ok {
+			return fmt.Sprintf("%s kern/%s over %d paired rounds, %s the 10%% target", what, ref.lang, len(ratios), v)
 		}
-		return "does not meet"
+		return fmt.Sprintf("%s kern/%s paired ratio %.2f [%.2f, %.2f] over %d rounds, %s the 10%% target", what, ref.lang, mean, lo, hi, len(ratios), v)
 	}
-	return fmt.Sprintf("Targets: kern release throughput %.1f Mops/s vs best %.1f (%s), ratio %.2f, %s the 10%% target; peak RSS %.1f MiB vs lowest %.1f (%s), ratio %.2f, %s the 10%% target.\n\n",
-		tp, bestTP, bestTPLang, tp/bestTP, verdict(tp >= 0.9*bestTP), rss, bestRSS, bestRSSLang, rss/bestRSS, verdict(rss <= 1.1*bestRSS))
+	return fmt.Sprintf("Targets: %s; %s.\n\n",
+		part("throughput", tpRef, throughput, throughputVerdict),
+		part("peak RSS", rssRef, peakRSS, memoryVerdict))
 }
+
+// throughput is a run's operations per microsecond (Mops/s).
+func throughput(x runResult) float64 { return float64(x.ops) / float64(x.ns) * 1e3 }
+
+// peakRSS is a run's peak resident set in MiB.
+func peakRSS(x runResult) float64 { return x.rss / (1 << 20) }
 
 func summary(r *row) string {
 	tp, ci := meanCI(mapRuns(r.runs, func(x runResult) float64 { return float64(x.ops) / float64(x.ns) * 1e3 }))
