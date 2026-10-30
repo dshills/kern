@@ -1,0 +1,25 @@
+{
+ "main": "buf.kern",
+ "expected_output": "8 111\n1 0\n33 0\n0 0\n2 0\n3 0\n3 4\n65 45 66 \n1 5\n42 39 51 44 64 104 \n51 44\n0 5\n75 69 82 78 33 \n0 0\n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 0,
+ "required_functions": [
+  "buf.block_new",
+  "buf.block_put",
+  "buf.block_get",
+  "buf.block_free",
+  "buf.copy_in",
+  "buf.count_bytes",
+  "buf.translate",
+  "buf.ends_with",
+  "buf.strip_len",
+  "buf.xor_key",
+  "buf.wrap_get"
+ ],
+ "frozen_functions": [
+  "main",
+  "show",
+  "bit",
+  "pair"
+ ]
+}

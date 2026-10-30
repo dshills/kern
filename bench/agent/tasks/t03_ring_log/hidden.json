@@ -1,0 +1,20 @@
+{
+ "main": "ring.kern",
+ "expected_output": "5\n2\n0\n2\n10\n15\n3\n5 8 2 0 \n13\n2\n9\n9\n17\n4\n2 7 1 9 \n17\n0\n6\n3\n9\n3\n4 6 3 \n6\n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 0,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "ring.push",
+  "ring.get",
+  "ring.last",
+  "ring.sum_newest",
+  "ring.copy_out",
+  "ring.max_window"
+ ],
+ "frozen_functions": [
+  "main",
+  "line",
+  "show"
+ ]
+}

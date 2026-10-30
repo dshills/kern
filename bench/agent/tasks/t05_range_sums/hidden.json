@@ -1,0 +1,19 @@
+{
+ "main": "ranges.kern",
+ "expected_output": "0 3 4 8 9 14 23 25 31 \n10 31 0 \n17 9 27 \n7 4 5 5 6 14 11 8 \n5 3 0 \n0 10 10 10 17 19 \n9 19 0 \n10 10 0 \n3 10 0 7 \n1 2 0 \n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 0,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "ranges.prefix",
+  "ranges.range_sum",
+  "ranges.best_window",
+  "ranges.window_sums",
+  "ranges.first_reaching"
+ ],
+ "frozen_functions": [
+  "main",
+  "put",
+  "report"
+ ]
+}

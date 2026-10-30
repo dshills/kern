@@ -1,0 +1,86 @@
+module stats
+// Statistics over a run of bytes: how often each byte and each ASCII
+// digit occurs, the most frequent of each, and the runs of one repeated
+// byte.
+
+// histogram adds one to counts[b] for every byte b of data.
+func histogram(data: view[]u8, counts: edit[[256]u64]) {
+    // TODO
+}
+
+// digit_counts adds one to digits[d] for every ASCII digit of data whose
+// value is d (the digit '0' is the byte 48); other bytes are ignored.
+func digit_counts(data: view[]u8, digits: edit[[10]u64]) {
+    // TODO
+}
+
+// most_frequent is the byte with the largest count in counts; on a tie it
+// is the smallest such byte, so it is 0 when every count is 0.
+func most_frequent(counts: view[[256]u64]) -> u8 {
+    // TODO
+    return 0u8
+}
+
+// top_digit is the digit with the largest count in digits; on a tie it is
+// the smallest such digit, so it is 0 when every count is 0.
+func top_digit(digits: view[[10]u64]) -> u8 {
+    // TODO
+    return 0u8
+}
+
+// longest_run is the length of the longest run of one repeated byte in
+// data, or 0 when data is empty.
+func longest_run(data: view[]u8) -> u64 {
+    // TODO
+    return 0u64
+}
+
+// final_run is the length of the run that ends data: how many bytes at its
+// end are equal to its last byte, or 0 when data is empty.
+func final_run(data: view[]u8) -> u64 {
+    // TODO
+    return 0u64
+}
+
+func line(v: u64) {
+    print_u64(v)
+    println()
+}
+
+func main() -> i32 {
+    var c1: [256]u64 = zero()
+    var d1: [10]u64 = zero()
+    with s := "call 555-0199 at 11:45, ok??" {
+        histogram(s, c1)
+        digit_counts(s, d1)
+        line(c1[32usize])
+        line(d1[5usize])
+        line(u64(most_frequent(c1)))
+        line(u64(top_digit(d1)))
+        line(longest_run(s))
+        line(final_run(s))
+    }
+    var c2: [256]u64 = zero()
+    var d2: [10]u64 = zero()
+    with s := "zzz 4242 abba!" {
+        histogram(s, c2)
+        digit_counts(s, d2)
+        line(c2[32usize])
+        line(d2[4usize])
+        line(u64(most_frequent(c2)))
+        line(u64(top_digit(d2)))
+        line(longest_run(s))
+        line(final_run(s))
+    }
+    var c3: [256]u64 = zero()
+    var d3: [10]u64 = zero()
+    with s := "" {
+        histogram(s, c3)
+        digit_counts(s, d3)
+        line(u64(most_frequent(c3)))
+        line(u64(top_digit(d3)))
+        line(longest_run(s))
+        line(final_run(s))
+    }
+    return 0i32
+}

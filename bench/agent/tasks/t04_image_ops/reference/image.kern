@@ -1,0 +1,118 @@
+module image
+// Image operations over a flat grid of w*h u32 pixels stored row by row:
+// pixel (x, y) is at index y * w + x, and every grid passed in has
+// exactly w * h entries.
+
+// pixel reads the pixel at flat index i as a u64.
+func pixel(src: view[]u32, i: usize) -> u64 {
+    if i < len(src) { return u64(src[i]) }
+    return 0u64
+}
+
+// blur writes the 3x3 box blur of src into dst, which has the shape of
+// src: each pixel becomes the mean, rounded down, of itself and its eight
+// neighbours, where the neighbours wrap around the edges (the row above
+// the first row is the last row, the column left of the first column is
+// the last column).
+func blur(src: view[]u32, dst: edit[]u32, w: usize, h: usize) {
+    for y in 0usize..h {
+        up := ((y + h - 1usize) % h) * w
+        mid := y * w
+        down := ((y + 1usize) % h) * w
+        for x in 0usize..w {
+            left := (x + w - 1usize) % w
+            right := (x + 1usize) % w
+            var s: u64 = pixel(src, up + left) + pixel(src, up + x) + pixel(src, up + right)
+            s = s + pixel(src, mid + left) + pixel(src, mid + x) + pixel(src, mid + right)
+            s = s + pixel(src, down + left) + pixel(src, down + x) + pixel(src, down + right)
+            o := mid + x
+            if o < len(dst) { dst[o] = truncate[u32](s / 9u64) }
+        }
+    }
+}
+
+// flip mirrors the grid left to right in place.
+func flip(g: edit[]u32, w: usize, h: usize) {
+    for y in 0usize..h {
+        row := y * w
+        for x in 0usize..w / 2usize {
+            a := row + x
+            b := row + w - 1usize - x
+            if a < len(g) && b < len(g) {
+                t := g[a]
+                g[a] = g[b]
+                g[b] = t
+            }
+        }
+    }
+}
+
+// row_sums writes the sum of row y into sums[y], for the rows that have
+// an entry in sums (sums may be shorter or longer than h); it returns the
+// number of sums written.
+func row_sums(g: view[]u32, w: usize, h: usize, sums: edit[]u64) -> usize {
+    var y: usize = 0usize
+    while y < h && y < len(sums) {
+        var s: u64 = 0u64
+        for x in 0usize..w {
+            i := y * w + x
+            if i < len(g) { s = s + u64(g[i]) }
+        }
+        sums[y] = s
+        y = y + 1usize
+    }
+    return y
+}
+
+// scroll writes src moved back by k pixels in row-major order into dst,
+// which has the length of src: dst[i] is the pixel k places after i,
+// wrapping past the end to the start. An empty grid writes nothing.
+func scroll(src: view[]u32, dst: edit[]u32, k: usize) {
+    if len(src) == 0usize { return }
+    for i in 0usize..len(dst) {
+        j := (i + k) % len(src)
+        if j < len(src) { dst[i] = src[j] }
+    }
+}
+
+func show(g: view[]u32) {
+    for p in g {
+        print_u64(u64(p))
+        print_str(" ")
+    }
+    println()
+}
+
+func report(g: edit[]u32, d: edit[]u32, w: usize, h: usize, sums: edit[]u64) {
+    blur(g, d, w, h)
+    show(d)
+    print_u64(u64(row_sums(d, w, h, sums)))
+    print_str(": ")
+    for s in sums {
+        print_u64(s)
+        print_str(" ")
+    }
+    println()
+    scroll(g, d, w + 1usize)
+    show(d)
+    flip(g, w, h)
+    show(g)
+}
+
+func main() -> i32 {
+    var a: [20]u32 = [9u32, 18u32, 27u32, 36u32, 45u32, 54u32, 63u32, 72u32, 81u32, 90u32, 99u32, 108u32, 117u32, 126u32, 135u32, 144u32, 153u32, 162u32, 171u32, 180u32]
+    var b: [12]u32 = [7u32, 0u32, 3u32, 250u32, 1u32, 8u32, 40u32, 2u32, 6u32, 5u32, 11u32, 4u32]
+    var d: [20]u32 = zero()
+    var sums: [4]u64 = zero()
+    with gs := a[0usize:20usize] {
+        with ds := d[0usize:20usize] {
+            with ss := sums[0usize:4usize] { report(gs, ds, 5usize, 4usize, ss) }
+        }
+    }
+    with gs := b[0usize:12usize] {
+        with ds := d[0usize:12usize] {
+            with ss := sums[0usize:1usize] { report(gs, ds, 6usize, 2usize, ss) }
+        }
+    }
+    return 0i32
+}

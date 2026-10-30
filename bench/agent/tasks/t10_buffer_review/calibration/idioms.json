@@ -1,0 +1,8 @@
+[
+ {"function": "count_bytes", "site": "counts[usize(b)]", "idiom": "byte into a table"},
+ {"function": "translate", "site": "table[usize(data[i])]", "idiom": "byte into a table"},
+ {"function": "ends_with", "site": "text[len(text) - 1usize]", "idiom": "last element"},
+ {"function": "strip_len", "site": "text[len(text) - 1usize]", "idiom": "last element"},
+ {"function": "xor_key", "site": "key[i % len(key)]", "idiom": "modulo"},
+ {"function": "wrap_get", "site": "text[i % len(text)]", "idiom": "modulo"}
+]

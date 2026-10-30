@@ -1,0 +1,113 @@
+module scores
+// Score tables: a sequence of points, one entry per player. Every ranking
+// below is built on argmax_from, which finds the best score at or after a
+// position, by moving the best remaining score to the front repeatedly.
+
+// argmax_from returns the index of the largest value of xs at index from or
+// later, the first such index on ties. from must be an index of xs.
+func argmax_from(xs: view[]u64, from: usize) -> usize {
+    var best: usize = from
+    var i: usize = from + 1usize
+    while i < len(xs) {
+        if xs[i] > xs[best] { best = i }
+        i = i + 1usize
+    }
+    return best
+}
+
+// sort_desc sorts xs from the largest value to the smallest.
+func sort_desc(xs: edit[]u64) {
+    var i: usize = 0usize
+    while i < len(xs) {
+        k := argmax_from(xs, i)
+        t := xs[i]
+        xs[i] = xs[k]
+        xs[k] = t
+        i = i + 1usize
+    }
+}
+
+// top_k writes the k largest values of xs into dst, largest first, and
+// returns how many it wrote: k, or fewer when xs or dst is shorter. It
+// reorders xs.
+func top_k(xs: edit[]u64, k: usize, dst: edit[]u64) -> usize {
+    var m: usize = k
+    if m > len(xs) { m = len(xs) }
+    if m > len(dst) { m = len(dst) }
+    var i: usize = 0usize
+    while i < m {
+        j := argmax_from(xs, i)
+        t := xs[i]
+        xs[i] = xs[j]
+        xs[j] = t
+        dst[i] = xs[i]
+        i = i + 1usize
+    }
+    return m
+}
+
+// max_score is the largest value of xs, or 0 when xs is empty.
+func max_score(xs: view[]u64) -> u64 {
+    if len(xs) == 0usize { return 0u64 }
+    return xs[argmax_from(xs, 0usize)]
+}
+
+// lead is how far the best score is ahead of the best score at any other
+// index, or 0 when xs has fewer than two values.
+func lead(xs: view[]u64) -> u64 {
+    if len(xs) < 2usize { return 0u64 }
+    b := argmax_from(xs, 0usize)
+    var second: usize = 0usize
+    if b == 0usize { second = 1usize }
+    var i: usize = 0usize
+    while i < len(xs) {
+        if i != b && xs[i] > xs[second] { second = i }
+        i = i + 1usize
+    }
+    return xs[b] - xs[second]
+}
+
+func show(xs: view[]u64, n: usize) {
+    var c: usize = 0usize
+    for x in xs {
+        if c < n {
+            print_u64(x)
+            print_str(" ")
+        }
+        c = c + 1usize
+    }
+    println()
+}
+
+func main() -> i32 {
+    var a: [8]u64 = [40u64, 75u64, 12u64, 98u64, 75u64, 3u64, 61u64, 20u64]
+    var b: [5]u64 = [7u64, 7u64, 30u64, 1u64, 18u64]
+    var top: [4]u64 = zero()
+    with xs := a[0usize:8usize] {
+        print_u64(u64(argmax_from(xs, 0usize)))
+        print_str(" ")
+        print_u64(u64(argmax_from(xs, 4usize)))
+        println()
+        print_u64(max_score(xs))
+        print_str(" ")
+        print_u64(lead(xs))
+        println()
+    }
+    with xs := b[0usize:5usize] {
+        print_u64(u64(argmax_from(xs, 3usize)))
+        print_str(" ")
+        print_u64(max_score(xs))
+        print_str(" ")
+        print_u64(lead(xs))
+        println()
+    }
+    with xs := a[0usize:8usize] {
+        with dst := top[0usize:4usize] { n := top_k(xs, 3usize, dst); show(dst, n) }
+    }
+    with xs := b[0usize:5usize] {
+        with dst := top[0usize:4usize] { n := top_k(xs, 9usize, dst); show(dst, n) }
+    }
+    with xs := a[0usize:8usize] { sort_desc(xs); show(xs, 8usize) }
+    with xs := b[0usize:5usize] { sort_desc(xs); show(xs, 5usize) }
+    return 0i32
+}

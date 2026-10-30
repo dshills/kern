@@ -1,0 +1,11 @@
+[
+ {"function": "argmax_from", "site": "xs[best]", "idiom": "argmax"},
+ {"function": "sort_desc", "site": "xs[k]", "idiom": "returned index"},
+ {"function": "top_k", "site": "xs[i]", "idiom": "transitive bound"},
+ {"function": "top_k", "site": "xs[j]", "idiom": "returned index"},
+ {"function": "top_k", "site": "dst[i]", "idiom": "transitive bound"},
+ {"function": "max_score", "site": "xs[argmax_from(xs, 0usize)]", "idiom": "returned index"},
+ {"function": "lead", "site": "xs[second]", "idiom": "argmax"},
+ {"function": "lead", "site": "xs[b]", "idiom": "returned index"},
+ {"function": "lead", "site": "xs[second]", "idiom": "argmax"}
+]

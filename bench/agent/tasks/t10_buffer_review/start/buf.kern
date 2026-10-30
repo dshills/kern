@@ -1,0 +1,149 @@
+module buf
+// A block of bytes over a raw allocation, wrapped in the block_ functions,
+// and byte helpers over views of a message.
+struct Block nocopy { base: RawPtr[u8]; cap: usize; alloc: SystemAllocator }
+
+// block_new allocates a block of cap zeroed bytes.
+contract { requires "cap > 0 and the allocator obligations of §6 hold" }
+func block_new(cap: usize) -> Option[Block] {
+    a := SystemAllocator.new()
+    unsafe {
+        match a.alloc(cap, 1usize) {
+            Ok(raw) => {
+                for i in 0usize..cap { ptr_store(ptr_offset(raw, isize(i)), 0u8) }
+                return Some(Block { base: raw, cap: cap, alloc: a })
+            }
+            Err(e) => return None
+        }
+    }
+}
+
+// block_put stores b at offset i and reports whether i is inside the block.
+func block_put(k: edit[Block], i: usize, b: u8) -> bool {
+    if i >= k.cap { return false }
+    ptr_store(ptr_offset(k.base, isize(i)), b)
+    return true
+}
+
+// block_get is the byte at offset i, or 0 outside the block.
+func block_get(k: view[Block], i: usize) -> u8 {
+    if i >= k.cap { return 0u8 }
+    unsafe { return ptr_load(ptr_offset(k.base, isize(i))) }
+}
+
+// block_free releases the block, which is then empty.
+func block_free(k: edit[Block]) {
+    if k.cap > 0usize {
+        k.alloc.free(k.base, k.cap, 1usize)
+        k.cap = 0usize
+    }
+}
+
+// copy_in copies text into the block until it is full; returns the count.
+func copy_in(k: edit[Block], text: view[]u8) -> usize {
+    var n: usize = 0usize
+    for b in text {
+        if !block_put(k, n, b) { return n }
+        n = n + 1usize
+    }
+    return n
+}
+
+// count_bytes adds one to counts[b] for every byte b of text.
+func count_bytes(text: view[]u8, counts: edit[[256]u64]) {
+    for b in text { counts[usize(b)] = counts[usize(b)] + 1u64 }
+}
+
+// translate replaces every byte b of data with table[b].
+func translate(data: edit[]u8, table: view[[256]u8]) {
+    for i in 0usize..len(data) { data[i] = table[usize(data[i])] }
+}
+
+// ends_with reports whether the last byte of text is b.
+func ends_with(text: view[]u8, b: u8) -> bool {
+    if len(text) == 0usize { return false }
+    return text[len(text) - 1usize] == b
+}
+
+// strip_len is the length of text without one trailing newline.
+func strip_len(text: view[]u8) -> usize {
+    if len(text) > 0usize && text[len(text) - 1usize] == 10u8 { return len(text) - 1usize }
+    return len(text)
+}
+
+// xor_key xors data with key repeated; an empty key leaves data unchanged.
+func xor_key(data: edit[]u8, key: view[]u8) {
+    if len(key) == 0usize { return }
+    for i in 0usize..len(data) { data[i] = data[i] ^ key[i % len(key)] }
+}
+
+// wrap_get is byte i of text read cyclically, or 0 for an empty text.
+func wrap_get(text: view[]u8, i: usize) -> u8 {
+    if len(text) == 0usize { return 0u8 }
+    return text[i % len(text)]
+}
+
+func show(xs: view[]u8) {
+    for x in xs { print_u64(u64(x)); print_str(" ") }
+    println()
+}
+
+func bit(b: bool) -> u64 {
+    if b { return 1u64 }
+    return 0u64
+}
+
+func pair(a: u64, b: u64) {
+    print_u64(a)
+    print_str(" ")
+    print_u64(b)
+    println()
+}
+
+func main() -> i32 {
+    match block_new(8usize) {
+        Some(k) => {
+            pair(u64(copy_in(k, "hello world")), u64(block_get(k, 4usize)))
+            pair(bit(block_put(k, 7usize, 33u8)), bit(block_put(k, 8usize, 33u8)))
+            pair(u64(block_get(k, 7usize)), u64(block_get(k, 9usize)))
+            block_free(k)
+            pair(u64(block_get(k, 0usize)), bit(block_put(k, 0usize, 1u8)))
+        }
+        None => { print_str("alloc failed"); println() }
+    }
+    match block_new(3usize) {
+        Some(k) => {
+            pair(u64(copy_in(k, "ab")), u64(block_get(k, 2usize)))
+            block_free(k)
+        }
+        None => { print_str("alloc failed"); println() }
+    }
+    var counts: [256]u64 = zero()
+    count_bytes("hello world", counts)
+    pair(counts[108usize], counts[122usize])
+    count_bytes("zzzz", counts)
+    pair(counts[108usize], counts[122usize])
+    var up: [256]u8 = zero()
+    for i in 0usize..256usize {
+        if i >= 97usize && i <= 122usize { up[i] = truncate[u8](i - 32usize) } else { up[i] = truncate[u8](i) }
+    }
+    var low: [3]u8 = [97u8, 45u8, 98u8]
+    translate(low, up)
+    show(low)
+    var msg: [6]u8 = [107u8, 101u8, 114u8, 110u8, 33u8, 10u8]
+    with m := msg[0usize:6usize] {
+        pair(bit(ends_with(m, 10u8)), u64(strip_len(m)))
+        translate(m, up)
+        xor_key(m, "ab")
+        show(m)
+        pair(u64(wrap_get(m, 8usize)), u64(wrap_get(m, 3usize)))
+    }
+    with m := msg[0usize:5usize] {
+        pair(bit(ends_with(m, 33u8)), u64(strip_len(m)))
+        xor_key(m, "ab")
+        xor_key(m, "")
+        show(m)
+    }
+    with m := msg[0usize:0usize] { pair(u64(strip_len(m)), u64(wrap_get(m, 8usize))) }
+    return 0i32
+}

@@ -1,0 +1,145 @@
+module ring
+// A fixed-capacity log of u64 samples kept in a ring. The entries live in
+// buf, whose length is the capacity (never 0). log.next is the slot the
+// next push writes and log.count the number of entries held; once the log
+// is full, a push overwrites the oldest entry.
+
+struct Log {
+    next: usize
+    count: usize
+}
+
+// push appends x as the newest entry, overwriting the oldest one when the
+// log is full.
+func push(log: edit[Log], buf: edit[]u64, x: u64) {
+    p := log.next
+    if p < len(buf) { buf[p] = x }
+    log.next = (p + 1usize) % len(buf)
+    if log.count < len(buf) { log.count = log.count + 1usize }
+}
+
+// get is the entry at position i counted from the oldest (0 is the
+// oldest), or 0 when i is not below log.count.
+func get(log: view[Log], buf: view[]u64, i: usize) -> u64 {
+    if i >= log.count { return 0u64 }
+    oldest := (log.next + len(buf) - log.count) % len(buf)
+    j := (oldest + i) % len(buf)
+    if j < len(buf) { return buf[j] }
+    return 0u64
+}
+
+// last is the newest entry, or 0 when the log is empty.
+func last(log: view[Log], buf: view[]u64) -> u64 {
+    if log.count == 0usize { return 0u64 }
+    if log.next == 0usize {
+        end := len(buf) - 1usize
+        if end < len(buf) { return buf[end] }
+        return 0u64
+    }
+    prev := log.next - 1usize
+    if prev < len(buf) { return buf[prev] }
+    return 0u64
+}
+
+// sum_newest is the sum of the newest k entries, or of all of them when
+// the log holds fewer than k.
+func sum_newest(log: view[Log], buf: view[]u64, k: usize) -> u64 {
+    var n: usize = k
+    if n > log.count { n = log.count }
+    var s: u64 = 0u64
+    for j in 0usize..n {
+        p := (log.next + len(buf) - 1usize - j) % len(buf)
+        if p < len(buf) { s = s + buf[p] }
+    }
+    return s
+}
+
+// copy_out writes the entries, oldest first, to the front of dst, which is
+// at least as long as buf, and returns how many it wrote.
+func copy_out(log: view[Log], buf: view[]u64, dst: edit[]u64) -> usize {
+    for i in 0usize..log.count {
+        if i < len(dst) { dst[i] = get(log, buf, i) }
+    }
+    return log.count
+}
+
+// max_window is the largest sum of w consecutive values of xs, or 0 when w
+// is 0 or longer than xs.
+func max_window(xs: view[]u64, w: usize) -> u64 {
+    var best: u64 = 0u64
+    var i: usize = 0usize
+    while i + w <= len(xs) {
+        var s: u64 = 0u64
+        for k in 0usize..w {
+            idx := i + k
+            if idx < len(xs) { s = s + xs[idx] }
+        }
+        if s > best { best = s }
+        i = i + 1usize
+    }
+    return best
+}
+
+func line(v: u64) {
+    print_u64(v)
+    println()
+}
+
+func show(xs: view[]u64) {
+    for x in xs {
+        print_u64(x)
+        print_str(" ")
+    }
+    println()
+}
+
+func main() -> i32 {
+    var a: Log = zero()
+    var ab: [4]u64 = zero()
+    var snap: [4]u64 = zero()
+    with buf := ab[0usize:4usize] {
+        push(a, buf, 5u64)
+        push(a, buf, 8u64)
+        push(a, buf, 2u64)
+        line(get(a, buf, 0usize))
+        line(get(a, buf, 2usize))
+        line(get(a, buf, 3usize))
+        line(last(a, buf))
+        line(sum_newest(a, buf, 2usize))
+        line(sum_newest(a, buf, 9usize))
+        with o := snap[0usize:4usize] {
+            line(u64(copy_out(a, buf, o)))
+            show(o)
+            line(max_window(o, 2usize))
+        }
+        push(a, buf, 7u64)
+        push(a, buf, 1u64)
+        push(a, buf, 9u64)
+        line(get(a, buf, 0usize))
+        line(get(a, buf, 3usize))
+        line(last(a, buf))
+        line(sum_newest(a, buf, 3usize))
+        with o := snap[0usize:4usize] {
+            line(u64(copy_out(a, buf, o)))
+            show(o)
+            line(max_window(o, 3usize))
+            line(max_window(o, 5usize))
+        }
+    }
+    var b: Log = zero()
+    var bb: [3]u64 = zero()
+    with buf := bb[0usize:3usize] {
+        push(b, buf, 4u64)
+        push(b, buf, 6u64)
+        push(b, buf, 3u64)
+        line(get(b, buf, 1usize))
+        line(last(b, buf))
+        line(sum_newest(b, buf, 2usize))
+        with o := snap[0usize:3usize] {
+            line(u64(copy_out(b, buf, o)))
+            show(o)
+            line(max_window(o, 1usize))
+        }
+    }
+    return 0i32
+}

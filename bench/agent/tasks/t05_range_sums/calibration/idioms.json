@@ -1,0 +1,42 @@
+[
+ {
+  "function": "prefix",
+  "site": "ps[0usize]",
+  "idiom": "length relation"
+ },
+ {
+  "function": "prefix",
+  "site": "ps[i + 1usize]",
+  "idiom": "length relation"
+ },
+ {
+  "function": "range_sum",
+  "site": "ps[a]",
+  "idiom": "transitive bound"
+ },
+ {
+  "function": "best_window",
+  "site": "xs[k]",
+  "idiom": "transitive bound"
+ },
+ {
+  "function": "best_window",
+  "site": "xs[i]",
+  "idiom": "window"
+ },
+ {
+  "function": "window_sums",
+  "site": "ps[i + w]",
+  "idiom": "length relation"
+ },
+ {
+  "function": "window_sums",
+  "site": "ps[i]",
+  "idiom": "length relation"
+ },
+ {
+  "function": "first_reaching",
+  "site": "ps[mid]",
+  "idiom": "midpoint"
+ }
+]

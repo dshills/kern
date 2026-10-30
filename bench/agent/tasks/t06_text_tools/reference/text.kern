@@ -1,0 +1,100 @@
+module text
+// Byte-string tools: reversal, palindromes, rotation and trailing bytes.
+
+// reverse reverses s in place.
+func reverse(s: edit[]u8) {
+    n := len(s)
+    for i in 0usize..n / 2usize {
+        j := n - 1usize - i
+        if i < len(s) && j < len(s) {
+            t := s[i]
+            s[i] = s[j]
+            s[j] = t
+        }
+    }
+}
+
+// is_palindrome reports whether s reads the same backwards, ignoring
+// spaces.
+func is_palindrome(s: view[]u8) -> bool {
+    var lo: usize = 0usize
+    var hi: usize = len(s)
+    while lo + 1usize < hi {
+        last := hi - 1usize
+        if lo >= len(s) || last >= len(s) { return false }
+        if s[lo] == 32u8 {
+            lo = lo + 1usize
+        } else if s[last] == 32u8 {
+            hi = hi - 1usize
+        } else {
+            if s[lo] != s[last] { return false }
+            lo = lo + 1usize
+            hi = hi - 1usize
+        }
+    }
+    return true
+}
+
+// rotate writes src rotated left by k into dst: dst[i] is the byte k
+// places after i in src, wrapping past the end to the start. It writes
+// the positions that both have, and nothing when src is empty; it
+// returns the number of bytes written.
+func rotate(src: view[]u8, dst: edit[]u8, k: usize) -> usize {
+    var i: usize = 0usize
+    while i < len(src) && i < len(dst) {
+        j := (i + k) % len(src)
+        if j < len(src) { dst[i] = src[j] }
+        i = i + 1usize
+    }
+    return i
+}
+
+// ends_with reports whether the last byte of s is b; an empty s does
+// not.
+func ends_with(s: view[]u8, b: u8) -> bool {
+    if len(s) == 0usize { return false }
+    last := len(s) - 1usize
+    if last < len(s) { return s[last] == b }
+    return false
+}
+
+// trim_len is the length of s without its trailing run of b bytes.
+func trim_len(s: view[]u8, b: u8) -> usize {
+    var n: usize = len(s)
+    while n > 0usize {
+        last := n - 1usize
+        if last >= len(s) || s[last] != b { return n }
+        n = last
+    }
+    return n
+}
+
+func report(s: edit[]u8, d: edit[]u8) {
+    print_bool(is_palindrome(s))
+    print_str(" ")
+    print_bool(ends_with(s, 46u8))
+    print_str(" ")
+    print_u64(u64(trim_len(s, 46u8)))
+    println()
+    n := rotate(s, d, 3usize)
+    print_u64(u64(n))
+    print_str(" ")
+    print_str(d)
+    println()
+    reverse(s)
+    print_str(s)
+    println()
+}
+
+func main() -> i32 {
+    var a: [17]u8 = [110u8, 101u8, 118u8, 101u8, 114u8, 32u8, 111u8, 100u8, 100u8, 32u8, 111u8, 114u8, 32u8, 101u8, 118u8, 101u8, 110u8]
+    var b: [13]u8 = [104u8, 101u8, 108u8, 108u8, 111u8, 44u8, 32u8, 107u8, 101u8, 114u8, 110u8, 46u8, 46u8]
+    var d: [17]u8 = zero()
+    with s := a[0usize:17usize] {
+        with t := d[0usize:17usize] { report(s, t) }
+    }
+    with s := b[0usize:13usize] {
+        with t := d[0usize:8usize] { report(s, t) }
+    }
+    return 0i32
+}

@@ -1,0 +1,101 @@
+module heap
+// A binary min-heap kept in a sequence: the children of slot i are slots
+// 2i + 1 and 2i + 2, and no slot holds a larger value than its children.
+// The heap is the whole sequence it is given; the caller grows it by one
+// slot before a push and shrinks it by one slot after a pop.
+
+// sift_down moves the value at start down, swapping it with its smaller
+// child, until neither child is smaller.
+func sift_down(h: edit[]u64, start: usize) {
+    var i: usize = start
+    n := len(h)
+    while 2usize * i + 1usize < n {
+        c := 2usize * i + 1usize
+        var m: usize = c
+        if c + 1usize < n && h[c + 1usize] > h[c] { m = c + 1usize }
+        if h[i] <= h[m] { return }
+        t := h[i]
+        h[i] = h[m]
+        h[m] = t
+        i = m
+    }
+}
+
+// heapify turns any sequence into a heap.
+func heapify(h: edit[]u64) {
+    var i: usize = len(h) / 2usize
+    while i > 0usize {
+        i = i - 1usize
+        sift_down(h, i)
+    }
+}
+
+// push stores v in the last slot of h, whose other slots are a heap, and
+// moves it up until its parent is no larger.
+func push(h: edit[]u64, v: u64) {
+    if len(h) == 0usize { return }
+    h[len(h) - 1usize] = v
+    var k: usize = len(h) - 1usize
+    while k > 0usize {
+        p := (k - 1usize) / 2usize
+        if h[p] <= h[k] { return }
+        t := h[p]
+        h[p] = h[k]
+        h[k] = t
+        k = p
+    }
+}
+
+// pop returns the smallest value of the heap h (0 when h is empty) and
+// leaves the remaining values as a heap in all but the last slot.
+func pop(h: edit[]u64) -> u64 {
+    if len(h) == 0usize { return 0u64 }
+    top := h[0usize]
+    h[0usize] = h[len(h) - 1usize]
+    with rest := h[0usize:len(h) - 1usize] { sift_down(rest, 0usize) }
+    return top
+}
+
+// is_heap reports whether no slot of h holds a smaller value than its parent.
+func is_heap(h: view[]u64) -> bool {
+    var i: usize = 1usize
+    while i < len(h) {
+        if h[(i - 1usize) / 2usize] > h[i] { return false }
+        i = i + 1usize
+    }
+    return true
+}
+
+func show(h: view[]u64) {
+    for x in h {
+        print_u64(x)
+        print_str(" ")
+    }
+    println()
+}
+
+func main() -> i32 {
+    var a: [7]u64 = [5u64, 3u64, 8u64, 1u64, 9u64, 2u64, 7u64]
+    with h := a[0usize:7usize] { print_bool(is_heap(h)); println(); heapify(h); print_bool(is_heap(h)); println() }
+    with h := a[0usize:7usize] { print_u64(pop(h)); print_str(" ") }
+    with h := a[0usize:6usize] { print_u64(pop(h)); print_str(" ") }
+    with h := a[0usize:5usize] { print_u64(pop(h)); print_str(" ") }
+    with h := a[0usize:4usize] { print_u64(pop(h)); println(); show(h) }
+    var b: [6]u64 = zero()
+    with h := b[0usize:1usize] { push(h, 40u64) }
+    with h := b[0usize:2usize] { push(h, 10u64) }
+    with h := b[0usize:3usize] { push(h, 30u64) }
+    with h := b[0usize:4usize] { push(h, 20u64) }
+    with h := b[0usize:5usize] { push(h, 5u64) }
+    with h := b[0usize:6usize] { push(h, 25u64); print_bool(is_heap(h)); println(); show(h) }
+    with h := b[0usize:6usize] { print_u64(pop(h)); print_str(" ") }
+    with h := b[0usize:5usize] { print_u64(pop(h)); print_str(" ") }
+    with h := b[0usize:4usize] { print_u64(pop(h)); println() }
+    var c: [6]u64 = [9u64, 4u64, 6u64, 7u64, 5u64, 8u64]
+    with h := c[0usize:6usize] { sift_down(h, 0usize); show(h) }
+    var d: [6]u64 = [1u64, 9u64, 2u64, 3u64, 4u64, 5u64]
+    with h := d[0usize:6usize] { sift_down(h, 1usize); show(h) }
+    var e: [5]u64 = [50u64, 40u64, 30u64, 20u64, 10u64]
+    with h := e[0usize:5usize] { heapify(h); print_bool(is_heap(h)); println(); show(h) }
+    return 0i32
+}

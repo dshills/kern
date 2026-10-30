@@ -263,6 +263,9 @@ func hiddenPasses(ctx context.Context, root, kernBin string, t *task, dir string
 			return false, "check reports diagnostics"
 		}
 	}
+	if d := frozenDiff(filepath.Join(t.Dir, "start"), dir, t.Files, t.Hidden.FrozenFunctions); d != "" {
+		return false, d
+	}
 	out, err := runProgram(ctx, dir, kernBin, files)
 	if err != nil || out != t.Hidden.ExpectedOutput {
 		return false, fmt.Sprintf("output %q (err %v), want %q", truncate(out, 200), err, truncate(t.Hidden.ExpectedOutput, 200))

@@ -1,0 +1,18 @@
+{
+ "main": "scores.kern",
+ "expected_output": "3 4\n98 23\n4 30 12\n98 75 75 \n30 18 7 7 \n98 75 75 61 40 20 12 3 \n30 18 7 7 1 \n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 0,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "scores.argmax_from",
+  "scores.sort_desc",
+  "scores.top_k",
+  "scores.max_score",
+  "scores.lead"
+ ],
+ "frozen_functions": [
+  "main",
+  "show"
+ ]
+}

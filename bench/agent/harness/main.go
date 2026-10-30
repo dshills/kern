@@ -29,6 +29,7 @@ type task struct {
 	Prompt      string
 	Kind        string   // implementation | debugging | refactoring | optimization | review
 	Files       []string // starting source files (relative to Dir/start)
+	Natural     string   // Dir/calibration/natural when the task has a natural solution (specs/agent-suite-v4 R5), else ""
 	Hidden      hiddenSpec
 	Description string
 }
@@ -57,6 +58,9 @@ type hiddenSpec struct {
 	// threads (`spawns` true), so that a parallel task cannot be solved
 	// sequentially.
 	MustSpawn []string `json:"must_spawn"`
+	// FrozenFunctions are top-level functions whose source text must equal
+	// the starting sources' (specs/agent-suite-v4 R10): the given driver.
+	FrozenFunctions []string `json:"frozen_functions"`
 }
 
 type typeSize struct {
@@ -103,6 +107,7 @@ func main() {
 	budget := flag.Duration("budget", 30*time.Minute, "wall-clock budget per trial")
 	out := flag.String("out", "", "report path (default bench/agent/REPORT.md)")
 	dryRun := flag.Bool("dry-run", false, "validate tasks (hidden tests against the reference solutions) without calling any model")
+	kernFlag := flag.String("kern", "", "a prebuilt kern binary to use instead of building one into bench/.build (lets several dry runs share one build)")
 	reportFrom := flag.String("report-from", "", "score the trial records of an existing run directory into the report without calling any model (budgets are taken from the flags)")
 	flag.Parse()
 	root, err := findRoot()
@@ -110,7 +115,13 @@ func main() {
 		fatalf("%v", err)
 	}
 	kernBin := filepath.Join(root, "bench", ".build", "kern")
-	if msg, err := runCmd(root, "go", "build", "-o", kernBin, "./cmd/kern"); err != nil {
+	if *kernFlag != "" {
+		abs, err := filepath.Abs(*kernFlag)
+		if err != nil {
+			fatalf("-kern: %v", err)
+		}
+		kernBin = abs
+	} else if msg, err := runCmd(root, "go", "build", "-o", kernBin, "./cmd/kern"); err != nil {
 		fatalf("building kern: %v: %s", err, msg)
 	}
 	tasks := loadTasks(filepath.Join(root, *tasksDir))
@@ -137,6 +148,9 @@ func main() {
 			bad, detail2 := hiddenPasses(context.Background(), root, kernBin, t, filepath.Join(t.Dir, "start"))
 			fmt.Printf("%s: starting sources %s hidden tests %s\n", t.Name, map[bool]string{true: "already pass (task is trivial!)", false: "fail as intended"}[bad], detail2)
 			if !ok || bad {
+				failed = true
+			}
+			if t.Natural != "" && !calibrate(context.Background(), root, kernBin, t) {
 				failed = true
 			}
 		}
@@ -281,6 +295,9 @@ func loadTasks(dir string) []*task {
 			t.Files = append(t.Files, filepath.Base(f))
 		}
 		sort.Strings(t.Files)
+		if st, err := os.Stat(filepath.Join(t.Dir, "calibration", "natural")); err == nil && st.IsDir() {
+			t.Natural = filepath.Join(t.Dir, "calibration", "natural")
+		}
 		tasks = append(tasks, t)
 	}
 	sort.Slice(tasks, func(i, j int) bool { return tasks[i].Name < tasks[j].Name })

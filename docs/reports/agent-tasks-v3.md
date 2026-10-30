@@ -9,6 +9,14 @@ far from meeting it). **Status:** written and validated with
 its hidden suite, every starting source fails it); **not run.** The owner
 has set the matrix aside for cost, so this report records the design and
 what it leaves unknown. **Plan:** PLAN.md 4.2, spec §2.3 and §9.
+**Location:** moved to `bench/agent/tasks-v3/` on 2026-10-30, when the
+fourth suite (`docs/reports/agent-tasks-v4.md`) took the default
+directory; re-running its dry run needs `-tasks-dir bench/agent/tasks-v3`.
+On the same day its prompts were corrected: f15f773 lowered every
+`hidden.json` budget to 0 but left eight prompts stating the old budgets
+(1 to 6, counting `main`'s slices), so a run would have failed agents
+that met the stated bound; each prompt now states no runtime-checked
+bounds checks.
 
 ## Why every task is a bounds-check task
 

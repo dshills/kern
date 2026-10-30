@@ -1,0 +1,96 @@
+module set
+// A sorted set of u64 keys kept in a plain sequence: sort it, drop the
+// duplicates, then answer membership, rank and pair-sum queries.
+
+// sort puts xs in ascending order with an insertion sort: each element in
+// turn is moved left past the larger elements before it.
+func sort(xs: edit[]u64) {
+    // TODO
+}
+
+// dedup removes the repeated keys of the sorted sequence xs in place: the
+// distinct keys move to the front, in order, and their number is
+// returned. What is left after them does not matter.
+func dedup(xs: edit[]u64) -> usize {
+    // TODO
+    return 0usize
+}
+
+// contains reports whether key is in the sorted sequence xs, found by
+// binary search.
+func contains(xs: view[]u64, key: u64) -> bool {
+    // TODO
+    return false
+}
+
+// rank is the number of elements of the sorted sequence xs that are less
+// than key, found by binary search.
+func rank(xs: view[]u64, key: u64) -> usize {
+    // TODO
+    return 0usize
+}
+
+// pair_sum reports whether two elements at different positions of the
+// sorted sequence xs add up to target, found by walking one position up
+// from the smallest element and one down from the largest.
+func pair_sum(xs: view[]u64, target: u64) -> bool {
+    // TODO
+    return false
+}
+
+func show(xs: view[]u64, n: usize) {
+    var i: usize = 0usize
+    for x in xs {
+        if i < n {
+            print_u64(x)
+            print_str(" ")
+        }
+        i = i + 1usize
+    }
+    println()
+}
+
+func query(xs: view[]u64, key: u64) {
+    print_bool(contains(xs, key))
+    print_str(" ")
+    print_u64(u64(rank(xs, key)))
+    print_str(" ")
+    print_bool(pair_sum(xs, key))
+    println()
+}
+
+func main() -> i32 {
+    var a: [10]u64 = [42u64, 7u64, 19u64, 7u64, 3u64, 42u64, 42u64, 11u64, 3u64, 25u64]
+    var b: [5]u64 = [90u64, 10u64, 50u64, 30u64, 70u64]
+    with xs := a[0usize:10usize] {
+        sort(xs)
+        show(xs, len(xs))
+        query(xs, 7u64)
+        query(xs, 20u64)
+        query(xs, 36u64)
+        query(xs, 42u64)
+        query(xs, 50u64)
+        n := dedup(xs)
+        print_u64(u64(n))
+        println()
+        show(xs, n)
+    }
+    with xs := b[0usize:5usize] {
+        sort(xs)
+        show(xs, len(xs))
+        query(xs, 10u64)
+        query(xs, 20u64)
+        query(xs, 60u64)
+        query(xs, 100u64)
+        n := dedup(xs)
+        print_u64(u64(n))
+        println()
+        show(xs, n)
+    }
+    with xs := b[0usize:0usize] {
+        query(xs, 1u64)
+        print_u64(u64(dedup(xs)))
+        println()
+    }
+    return 0i32
+}

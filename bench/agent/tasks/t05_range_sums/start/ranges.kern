@@ -1,0 +1,106 @@
+module ranges
+// Range queries over a series of u64 samples through its prefix sums: ps
+// has one more entry than the series, ps[0] is 0 and ps[i + 1] is the sum
+// of the first i + 1 samples, so the sum of samples a to b - 1 is
+// ps[b] - ps[a].
+
+// prefix writes the prefix sums of xs into ps, which has len(xs) + 1
+// entries.
+func prefix(xs: view[]u64, ps: edit[]u64) {
+    ps[0usize] = 0u64
+    for i in 0usize..len(xs) { ps[i + 1usize] = ps[i] + xs[i] }
+}
+
+// range_sum is the sum of samples a to b - 1, or 0 when a > b or b is
+// past the end of the series.
+func range_sum(ps: view[]u64, a: usize, b: usize) -> u64 {
+    if a > b || b >= len(ps) { return 0u64 }
+    return ps[b] - ps[a]
+}
+
+// best_window is the largest sum of w consecutive samples of xs, or 0
+// when w is 0 or longer than the series.
+func best_window(xs: view[]u64, w: usize) -> u64 {
+    if w == 0usize || w > len(xs) { return 0u64 }
+    var s: u64 = 0u64
+    for k in 0usize..w { s = s + xs[k] }
+    var best: u64 = s
+    var i: usize = 0usize
+    while i + w < len(xs) {
+        s = s + xs[i + w] - xs[i]
+        if s > best { best = s }
+        i = i + 1usize
+    }
+    return best
+}
+
+// window_sums writes the sum of every window of w samples, from the one
+// starting at 0, into sums, for the windows that fit in both the series
+// and sums; it returns how many it wrote.
+func window_sums(xs: view[]u64, ps: view[]u64, w: usize, sums: edit[]u64) -> usize {
+    if w > len(xs) { return 0usize }
+    var n: usize = len(xs) - w + 1usize
+    if len(sums) < n { n = len(sums) }
+    for i in 0usize..n { sums[i] = ps[i + w] - ps[i] }
+    return n
+}
+
+// first_reaching is the length of the shortest window starting at sample
+// a whose sum reaches target, found by binary search over the prefix
+// sums, or 0 when no window starting at a reaches it.
+func first_reaching(ps: view[]u64, a: usize, target: u64) -> usize {
+    if a >= len(ps) { return 0usize }
+    base := ps[a]
+    var lo: usize = a + 1usize
+    var hi: usize = len(ps)
+    while lo < hi {
+        mid := lo + (hi - lo) / 2usize
+        if ps[mid] - base >= target { hi = mid } else { lo = mid + 1usize }
+    }
+    if lo == len(ps) { return 0usize }
+    return lo - a
+}
+
+func put(v: u64) {
+    print_u64(v)
+    print_str(" ")
+}
+
+func report(xs: view[]u64, ps: edit[]u64, sums: edit[]u64) {
+    prefix(xs, ps)
+    for p in ps { put(p) }
+    println()
+    put(range_sum(ps, 2usize, 5usize))
+    put(range_sum(ps, 0usize, len(xs)))
+    put(range_sum(ps, 3usize, 9usize))
+    println()
+    put(best_window(xs, 3usize))
+    put(best_window(xs, 1usize))
+    put(best_window(xs, 6usize))
+    println()
+    put(u64(window_sums(xs, ps, 2usize, sums)))
+    for s in sums { put(s) }
+    println()
+    put(u64(first_reaching(ps, 0usize, 10u64)))
+    put(u64(first_reaching(ps, 2usize, 7u64)))
+    put(u64(first_reaching(ps, 1usize, 100u64)))
+    println()
+}
+
+func main() -> i32 {
+    a := [3u64, 1u64, 4u64, 1u64, 5u64, 9u64, 2u64, 6u64]
+    b := [10u64, 0u64, 0u64, 7u64, 2u64]
+    var ps: [9]u64 = zero()
+    var sums: [7]u64 = zero()
+    with xs := a[0usize:8usize] {
+        with p := ps[0usize:9usize] {
+            with s := sums[0usize:7usize] { report(xs, p, s) }
+        }
+    }
+    with xs := b[0usize:5usize] {
+        with p := ps[0usize:6usize] {
+            with s := sums[0usize:3usize] { report(xs, p, s) }
+        }
+    }
+    return 0i32
+}

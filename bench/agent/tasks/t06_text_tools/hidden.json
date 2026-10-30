@@ -1,0 +1,18 @@
+{
+ "main": "text.kern",
+ "expected_output": "true false 17\n17 er odd or evennev\nneve ro ddo reven\nfalse true 11\n8 lo, kern\n..nrek ,olleh\n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 0,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "text.reverse",
+  "text.is_palindrome",
+  "text.rotate",
+  "text.ends_with",
+  "text.trim_len"
+ ],
+ "frozen_functions": [
+  "main",
+  "report"
+ ]
+}

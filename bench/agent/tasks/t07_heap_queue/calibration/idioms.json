@@ -1,0 +1,11 @@
+[
+ {"function": "sift_down", "site": "h[i]", "idiom": "heap children"},
+ {"function": "sift_down", "site": "h[m]", "idiom": "heap children"},
+ {"function": "push", "site": "h[len(h) - 1usize]", "idiom": "last element"},
+ {"function": "push", "site": "h[p]", "idiom": "transitive bound"},
+ {"function": "push", "site": "h[k]", "idiom": "transitive bound"},
+ {"function": "pop", "site": "h[0usize]", "idiom": "other"},
+ {"function": "pop", "site": "h[len(h) - 1usize]", "idiom": "last element"},
+ {"function": "pop", "site": "h[0usize:len(h) - 1usize]", "idiom": "other"},
+ {"function": "is_heap", "site": "h[(i - 1usize) / 2usize]", "idiom": "transitive bound"}
+]

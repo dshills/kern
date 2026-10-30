@@ -223,9 +223,14 @@ carry; the queries cost iterations elsewhere. The primary metric, revised
 on 2026-10-28 to weigh successes before median iterations
 (`docs/reports/agent-metric-revision.md`), records 0 wins of 10 on the
 first suite and 1 on the second, below its threshold of 8. A third suite
-(`bench/agent/tasks/`, `docs/reports/agent-tasks-v3.md`), built entirely on
+(`bench/agent/tasks-v3/`, `docs/reports/agent-tasks-v3.md`), built entirely on
 the one requirement the plain arm failed, a bound on runtime-checked bounds
-checks, is written and validated but has not been run. Open items are
+checks, was written but never run, and the proof pass has since proved most
+of its idioms. A fourth suite (`bench/agent/tasks/`,
+`docs/reports/agent-tasks-v4.md`) is built on the indexing idioms the proof
+pass still leaves checked; it is written and validated offline, each task
+against a natural solution that must fail on the budget alone, and has not
+been run. Open items are
 recorded in the reports and ADRs rather than in an issue tracker.
 
 Specification documents, the language reference and the ADRs are the
