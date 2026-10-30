@@ -1,0 +1,18 @@
+// A fixed-capacity stack of u64.
+module stack
+struct Stack {
+    items: [4]u64
+    n: usize
+}
+func New() -> Stack { return Stack{items: zero(), n: 0usize} }
+impl Stack {
+    func Push(edit self, v: u64) {
+        self.items[self.n] = v
+        self.n = self.n + 1usize
+    }
+    func Pop(edit self) -> u64 {
+        self.n = self.n - 1usize
+        return self.items[self.n]
+    }
+    func Len(view self) -> usize { return self.n }
+}

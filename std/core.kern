@@ -65,6 +65,13 @@ func align_of[T]() -> usize
 // variant (trap_kind(bounds)); the span reported is the call that entered
 // the library, as for every trap raised inside std/core.
 func trap_kind(kind: TrapKind)
+// expect returns when cond is true and otherwise traps explicit, the
+// assertion of `kern test` (assert is a keyword); as for every trap raised
+// in std/core, the record names the expect call's file and span
+// (specs/test-command/SPEC.md R5).
+func expect(cond: bool) {
+    if !cond { trap_kind(explicit) }
+}
 // container_identity issues the next 32-bit identity tag (spec §5.6): a
 // process-global counter starting at 1 in debug builds, 0 in release builds.
 func container_identity() -> u32

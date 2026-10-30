@@ -100,7 +100,7 @@ type inliner struct {
 // it counts as referenced (-1) rather than called.
 func callSites(mod *ir.Module, funcs []*ir.Func) map[*ir.Func]int {
 	sites := map[*ir.Func]int{}
-	referenced := map[string]bool{mod.Entry: true}
+	referenced := roots(mod)
 	for _, f := range funcs {
 		if f.Release != "" {
 			referenced[f.Release] = true
@@ -135,6 +135,16 @@ func callSites(mod *ir.Module, funcs []*ir.Func) map[*ir.Func]int {
 		}
 	}
 	return sites
+}
+
+// roots are the functions the module is entered at: the entry and the
+// test functions (kern test), referenced whatever calls them.
+func roots(mod *ir.Module) map[string]bool {
+	out := map[string]bool{mod.Entry: true}
+	for _, t := range mod.Tests {
+		out[t] = true
+	}
+	return out
 }
 
 // eligible reports whether a call from f to g may be inlined (PLAN.md 6.2).
@@ -849,7 +859,7 @@ func defs(in ir.Instr) []*ir.Value {
 // destructor, not exported under the C ABI, and not a library
 // instantiation (which the backend discards on its own when unused).
 func markInlined(mod *ir.Module, funcs []*ir.Func) {
-	referenced := map[string]bool{mod.Entry: true}
+	referenced := roots(mod)
 	for _, f := range funcs {
 		if f.Release != "" {
 			referenced[f.Release] = true

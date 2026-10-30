@@ -12,7 +12,7 @@ case $K in */*) K=${K:A};; esac
 mkdir -p "$OUT" || exit 1
 OUT=${OUT:A}
 cd "$(dirname "$0")/.." || exit 1
-rm -f "$OUT"/*.ll "$OUT/tmpbin"  # a reused directory holds nothing from an earlier run
+rm -f "$OUT"/*.ll(N) "$OUT/tmpbin"  # a reused directory holds nothing from an earlier run (N: no error when empty)
 : > "$OUT/failed.txt"
 for f in bench/kern/*/*.kern tests/run/*.kern tests/trap/*.kern tests/positive/*.kern; do
   for opt in debug release; do

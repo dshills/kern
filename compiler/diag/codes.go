@@ -105,6 +105,8 @@ var Registry = map[Code]Info{
 	"CLI_INVALID_FLAGS": {"P.0", CatCLI, 0, "invalid or incompatible command-line flags"},
 	"PROJECT_NOT_FOUND": {"P.1", CatCLI, 0, "no file named and no kern.mod in the working directory or its ancestors"},
 	"PROJECT_INVALID":   {"P.2", CatCLI, 0, "kern.mod cannot be read as a manifest, or lacks the entry the command needs"},
+	"TEST_SIGNATURE":    {"P.3", CatCLI, 0, "a test function takes parameters or type parameters, has results or no body, or is extern"},
+	"TEST_DIRECTIVE":    {"P.4", CatCLI, 0, "an expect directive is malformed, repeated, or not on a test function"},
 	// internal
 	"INTERNAL": {"7.failure", CatInternal, 0, "internal compiler error"},
 }

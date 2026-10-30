@@ -45,6 +45,10 @@ no arguments.
   Files in subdirectories belong to other modules. (This is the existing
   rule behind `MODULE_MISMATCH`: every named file of a directory declares
   the same module name.)
+  *Amended 2026-10-30* (`specs/test-command/SPEC.md` §2.1): a file whose
+  name ends in `_test.kern` is a test file, left out of a module
+  directory by every command except `kern test`; a named file is loaded
+  whatever its name.
 - **Paths.** Every path in this document is handled lexically: a
   directory or file reached through a symbolic link is read as the OS
   presents it, no link is resolved, and a path is spelled as it was

@@ -26,6 +26,7 @@ import (
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/lower"
 	"github.com/dshills/kern/compiler/opt"
+	"github.com/dshills/kern/compiler/project"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
@@ -160,8 +161,22 @@ func fixtures(t *testing.T) []string {
 			}
 		}
 	}
-	ex, _ := filepath.Glob(filepath.Join("..", "examples", "*", "*.kern"))
-	out = append(out, ex...)
+	// an example is one fixture per file, or one directory fixture when it
+	// is a project (it holds a kern.mod); test files are never fixtures,
+	// `kern test` runs them (specs/test-command/SPEC.md)
+	exDirs, _ := filepath.Glob(filepath.Join("..", "examples", "*"))
+	for _, d := range exDirs {
+		if _, err := os.Stat(filepath.Join(d, project.ManifestName)); err == nil {
+			out = append(out, d)
+			continue
+		}
+		ex, _ := filepath.Glob(filepath.Join(d, "*.kern"))
+		for _, f := range ex {
+			if !project.TestFile(f) {
+				out = append(out, f)
+			}
+		}
+	}
 	sort.Strings(out)
 	return out
 }
@@ -192,12 +207,15 @@ func loadFixture(t *testing.T, path string) (*source.File, []*source.File) {
 	}
 	var names []string
 	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".kern") {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".kern") && !project.TestFile(p) {
 			names = append(names, p)
 		}
 		return nil
 	})
 	sort.Strings(names)
+	if len(names) == 0 {
+		t.Fatalf("directory fixture %s holds no .kern file that is not a test file", path)
+	}
 	var files []*source.File
 	for _, n := range names {
 		f, err := source.Load(n)

@@ -1152,3 +1152,25 @@ func TestPrintBlockFile(t *testing.T) {
 		t.Fatalf("expected labels with and without a file, got %d and %d\n%s", withFile, without, text)
 	}
 }
+
+// A test function nothing calls is a root (specs/test-command/SPEC.md R7):
+// listed in the module's Tests, it is not marked Inlined; otherwise it
+// would be, like any function nothing references.
+func TestInlineKeepsTestRoots(t *testing.T) {
+	files := map[string]string{"t.kern": "module t\nfunc test_alone() { print_u64(1u64) }\nfunc main() -> i32 { return 0i32 }\n"}
+	plain := lowerFiles(t, files)
+	Inline(plain)
+	if !plain.Func("t.test_alone").Inlined {
+		t.Fatal("without the Tests list an unreferenced function is marked Inlined")
+	}
+	mod := lowerFiles(t, files)
+	mod.Tests = []string{"t.test_alone"}
+	Inline(mod)
+	validate(t, mod)
+	if mod.Func("t.test_alone").Inlined {
+		t.Fatal("a test root must not be marked Inlined")
+	}
+	if !strings.Contains(ir.Print(mod), "\ntest t.test_alone\n") {
+		t.Fatalf("the printer lists the test roots\n%s", ir.Print(mod))
+	}
+}

@@ -68,6 +68,8 @@ type sharedState struct {
 	exit          atomic.Pointer[int32] // an exit requested on a spawned thread
 	fatalOnce     sync.Once
 	fatalCh       chan struct{}
+	// stop is set by Stop: every thread ends at its next basic block
+	stop atomic.Bool
 }
 
 // lockedWriter serializes output from several threads.
@@ -133,6 +135,20 @@ func (it *Interp) fatalExit(code exitCode) {
 		it.sh.exit.Store(&c)
 		close(it.sh.fatalCh)
 	})
+}
+
+// StoppedStatus is the status RunEntry returns for a run Stop ended.
+const StoppedStatus = -1
+
+// Stop ends a running program from another goroutine (`kern test`'s
+// timeout, specs/test-command/SPEC.md R8): every thread of it ends at its
+// next basic block as if it had exited with StoppedStatus, and a thread
+// waiting for a join wakes. A thread blocked in a lock or a condition
+// wait does not run another block until it is woken, so it may stay
+// blocked; it no longer uses the CPU.
+func (it *Interp) Stop() {
+	it.sh.stop.Store(true)
+	it.fatalExit(exitCode(StoppedStatus))
 }
 
 // terminated reports whether a spawned thread ended the program, with the
@@ -225,9 +241,14 @@ func constValue(t resolve.Type, init any) Value {
 	return zeroOf(t)
 }
 
-func (it *Interp) Run() (status int) {
+func (it *Interp) Run() (status int) { return it.RunEntry(it.mod.Entry) }
+
+// RunEntry runs the named function as the program's entry, as Run runs
+// main: a test function of `kern test` (specs/test-command/SPEC.md R7).
+// Each call starts from fresh globals; an interpreter runs one entry.
+func (it *Interp) RunEntry(name string) (status int) {
 	it.globals = it.freshGlobals()
-	entry := it.mod.Func(it.mod.Entry)
+	entry := it.mod.Func(name)
 	if entry == nil {
 		_, _ = fmt.Fprintf(it.errOut, "no entry function\n")
 		return 3
@@ -459,6 +480,9 @@ func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
 	}
 	b := f.Entry
 	for {
+		if it.sh.stop.Load() {
+			panic(exitCode(StoppedStatus))
+		}
 		fr.block = b
 		for _, in := range b.Instrs {
 			it.exec(fr, in)

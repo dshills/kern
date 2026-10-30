@@ -1,0 +1,15 @@
+//! phase: 3
+//! expect: output testing
+// A program with a library module and its tests: `kern test` from this
+// directory runs app_test.kern and stack/stack_test.kern in the
+// interpreter and natively, in debug and release.
+module app
+import "stack"
+func main() -> i32 {
+    s := stack.New()
+    s.Push(3u64)
+    s.Push(4u64)
+    print_u64(s.Pop() * s.Pop())
+    println()
+    return 0i32
+}

@@ -16,7 +16,12 @@ type Module struct {
 	Globals []*Global
 	Funcs   []*Func
 	Entry   string // name of the entry function ("main") or ""
-	byName  map[string]*Func
+	// Tests are the test functions `kern test` runs, each as an entry of
+	// its own (specs/test-command/SPEC.md R7): lowered as roots, never
+	// marked Inlined, and selected by index in a native build. Empty for
+	// every other command.
+	Tests  []string
+	byName map[string]*Func
 }
 
 // Func looks up a function by name.

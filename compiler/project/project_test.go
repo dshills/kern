@@ -299,3 +299,89 @@ func TestAbsoluteEntryWithManifest(t *testing.T) {
 		t.Errorf("absolute entry: %v root=%q manifest=%v files=%v", codes(r), r.Root, r.Manifest, r.Names())
 	}
 }
+
+// Test files (specs/test-command/SPEC.md R1, R2).
+func TestTestFiles(t *testing.T) {
+	cwd := tree(t, t.TempDir(), map[string]string{
+		"app.kern":           app,
+		"app_test.kern":      "module app\nfunc test_a() {}\n",
+		"other_test.kern":    "module other\nfunc test_b() {}\n", // another program's test file in the entry directory
+		"broken_test.kern":   "modul app\n",                      // a prologue that does not parse
+		"lib/lib.kern":       lib,
+		"lib/lib_test.kern":  "module lib\nimport \"helper\"\nfunc test_c() {}\n",
+		"helper/helper.kern": "module helper\nfunc H() -> u64 { return 2u64 }\n",
+	})
+	// R1: every command but kern test leaves test files out of a module
+	// directory
+	r := Load(cwd, []string{"app.kern"})
+	if codes(r) != "" || strings.Join(r.Names(), " ") != "app.kern lib/lib.kern" {
+		t.Errorf("Load: %v %v", codes(r), r.Names())
+	}
+	// R1: a named test file is loaded like any named file
+	named := Load(cwd, []string{"lib/lib_test.kern"})
+	if codes(named) != "" || strings.Join(named.Names(), " ") != "lib/lib_test.kern helper/helper.kern" {
+		t.Errorf("named test file: %v %v", codes(named), named.Names())
+	}
+	// R2: the entry directory's test files of the entry's module (and the
+	// unparsable one, whose error is then reported), the module
+	// directories' test files, and what they import
+	tr := LoadTests(cwd, []string{"app.kern"})
+	want := "app.kern app_test.kern broken_test.kern lib/lib.kern lib/lib_test.kern helper/helper.kern"
+	if got := strings.Join(tr.Names(), " "); got != want {
+		t.Errorf("LoadTests: %v\nwant %s", tr.Names(), want)
+	}
+	if tr.Entry != 3 {
+		t.Errorf("the entry directory's test files join the entry files: entry=%d", tr.Entry)
+	}
+	if !strings.Contains(codes(tr), "SYNTAX") {
+		t.Errorf("the unparsable test file's error is reported: %v", codes(tr))
+	}
+	// R2: a module directory's test file must declare the directory's module
+	mismatch := tree(t, t.TempDir(), map[string]string{
+		"app.kern":          app,
+		"lib/lib.kern":      lib,
+		"lib/lib_test.kern": "module notlib\n",
+	})
+	if got := codes(LoadTests(mismatch, []string{"app.kern"})); got != "MODULE_MISMATCH" {
+		t.Errorf("a test file declaring another module: %q", got)
+	}
+	if got := codes(Load(mismatch, []string{"app.kern"})); got != "" {
+		t.Errorf("Load does not read the test file: %q", got)
+	}
+	if !TestFile("x/y_test.kern") || TestFile("x/test.kern") || TestFile("y_test.kern.bak") {
+		t.Error("TestFile")
+	}
+}
+
+// A test file of the entry directory that cannot be read is reported,
+// not skipped (prism: kern test would succeed without running it).
+func TestTestFileUnreadable(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Getuid() == 0 {
+		t.Skip("file modes")
+	}
+	cwd := tree(t, t.TempDir(), map[string]string{"app.kern": app, "lib/lib.kern": lib, "app_test.kern": "module app\n"})
+	p := filepath.Join(cwd, "app_test.kern")
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
+	r := LoadTests(cwd, []string{"app.kern"})
+	if codes(r) != "API_FILE_NOT_FOUND" || !strings.Contains(r.Diags[0].Message, "app_test.kern") {
+		t.Errorf("got %v", r.Diags)
+	}
+}
+
+// A dangling test-file link in the entry directory is reported too.
+func TestTestFileDangling(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links")
+	}
+	cwd := tree(t, t.TempDir(), map[string]string{"app.kern": app, "lib/lib.kern": lib})
+	if err := os.Symlink(filepath.Join(cwd, "nowhere.kern"), filepath.Join(cwd, "gone_test.kern")); err != nil {
+		t.Fatal(err)
+	}
+	r := LoadTests(cwd, []string{"app.kern"})
+	if codes(r) != "API_FILE_NOT_FOUND" || !strings.Contains(r.Diags[0].Message, "gone_test.kern") {
+		t.Errorf("got %v", r.Diags)
+	}
+}

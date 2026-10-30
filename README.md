@@ -123,7 +123,7 @@ Check a file and read the diagnostics as text rather than JSON:
 
 ## Commands
 
-Every command other than `run`, `build` and `debug` reads one JSON request on
+Every command other than `run`, `build`, `debug` and `test` reads one JSON request on
 standard input (or takes files on the command line) and writes one JSON response
 on standard output; `--human` renders the response as text. The schema is in
 `tools/agent-api/schema.md`. A request names its `schema_version`: 0.3, the
@@ -142,6 +142,37 @@ shape without it; files on the command line get 0.3.
 | `run` | Build and execute natively; `--opt=debug\|release`, `--env=hosted\|freestanding`, `--stack-bytes=N`, `--test-hooks` |
 | `build` | Produce an executable or freestanding image; `--debug` emits DWARF line tables |
 | `debug` | Build with debug info and launch lldb with a `kern-own` command that shows ownership state at the current line |
+| `test` | Run the program's tests in the interpreter and natively, in debug and release, and compare the runs; `--opt=`, `--engine=interp\|native`, `--run=<regexp>`, `--timeout=<seconds>`, `--human` |
+
+### Tests
+
+A test is a `test_` function in a file named `*_test.kern`, in the module it
+tests; `expect(cond)` traps `explicit` when `cond` is false, and a
+`//! expect: trap <kind>` line above a test says it must trap with that kind:
+
+```kern
+// stack/stack_test.kern
+module stack
+func test_push_pop() {
+    s := New()
+    s.Push(7u64)
+    expect(s.Pop() == 7u64)
+}
+//! expect: trap bounds
+func test_push_full() {
+    s := New()
+    var i: u64 = 0u64
+    while i < 5u64 { s.Push(i); i = i + 1u64 }
+}
+```
+
+`kern test` (from `examples/testing`, or with the entry file named) runs each
+test in four configurations, each run from a fresh program state, and
+writes one JSON response: per test its status (`pass`, `fail`, `mismatch`
+when two configurations disagree, `timeout`, `skipped`) and every run's
+outcome, trap record and output. It exits 0 when every test passes and 1
+otherwise. Other commands leave `*_test.kern` files out of a module.
+`specs/test-command/SPEC.md` is the full contract.
 
 ## Testing and benchmarks
 

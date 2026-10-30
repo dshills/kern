@@ -69,7 +69,9 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 		}
 		e.function(f)
 	}
-	if mod.Entry != "" {
+	if len(mod.Tests) > 0 {
+		e.testMain(mod)
+	} else if mod.Entry != "" {
 		entry := mod.Func(mod.Entry)
 		ret := e.retType(entry)
 		entrySym := "@main"
@@ -139,6 +141,43 @@ func (e *emitter) attrRef() string {
 		return ""
 	}
 	return " #0"
+}
+
+// testMain emits the entry of a `kern test` executable
+// (specs/test-command/SPEC.md R7): argv[1] is the index of the test to
+// run in mod.Tests, a decimal integer the whole argument spells (strtol
+// must consume it all and not overflow); the program's arguments are its
+// name alone, its file (what a runtime-raised trap names) is the test's,
+// and returning from the test exits 0. A missing, malformed or unknown
+// index exits 2 without running anything.
+func (e *emitter) testMain(mod *ir.Module) {
+	e.declare("strtol", "i64 (ptr, ptr, i32)")
+	e.declare("kern_set_file", "void (ptr)")
+	e.declare("kern_set_args", "void (i32, ptr)")
+	e.declare("kern_start", "void ()")
+	var b strings.Builder
+	b.WriteString("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n")
+	b.WriteString("  %few = icmp slt i32 %argc, 2\n  br i1 %few, label %usage, label %pick\n")
+	b.WriteString("usage:\n  ret i32 2\n")
+	b.WriteString("pick:\n  %endp = alloca ptr\n  %a1p = getelementptr ptr, ptr %argv, i64 1\n  %a1 = load ptr, ptr %a1p\n")
+	b.WriteString("  %c0 = load i8, ptr %a1\n  %digit0 = sub i8 %c0, 48\n  %isdigit = icmp ult i8 %digit0, 10\n  br i1 %isdigit, label %parse, label %usage\n")
+	b.WriteString("parse:\n  %n = call i64 @strtol(ptr %a1, ptr %endp, i32 10)\n  %end = load ptr, ptr %endp\n  %c = load i8, ptr %end\n  %whole = icmp eq i8 %c, 0\n  br i1 %whole, label %dispatch, label %usage\n")
+	b.WriteString("dispatch:\n")
+	var cases []string
+	for i := range mod.Tests {
+		cases = append(cases, fmt.Sprintf("i64 %d, label %%t%d", i, i))
+	}
+	fmt.Fprintf(&b, "  switch i64 %%n, label %%usage [ %s ]\n", strings.Join(cases, " "))
+	for i, name := range mod.Tests {
+		f := mod.Func(name)
+		fmt.Fprintf(&b, "t%d:\n", i)
+		if f != nil && f.File != "" {
+			fmt.Fprintf(&b, "  call void @kern_set_file(ptr %s)\n", e.fileSym(f.File))
+		}
+		fmt.Fprintf(&b, "  call void @kern_set_args(i32 1, ptr %%argv)\n  call void @kern_start()\n  call void %s()\n  ret i32 0\n", fnSym(name))
+	}
+	b.WriteString("}\n")
+	e.sb.WriteString(b.String())
 }
 
 func retOrVoid(t string) string {
@@ -588,7 +627,7 @@ func (e *emitter) function(f *ir.Func) {
 		if coldLibrary[baseName(f.Name)] {
 			attrs = " noinline cold" // a growth or allocation path: kept out of the hot operations that call it
 		}
-	} else if e.mod.Entry != "" && f.Extern == "" {
+	} else if (e.mod.Entry != "" || len(e.mod.Tests) > 0) && f.Extern == "" {
 		// a program's own functions are reached only from the module (the
 		// entry through its wrapper, the rest by call or function value), so
 		// they are private too, except one exported under a C name: LLVM then

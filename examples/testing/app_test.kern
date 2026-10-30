@@ -1,0 +1,10 @@
+// Tests of the main module: test_ functions in a _test.kern file of the
+// entry's directory, declaring the entry's module.
+module app
+import "stack"
+func test_product() {
+    s := stack.New()
+    s.Push(3u64)
+    s.Push(4u64)
+    expect(s.Pop() * s.Pop() == 12u64)
+}

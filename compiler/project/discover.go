@@ -38,13 +38,25 @@ func (r Result) Names() []string {
 // the manifest's entry when none is named) and then every file of every
 // module the set imports by a user import path (spec §4.3). Relative names
 // are accessed under cwd and kept as display names.
-func Load(cwd string, named []string) Result { return load(cwd, named, true) }
+func Load(cwd string, named []string) Result { return load(cwd, named, true, false) }
+
+// LoadTests is Load for `kern test` (specs/test-command/SPEC.md §2.1): it
+// also loads the test files (TestFile) of every module directory discovery
+// enters, and those of each entry file's directory that declare the entry
+// file's module, which join the entry files.
+func LoadTests(cwd string, named []string) Result { return load(cwd, named, true, true) }
 
 // Entries is Load without discovery: the root, the manifest and the entry
 // files only, for a command that works on the named files alone (format).
-func Entries(cwd string, named []string) Result { return load(cwd, named, false) }
+func Entries(cwd string, named []string) Result { return load(cwd, named, false, false) }
 
-func load(cwd string, named []string, discover bool) Result {
+// TestFile reports whether a file name is a test file's: its base name
+// ends in _test.kern. Discovery leaves test files out of a module
+// directory in every command but `kern test`; a named file is loaded
+// whatever its name.
+func TestFile(name string) bool { return strings.HasSuffix(filepath.Base(name), "_test.kern") }
+
+func load(cwd string, named []string, discover, tests bool) Result {
 	var r Result
 	root, mpath, found := FindRoot(cwd, named)
 	r.Root = root
@@ -82,6 +94,14 @@ func load(cwd string, named []string, discover bool) Result {
 			seen[identity(cwd, name)] = f
 		}
 	}
+	if tests {
+		more, ds := entryTests(cwd, r.Files, seen)
+		r.Files = append(r.Files, more...)
+		if len(ds) > 0 {
+			r.Diags = append(r.Diags, ds...)
+			return r
+		}
+	}
 	r.Entry = len(r.Files)
 	if !discover {
 		return r
@@ -114,7 +134,7 @@ func load(cwd string, named []string, discover bool) Result {
 			if visited[key] {
 				continue
 			}
-			names, msg := moduleFiles(cwd, dir)
+			names, msg := moduleFiles(cwd, dir, tests)
 			if msg != "" {
 				r.Diags = append(r.Diags, diag.New("MODULE_NOT_FOUND", f.Name, at, "import %q: %s", imp.Path, msg))
 				continue
@@ -179,17 +199,79 @@ func ValidImportPath(p string) bool {
 	return true
 }
 
+// entryTests returns the test files of the entry files' directories that
+// declare the module of an entry file in that directory and are not in
+// the set yet, in directory then byte order. A test file whose prologue
+// does not parse is included, so that its error is reported rather than
+// the file silently skipped; a directory that cannot be listed or a test
+// file that cannot be read is an API_FILE_NOT_FOUND diagnostic, for the
+// same reason.
+func entryTests(cwd string, entries []*source.File, seen map[string]*source.File) ([]*source.File, []diag.Diagnostic) {
+	modules := map[string]map[string]bool{} // directory -> modules its entry files declare
+	var dirs []string
+	for _, f := range entries {
+		pro, ds := parser.ParsePrologue(f)
+		if len(ds) > 0 {
+			continue
+		}
+		dir := filepath.Dir(f.Name)
+		if modules[dir] == nil {
+			modules[dir] = map[string]bool{}
+			dirs = append(dirs, dir)
+		}
+		modules[dir][pro.Module] = true
+	}
+	var out []*source.File
+	var ds []diag.Diagnostic
+	for _, dir := range dirs {
+		listing, err := os.ReadDir(onDisk(cwd, dir))
+		if err != nil {
+			ds = append(ds, diag.New("API_FILE_NOT_FOUND", dir, diag.Span{}, "cannot list %s for its test files: %v", dir, err))
+			continue
+		}
+		for _, e := range listing {
+			name := filepath.Join(dir, e.Name())
+			if dir == "." {
+				name = e.Name()
+			}
+			if !TestFile(name) || seen[identity(cwd, name)] != nil {
+				continue
+			}
+			st, err := os.Stat(onDisk(cwd, name))
+			if err != nil {
+				ds = append(ds, diag.New("API_FILE_NOT_FOUND", name, diag.Span{}, "cannot read test file %s: %v", name, err))
+				continue
+			}
+			if !st.Mode().IsRegular() {
+				continue // a directory or a device named like a test file
+			}
+			src, err := source.Load(onDisk(cwd, name))
+			if err != nil {
+				ds = append(ds, diag.New("API_FILE_NOT_FOUND", name, diag.Span{}, "cannot read test file %s: %v", name, err))
+				continue
+			}
+			src.Name = name
+			if pro, ds := parser.ParsePrologue(src); len(ds) == 0 && !modules[dir][pro.Module] {
+				continue // another program's test file in the same directory
+			}
+			seen[identity(cwd, name)] = src
+			out = append(out, src)
+		}
+	}
+	return out, ds
+}
+
 // moduleFiles lists a module directory's files (spec §2): the regular
-// files named *.kern directly in it, as display names in byte order; or
-// the reason there are none.
-func moduleFiles(cwd, dir string) ([]string, string) {
+// files named *.kern directly in it, test files only when tests is set, as
+// display names in byte order; or the reason there are none.
+func moduleFiles(cwd, dir string, tests bool) ([]string, string) {
 	entries, err := os.ReadDir(onDisk(cwd, dir))
 	if err != nil {
 		return nil, err.Error()
 	}
 	var names []string
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".kern") {
+		if !strings.HasSuffix(e.Name(), ".kern") || !tests && TestFile(e.Name()) {
 			continue
 		}
 		if st, err := os.Stat(filepath.Join(onDisk(cwd, dir), e.Name())); err != nil || !st.Mode().IsRegular() {

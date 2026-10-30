@@ -36,7 +36,7 @@ func main() {
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: kern <check|format|emit-ir|explain-ownership|show-*|run|build> [flags] [files...]")
+		_, _ = fmt.Fprintln(stderr, "usage: kern <check|format|emit-ir|explain-ownership|show-*|run|build|test> [flags] [files...]")
 		_, _ = fmt.Fprintln(stderr, "  files default to the entry of kern.mod, the manifest that marks the project root and may set entry, opt, env, target and output; imports are found under that root")
 		return 2
 	}
@@ -49,6 +49,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if cmd == "debug" {
 		return debugCommand(args[1:], stdout, stderr)
+	}
+	if cmd == "test" {
+		return testCommand(args[1:], stdout, stderr)
 	}
 	human := false
 	cliTarget := ""

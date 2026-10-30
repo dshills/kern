@@ -1,0 +1,12 @@
+//! phase: 3
+//! expect: output expect_true
+// expect(true) returns (specs/test-command/SPEC.md R5).
+module t
+func main() -> i32 {
+    n := 6u64
+    expect(n * 7u64 == 42u64)
+    expect(true)
+    print_str("held")
+    println()
+    return 0i32
+}

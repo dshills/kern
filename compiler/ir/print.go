@@ -13,6 +13,9 @@ func Print(m *Module) string {
 	if m.Entry != "" {
 		fmt.Fprintf(&sb, "entry %s\n", m.Entry)
 	}
+	for _, t := range m.Tests {
+		fmt.Fprintf(&sb, "test %s\n", t)
+	}
 	for _, g := range m.Globals {
 		kind := "thread_local"
 		if g.ReadOnly {

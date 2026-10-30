@@ -15,6 +15,7 @@ import (
 	"github.com/dshills/kern/compiler/backend/llvm"
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
+	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/lower"
 	"github.com/dshills/kern/compiler/opt"
 	"github.com/dshills/kern/compiler/resolve"
@@ -127,8 +128,20 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 	if err := opt.Run(mod, opt.OptionsFor(opts.Opt)); err != nil {
 		return nil, fmt.Errorf("ir: %v", err)
 	}
-	if mod.Entry == "" {
-		return nil, errors.New("no main function")
+	return nil, BuildModule(mod, srcs, out, opts)
+}
+
+// BuildModule compiles and links an already lowered and optimized module
+// (Build's back half): `kern test` lowers with its test functions as roots
+// and builds the result (specs/test-command/SPEC.md). srcs supply the
+// debug-info sources. A module with test functions builds their selecting
+// entry in place of main's, hosted only.
+func BuildModule(mod *ir.Module, srcs []*source.File, out string, opts Options) error {
+	if mod.Entry == "" && len(mod.Tests) == 0 {
+		return errors.New("no main function")
+	}
+	if len(mod.Tests) > 0 && opts.Freestanding {
+		return errors.New("test executables are hosted only")
 	}
 	triple := opts.Triple
 	if triple == "" {
@@ -147,32 +160,32 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 	}
 	text, errs := llvm.EmitWith(mod, lo)
 	if len(errs) > 0 {
-		return nil, fmt.Errorf("backend: %v", errs[0])
+		return fmt.Errorf("backend: %v", errs[0])
 	}
 	if opts.EmitLLVM != "" {
 		if err := os.WriteFile(opts.EmitLLVM, []byte(text), 0o644); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if opts.Freestanding {
-		return nil, buildFreestanding(text, out, triple, opts.Opt == "release")
+		return buildFreestanding(text, out, triple, opts.Opt == "release")
 	}
 	clang, err := exec.LookPath("clang")
 	if err != nil {
-		return nil, ErrNoClang
+		return ErrNoClang
 	}
 	dir, err := os.MkdirTemp("", "kern-build-")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	ll := filepath.Join(dir, "prog.ll")
 	rt := filepath.Join(dir, "kern_rt.c")
 	if err := os.WriteFile(ll, []byte(text), 0o644); err != nil {
-		return nil, err
+		return err
 	}
 	if err := os.WriteFile(rt, []byte(hosted.Source), 0o644); err != nil {
-		return nil, err
+		return err
 	}
 	level := "-O1"
 	if opts.Opt == "release" {
@@ -204,9 +217,9 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 		if len(msg) > 4096 {
 			msg = msg[:4096]
 		}
-		return nil, fmt.Errorf("clang failed: %v: %s", err, msg)
+		return fmt.Errorf("clang failed: %v: %s", err, msg)
 	}
-	return nil, nil
+	return nil
 }
 
 // EmitAsm compiles srcs to target assembly text (the emit-asm command).

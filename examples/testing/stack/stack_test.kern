@@ -1,0 +1,27 @@
+// Tests of the stack module: they see its private fields.
+module stack
+func test_push_pop() {
+    s := New()
+    s.Push(7u64)
+    s.Push(8u64)
+    expect(s.Len() == 2usize)
+    expect(s.Pop() == 8u64)
+    expect(s.Pop() == 7u64)
+    expect(s.n == 0usize)
+}
+// A fifth push indexes past the four slots.
+//! expect: trap bounds
+func test_push_full() {
+    s := New()
+    var i: u64 = 0u64
+    while i < 5u64 {
+        s.Push(i)
+        i = i + 1u64
+    }
+}
+// A pop of an empty stack underflows its count.
+//! expect: trap overflow
+func test_pop_empty() {
+    s := New()
+    print_u64(s.Pop())
+}

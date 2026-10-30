@@ -1,0 +1,16 @@
+//! phase: 3
+//! expect: trap explicit
+// expect(false) traps explicit at the expect call, in both engines and
+// both opt levels (specs/test-command/SPEC.md R5); the sentinel must not
+// print.
+module t
+func main() -> i32 {
+    n := 6u64
+    expect(n * 7u64 == 42u64)
+    print_str("first holds")
+    println()
+    expect(n * 7u64 == 41u64)
+    print_str("after the trap")
+    println()
+    return 0i32
+}

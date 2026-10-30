@@ -24,6 +24,19 @@ var _ = preludeFile
 // Lower lowers a resolved program. Generic functions are lowered once per
 // instantiation reachable from the main module's non-generic functions.
 func Lower(prog *resolve.Program) (mod *ir.Module, diags []diag.Diagnostic) {
+	return LowerWith(prog, Options{})
+}
+
+// Options are the lowering's extra inputs.
+type Options struct {
+	// Tests are the test functions of `kern test`, lowered as roots in
+	// whatever module declares them and listed, in this order, as the
+	// module's Tests (specs/test-command/SPEC.md R7).
+	Tests []*ast.FuncDecl
+}
+
+// LowerWith is Lower with extra roots.
+func LowerWith(prog *resolve.Program, o Options) (mod *ir.Module, diags []diag.Diagnostic) {
 	l := &lowerer{prog: prog, info: prog.Info, mod: &ir.Module{Name: prog.Main.Name}, done: map[string]*ir.Func{}, parent: map[string]string{}, dtorType: map[string]*resolve.Named{}}
 	defer func() {
 		if r := recover(); r != nil {
@@ -62,7 +75,16 @@ func Lower(prog *resolve.Program) (mod *ir.Module, diags []diag.Diagnostic) {
 			}
 		}
 	}
+	var tests []string
+	for _, d := range o.Tests {
+		fd := l.info.Funcs[d]
+		if fd == nil {
+			panic(lowerError{msg: "test function " + d.Name + " was not resolved", pos: d.Pos})
+		}
+		tests = append(tests, l.request(fd, nil, ""))
+	}
 	l.drain()
+	l.mod.Tests = tests
 	if main := l.mod.Func(prog.Main.Name + ".main"); main != nil {
 		l.mod.Entry = main.Name
 	}
