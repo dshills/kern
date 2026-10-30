@@ -96,10 +96,11 @@ read through the overlay:
    prologue does not parse or the directory cannot be listed, the entry
    set is *P* alone; a sibling that cannot be read or whose prologue
    does not parse is left out, and the check reports nothing for it.
-3. When *P* is a test file and *D*'s prologue parses, the set is loaded with the test-file rule
-   of `kern test` (`specs/test-command/SPEC.md` §2.1), so the module's
-   other test files join it; otherwise test files are excluded as in
-   `kern check`.
+3. When *D*'s prologue parses, the set is loaded with the test-file
+   rule of `kern test` (`specs/test-command/SPEC.md` §2.1), so the
+   module's test files join it whether or not *P* is one (since
+   `specs/editor-nav/SPEC.md` R7; before, only a test file's program
+   included them).
 
 Discovery then adds the files of every imported module, as
 `specs/module-discovery/SPEC.md` defines, with the project root found
@@ -349,7 +350,9 @@ page.
 
 **R12 — Cost.** A check of a program costs the server the compiler work
 of `kern check` on the same files, plus reading the files and converting
-positions. No timing bound is set; the report measures the
+positions; since `specs/editor-nav/SPEC.md` R8 the check goes through
+the incremental cache, so a program none of whose files changed costs a
+cache lookup. No timing bound is set; the report measures the
 time from a `didChange` to its diagnostics on the repository's largest
 multi-module example.
 

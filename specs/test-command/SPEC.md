@@ -75,7 +75,9 @@ name.
 A test file belongs to the module its `module` line declares, like any
 file, so its functions see the module's private names. Module discovery
 leaves test files out of every module directory in every command except
-`kern test`; a test file named explicitly on a command line is loaded
+`kern test` and, since `specs/editor-nav/SPEC.md` R5, `kern check`, which
+loads them by the rule below and also reports the TEST_SIGNATURE and
+TEST_DIRECTIVE diagnostics of R3 and R4; a test file named explicitly on a command line is loaded
 like any named file. `kern test` loads, in addition to what discovery
 loads for the same entry files: every test file in the directory of each
 entry file that declares the same module as that entry file, and every
@@ -145,8 +147,9 @@ is left blocked and idle after a one-second grace period.
 - A trap kind of its own for a failed assertion (`explicit` is used).
 - Messages on `expect` (the record's span locates the call).
 - Freestanding targets and `--test-hooks`.
-- `kern check` and the other commands reporting errors in test files:
-  they do not load them (§2.1); `kern test` does.
+- The other commands reporting errors in test files: they do not load
+  them (§2.1); `kern test` does, and so does `kern check` since
+  `specs/editor-nav/SPEC.md` R5.
 
 ## 4. Requirements
 

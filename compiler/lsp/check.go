@@ -7,22 +7,69 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dshills/kern/compiler/backend/native"
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
+	"github.com/dshills/kern/compiler/incremental"
 	"github.com/dshills/kern/compiler/parser"
 	"github.com/dshills/kern/compiler/project"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
+	"github.com/dshills/kern/compiler/testrun"
 )
 
-// defaultCheck is `kern check`'s work on a file set: resolution, then
-// checking when resolution reports nothing.
-func defaultCheck(srcs []*source.File) ([]diag.Diagnostic, error) {
+// uncachedCheck is `kern check`'s work on a file set without the cache:
+// resolution, then checking when resolution reports nothing.
+func uncachedCheck(srcs []*source.File) []diag.Diagnostic {
 	prog := resolve.Resolve(srcs)
 	if len(prog.Diags) > 0 {
-		return prog.Diags, nil
+		return prog.Diags
 	}
-	return check.Check(prog), nil
+	return check.Check(prog)
+}
+
+// cacheConfig is the configuration a cached check is keyed by: the host
+// target, debug, hosted, as `kern check --cache` uses by default.
+var cacheConfig = incremental.Config{Target: native.HostTriple(), Opt: "debug", Env: "hosted"}
+
+// check is the server's check of a document's program (specs/editor-nav
+// R5, R8): the test hook when set; otherwise the incremental cache, or the
+// uncached check when the cache is unavailable or fails (logged once),
+// plus the test files' static diagnostics, sorted.
+func (s *Server) check(uri string, srcs []*source.File) ([]diag.Diagnostic, error) {
+	if s.opts.Check != nil {
+		return s.opts.Check(srcs)
+	}
+	var ds []diag.Diagnostic
+	cached := false
+	if s.cacheDir != "" {
+		got, st, err := incremental.Check(s.cacheDir, srcs, cacheConfig)
+		if err == nil {
+			ds, cached = got, true
+			if s.opts.CacheStats != nil {
+				s.opts.CacheStats(uri, st)
+			}
+		} else {
+			s.cacheUnavailable(err.Error())
+		}
+	} else {
+		s.cacheUnavailable("no cache directory could be created")
+	}
+	if !cached {
+		ds = uncachedCheck(srcs)
+	}
+	ds = append(append([]diag.Diagnostic(nil), ds...), testrun.StaticDiags(srcs)...)
+	diag.Sort(ds)
+	return ds, nil
+}
+
+// cacheUnavailable logs, once per session, that checks run uncached.
+func (s *Server) cacheUnavailable(why string) {
+	if s.cacheWarned {
+		return
+	}
+	s.cacheWarned = true
+	s.logMessage(2, "checks run without the incremental cache: %s", why)
 }
 
 // holder is the document that supplies a path's text: of the documents
@@ -84,10 +131,8 @@ func absName(dir, name string) string {
 func (s *Server) load(d *document) program {
 	dir := filepath.Dir(d.path)
 	entries := []string{d.path}
-	tests := false
 	pro, pds := parser.ParsePrologue(&source.File{Name: d.path, Bytes: s.textOf(d.path)})
 	if len(pds) == 0 {
-		tests = project.TestFile(d.path)
 		if listing, err := os.ReadDir(dir); err == nil {
 			for _, e := range listing {
 				p := filepath.Join(dir, e.Name())
@@ -111,7 +156,8 @@ func (s *Server) load(d *document) program {
 			}
 		}
 	}
-	r := project.LoadWith(dir, entries, project.Options{Discover: true, Tests: tests, Overlay: s.overlay})
+	// every program includes its test files (specs/editor-nav R7)
+	r := project.LoadWith(dir, entries, project.Options{Discover: true, Tests: true, Overlay: s.overlay})
 	pg := program{dir: dir, files: r.Files, diags: r.Diags}
 	for _, f := range pg.files {
 		f.Name = absName(dir, f.Name)
@@ -143,7 +189,7 @@ func (s *Server) checkDoc(d *document) {
 			return
 		}
 		var err error
-		if ds, err = s.opts.Check(pg.files); err != nil {
+		if ds, err = s.check(d.uri, pg.files); err != nil {
 			failure = err.Error()
 		}
 	}()

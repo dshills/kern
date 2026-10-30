@@ -25,6 +25,7 @@ import (
 	"github.com/dshills/kern/compiler/project"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
+	"github.com/dshills/kern/compiler/testrun"
 )
 
 // Request is the §7 machine-API request (compiler/diag/schema.go).
@@ -152,9 +153,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	var pr project.Result
-	if cmd == "format" {
+	switch cmd {
+	case "format":
 		pr = project.Entries(cwd, req.Files) // formatting rewrites the entry files and needs no other
-	} else {
+	case "check":
+		// check loads the program's test files as kern test does and
+		// reports their errors too (specs/editor-nav R5)
+		pr = project.LoadTests(cwd, req.Files)
+	default:
 		pr = project.Load(cwd, req.Files)
 	}
 	if len(pr.Diags) > 0 {
@@ -211,6 +217,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if code := internal(req, wire, err, stdout, stderr); code != 0 {
 			return code
 		}
+	}
+	if tds := testrun.StaticDiags(srcs); len(tds) > 0 {
+		ds = append(ds, tds...)
+		diag.Sort(ds)
 	}
 	if human {
 		for _, d := range ds {

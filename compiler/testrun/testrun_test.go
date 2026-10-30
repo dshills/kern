@@ -381,3 +381,28 @@ func TestNativeIndexStrict(t *testing.T) {
 		t.Errorf("no argument: %q %v", out, err)
 	}
 }
+
+// TestStaticDiags: the test diagnostics from parsing alone equal Find's on
+// the same program, and a test file that does not parse contributes none
+// (specs/editor-nav R6).
+func TestStaticDiags(t *testing.T) {
+	files := map[string]string{
+		"a.kern": "module t\nfunc main() -> i32 { return 0i32 }\n",
+		"a_test.kern": "module t\nfunc test_param(x: u64) {}\n//! expect: maybe\nfunc test_word() {}\n" +
+			"//! expect: return\nfunc helper() {}\nfunc test_ok() {}\n",
+	}
+	_, want := find(t, files)
+	got := StaticDiags(srcs(files))
+	if codesOf(got) != codesOf(want) || len(got) != 3 {
+		t.Fatalf("StaticDiags %s, Find %s", codesOf(got), codesOf(want))
+	}
+	for i := range got {
+		if got[i].File != want[i].File || got[i].Span != want[i].Span || got[i].Message != want[i].Message {
+			t.Errorf("diagnostic %d: %+v, Find's %+v", i, got[i], want[i])
+		}
+	}
+	broken := map[string]string{"a.kern": files["a.kern"], "a_test.kern": "module t\nfunc test_x( {\n"}
+	if ds := StaticDiags(srcs(broken)); len(ds) != 0 {
+		t.Errorf("a test file that does not parse: %v", ds)
+	}
+}

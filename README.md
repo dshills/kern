@@ -132,7 +132,7 @@ shape without it; files on the command line get 0.3.
 
 | Command | What it does |
 |---|---|
-| `check` | Parse, resolve, type-check and ownership-check; diagnostics carry a code, a rule number, a one-sentence message and, where one exists, a machine-applicable fix |
+| `check` | Parse, resolve, type-check and ownership-check, the program's test files (`*_test.kern`) included; diagnostics carry a code, a rule number, a one-sentence message and, where one exists, a machine-applicable fix |
 | `format` | Canonical formatting (`spec/format.md`): idempotent and diagnostic-preserving |
 | `emit-ir`, `emit-asm` | The semantic IR, or the LLVM IR the backend produces |
 | `explain-ownership` | For a span or `--line=N`: each place's ownership state, drop point and accesses |
@@ -172,7 +172,8 @@ test in four configurations, each run from a fresh program state, and
 writes one JSON response: per test its status (`pass`, `fail`, `mismatch`
 when two configurations disagree, `timeout`, `skipped`) and every run's
 outcome, trap record and output. It exits 0 when every test passes and 1
-otherwise. Other commands leave `*_test.kern` files out of a module.
+otherwise. `kern check` loads the test files too and reports their
+errors; the other commands leave `*_test.kern` files out of a module.
 `specs/test-command/SPEC.md` is the full contract.
 
 ## Testing and benchmarks

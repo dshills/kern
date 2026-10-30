@@ -212,8 +212,8 @@ func TestQuickFix(t *testing.T) {
 			t.Fatalf("%s: changes %+v", k.name, as[0].Edit.Changes)
 		}
 		fixed := applyEdits(k.text, edits, UTF16)
-		if ds, err := defaultCheck([]*source.File{{Name: path, Bytes: []byte(fixed)}}); err != nil || len(ds) != 0 {
-			t.Errorf("%s: the fixed text %q does not check clean: %v %v", k.name, fixed, ds, err)
+		if ds := uncachedCheck([]*source.File{{Name: path, Bytes: []byte(fixed)}}); len(ds) != 0 {
+			t.Errorf("%s: the fixed text %q does not check clean: %v", k.name, fixed, ds)
 		}
 		// an only filter without quickfix: nothing; with a prefix of it: the fix
 		for only, n := range map[string]int{"refactor": 0, "source.organizeImports": 0, "": 1, "quickfix": 1} {

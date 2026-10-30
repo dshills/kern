@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/dshills/kern/compiler/diag"
+	"github.com/dshills/kern/compiler/incremental"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
@@ -32,6 +33,12 @@ type Options struct {
 	// Start, when not nil, holds the loop (not the reader) until it is
 	// closed, so a test can queue a batch.
 	Start <-chan struct{}
+	// CacheDir, when set, is the incremental cache's directory instead of
+	// one the server creates and removes (specs/editor-nav R8).
+	CacheDir string
+	// CacheStats is called after every cached check with the document's
+	// URI and what the cache did.
+	CacheStats func(uri string, st incremental.Stats)
 }
 
 // lifecycle states (spec §3.1)
@@ -81,6 +88,10 @@ type Server struct {
 	enc     Encoding
 	literal bool // the client declared codeActionLiteralSupport
 
+	cacheDir    string // the incremental cache; "" when it could not be made
+	cacheOwned  bool   // the server made cacheDir and removes it
+	cacheWarned bool   // the uncached fallback was logged
+
 	docs    map[string]*document // by URI
 	seq     int
 	stale   map[string]bool
@@ -90,9 +101,6 @@ type Server struct {
 
 // New makes a server reading in and writing out.
 func New(in io.Reader, out io.Writer, opts Options) *Server {
-	if opts.Check == nil {
-		opts.Check = defaultCheck
-	}
 	if opts.Resolve == nil {
 		opts.Resolve = resolve.Resolve
 	}
@@ -116,6 +124,17 @@ func (s *Server) Queued() int { return len(s.queue) }
 // input, at a read error, or when Run has returned.
 func (s *Server) Run() int {
 	defer close(s.done)
+	s.cacheDir = s.opts.CacheDir
+	if s.cacheDir == "" {
+		if dir, err := os.MkdirTemp("", "kern-lsp-cache-"); err == nil {
+			s.cacheDir, s.cacheOwned = dir, true
+		}
+	}
+	defer func() {
+		if s.cacheOwned {
+			_ = os.RemoveAll(s.cacheDir)
+		}
+	}()
 	go s.read()
 	if s.opts.Start != nil {
 		<-s.opts.Start
@@ -309,6 +328,18 @@ func (s *Server) request(method string, params json.RawMessage) (result any, rer
 			return nil, invalidParams(err)
 		}
 		return s.codeAction(p)
+	case "textDocument/definition":
+		var p textDocumentPositionParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.definition(p)
+	case "textDocument/references":
+		var p referenceParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.references(p)
 	}
 	return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + method}
 }
@@ -349,6 +380,8 @@ func (s *Server) initialize(params json.RawMessage) (any, *rpcError) {
 			"hoverProvider":              true,
 			"documentFormattingProvider": true,
 			"codeActionProvider":         codeActions,
+			"definitionProvider":         true,
+			"referencesProvider":         true,
 		},
 		"serverInfo": map[string]any{"name": "kern", "version": diag.SchemaVersion},
 	}, nil

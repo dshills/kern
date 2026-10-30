@@ -10,6 +10,7 @@ import (
 
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/diag"
+	"github.com/dshills/kern/compiler/parser"
 	"github.com/dshills/kern/compiler/project"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
@@ -38,10 +39,6 @@ type Test struct {
 // TEST_DIRECTIVE diagnostics of R3 and R4. srcs supply the bytes the
 // directive lines are read from.
 func Find(prog *resolve.Program, srcs []*source.File) ([]Test, []diag.Diagnostic) {
-	bytesOf := map[string][]byte{}
-	for _, f := range srcs {
-		bytesOf[f.Name] = f.Bytes
-	}
 	var files []*ast.File
 	for _, m := range prog.Modules {
 		if m.Std {
@@ -52,6 +49,37 @@ func Find(prog *resolve.Program, srcs []*source.File) ([]Test, []diag.Diagnostic
 				files = append(files, f)
 			}
 		}
+	}
+	return FindFiles(files, srcs)
+}
+
+// StaticDiags is the TEST_SIGNATURE and TEST_DIRECTIVE diagnostics of the
+// test files among srcs, from parsing alone (specs/editor-nav R6), for
+// `kern check` and the editor: a test file that does not parse is left to
+// the check, which reports its parse errors.
+func StaticDiags(srcs []*source.File) []diag.Diagnostic {
+	var files []*ast.File
+	for _, f := range srcs {
+		if !project.TestFile(f.Name) {
+			continue
+		}
+		af, ds := parser.Parse(f)
+		if len(ds) > 0 || af == nil {
+			continue
+		}
+		af.Name = f.Name
+		files = append(files, af)
+	}
+	_, ds := FindFiles(files, srcs)
+	return ds
+}
+
+// FindFiles is Find over parsed test files: their test functions in §2.2's
+// order and their diagnostics.
+func FindFiles(files []*ast.File, srcs []*source.File) ([]Test, []diag.Diagnostic) {
+	bytesOf := map[string][]byte{}
+	for _, f := range srcs {
+		bytesOf[f.Name] = f.Bytes
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 	var tests []Test
