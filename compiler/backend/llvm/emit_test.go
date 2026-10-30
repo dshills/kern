@@ -1,6 +1,11 @@
 package llvm_test
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -8,6 +13,7 @@ import (
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/lower"
+	"github.com/dshills/kern/compiler/opt"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
@@ -96,5 +102,153 @@ func main() -> i32 { return 0i32 }
 	}
 	if strings.Contains(text, "store [1048576 x i8]") || strings.Contains(text, "load [1048576 x i8]") {
 		t.Fatalf("1 MiB aggregate moved through a register:\n%s", text)
+	}
+}
+
+// ---- cross-file inlining (specs/cross-file-inlining/SPEC.md R5, R7) ----
+
+// emitFiles lowers a multi-file program, runs the passes of the given
+// configuration and emits it, with debug sources when debug is set.
+func emitFiles(t *testing.T, files map[string]string, optLevel string, debug bool) string {
+	t.Helper()
+	names := make([]string, 0, len(files))
+	for n := range files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var srcs []*source.File
+	for _, n := range names {
+		srcs = append(srcs, &source.File{Name: n, Bytes: []byte(files[n])})
+	}
+	prog := resolve.ResolveFor(srcs, optLevel == "release")
+	if len(prog.Diags) > 0 {
+		t.Fatalf("resolve: %s", prog.Diags[0].Message)
+	}
+	if ds := check.Check(prog); len(ds) > 0 {
+		t.Fatalf("check: %s", ds[0].Message)
+	}
+	mod, ds := lower.Lower(prog)
+	if len(ds) > 0 {
+		t.Fatalf("lower: %s", ds[0].Message)
+	}
+	if err := opt.Run(mod, opt.OptionsFor(optLevel)); err != nil {
+		t.Fatalf("opt: %v", err)
+	}
+	lo := llvm.Options{Triple: "aarch64-apple-macosx"}
+	if debug {
+		lo.Sources = map[string][]byte{"std/core.kern": resolve.Prelude(optLevel == "release")}
+		for _, f := range srcs {
+			lo.Sources[f.Name] = f.Bytes
+		}
+	}
+	text, errs := llvm.EmitWith(mod, lo)
+	if len(errs) > 0 {
+		t.Fatalf("emit: %v", errs[0])
+	}
+	return text
+}
+
+// crossFileProgram is a two-file program whose imported helper has a
+// bounds check on line 12 of lib/lib.kern, a line app.kern does not have.
+var crossFileProgram = map[string]string{
+	"app.kern": `module app
+import "lib"
+func main() -> i32 {
+    xs := [1u64, 2u64, 3u64]
+    print_u64(lib.Pick(xs[0usize:3usize], 1usize))
+    println()
+    return 0i32
+}
+`,
+	"lib/lib.kern": "module lib\n\n\n\n\n\n\n\n\n\nfunc Pick(xs: view[[]u64], i: usize) -> u64 {\n    return xs[i]\n}\n",
+}
+
+func TestEmitCrossFileTrapFile(t *testing.T) {
+	text := emitFiles(t, crossFileProgram, "release", false)
+	if strings.Contains(text, "call i64 @lib.Pick(") || strings.Contains(text, "define i64 @lib.Pick(") {
+		t.Fatalf("lib.Pick must be inlined and not emitted\n%s", text)
+	}
+	// main's own check (the slice bounds) is proven, so the copied check
+	// is the only trap edge, and it is in another file than main's: the
+	// landing block takes the file by phi, naming lib's constant
+	lib := regexp.MustCompile(`(@kern\.file\.\d+) = private constant \[13 x i8\] c"lib/lib\.kern\\00"`).FindStringSubmatch(text)
+	if lib == nil {
+		t.Fatalf("no file constant for lib/lib.kern\n%s", text)
+	}
+	phi := regexp.MustCompile(`%trap\.file = phi ptr (.*)`).FindStringSubmatch(text)
+	if phi == nil {
+		t.Fatalf("the trap landing block of main must take the file by phi\n%s", text)
+	}
+	if !strings.Contains(phi[1], lib[1]+",") {
+		t.Fatalf("the phi must name lib's file: %s", phi[0])
+	}
+	if !strings.Contains(text, `c"app.kern\00"`) {
+		t.Fatalf("missing file constant for app.kern\n%s", text)
+	}
+	if n := strings.Count(text, "%trap.file = phi"); n != 1 {
+		t.Fatalf("expected one file phi (main's), got %d\n%s", n, text)
+	}
+	// a one-file program's landing blocks are as before: no phi for the
+	// file, and a library function (Vec.get, with its own checks)
+	// reports the file its caller passed
+	one := emit(t, `module t
+func pick(xs: view[[]u64], i: usize) -> u64 { return xs[i] }
+func main() -> i32 {
+    xs := [1u64, 2u64, 3u64]
+    print_u64(pick(xs[0usize:3usize], 1usize))
+    println()
+    v := Vec[u64].new()
+    v.push(4u64)
+    print_u64(v.get(0usize))
+    println()
+    return 0i32
+}
+`)
+	if strings.Contains(one, "%trap.file") {
+		t.Fatalf("a one-file program takes no file phi\n%s", one)
+	}
+	if !strings.Contains(one, "i64 %trap.end, ptr %span.f)") {
+		t.Fatalf("a library function's landing block must report its caller's file\n%s", one)
+	}
+}
+
+func TestEmitCrossFileDebugScope(t *testing.T) {
+	text := emitFiles(t, crossFileProgram, "release", true)
+	file := regexp.MustCompile(`!(\d+) = !DIFile\(filename: "lib\.kern", directory: "lib"\)`).FindStringSubmatch(text)
+	if file == nil {
+		t.Fatalf("no DIFile for lib/lib.kern\n%s", text)
+	}
+	lex := regexp.MustCompile(`!(\d+) = !DILexicalBlockFile\(scope: !\d+, file: !` + file[1] + `, discriminator: 0\)`).FindStringSubmatch(text)
+	if lex == nil {
+		t.Fatalf("no DILexicalBlockFile for lib/lib.kern\n%s", text)
+	}
+	if !regexp.MustCompile(`!DILocation\(line: 12, column: \d+, scope: !` + lex[1] + `\)`).MatchString(text) {
+		t.Fatalf("the copied check's location must be line 12 of lib/lib.kern in that scope\n%s", text)
+	}
+	one := emitFiles(t, map[string]string{"t.kern": `module t
+func pick(xs: view[[]u64], i: usize) -> u64 { return xs[i] }
+func main() -> i32 {
+    xs := [1u64, 2u64, 3u64]
+    print_u64(pick(xs[0usize:3usize], 1usize))
+    println()
+    return 0i32
+}
+`}, "release", true)
+	if strings.Contains(one, "DILexicalBlockFile") {
+		t.Fatalf("a one-file program has no lexical block file\n%s", one)
+	}
+	// the toolchain accepts the module (compiled to an object, no link)
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		t.Skip("clang not found")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.ll")
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(clang, "-x", "ir", "-c", "-Wno-override-module", "-o", filepath.Join(dir, "app.o"), path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clang rejected the module: %v\n%s\n%s", err, out, text)
 	}
 }

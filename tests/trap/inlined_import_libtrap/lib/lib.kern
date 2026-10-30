@@ -1,0 +1,20 @@
+module lib
+struct Guard nocopy {
+    Id: u64
+}
+impl Guard {
+    destructor(edit self) {
+        print_str("destructor ran")
+        println()
+    }
+}
+func Make(id: u64) -> Guard {
+    return Guard{Id: id}
+}
+func Last(xs: [3]u64, i: usize) -> u64 {
+    v := Vec[u64].new()
+    v.push(xs[0usize])
+    v.push(xs[1usize])
+    v.push(xs[2usize])
+    return v.get(i)
+}

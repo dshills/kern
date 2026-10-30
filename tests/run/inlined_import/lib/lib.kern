@@ -1,0 +1,27 @@
+module lib
+struct Tok nocopy {
+    Id: u64
+}
+impl Tok {
+    destructor(edit self) {
+        print_str("drop ")
+        print_u64(self.Id)
+        println()
+    }
+}
+struct Pair {
+    Lo: u64
+    Hi: u64
+}
+func Make(id: u64) -> Tok {
+    return Tok{Id: id}
+}
+func MakePair(lo: u64, hi: u64) -> Pair {
+    return Pair{Lo: lo, Hi: hi}
+}
+func Use(tk: own Tok, p: view[Pair], first: bool) -> u64 {
+    if first {
+        return tk.Id + p.Lo
+    }
+    return tk.Id + p.Hi
+}

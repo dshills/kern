@@ -66,8 +66,11 @@ func Layout(prog *resolve.Program, target string) diag.ShowLayoutResult {
 	return res
 }
 
-func loc(f *ir.Func, p ast.Pos) diag.Loc {
-	return diag.Loc{File: f.File, Span: diag.Span{Start: p.Start, End: p.End}}
+// loc locates a position of an instruction in block b of f: in the
+// block's effective file, which is the callee's for a block the inliner
+// copied from another file (specs/cross-file-inlining/SPEC.md R8).
+func loc(f *ir.Func, b *ir.Block, p ast.Pos) diag.Loc {
+	return diag.Loc{File: b.FileIn(f), Span: diag.Span{Start: p.Start, End: p.End}}
 }
 
 // Copies reports every bitwise copy of an aggregate Copy value (a load of a
@@ -84,12 +87,12 @@ func Copies(mod *ir.Module, target string) diag.ShowCopiesResult {
 				switch i := in.(type) {
 				case *ir.Load:
 					if isAggregateCopy(i.Dst.Type) {
-						res.Copies = append(res.Copies, diag.Copy{Loc: loc(f, i.Pos), Type: i.Dst.Type.String(), Bytes: layout.Of(i.Dst.Type).Size, Kind: diag.CopyBitwise, Heap: false, Label: diag.LabelProven})
+						res.Copies = append(res.Copies, diag.Copy{Loc: loc(f, b, i.Pos), Type: i.Dst.Type.String(), Bytes: layout.Of(i.Dst.Type).Size, Kind: diag.CopyBitwise, Heap: false, Label: diag.LabelProven})
 					}
 				case *ir.Call:
 					if (i.Intrinsic == "clone" || isCloneCall(mod, i)) && len(i.Dsts) == 1 {
 						t := i.Dsts[0].Type
-						res.Copies = append(res.Copies, diag.Copy{Loc: loc(f, i.Pos), Type: t.String(), Bytes: layout.Of(t).Size, Kind: diag.CopyExplicitDeep, Heap: !resolve.IsCopy(t), Label: diag.LabelProven})
+						res.Copies = append(res.Copies, diag.Copy{Loc: loc(f, b, i.Pos), Type: t.String(), Bytes: layout.Of(t).Size, Kind: diag.CopyExplicitDeep, Heap: !resolve.IsCopy(t), Label: diag.LabelProven})
 					}
 				}
 			}
@@ -173,7 +176,7 @@ func Allocations(mod *ir.Module) diag.ShowAllocationsResult {
 				if key == "clone" && (len(c.Dsts) != 1 || resolve.IsCopy(c.Dsts[0].Type)) {
 					continue
 				}
-				site := diag.AllocationSite{Loc: loc(f, c.Pos), Allocator: "system", Label: diag.LabelUnknown}
+				site := diag.AllocationSite{Loc: loc(f, b, c.Pos), Allocator: "system", Label: diag.LabelUnknown}
 				if always {
 					site.Label = diag.LabelProven
 					if len(c.TypeArgs) > 0 && c.TypeArgs[0] != nil {
@@ -218,8 +221,8 @@ func BoundsChecks(mod *ir.Module) diag.ShowBoundsChecksResult {
 		kind string
 	}
 	index := map[key]int{}
-	add := func(f *ir.Func, p ast.Pos, kind string, prov ir.Provenance) {
-		c := diag.BoundsCheck{Loc: loc(f, p), Kind: kind, Label: diag.Label(prov.Label)}
+	add := func(f *ir.Func, b *ir.Block, p ast.Pos, kind string, prov ir.Provenance) {
+		c := diag.BoundsCheck{Loc: loc(f, b, p), Kind: kind, Label: diag.Label(prov.Label)}
 		if prov.Label == "proven" && prov.ProvenBy != "" {
 			by := prov.ProvenBy
 			c.ProvenBy = &by
@@ -243,9 +246,9 @@ func BoundsChecks(mod *ir.Module) diag.ShowBoundsChecksResult {
 			for _, in := range b.Instrs {
 				switch i := in.(type) {
 				case *ir.CheckBounds:
-					add(f, i.Pos, diag.CheckBounds, i.Prov)
+					add(f, b, i.Pos, diag.CheckBounds, i.Prov)
 				case *ir.CheckOverflow:
-					add(f, i.Pos, diag.CheckOverflow, i.Prov)
+					add(f, b, i.Pos, diag.CheckOverflow, i.Prov)
 				case *ir.Call:
 					key := i.Intrinsic
 					if key == "" {
@@ -254,7 +257,7 @@ func BoundsChecks(mod *ir.Module) diag.ShowBoundsChecksResult {
 						}
 					}
 					if kind, ok := checking[key]; ok {
-						add(f, i.Pos, kind, ir.RuntimeChecked)
+						add(f, b, i.Pos, kind, ir.RuntimeChecked)
 					}
 				}
 			}

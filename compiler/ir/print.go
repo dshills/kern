@@ -65,7 +65,11 @@ func PrintFunc(sb *strings.Builder, f *Func) {
 		}
 	}
 	for _, b := range f.Blocks {
-		fmt.Fprintf(sb, "%s:\n", blockName(b))
+		if b.File != "" {
+			fmt.Fprintf(sb, "%s [file %s]:\n", blockName(b), b.File)
+		} else {
+			fmt.Fprintf(sb, "%s:\n", blockName(b))
+		}
 		for _, in := range b.Instrs {
 			fmt.Fprintf(sb, "  %s\n", printInstr(in))
 		}

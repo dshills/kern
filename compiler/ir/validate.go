@@ -11,9 +11,23 @@ import (
 // every later pass.
 func Validate(m *Module) []error {
 	var errs []error
+	// a block's File, when set, names a file some function of the module
+	// was lowered against: the backends and the reports never see a file
+	// the program did not load (specs/cross-file-inlining/SPEC.md R4)
+	declared := map[string]bool{}
+	for _, f := range m.Funcs {
+		if f.File != "" {
+			declared[f.File] = true
+		}
+	}
 	for _, f := range m.Funcs {
 		if f.Intrinsic || f.Extern != "" || f.Entry == nil {
 			continue
+		}
+		for _, b := range f.Blocks {
+			if b.File != "" && !declared[b.File] {
+				errs = append(errs, fmt.Errorf("%s: block %s: file %q is not declared by any function of the module", f.Name, blockName(b), b.File))
+			}
 		}
 		v := &validator{f: f, consts: map[*Value]bool{}, defs: map[*Value]Instr{}}
 		errs = append(errs, v.run()...)

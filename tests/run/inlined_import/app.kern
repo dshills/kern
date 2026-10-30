@@ -1,0 +1,22 @@
+//! phase: 3
+//! expect: output inlined_import
+// An imported module's helper the release build inlines across files
+// (specs/cross-file-inlining/SPEC.md R10): an own parameter with a
+// destructor (destroyed exactly once, in the copy's exit), a field read
+// through the aliased view parameter, and two return paths. The debug
+// build and the interpreter call it; all four runs print the same.
+module app
+import "lib"
+func main() -> i32 {
+    q := lib.MakePair(1u64, 7u64)
+    a := lib.Make(5u64)
+    print_u64(lib.Use(a, q, true))
+    println()
+    b := lib.Make(9u64)
+    x := lib.Use(b, q, false)
+    print_u64(x)
+    println()
+    print_str("end")
+    println()
+    return 0i32
+}

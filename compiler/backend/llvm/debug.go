@@ -17,14 +17,15 @@ type debugInfo struct {
 	lines   map[string][]int // newline offsets per file, for binary search
 	files   map[string]int   // file name -> metadata id
 	subs    map[string]int   // function name -> DISubprogram id
-	locs    map[string]int   // "sub:line:col" -> DILocation id
+	lexical map[string]int   // "sub:file" -> DILexicalBlockFile id, for blocks copied from another file
+	locs    map[string]int   // "scope:line:col" -> DILocation id
 	nodes   []string         // metadata nodes in id order
 	cuID    int
 	typeID  int
 }
 
 func newDebugInfo(sources map[string][]byte) *debugInfo {
-	d := &debugInfo{sources: sources, lines: map[string][]int{}, files: map[string]int{}, subs: map[string]int{}, locs: map[string]int{}}
+	d := &debugInfo{sources: sources, lines: map[string][]int{}, files: map[string]int{}, subs: map[string]int{}, lexical: map[string]int{}, locs: map[string]int{}}
 	d.cuID = d.add("") // filled once the main file is known
 	d.typeID = d.add("!DISubroutineType(types: !{null})")
 	return d
@@ -106,18 +107,34 @@ func (d *debugInfo) subprogram(f *ir.Func) string {
 	return fmt.Sprintf("!%d", id)
 }
 
-// location returns the DILocation reference for a position in f.
-func (d *debugInfo) location(f *ir.Func, p ast.Pos) string {
+// location returns the DILocation reference for a position p of an
+// instruction in block b of f. A block the inliner copied from a callee
+// in another file (b.File set) scopes its locations in a
+// DILexicalBlockFile for that file, the form for code from another file
+// inside one function, with line and column computed against that file;
+// b nil (a terminator) or an empty position (replaced by f's) is in f's
+// own file and scope (specs/cross-file-inlining/SPEC.md R7).
+func (d *debugInfo) location(f *ir.Func, b *ir.Block, p ast.Pos) string {
 	sub := d.subprogram(f)
+	scope, file := sub, f.File
 	if p.Start == 0 && p.End == 0 {
 		p = f.Pos
+	} else if b != nil && b.File != "" && b.File != f.File {
+		file = b.File
+		key := sub + ":" + file
+		id, ok := d.lexical[key]
+		if !ok {
+			id = d.add(fmt.Sprintf("!DILexicalBlockFile(scope: %s, file: !%d, discriminator: 0)", sub, d.file(file)))
+			d.lexical[key] = id
+		}
+		scope = fmt.Sprintf("!%d", id)
 	}
-	line, col := d.lineCol(f.File, p.Start)
-	key := fmt.Sprintf("%s:%d:%d", sub, line, col)
+	line, col := d.lineCol(file, p.Start)
+	key := fmt.Sprintf("%s:%d:%d", scope, line, col)
 	if id, ok := d.locs[key]; ok {
 		return fmt.Sprintf("!%d", id)
 	}
-	id := d.add(fmt.Sprintf("!DILocation(line: %d, column: %d, scope: %s)", line, col, sub))
+	id := d.add(fmt.Sprintf("!DILocation(line: %d, column: %d, scope: %s)", line, col, scope))
 	d.locs[key] = id
 	return fmt.Sprintf("!%d", id)
 }

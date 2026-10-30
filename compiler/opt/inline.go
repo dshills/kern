@@ -43,8 +43,9 @@ var MaxGrowth = 512
 // charged against the caller's MaxGrowth: charging it would starve the
 // small helpers at the sites after it (docs/reports/inliner-sizing.md
 // has the measurement). The callee is otherwise judged like any other
-// (no out parameters, no returned accesses, not recursive, same file,
-// not library).
+// (no out parameters, no returned accesses, not recursive, not library).
+// A callee declared in another file is judged like any other: the copied
+// blocks carry its file (specs/cross-file-inlining/SPEC.md).
 var InlineSingleSite = true
 
 // MaxCallerSize bounds a function's size through single-site copies: a
@@ -144,8 +145,6 @@ func (in *inliner) eligible(f, g *ir.Func) bool {
 		return false
 	case g.Library || g.Extern != "" || g.Intrinsic:
 		return false // library bodies keep their call-site trap spans and reporting
-	case g.File != f.File:
-		return false // positions are offsets within the function's file
 	case g.Release != "":
 		return false
 	case recursive[g]:
@@ -565,7 +564,8 @@ func (m *copier) place(p ir.Place) ir.Place {
 }
 
 // instr copies one instruction with every reference remapped; positions
-// are kept verbatim (the callee is in the caller's file).
+// are kept verbatim (offsets in the callee's file, which the copied block
+// names when it is not the caller's).
 func (m *copier) instr(in ir.Instr) ir.Instr {
 	switch i := in.(type) {
 	case *ir.Const:
@@ -714,12 +714,21 @@ func rewrite(f *ir.Func, b *ir.Block, k int, c *ir.Call, g *ir.Func) []*ir.Block
 			results = append(results, rl)
 		}
 	}
-	// blocks
+	// blocks: a copy carries its source block's file when that is not the
+	// caller's declaring file, so that the positions it copies verbatim
+	// (offsets in the callee's file) are reported against the right file;
+	// an override carried from an earlier copy into g is normalized the
+	// same way (empty again when the copy returns to its own file). The
+	// continuation holds the rest of b and is in b's file.
 	for _, blk := range g.Blocks {
-		m.blocks[blk] = &ir.Block{ID: nextBlock, Name: blk.Name}
+		nb := &ir.Block{ID: nextBlock, Name: blk.Name}
+		if file := blk.FileIn(g); file != f.File {
+			nb.File = file
+		}
+		m.blocks[blk] = nb
 		nextBlock++
 	}
-	cont := &ir.Block{ID: nextBlock, Name: "inline.join"}
+	cont := &ir.Block{ID: nextBlock, Name: "inline.join", File: b.File}
 	for _, blk := range g.Blocks {
 		nb := m.blocks[blk]
 		if blk == g.Entry {

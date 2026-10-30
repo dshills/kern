@@ -339,18 +339,43 @@ func (fe *fnEmit) spanFile(p ast.Pos) string {
 	return fe.span(p) + ", ptr " + fe.file()
 }
 
-// file renders the file-name operand of a trap record: inside a library
-// function the one its caller passed (with the span), otherwise this
-// function's own file; null, for a function without one, names the
-// program's file in the record.
+// file renders the file-name operand of a trap record for the block being
+// written: inside a library function the one its caller passed (with the
+// span), otherwise the block's effective file (the callee's, for a block
+// the inliner copied from another file; else this function's own); null,
+// for a function without one, names the program's file in the record.
 func (fe *fnEmit) file() string {
 	if fe.f.Library {
 		return "%span.f"
 	}
-	if fe.f.File == "" {
+	return fe.fileOperand(fe.blockFile())
+}
+
+// blockFile is the effective file of the block being written: its own
+// when the inliner copied it from a callee in another file, else the
+// function's.
+func (fe *fnEmit) blockFile() string {
+	if fe.cur != nil {
+		return fe.cur.FileIn(fe.f)
+	}
+	return fe.f.File
+}
+
+// funcFile renders the function's own file as the operand, whatever block
+// is being written: the stack check and the trap landing block, which
+// belong to no block.
+func (fe *fnEmit) funcFile() string {
+	if fe.f.Library {
+		return "%span.f"
+	}
+	return fe.fileOperand(fe.f.File)
+}
+
+func (fe *fnEmit) fileOperand(name string) string {
+	if name == "" {
 		return "null"
 	}
-	return fe.e.fileSym(fe.f.File)
+	return fe.e.fileSym(name)
 }
 
 // fileSym is the constant holding a file's name, emitted once.

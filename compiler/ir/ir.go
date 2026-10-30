@@ -89,6 +89,23 @@ type Block struct {
 	Name   string
 	Instrs []Instr
 	Term   Term
+	// File is the file the block's positions are offsets in, when it is
+	// not the function's declaring file: set only by the inliner, on a
+	// block copied from a callee declared in another file
+	// (specs/cross-file-inlining/SPEC.md §2). Empty on every block the
+	// lowering creates. FileIn gives the effective file.
+	File string
+}
+
+// FileIn is the effective file of the block's positions in f: its own
+// File when set, else f's declaring file. Every consumer that pairs an
+// instruction's position with a file (trap records, debug locations, the
+// machine-API reports) reads it here.
+func (b *Block) FileIn(f *Func) string {
+	if b.File != "" {
+		return b.File
+	}
+	return f.File
 }
 
 // Provenance tags a check (spec §7 invariant 3).

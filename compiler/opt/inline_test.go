@@ -37,6 +37,9 @@ func lowerFiles(t *testing.T, files map[string]string) *ir.Module {
 	}
 	for _, name := range names {
 		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(path, []byte(files[name]), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -462,27 +465,6 @@ func main() -> i32 {
 	t.Fatalf("library calls must stay calls\n%s", ir.Print(inl))
 }
 
-func TestInlineCrossFileStaysCall(t *testing.T) {
-	files := map[string]string{
-		"a.kern": `module t
-func main() -> i32 {
-    print_u64(twice(4u64))
-    println()
-    return 0i32
-}
-`,
-		"b.kern": `module t
-func twice(n: u64) -> u64 { return n * 2u64 }
-`,
-	}
-	mod := lowerFiles(t, files)
-	Inline(mod)
-	validate(t, mod)
-	if got := calls(mod.Func("t.main")); len(got) != 1 || got[0] != "t.twice" {
-		t.Fatalf("a callee in another file must stay a call, got %v", got)
-	}
-}
-
 func TestInlineIndirectStaysCall(t *testing.T) {
 	src := `module t
 func twice(n: u64) -> u64 { return n * 2u64 }
@@ -817,5 +799,356 @@ func TestInlineSingleSiteChainBounded(t *testing.T) {
 	// more than one level
 	if n := size(inl.Func("t.main")); n < 2*size(lowerSrc(t, src).Func("t.c1")) {
 		t.Fatalf("main is %d, expected it to hold more than one level of the chain", n)
+	}
+}
+
+// ---- cross-file inlining (specs/cross-file-inlining/SPEC.md) ----
+
+// sameFiles lowers a multi-file program twice, inlines one copy, and
+// compares the interpreter's output of both; it returns the inlined module.
+func sameFiles(t *testing.T, files map[string]string) *ir.Module {
+	t.Helper()
+	plain := lowerFiles(t, files)
+	inl := lowerFiles(t, files)
+	Inline(inl)
+	validate(t, inl)
+	wantOut, wantStatus := run(t, plain)
+	gotOut, gotStatus := run(t, inl)
+	if gotOut != wantOut || gotStatus != wantStatus {
+		t.Fatalf("inlined program differs: status %d vs %d\n--- plain\n%s--- inlined\n%s\n%s", gotStatus, wantStatus, wantOut, gotOut, ir.Print(inl))
+	}
+	return inl
+}
+
+// checkText returns, for every check or trap of f, the source text its
+// position denotes in its block's effective file, keyed by the base name
+// of that file: the pair (file, position) must identify the source.
+func checkText(t *testing.T, files map[string]string, f *ir.Func) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
+	for _, b := range f.Blocks {
+		for _, in := range b.Instrs {
+			var pos ast.Pos
+			switch i := in.(type) {
+			case *ir.CheckOverflow:
+				pos = i.Pos
+			case *ir.CheckBounds:
+				pos = i.Pos
+			case *ir.Trap:
+				pos = i.Pos
+			default:
+				continue
+			}
+			file := b.FileIn(f)
+			var name, src string
+			for n, s := range files {
+				if strings.HasSuffix(file, "/"+n) {
+					name, src = n, s
+				}
+			}
+			if name == "" {
+				t.Fatalf("block %s of %s is in %q, not a file of the program", b.Name, f.Name, file)
+			}
+			if pos.End > len(src) {
+				t.Fatalf("position %d-%d of a check in %s is past the end of %s", pos.Start, pos.End, f.Name, name)
+			}
+			out[name] = append(out[name], src[pos.Start:pos.End])
+		}
+	}
+	return out
+}
+
+func hasText(xs []string, sub string) bool {
+	for _, x := range xs {
+		if strings.Contains(x, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// blockFiles returns each block's File keyed by name (R3 assertions).
+func blockFiles(f *ir.Func) map[string]string {
+	out := map[string]string{}
+	for _, b := range f.Blocks {
+		out[b.Name] = b.File
+	}
+	return out
+}
+
+func TestInlineCrossFile(t *testing.T) {
+	files := map[string]string{
+		"a.kern": `module t
+func main() -> i32 {
+    print_u64(twice(4u64))
+    println()
+    return 0i32
+}
+`,
+		"b.kern": `module t
+func twice(n: u64) -> u64 { return n * 2u64 }
+`,
+	}
+	mod := sameFiles(t, files)
+	main := mod.Func("t.main")
+	if got := calls(main); len(got) != 0 {
+		t.Fatalf("a callee in another file must be inlined, got calls %v\n%s", got, ir.Print(mod))
+	}
+	if !mod.Func("t.twice").Inlined {
+		t.Fatal("twice has no other reference and must be marked Inlined")
+	}
+	texts := checkText(t, files, main)
+	if !hasText(texts["b.kern"], "n * 2u64") {
+		t.Fatalf("the copied overflow check must be in a block naming b.kern: %v\n%s", texts, ir.Print(mod))
+	}
+	bf := blockFiles(main)
+	if main.Entry.File != "" || bf["inline.join"] != "" {
+		t.Fatalf("the call's block and the continuation stay in the caller's file: %v", bf)
+	}
+	if !strings.Contains(ir.Print(mod), "[file ") {
+		t.Fatalf("the printer must show the copied block's file\n%s", ir.Print(mod))
+	}
+}
+
+func TestInlineImportedModule(t *testing.T) {
+	files := map[string]string{
+		"app.kern": `module app
+import "lib"
+func main() -> i32 {
+    print_u64(lib.Twice(4u64))
+    println()
+    return 0i32
+}
+`,
+		"lib/lib.kern": `module lib
+func Twice(n: u64) -> u64 { return n * 2u64 }
+`,
+	}
+	mod := sameFiles(t, files)
+	main := mod.Func("app.main")
+	if got := calls(main); len(got) != 0 {
+		t.Fatalf("a callee in an imported module must be inlined, got calls %v\n%s", got, ir.Print(mod))
+	}
+	if !mod.Func("lib.Twice").Inlined {
+		t.Fatal("lib.Twice has no other reference and must be marked Inlined")
+	}
+	texts := checkText(t, files, main)
+	if !hasText(texts["lib/lib.kern"], "n * 2u64") {
+		t.Fatalf("the copied overflow check must be in a block naming lib/lib.kern: %v", texts)
+	}
+}
+
+func TestInlineCrossFileOutParamStaysCall(t *testing.T) {
+	files := map[string]string{
+		"a.kern": `module t
+func main() -> i32 {
+    var v: u64
+    fill(out v)
+    print_u64(v)
+    println()
+    return 0i32
+}
+`,
+		"b.kern": `module t
+func fill(o: out u64) { o = 7u64 }
+`,
+	}
+	mod := sameFiles(t, files)
+	if got := calls(mod.Func("t.main")); len(got) != 1 || got[0] != "t.fill" {
+		t.Fatalf("an out-parameter callee stays a call whatever its file, got %v", got)
+	}
+}
+
+func TestInlineCrossFileLibraryStaysCall(t *testing.T) {
+	files := map[string]string{
+		"a.kern": `module t
+func main() -> i32 {
+    print_u64(first())
+    println()
+    return 0i32
+}
+`,
+		"b.kern": `module t
+func first() -> u64 {
+    v := Vec[u64].new()
+    v.push(4u64)
+    return v.get(0usize)
+}
+`,
+	}
+	mod := sameFiles(t, files)
+	for _, callee := range calls(mod.Func("t.main")) {
+		if strings.HasPrefix(callee, "Vec.") {
+			return
+		}
+	}
+	t.Fatalf("library calls stay calls after a cross-file copy\n%s", ir.Print(mod))
+}
+
+func TestInlineCrossFileChain(t *testing.T) {
+	files := map[string]string{
+		"a.kern": `module t
+func inc(n: u64) -> u64 { return n + 1u64 }
+`,
+		"b.kern": `module t
+func twice_inc(n: u64) -> u64 { return inc(n) * 2u64 }
+`,
+		"c.kern": `module t
+func main() -> i32 {
+    print_u64(twice_inc(4u64))
+    println()
+    return 0i32
+}
+`,
+	}
+	mod := sameFiles(t, files)
+	main := mod.Func("t.main")
+	if got := calls(main); len(got) != 0 {
+		t.Fatalf("both levels must be inlined, got %v\n%s", got, ir.Print(mod))
+	}
+	texts := checkText(t, files, main)
+	if !hasText(texts["a.kern"], "n + 1u64") || !hasText(texts["b.kern"], "inc(n) * 2u64") {
+		t.Fatalf("each copied check must name the file it came from: %v\n%s", texts, ir.Print(mod))
+	}
+}
+
+func TestInlineCrossFileRoundTrip(t *testing.T) {
+	files := map[string]string{
+		"a.kern": `module t
+func inc(n: u64) -> u64 { return n + 1u64 }
+func main() -> i32 {
+    print_u64(twice_inc(4u64))
+    println()
+    return 0i32
+}
+`,
+		"b.kern": `module t
+func twice_inc(n: u64) -> u64 { return inc(n) * 2u64 }
+`,
+	}
+	mod := sameFiles(t, files)
+	main := mod.Func("t.main")
+	if got := calls(main); len(got) != 0 {
+		t.Fatalf("both levels must be inlined, got %v\n%s", got, ir.Print(mod))
+	}
+	texts := checkText(t, files, main)
+	if !hasText(texts["a.kern"], "n + 1u64") || !hasText(texts["b.kern"], "inc(n) * 2u64") {
+		t.Fatalf("each copied check must name the file it came from: %v\n%s", texts, ir.Print(mod))
+	}
+	// the block holding inc's check came back to its own file: File empty
+	for _, b := range main.Blocks {
+		for _, in := range b.Instrs {
+			if c, ok := in.(*ir.CheckOverflow); ok && c.Op == "add" && b.File != "" {
+				t.Fatalf("a copy returning to its own file carries no File, got %q", b.File)
+			}
+		}
+	}
+}
+
+func TestInlineSameFileNoBlockFile(t *testing.T) {
+	_, inl := same(t, helperSrc)
+	for _, f := range inl.Funcs {
+		for _, b := range f.Blocks {
+			if b.File != "" {
+				t.Fatalf("a one-file program has no block file, %s has %q", f.Name, b.File)
+			}
+		}
+	}
+}
+
+func TestLowerLeavesBlockFileEmpty(t *testing.T) {
+	mod := lowerFiles(t, map[string]string{
+		"a.kern": "module t\nfunc main() -> i32 { return i32(twice(1u64)) }\n",
+		"b.kern": "module t\nfunc twice(n: u64) -> u64 { return n * 2u64 }\n",
+	})
+	for _, f := range mod.Funcs {
+		for _, b := range f.Blocks {
+			if b.File != "" {
+				t.Fatalf("lowering sets no block file, %s has %q", f.Name, b.File)
+			}
+		}
+	}
+}
+
+func TestValidateBlockFile(t *testing.T) {
+	files := map[string]string{
+		"a.kern": "module t\nfunc main() -> i32 { return i32(twice(1u64)) }\n",
+		"b.kern": "module t\nfunc twice(n: u64) -> u64 { return n * 2u64 }\n",
+	}
+	mod := lowerFiles(t, files)
+	Inline(mod)
+	validate(t, mod)
+	main := mod.Func("t.main")
+	var copied *ir.Block
+	for _, b := range main.Blocks {
+		if b.File != "" {
+			copied = b
+		}
+	}
+	if copied == nil {
+		t.Fatal("no copied block carries a file")
+	}
+	saved := copied.File
+	copied.File = "nowhere.kern"
+	errs := ir.Validate(mod)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "not declared by any function") {
+		t.Fatalf("an undeclared block file must be the one error, got %v", errs)
+	}
+	copied.File = main.File // another function's file: declared
+	if errs := ir.Validate(mod); len(errs) > 0 {
+		t.Fatalf("a declared file validates, got %v", errs)
+	}
+	copied.File = saved
+}
+
+func TestInlineCrossFileDeterministic(t *testing.T) {
+	files := map[string]string{
+		"a.kern": `module t
+func inc(n: u64) -> u64 { return n + 1u64 }
+func main() -> i32 {
+    print_u64(twice_inc(4u64) + twice_inc(5u64))
+    println()
+    return 0i32
+}
+`,
+		"b.kern": `module t
+func twice_inc(n: u64) -> u64 { return inc(n) * 2u64 }
+`,
+	}
+	var prints []string
+	for i := 0; i < 2; i++ {
+		mod := lowerFiles(t, files)
+		Inline(mod)
+		prints = append(prints, labelDir.ReplaceAllString(ir.Print(mod), `[file `))
+	}
+	if prints[0] != prints[1] {
+		t.Fatalf("two runs differ:\n%s\n---\n%s", prints[0], prints[1])
+	}
+}
+
+// labelDir strips the temporary directory from a printed block's file.
+var labelDir = regexp.MustCompile(`\[file [^\]]*/`)
+
+func TestPrintBlockFile(t *testing.T) {
+	mod := lowerFiles(t, map[string]string{
+		"a.kern": "module t\nfunc main() -> i32 { return i32(twice(1u64)) }\n",
+		"b.kern": "module t\nfunc twice(n: u64) -> u64 { return n * 2u64 }\n",
+	})
+	Inline(mod)
+	text := ir.Print(mod)
+	labels := regexp.MustCompile(`(?m)^(bb\d+\.\S+)( \[file (\S+)\])?:$`).FindAllStringSubmatch(text, -1)
+	withFile, without := 0, 0
+	for _, l := range labels {
+		if l[2] != "" {
+			withFile++
+			if !strings.HasSuffix(l[3], "/b.kern") {
+				t.Fatalf("label %q names a file other than b.kern", l[0])
+			}
+		} else {
+			without++
+		}
+	}
+	if withFile == 0 || without == 0 {
+		t.Fatalf("expected labels with and without a file, got %d and %d\n%s", withFile, without, text)
 	}
 }

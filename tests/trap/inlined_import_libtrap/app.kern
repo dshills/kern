@@ -1,0 +1,20 @@
+//! phase: 3
+//! expect: trap bounds
+//! trap-file: lib/lib.kern
+// The inlined helper's trap is raised by a library call it makes
+// (Vec.get past the length): the library reports the user-level call
+// that entered it, which after inlining lies in a block copied from
+// lib/lib.kern, so the record names that file in both engines
+// (specs/cross-file-inlining/SPEC.md R5, R6).
+module app
+import "lib"
+func main() -> i32 {
+    g := lib.Make(7u64)
+    print_u64(lib.Last([1u64, 2u64, 3u64], 2usize))
+    println()
+    print_u64(lib.Last([1u64, 2u64, 3u64], 5usize))
+    print_str("after the trap")
+    println()
+    print_u64(g.Id)
+    return 0i32
+}

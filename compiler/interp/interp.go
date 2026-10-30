@@ -338,8 +338,13 @@ func trapKindIndex(k string) int {
 
 func (it *Interp) trap(kind string, pos ast.Pos) {
 	file := it.file
-	if it.cur != nil && it.cur.file != "" {
-		file = it.cur.file
+	if it.cur != nil {
+		if it.cur.file != "" {
+			file = it.cur.file
+		}
+		if !it.cur.f.Library && it.cur.block != nil && it.cur.block.File != "" {
+			file = it.cur.block.File
+		}
 	}
 	panic(&Trap{Kind: kind, Pos: pos, File: file})
 }
@@ -356,6 +361,10 @@ type frame struct {
 	// user-level call that entered the library, which every trap inside
 	// reports in place of its own position.
 	span *ast.Pos
+	// block is the one being executed: a trap in a block the inliner
+	// copied from a callee in another file reports that file
+	// (specs/cross-file-inlining/SPEC.md R6).
+	block *ir.Block
 }
 
 // at returns the position a trap at pos reports from this frame.
@@ -418,7 +427,13 @@ func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
 		if span == nil {
 			span = &ast.Pos{}
 		} else if prev != nil {
+			// the effective file of the caller's current block, as the
+			// hidden file argument is natively: a copied block names the
+			// callee's file (specs/cross-file-inlining/SPEC.md R6)
 			fr.file = prev.file
+			if !prev.f.Library && prev.block != nil {
+				fr.file = prev.block.FileIn(prev.f)
+			}
 		}
 		fr.span = span
 	}
@@ -444,6 +459,7 @@ func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
 	}
 	b := f.Entry
 	for {
+		fr.block = b
 		for _, in := range b.Instrs {
 			it.exec(fr, in)
 		}

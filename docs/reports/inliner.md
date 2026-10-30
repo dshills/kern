@@ -153,5 +153,6 @@ of unknown origin forgets the locals it may reach, like the other writes
 ## Deferred (PLAN.md 6.6)
 
 Library callees, cross-file inlining and inlining through function values
-stay as planned. `parse` itself (size 101) is not inlined and remains the
+stay as planned. (Cross-file inlining landed on 2026-10-30,
+`docs/reports/cross-file-inlining.md`: a copied block carries its file.) `parse` itself (size 101) is not inlined and remains the
 call per packet that separates the parser from Rust.

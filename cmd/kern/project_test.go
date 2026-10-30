@@ -116,6 +116,37 @@ func TestDiscoveryRunsFixtures(t *testing.T) {
 	}
 }
 
+// TestCrossFileInliningIR: an imported module's helper is inlined in
+// release and called in debug, the copied block's label names the
+// module's file, and the release IR is deterministic
+// (specs/cross-file-inlining/SPEC.md R9, R10, R13).
+func TestCrossFileInliningIR(t *testing.T) {
+	for _, fx := range []string{"trap/inlined_import_trap", "trap/inlined_import_libtrap", "run/inlined_import"} {
+		dir := copyFixture(t, fx)
+		t.Chdir(dir)
+		code, release, errb := invoke(t, "", "emit-ir", "--opt=release", "app.kern")
+		if code != 0 {
+			t.Fatalf("%s: emit-ir release exit %d\n%s%s", fx, code, release, errb)
+		}
+		if strings.Contains(release, "call lib.") {
+			t.Errorf("%s: release IR still calls into lib:\n%s", fx, release)
+		}
+		if !strings.Contains(release, "[file lib/lib.kern]") {
+			t.Errorf("%s: release IR has no block labelled with the module's file:\n%s", fx, release)
+		}
+		code, debug, errb := invoke(t, "", "emit-ir", "--opt=debug", "app.kern")
+		if code != 0 {
+			t.Fatalf("%s: emit-ir debug exit %d\n%s%s", fx, code, debug, errb)
+		}
+		if !strings.Contains(debug, "call lib.") || strings.Contains(debug, "[file ") {
+			t.Errorf("%s: debug IR must call into lib and label no block with a file:\n%s", fx, debug)
+		}
+		if _, again, _ := invoke(t, "", "emit-ir", "--opt=release", "app.kern"); again != release {
+			t.Errorf("%s: two release emit-ir runs differ", fx)
+		}
+	}
+}
+
 // TestManifestProject: the manifest marks the root, supplies the entry and
 // the settings, and is found by walking up (A2, A5, A7, R18, R23).
 func TestManifestProject(t *testing.T) {

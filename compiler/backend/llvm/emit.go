@@ -219,6 +219,7 @@ type trapEdge struct {
 	kind  int
 	start string
 	end   string
+	file  string // the effective file of the check's block ("" for none); rendered at the landing block
 }
 
 func (fe *fnEmit) next(prefix string) string {
@@ -523,12 +524,12 @@ func (e *emitter) function(f *ir.Func) {
 		fe.curLabel = fe.labels[b]
 		for _, in := range b.Instrs {
 			if e.dbg != nil {
-				fe.dbgLoc = e.dbg.location(f, instrPos(in))
+				fe.dbgLoc = e.dbg.location(f, b, instrPos(in))
 			}
 			fe.instr(in)
 		}
 		if e.dbg != nil {
-			fe.dbgLoc = e.dbg.location(f, f.Pos)
+			fe.dbgLoc = e.dbg.location(f, nil, f.Pos)
 		}
 		fe.term(b.Term)
 	}
@@ -536,17 +537,35 @@ func (e *emitter) function(f *ir.Func) {
 		// one trap landing block per function: every check is a compare
 		// and a branch here, and the kind and span it reports arrive by phi,
 		// so the checks cost LLVM's inliner one call, not one per check
-		var kinds, starts, ends []string
+		// the file too, by phi, only when some check sits in a block the
+		// inliner copied from another file; otherwise the function's own,
+		// as a constant. The edges' operands are rendered here, after the
+		// function's, so that a one-file program interns its file constant
+		// at the same point as before and its output is byte-identical
+		// (specs/cross-file-inlining/SPEC.md R11).
+		file := fe.funcFile()
+		var kinds, starts, ends, files []string
+		differ := false
 		for _, t := range fe.traps {
+			op := file
+			if !fe.f.Library {
+				op = fe.fileOperand(t.file)
+			}
 			kinds = append(kinds, fmt.Sprintf("[ %d, %%%s ]", t.kind, t.from))
 			starts = append(starts, fmt.Sprintf("[ %s, %%%s ]", t.start, t.from))
 			ends = append(ends, fmt.Sprintf("[ %s, %%%s ]", t.end, t.from))
+			files = append(files, fmt.Sprintf("[ %s, %%%s ]", op, t.from))
+			differ = differ || op != file
 		}
 		fmt.Fprintf(&fe.body, "trap:\n")
 		fe.emit("%%trap.kind = phi i32 %s", strings.Join(kinds, ", "))
 		fe.emit("%%trap.start = phi i64 %s", strings.Join(starts, ", "))
 		fe.emit("%%trap.end = phi i64 %s", strings.Join(ends, ", "))
-		fe.emit("call void @kern_trap(i32 %%trap.kind, i64 %%trap.start, i64 %%trap.end, ptr %s)", fe.file())
+		if differ {
+			fe.emit("%%trap.file = phi ptr %s", strings.Join(files, ", "))
+			file = "%trap.file"
+		}
+		fe.emit("call void @kern_trap(i32 %%trap.kind, i64 %%trap.start, i64 %%trap.end, ptr %s)", file)
 		fe.emit("unreachable")
 	}
 	// the entry block: allocas (a stack-pointer adjustment only), then in
@@ -556,7 +575,7 @@ func (e *emitter) function(f *ir.Func) {
 	// no stack probes are emitted in that mode), then the parameter stores
 	entry := fe.allocas.String()
 	if e.opts.StackCheck {
-		entry += fmt.Sprintf("  %%sp = call ptr @llvm.stacksave.p0()\n  %%lim = load ptr, ptr @kern_stack_limit\n  %%ovf = icmp ult ptr %%sp, %%lim\n  br i1 %%ovf, label %%stackovf, label %%frame\nstackovf:\n  call void @kern_trap(i32 %d, %s)\n  unreachable\nframe:\n", trapKind("stack"), fe.spanFile(f.Pos))
+		entry += fmt.Sprintf("  %%sp = call ptr @llvm.stacksave.p0()\n  %%lim = load ptr, ptr @kern_stack_limit\n  %%ovf = icmp ult ptr %%sp, %%lim\n  br i1 %%ovf, label %%stackovf, label %%frame\nstackovf:\n  call void @kern_trap(i32 %d, %s, ptr %s)\n  unreachable\nframe:\n", trapKind("stack"), fe.span(f.Pos), fe.funcFile())
 	}
 	entry += fe.pstores.String() + fmt.Sprintf("  br label %%bb%d\n", f.Entry.ID)
 	dbgSuffix := ""
@@ -761,7 +780,7 @@ func (fe *fnEmit) check(cond string, kind string, pos ast.Pos) {
 	c := fmt.Sprintf("ok%d", fe.tmp)
 	fe.emit("br i1 %s, label %%trap, label %%%s", cond, c)
 	start, end := fe.spanParts(pos)
-	fe.traps = append(fe.traps, trapEdge{from: fe.curLabel, kind: trapKind(kind), start: start, end: end})
+	fe.traps = append(fe.traps, trapEdge{from: fe.curLabel, kind: trapKind(kind), start: start, end: end, file: fe.blockFile()})
 	fmt.Fprintf(&fe.body, "%s:\n", c)
 	fe.curLabel = c
 }

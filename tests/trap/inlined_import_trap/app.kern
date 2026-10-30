@@ -1,0 +1,21 @@
+//! phase: 3
+//! expect: trap bounds
+//! trap-file: lib/lib.kern
+// The helper of an imported module is inlined in release
+// (specs/cross-file-inlining/SPEC.md): the bounds trap inside its copy
+// still reports the module's file and the span in that file, the same
+// record as the debug build's call and the interpreter's. The sentinel
+// lines must not appear: execution and destruction stop at the trap.
+module app
+import "lib"
+func main() -> i32 {
+    g := lib.Make(7u64)
+    xs := [1u64, 2u64, 3u64]
+    print_u64(lib.Pick(xs[0usize:3usize], 1usize))
+    println()
+    print_u64(lib.Pick(xs[0usize:3usize], 5usize))
+    print_str("after the trap")
+    println()
+    print_u64(g.Id)
+    return 0i32
+}
