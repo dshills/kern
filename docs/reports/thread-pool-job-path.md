@@ -7,9 +7,9 @@ runtime-owned lock: lock_protected_map 0.76 → 1.02 of C, thread_pool
 remaining nanoseconds per job go, and which of them can a compiler or
 runtime change remove without touching the benchmark program?
 **Status:** attributed; no compiler change made, for the reasons in
-§"What a compiler could do"; `bench/REPORT.md` regenerated on the quiet host
-(2026-10-30T03:38, load 2.1 to 2.4): thread_pool 0.94 of C, meets the
-target.
+§"What a compiler could do"; `bench/REPORT.md` regenerated on the quiet host twice
+(2026-10-30T03:38 and 04:38, load 2.1 to 2.6): thread_pool 0.94 of C in
+both, meets the target.
 
 ## Method
 
@@ -112,6 +112,35 @@ it. The report is committed as measured, since that is what the
 protocol prescribes; the remedy is to the harness (run the languages'
 repetitions round-robin, as the interleaved script does), which is a
 task of its own.
+
+## A second quiet run, one hour later
+
+The owner offered a quiet machine and the harness ran again at 04:37
+(load 2.6, checksums unchanged), with C against kern interleaved for
+the four workloads right after. Between the two quiet runs an hour
+apart, the ratios moved as follows; the interleaved column is the
+same-round ratio measured minutes after the second run.
+
+| workload | 03:38 run | 04:38 run | interleaved after 04:38 |
+|---|---|---|---|
+| thread_pool | 0.94 | 0.94 | 0.93 |
+| lock_protected_map | 1.25 | 1.16 | 1.25 |
+| btree | 0.87 | 0.93 | 0.91 (C 315 ms; it was 363 ms an hour earlier) |
+| lock_free_queue | 0.85 | 0.95 | 0.93 |
+| ring_buffer | 1.16 | 1.02 | |
+| vector | 1.17 | 1.10 | |
+| arena_ast | 0.91 | 0.87 | |
+| hash_table | 0.91 | 0.96 | |
+
+Two quiet runs of the protocol therefore differ by up to 0.1 on
+individual workloads, in both directions, with the C or Rust reference
+moving as often as the kern row; the pool and the map are among the
+stable ones. `bench/REPORT.md` is the 04:38 run. The harness's
+back-to-back rows are part of it (btree's 0.87 against 0.91
+interleaved) but not all of it (btree's C time itself moved by 15%
+between the hours), so the harness task should also consider more
+repetitions, and a reader of any single report should treat a ratio
+within 0.1 of the target as undecided.
 
 ## What a compiler could do
 
