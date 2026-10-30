@@ -127,6 +127,11 @@ exactly as it does for scope exit.
   init: func(out T) -> Result[(), E])` with `AllocOrInit[E]`, and the two failure fixtures:
   OOM before initialization, and initializer error after partial initialization verifying
   that no destructor runs for the partial value and the slot is vacant afterwards.
+  *Done 2026-10-30* (`specs/in-place-init/SPEC.md`, `docs/reports/in-place-init.md`):
+  `Box.new_with`, `Pool.alloc_with` and `Arena.alloc_with` over the unsafe `ptr_init`;
+  fixtures `tests/run/{box_new_with,pool_alloc_with,arena_alloc_with,pool_alloc_with_oom,
+  out_whole_then_err}`, `tests/trap/{box_new_with_trap,pool_alloc_with_stale}`, and
+  `tests/adversarial/large_object_out` (no `Page` copy in `show-copies`).
 - PLAN.md 2.1 and 2.5: static lowering of `out` cleanup with no landing pads; `show-copies`
   on the `Page` construction path; `show-layout` against C `offsetof` for `out` storage.
 - PLAN.md 2.6 and 3.4: vector and buffer-pool benchmark rows (copies and heap allocation

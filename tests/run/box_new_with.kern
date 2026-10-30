@@ -1,0 +1,53 @@
+//! phase: 3
+//! expect: output box_new_with
+// Box.new_with builds the boxed value in place (specs/in-place-init/SPEC.md
+// R3). An initializer that fails after initializing a field destroys that
+// field (the out failure rule) and Page's own destructor does not run; one
+// that initializes the whole value and then fails destroys it once by
+// §5.7, Page's destructor first.
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop tok "); print_u64(self.id); println() }
+}
+struct Page nocopy { id: u64; tok: Tok; data: [4096]u8 }
+impl Page {
+    destructor(edit self) { print_str("drop page "); print_u64(self.id); println() }
+}
+union E { Bad }
+func init_ok(p: out Page) -> Result[(), E] {
+    p.id = 1u64
+    p.tok = Tok { id: 10u64 }
+    p.data = zero()
+    p.data[4095usize] = 9u8
+    return Ok(())
+}
+func init_partial(p: out Page) -> Result[(), E] {
+    p.id = 2u64
+    p.tok = Tok { id: 20u64 }
+    return Err(Bad)
+}
+func init_whole(p: out Page) -> Result[(), E] {
+    p.id = 3u64
+    p.tok = Tok { id: 30u64 }
+    p.data = zero()
+    return Err(Bad)
+}
+func build(init: func(out Page) -> Result[(), E]) -> Result[u64, E] {
+    b := Box[Page].new_with(init)?
+    with g := b.get() {
+        return Ok(g.id * 1000u64 + u64(g.data[4095usize]))
+    }
+}
+func show(r: Result[u64, E]) {
+    match r {
+        Ok(v) => { print_str("ok "); print_u64(v); println() }
+        Err(e) => { print_str("init failed"); println() }
+    }
+}
+func main() -> i32 {
+    show(build(init_ok))
+    show(build(init_partial))
+    show(build(init_whole))
+    return 0i32
+}

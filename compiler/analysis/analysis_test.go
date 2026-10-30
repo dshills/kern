@@ -1,6 +1,8 @@
 package analysis_test
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -79,5 +81,50 @@ func main() -> i32 {
 	}
 	if !found {
 		t.Fatalf("no bounds check located in lib/lib.kern: %+v", res.Checks)
+	}
+}
+
+// No copy of a Page built in place in a box or a pool slot, and a caller
+// of an initializer method has unknown effects (specs/in-place-init R2, R6).
+func TestInPlaceInitCopiesAndEffects(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "tests", "adversarial", "large_object_out.kern"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a main that reaches every path, so that release (whose inliner marks
+	// uncalled functions dead) reports on them too
+	prog := string(src) + `func main() -> i32 {
+    p := Pool[Page].new()
+    match pooled(p) {
+        Ok(id) => print_u64(p.get(id).id)
+        Err(e) => print_str("failed")
+    }
+    match boxed() {
+        Ok(v) => print_u64(v)
+        Err(e) => print_str("failed")
+    }
+    print_u64(make())
+    return 0i32
+}
+`
+	for _, level := range []string{"debug", "release"} {
+		mod := lowerFiles(t, map[string]string{"large_object_out.kern": prog}, level)
+		for _, c := range analysis.Copies(mod, "host").Copies {
+			if c.Type == "Page" {
+				t.Errorf("%s: a copy of %s at %+v", level, c.Type, c.Loc)
+			}
+		}
+		found := false
+		for _, f := range analysis.Effects(mod, "host").Functions {
+			if f.Name == "adversarial.main" {
+				found = true
+				if f.Label != diag.LabelUnknown || !f.Allocates || !f.Traps {
+					t.Errorf("%s: effects of main %+v, want unknown with every effect", level, f)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s: no effects entry for adversarial.main", level)
+		}
 	}
 }

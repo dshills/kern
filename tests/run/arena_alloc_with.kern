@@ -1,0 +1,45 @@
+//! phase: 3
+//! expect: output arena_alloc_with
+// Arena.alloc_with constructs in the next slot (specs/in-place-init/SPEC.md
+// R5): a failed initializer leaves the arena as it was, and the next
+// allocation takes the same index.
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop tok "); print_u64(self.id); println() }
+}
+struct Cell nocopy { v: u64; tok: Tok }
+union E { Bad }
+func init_one(c: out Cell) -> Result[(), E] {
+    c.v = 1u64
+    c.tok = Tok { id: 1u64 }
+    return Ok(())
+}
+func init_fail(c: out Cell) -> Result[(), E] {
+    c.v = 2u64
+    c.tok = Tok { id: 2u64 }
+    return Err(Bad)
+}
+func init_three(c: out Cell) -> Result[(), E] {
+    c.v = 3u64
+    c.tok = Tok { id: 3u64 }
+    return Ok(())
+}
+func run() -> Result[u64, AllocOrInit[E]] {
+    r := Arena[Cell].new()
+    a := r.alloc_with(init_one)?
+    match r.alloc_with(init_fail) {
+        Ok(x) => { print_str("unexpected"); println() }
+        Err(e) => { print_str("init error, len "); print_u64(u64(r.len())); println() }
+    }
+    b := r.alloc_with(init_three)?
+    print_str("len "); print_u64(u64(r.len())); println()
+    return Ok(r.get(a).v * 10u64 + r.get(b).v)
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => { print_str("ok "); print_u64(v); println() }
+        Err(e) => { print_str("unexpected"); println() }
+    }
+    return 0i32
+}

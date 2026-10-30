@@ -1,0 +1,13 @@
+len 1
+drop tok 99
+init error, len 1
+len 2
+drop node 1
+drop tok 10
+freed, len 1
+len 2
+drop node 2
+drop tok 20
+drop node 1
+drop tok 10
+ok 21

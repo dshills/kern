@@ -1,0 +1,25 @@
+//! phase: 3
+//! expect: trap generation
+// A slot freed and reused by alloc_with has a new generation: the old
+// handle traps generation (specs/in-place-init/SPEC.md R4).
+module t
+union E { Bad }
+func init_n(n: out u64) -> Result[(), E] { n = 7u64; return Ok(()) }
+func run() -> Result[u64, AllocOrInit[E]] {
+    p := Pool[u64].new()
+    a := p.alloc_with(init_n)?
+    p.free(a)
+    b := p.alloc_with(init_n)?
+    print_u64(p.get(b))
+    println()
+    print_u64(p.get(a))
+    print_str("after the trap")
+    return Ok(0u64)
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => {}
+        Err(e) => {}
+    }
+    return 0i32
+}

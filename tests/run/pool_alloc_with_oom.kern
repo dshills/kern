@@ -1,0 +1,41 @@
+//! phase: 3
+//! expect: output pool_alloc_with_oom
+//! test-hooks: true
+// When the container cannot grow, alloc_with returns Alloc(OutOfMemory)
+// before the initializer runs (specs/in-place-init/SPEC.md R4, R5).
+module t
+union E { Bad }
+func init_n(n: out u64) -> Result[(), E] {
+    print_str("init ran")
+    println()
+    n = 7u64
+    return Ok(())
+}
+func report(r: Result[u32, AllocOrInit[E]]) {
+    match r {
+        Ok(x) => { print_str("allocated"); println() }
+        Err(e) => {
+            match e {
+                Alloc(a) => { print_str("out of memory"); println() }
+                Init(i) => { print_str("init error"); println() }
+            }
+        }
+    }
+}
+func pool() -> Result[u32, AllocOrInit[E]] {
+    p := Pool[u64].new()
+    testing.fail_next_alloc()
+    id := p.alloc_with(init_n)?
+    return Ok(0u32)
+}
+func arena() -> Result[u32, AllocOrInit[E]] {
+    r := Arena[u64].new()
+    testing.fail_next_alloc()
+    id := r.alloc_with(init_n)?
+    return Ok(0u32)
+}
+func main() -> i32 {
+    report(pool())
+    report(arena())
+    return 0i32
+}

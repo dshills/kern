@@ -615,6 +615,15 @@ func (fl *fnLower) outFieldDrops(key any) {
 		n, _ := fl.ty(sym.Type).(*resolve.Named)
 		for _, fname := range fields {
 			if fname == "*" {
+				// the whole value, initialized field by field (the checker
+				// proved every field initialized here): the validator learns
+				// of it as one initialized place before the §5.7 drop
+				// (regression: "drop of %c which is uninitialized" for an
+				// out parameter fully built and then failed,
+				// specs/in-place-init/SPEC.md R10)
+				if loc.Conv == ast.ConvOut {
+					fl.emit(&ir.Init{Place: ir.Place{Local: loc}})
+				}
 				fl.emitDrop(ir.Place{Local: loc}, loc.Type, sym.Pos)
 				continue
 			}

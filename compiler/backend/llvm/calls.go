@@ -589,6 +589,14 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	case "ptr_view", "ptr_edit":
 		// an access on raw memory is the pointer itself
 		fe.vals[dst()] = fe.v(a[0])
+	case "ptr_init":
+		// the initializer takes its out storage as a pointer: the raw one
+		ft, ok := a[1].Type.(*resolve.Func)
+		if !ok || ft.Closure {
+			fe.fail("ptr_init through %s", a[1].Type)
+			return
+		}
+		fe.directCall(c.Dsts, ft.Ret, fe.v(a[1]), "ptr "+fe.v(a[0]))
 	case "saturating_add", "saturating_sub":
 		t := fe.elemType(c, 0)
 		lt := e.mty(t)

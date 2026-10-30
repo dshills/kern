@@ -469,6 +469,12 @@ func init() {
 		"ptr_edit": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}}
 		},
+		// ptr_init: the initializer's out parameter is an access on the raw
+		// storage, as natively it is the pointer itself
+		"ptr_init": func(it *Interp, a []Value, c callCtx) []Value {
+			out := &Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}
+			return it.callNamed(a[1].(FuncVal).Name, []Value{out})
+		},
 		"saturating_add": saturating("+"),
 		"saturating_sub": saturating("-"),
 		"saturating_mul": saturating("*"),

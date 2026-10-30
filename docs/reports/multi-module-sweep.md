@@ -65,4 +65,5 @@ under both backends, and every trap was the same kind, span and file.
   container is missing; the spec is the owner's. The history and the two
   options are in `docs/reports/slab-drift.md`.
 - `alloc_with` and `new_with` (PLAN.md 1.x fixed signatures) are not in
-  the library; an earlier proposal to implement them is open.
+  the library; an earlier proposal to implement them is open. *Resolved
+  2026-10-30* (`docs/reports/in-place-init.md`).

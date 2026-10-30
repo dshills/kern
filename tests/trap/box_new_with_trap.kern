@@ -1,0 +1,27 @@
+//! phase: 3
+//! expect: trap bounds
+// A trap inside an initializer reports the initializer's own span, not
+// the library call that entered ptr_init (specs/in-place-init/SPEC.md R3).
+module t
+struct Page { id: u64; data: [8]u8 }
+union E { Bad }
+func init_page(p: out Page) -> Result[(), E] {
+    p.id = 1u64
+    p.data = zero()
+    var i: usize = 8usize
+    p.data[i] = 1u8
+    return Ok(())
+}
+func build() -> Result[u64, E] {
+    b := Box[Page].new_with(init_page)?
+    return Ok(b.get().id)
+}
+func main() -> i32 {
+    match build() {
+        Ok(v) => print_u64(v)
+        Err(e) => print_str("init failed")
+    }
+    print_str("after the trap")
+    println()
+    return 0i32
+}

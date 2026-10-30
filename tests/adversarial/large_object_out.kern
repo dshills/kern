@@ -2,7 +2,9 @@
 //! expect: accept
 //! twin: large_object_out_reject
 // Large-object construction without copies: the page is built in place
-// through an out parameter (spec §5.2).
+// through an out parameter (spec §5.2), in a local, in a heap box
+// (Box.new_with) and in a pool slot (Pool.alloc_with); show-copies reports
+// no copy of Page (specs/in-place-init/SPEC.md R6).
 module adversarial
 struct Page { id: u64; data: [4096]u8 }
 func init_page(p: out Page, id: u64) {
@@ -14,4 +16,17 @@ func make() -> u64 {
     var p: Page
     init_page(out p, 7u64)
     return p.id
+}
+union IoErr { Short }
+func fill_page(p: out Page) -> Result[(), IoErr] {
+    p.id = 9u64
+    p.data = zero()
+    return Ok(())
+}
+func boxed() -> Result[u64, IoErr] {
+    b := Box[Page].new_with(fill_page)?
+    return Ok(b.get().id)
+}
+func pooled(pool: edit[Pool[Page]]) -> Result[PoolId[Page], AllocOrInit[IoErr]] {
+    return pool.alloc_with(fill_page)              // slot initialized in place; no Page value exists
 }

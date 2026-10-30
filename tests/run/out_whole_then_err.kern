@@ -1,0 +1,30 @@
+//! phase: 3
+//! expect: output out_whole_then_err
+// An out parameter whose every field is initialized before an error
+// return is destroyed whole by spec §5.2 and §5.7: the type destructor,
+// then the fields (regression: the lowering's whole-value drop failed IR
+// validation, "drop of %c which is uninitialized"; specs/in-place-init
+// R10).
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop tok "); print_u64(self.id); println() }
+}
+struct Cell nocopy { v: u64; tok: Tok }
+impl Cell {
+    destructor(edit self) { print_str("drop cell"); println() }
+}
+union E { Bad }
+func init_fail(c: out Cell) -> Result[(), E] {
+    c.v = 2u64
+    c.tok = Tok { id: 2u64 }
+    return Err(Bad)
+}
+func main() -> i32 {
+    var c: Cell
+    match init_fail(out c) {
+        Ok(u) => { print_u64(c.v); println(); drop(c) }
+        Err(e) => { print_str("failed"); println() }
+    }
+    return 0i32
+}

@@ -218,11 +218,15 @@ consuming it with `?` or `match` in the same statement is
 //! expect: accept
 //! twin: large_object_out_reject
 struct Page { id: u64; data: [4096]u8 }
-func init_page(p: out Page, id: u64) -> Result[(), IoErr] { p.id = id; read_disk(id, out p.data)?; return Result.Ok(()) }
-func load(pool: edit[Pool[Page]], id: u64) -> Result[PoolId[Page], LoadErr] {
-    return pool.alloc_with(init_page, id)          // slot initialized in place; no Page value exists
+func fill_page(p: out Page) -> Result[(), IoErr] { p.id = 9u64; p.data = zero(); return Ok(()) }
+func pooled(pool: edit[Pool[Page]]) -> Result[PoolId[Page], AllocOrInit[IoErr]] {
+    return pool.alloc_with(fill_page)              // slot initialized in place; no Page value exists
 }
 ```
+(As implemented, 2026-10-30: an initializer is a function value with one
+`out` parameter, so per-call data such as an `id` cannot be passed to it;
+the earlier draft's `alloc_with(init_page, id)` is not the fixed
+signature. `docs/reports/in-place-init.md` records the open question.)
 Reject twin: `r := init_page(out p, 7u64)` followed by a use of `r`.
 
 ## Closing note: callbacks and async

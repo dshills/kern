@@ -1,0 +1,10 @@
+//! expect: reject UNSAFE_OP_OUTSIDE_UNSAFE rule=6.4
+//! twin: ptr_init_outside_unsafe_ok
+// ptr_init writes through a raw pointer: an enumerated unsafe operation
+// (specs/in-place-init/SPEC.md R1).
+module m
+union E { Bad }
+func init(v: out u64) -> Result[(), E] { v = 7u64; return Ok(()) }
+func f(p: RawPtr[u64]) -> Result[(), E] {
+    return ptr_init(p, init)   // UNSAFE_OP_OUTSIDE_UNSAFE
+}

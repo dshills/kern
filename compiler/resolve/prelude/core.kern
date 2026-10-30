@@ -52,6 +52,13 @@ func ptr_edit[T](p: RawPtr[T]) -> edit[T]
 func ptr_view_seq[T](p: RawPtr[T], n: usize) -> view[]T
 func ptr_edit_seq[T](p: RawPtr[T], n: usize) -> edit[]T
 func ptr_edit2[T](a: RawPtr[T], b: RawPtr[T]) -> (edit[T], edit[T])
+// ptr_init calls init with the raw storage at p as its out parameter
+// (spec §5.2: out storage may be "a fresh slot provided by a container"),
+// and returns its result: on Ok the storage holds an initialized T; on
+// Err init's failure rule has destroyed what it had initialized, and the
+// storage is uninitialized again. p must address storage for one T that
+// holds no live value (specs/in-place-init/SPEC.md).
+func ptr_init[T, E](p: RawPtr[T], init: func(out T) -> Result[(), E]) -> Result[(), E]
 // ptr_store_seq writes the len(src) elements of a sequence view into raw
 // memory at p, each in its §4.1 layout (so the elements are duplicated
 // bitwise); the destination must not overlap the source. Vec.extend's block
@@ -249,6 +256,24 @@ impl Box[T] {
             p := ptr_cast[T, u8](heap_alloc(size_of[T](), align_of[T]()))
             ptr_store(p, v)
             return Box[T] { p: p }
+        }
+    }
+    // new_with constructs the boxed value in place (spec §5.2): init
+    // initializes the allocation through out, so no T is built elsewhere
+    // and copied. On Err(e) init has already destroyed what it had
+    // initialized (the out failure rule); the allocation is freed and
+    // Err(e) returned. A failed allocation traps oom, as in new.
+    contract { requires "init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func new_with[E](init: func(out T) -> Result[(), E]) -> Result[Box[T], E] {
+        unsafe {
+            p := ptr_cast[T, u8](heap_alloc(size_of[T](), align_of[T]()))
+            match ptr_init(p, init) {
+                Ok(u) => return Ok(Box[T] { p: p })
+                Err(e) => {
+                    heap_free(ptr_cast[u8, T](p), size_of[T](), align_of[T]())
+                    return Err(e)
+                }
+            }
         }
     }
     // get, at and into trap explicit on a Box emptied by release.
@@ -603,6 +628,48 @@ impl Pool[T] {
         return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen, phantom_tag: self.identity }) //@debug
         return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen }) //@release
     }
+    // alloc_with constructs the value in its slot (spec §5.2, PLAN.md
+    // Phase 1): the slot is obtained as alloc obtains it, and init
+    // initializes it through out. Err(Alloc(OutOfMemory)) when the buffers
+    // cannot grow, before init runs; Err(Init(e)) when init fails, after
+    // which init has destroyed what it had initialized (the out failure
+    // rule) and the slot is back on the free list, vacant, its generation
+    // unchanged.
+    contract { requires "the two buffers hold cap entries; the first count slots are initialized; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func alloc_with[E](edit self, init: func(out T) -> Result[(), E]) -> Result[PoolId[T], AllocOrInit[E]] {
+        var idx: usize = 0usize
+        var gen: u32 = 0u32
+        unsafe {
+            if self.nfree > 0usize {
+                self.nfree = self.nfree - 1usize
+                idx = usize(ptr_load(ptr_offset(self.free_list, truncate[isize](self.nfree))))
+                gen = ptr_load(self.meta_at(idx)).gen
+            } else {
+                if self.count == self.cap {
+                    if !self.grow() { return Err(Alloc(OutOfMemory)) }
+                }
+                idx = self.count
+                self.count = self.count + 1usize
+                ptr_store(self.meta_at(idx), PoolSlotMeta { gen: 0u32, live: false, retired: false })
+            }
+            match ptr_init(self.elem_at(idx), init) {
+                Ok(u) => {
+                    mp := self.meta_at(idx)
+                    m := ptr_load(mp)
+                    m.live = true
+                    ptr_store(mp, m)
+                }
+                Err(e) => {
+                    ptr_store(ptr_offset(self.free_list, truncate[isize](self.nfree)), truncate[u32](idx))
+                    self.nfree = self.nfree + 1usize
+                    return Err(Init(e))
+                }
+            }
+        }
+        self.live = self.live + 1usize
+        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen, phantom_tag: self.identity }) //@debug
+        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen }) //@release
+    }
     // check validates a handle in the §5.6 order (bounds, identity, vacant,
     // generation) and returns its slot index.
     contract { requires "the two buffers hold cap entries; the first count slots are initialized" }
@@ -756,6 +823,27 @@ impl Arena[T] {
             if !self.grow() { drop(v); return Err(OutOfMemory) }
         }
         unsafe { ptr_store(ptr_offset(self.data, truncate[isize](self.size)), v) }
+        id := ArenaId[T] { index: truncate[u32](self.size), phantom_tag: self.identity } //@debug
+        id := ArenaId[T] { index: truncate[u32](self.size) } //@release
+        self.size = self.size + 1usize
+        return Ok(id)
+    }
+    // alloc_with constructs the value in the arena's next slot (spec §5.2,
+    // PLAN.md Phase 1): Err(Alloc(OutOfMemory)) when the arena cannot
+    // grow, before init runs; Err(Init(e)) when init fails, after which
+    // init has destroyed what it had initialized and the arena is as it
+    // was.
+    contract { requires "data addresses cap elements of which the first size are live; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func alloc_with[E](edit self, init: func(out T) -> Result[(), E]) -> Result[ArenaId[T], AllocOrInit[E]] {
+        if self.size == self.cap {
+            if !self.grow() { return Err(Alloc(OutOfMemory)) }
+        }
+        unsafe {
+            match ptr_init(ptr_offset(self.data, truncate[isize](self.size)), init) {
+                Ok(u) => {}
+                Err(e) => return Err(Init(e))
+            }
+        }
         id := ArenaId[T] { index: truncate[u32](self.size), phantom_tag: self.identity } //@debug
         id := ArenaId[T] { index: truncate[u32](self.size) } //@release
         self.size = self.size + 1usize

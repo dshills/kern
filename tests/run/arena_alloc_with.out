@@ -1,0 +1,6 @@
+drop tok 2
+init error, len 1
+len 2
+drop tok 3
+drop tok 1
+ok 13
