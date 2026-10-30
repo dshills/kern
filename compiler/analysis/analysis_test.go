@@ -197,3 +197,68 @@ func main() -> i32 {
 		}
 	}
 }
+
+// Calls into std/str, std/map and Vec.extend that may allocate are sites;
+// constructors that allocate nothing are not; Box.new keeps its proven
+// table site (specs/alloc-sites-std §4 item 1).
+func TestLibraryAllocationSites(t *testing.T) {
+	src := `module app
+import "std/str"
+import "std/map"
+func only_str() -> usize {
+    s := str.String.new()
+    s.push_u64(42u64)
+    return s.len()
+}
+func only_map() -> usize {
+    m := map.Map[u64, u64].new()
+    m.insert(3u64, 4u64)
+    return m.len()
+}
+func only_extend(v: edit[Vec[u64]], xs: view[]u64) { v.extend(xs) }
+func boxed() -> u64 {
+    b := Box[u64].new(7u64)
+    return b.get()
+}
+func pure(xs: view[]u64) -> u64 {
+    var s: u64 = 0u64
+    for x in xs { s = s + x }
+    return s
+}
+func main() -> i32 {
+    var v: Vec[u64] = Vec[u64].new()
+    a := [1u64, 2u64]
+    only_extend(v, a[0usize:2usize])
+    print_u64(u64(only_str() + only_map()) + pure(a[0usize:2usize]) + boxed())
+    println()
+    return 0i32
+}
+`
+	text := func(s diag.AllocationSite) string { return src[s.Loc.Span.Start:s.Loc.Span.End] }
+	for _, level := range []string{"debug", "release"} {
+		mod := lowerFiles(t, map[string]string{"app.kern": src}, level)
+		got := map[string]diag.AllocationSite{}
+		for _, s := range analysis.Allocations(mod).Sites {
+			got[text(s)] = s
+		}
+		for _, call := range []string{"s.push_u64(42u64)", "map.Map[u64, u64].new()", "m.insert(3u64, 4u64)", "v.extend(xs)"} {
+			s, ok := got[call]
+			if !ok || s.Label != diag.LabelUnknown || s.Size != nil || s.Allocator != "system" {
+				t.Errorf("%s: %s: site %+v (found %v), want unknown with no size", level, call, s, ok)
+			}
+		}
+		for _, call := range []string{"str.String.new()", "Vec[u64].new()"} {
+			if _, ok := got[call]; ok {
+				t.Errorf("%s: %s allocates nothing but is a site", level, call)
+			}
+		}
+		if s, ok := got["Box[u64].new(7u64)"]; !ok || s.Label != diag.LabelProven || s.Size == nil || *s.Size != 8 {
+			t.Errorf("%s: Box.new site %+v (found %v), want proven with size 8", level, s, ok)
+		}
+		// the five above and nothing else: none in pure, none for the empty
+		// constructors
+		if len(got) != 5 {
+			t.Errorf("%s: %d sites, want 5: %v", level, len(got), got)
+		}
+	}
+}

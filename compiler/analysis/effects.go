@@ -41,6 +41,20 @@ type effects struct {
 // label assumed-unsafe; otherwise the summary is proven.
 func Effects(mod *ir.Module, target string) diag.ShowEffectsResult {
 	res := diag.ShowEffectsResult{Target: target, Functions: []diag.FunctionEffects{}}
+	summaries, defined := effectSummaries(mod)
+	for _, f := range defined {
+		e := summaries[f.Name]
+		res.Functions = append(res.Functions, diag.FunctionEffects{Name: f.Name, Allocates: e.allocates, Traps: e.traps, Spawns: e.spawns, Unsafe: e.unsafe, Label: e.label})
+	}
+	sort.Slice(res.Functions, func(i, j int) bool { return res.Functions[i].Name < res.Functions[j].Name })
+	return res
+}
+
+// effectSummaries computes the transitive effect summary of every function
+// of the module that has one (all but intrinsics and inlined functions),
+// by name, and returns the functions with a body in module order. An
+// extern declaration without a body has every effect, assumed-unsafe.
+func effectSummaries(mod *ir.Module) (map[string]*effects, []*ir.Func) {
 	summaries := map[string]*effects{}
 	var defined []*ir.Func
 	for _, f := range mod.Funcs {
@@ -149,12 +163,7 @@ func Effects(mod *ir.Module, target string) diag.ShowEffectsResult {
 			}
 		}
 	}
-	for _, f := range defined {
-		e := summaries[f.Name]
-		res.Functions = append(res.Functions, diag.FunctionEffects{Name: f.Name, Allocates: e.allocates, Traps: e.traps, Spawns: e.spawns, Unsafe: e.unsafe, Label: e.label})
-	}
-	sort.Slice(res.Functions, func(i, j int) bool { return res.Functions[i].Name < res.Functions[j].Name })
-	return res
+	return summaries, defined
 }
 
 // destructorOf finds the lowered destructor of a named type, if any.

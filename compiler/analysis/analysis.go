@@ -138,19 +138,30 @@ func isAggregateCopy(t resolve.Type) bool {
 // containers' methods by their unspecialized name) to whether the
 // allocation is unconditional (a constructor) or conditional (growth,
 // pooled slots).
+// The containers are kern code that allocate lazily: Vec.new, Pool.new and
+// Arena.new allocate nothing and are not entries, and Vec.with_capacity(n)
+// allocates only when n is above 0 (specs/alloc-sites-std/SPEC.md R1). A
+// library entry yields a site only when its callee's effect summary
+// allocates, which TestAllocationTableEntriesAllocate pins.
 var allocating = map[string]bool{
-	"Box.new": true, "Vec.new": true, "Vec.with_capacity": true, "Pool.new": true, "Arena.new": true,
+	"Box.new": true, "Vec.with_capacity": false,
 	"Shared.new": true, "Mutex.new": true, "Condvar.new": true, "thread.scope": true,
 	"Vec.push": false, "Pool.alloc": false, "Arena.alloc": false, "thread.spawn": false, "scope.spawn": false,
 	"SystemAllocator.alloc": false, "SystemAllocator.realloc": false, "SystemAllocator.alloc_zeroed": false, "clone": false,
 }
 
-// Allocations reports every allocation site: library constructors and the
-// growth or slot operations that may allocate. The size is the inline size
-// of the stored element when it is static (a constructor), else null; an
-// unconditional allocation is proven, a conditional one is unknown.
+// Allocations reports every allocation site of the user functions
+// (specs/alloc-sites-std/SPEC.md §2): a table site is an allocating
+// intrinsic, a library operation of the allocation table, or a deep clone,
+// with the size of the stored element when it is static (a constructor),
+// proven when the allocation is unconditional and unknown when it is
+// conditional; a library site is any other statically resolved call to a
+// library function whose effect summary allocates, unknown with no size,
+// since the callee may or may not allocate on a given call. The library's
+// own allocations are attributed to the user-level call.
 func Allocations(mod *ir.Module) diag.ShowAllocationsResult {
 	res := diag.ShowAllocationsResult{Sites: []diag.AllocationSite{}}
+	summaries, _ := effectSummaries(mod)
 	for _, f := range mod.Funcs {
 		if f.Library || f.Inlined {
 			continue // the library's own allocations are attributed to the user-level call
@@ -170,7 +181,21 @@ func Allocations(mod *ir.Module) diag.ShowAllocationsResult {
 					}
 				}
 				always, known := allocating[key]
+				if known && c.Intrinsic == "" && key != "clone" {
+					// a library entry: only where the callee may allocate
+					if e := summaries[c.Callee]; e == nil || !e.allocates {
+						continue
+					}
+				}
 				if !known {
+					// a library site: a library callee that may allocate
+					if c.Fn == nil && c.Intrinsic == "" {
+						if lib := mod.Func(c.Callee); lib != nil && lib.Library {
+							if e := summaries[lib.Name]; e != nil && e.allocates {
+								res.Sites = append(res.Sites, diag.AllocationSite{Loc: loc(f, b, c.Pos), Allocator: "system", Label: diag.LabelUnknown})
+							}
+						}
+					}
 					continue
 				}
 				if key == "clone" && (len(c.Dsts) != 1 || resolve.IsCopy(c.Dsts[0].Type)) {

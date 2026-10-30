@@ -211,7 +211,7 @@ Sizes, alignments and offsets are for the request target. Proven by construction
 
 ### show-allocations
 
-Every allocation site in the request files.
+Every allocation site in the request files' user code: a call of an allocating runtime operation or of a core container operation known to allocate (`Box.new` is unconditional, `proven`, with the stored size; `Vec.push`, `Vec.with_capacity`, `Pool.alloc`, `Arena.alloc` and a deep `clone` are conditional, `unknown`), and any other call into library code whose effect summary allocates (`unknown`, `size` `null`: the callee may or may not allocate on a given call). Library code's own allocations are attributed to the user-level call; constructors that allocate nothing (`Vec.new`, `Pool.new`, `Arena.new`) are not sites.
 
 #### `ShowAllocationsResult`
 

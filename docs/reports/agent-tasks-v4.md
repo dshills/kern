@@ -51,7 +51,8 @@ so what the compiler leaves checked is invisible without the query.
   (`compiler/analysis/analysis.go`, `allocating`). Calls into `std/str`
   and `std/map` that allocate, such as `String.new`, `push_u64`,
   `Map.new` and `insert`, are not reported, and neither is
-  `Vec.extend`.
+  `Vec.extend`. Fixed since in `docs/reports/alloc-sites-std.md`, which also
+  removed constructors that allocate nothing from the table.
 - **`show-bounds-checks` misses library-internal checks.** A check
   inside `Vec.get` is not attributed to the call, so a loop over
   `v.get(i)` shows no check at all.
