@@ -1,0 +1,14 @@
+//! phase: 3
+//! expect: trap overflow
+//! test-hooks: true
+// A Shared whose count is at its maximum overflows on clone: the runtime's
+// record names the clone call, in both engines
+// (specs/runtime-trap-file/SPEC.md R5).
+module t
+func main() -> i32 {
+    s := Shared[u64].new(5u64)
+    testing.seed_shared_count(s, 18446744073709551615u64)
+    t := s.clone()
+    print_str("after the trap")
+    return 0i32
+}

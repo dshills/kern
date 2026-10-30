@@ -201,14 +201,25 @@ static size_t kern_block_size(int64_t size) {
     return n ? n : KERN_HEAP_GRAIN;
 }
 static size_t kern_block_align(int64_t align) { return (size_t)align < KERN_HEAP_GRAIN ? KERN_HEAP_GRAIN : (size_t)align; }
-static void kern_check_request(int64_t size, int64_t align) {
-    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0, 0);
+// The allocator's entry points take the location of the user-level call
+// last, as a pointer to a record the backend emits (as in the hosted
+// runtime), and raise their obligation traps there
+// (specs/runtime-trap-file/SPEC.md); a null record is no location (the
+// span 0-0 and the program's file), and a null file in a record is the
+// program's file with the record's span, as for kern_trap.
+typedef struct { int64_t start, end; const char *file; } kern_loc;
+static void kern_trap_loc(int32_t kind, const kern_loc *at) {
+    if (at == 0) kern_trap(kind, 0, 0, 0);
+    kern_trap(kind, at->start, at->end, at->file);
+}
+static void kern_check_request(int64_t size, int64_t align, const kern_loc *at) {
+    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap_loc(11, at);
 }
 // kern_check_block traps unless p with n bytes lies in the arena on a grain
 // boundary: a pointer that was not one allocation's.
-static void kern_check_block(const void *p, size_t n) {
+static void kern_check_block(const void *p, size_t n, const kern_loc *at) {
     uintptr_t a = (uintptr_t)p, lo = (uintptr_t)kern_heap, hi = lo + KERN_HEAP_SIZE;
-    if (a < lo || a >= hi || n > hi - a || (a & (KERN_HEAP_GRAIN - 1)) != 0) kern_trap(11, 0, 0, 0);
+    if (a < lo || a >= hi || n > hi - a || (a & (KERN_HEAP_GRAIN - 1)) != 0) kern_trap_loc(11, at);
 }
 
 // kern_heap_take carves n bytes at alignment al (both multiples of the
@@ -259,9 +270,9 @@ static int kern_heap_extend(uint8_t *p, size_t n, size_t m) {
 }
 
 void *kern_sysalloc_new(void) { static kern_sysalloc a; return &a; }
-void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off) {
+void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at) {
     (void)a;
-    kern_check_request(size, align);
+    kern_check_request(size, align, at);
     kern_heap_init();
     size_t n = kern_block_size(size);
     uint8_t *p = n ? kern_heap_take(n, kern_block_align(align)) : 0;
@@ -270,8 +281,8 @@ void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *ou
     memcpy(out + off, &p, sizeof p);
 }
 // kern_sysalloc_alloc_zeroed is kern_sysalloc_alloc with zeroed bytes.
-void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off) {
-    kern_sysalloc_alloc(a, size, align, out, off);
+void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at) {
+    kern_sysalloc_alloc(a, size, align, out, off, at);
     if (out[0] != 0 || size == 0) return;
     uint8_t *p;
     memcpy(&p, out + off, sizeof p);
@@ -280,14 +291,14 @@ void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, c
 // kern_sysalloc_realloc shrinks or grows the allocation in place when the
 // arena allows, else takes a new block, copies the common prefix and
 // releases the old one; on failure the old allocation stays.
-void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t size, int64_t align, char *out, int64_t off) {
+void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at) {
     (void)a;
-    kern_check_request(size, align);
-    kern_check_request(old_size, align);
+    kern_check_request(size, align, at);
+    kern_check_request(old_size, align, at);
     kern_heap_init();
     size_t on = kern_block_size(old_size), n = kern_block_size(size), al = kern_block_align(align);
-    if (on == 0) kern_trap(11, 0, 0, 0); // larger than the arena: not one allocation's size
-    kern_check_block(p, on);
+    if (on == 0) kern_trap_loc(11, at); // larger than the arena: not one allocation's size
+    kern_check_block(p, on, at);
     uint8_t *q = p;
     if (n == 0) { out[0] = 1; return; }
     if (n < on) kern_heap_release(q + n, on - n);
@@ -301,12 +312,12 @@ void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t 
     out[0] = 0;
     memcpy(out + off, &q, sizeof q);
 }
-void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align) {
+void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align, const kern_loc *at) {
     (void)a;
-    kern_check_request(size, align);
+    kern_check_request(size, align, at);
     kern_heap_init();
     size_t n = kern_block_size(size);
-    if (n == 0) kern_trap(11, 0, 0, 0);
-    kern_check_block(p, n);
+    if (n == 0) kern_trap_loc(11, at);
+    kern_check_block(p, n, at);
     kern_heap_release(p, n);
 }

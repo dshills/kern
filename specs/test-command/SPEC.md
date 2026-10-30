@@ -256,10 +256,11 @@ and one that loops forever under `--timeout=1`.
 
 **R9. Agreement.** Two runs of one test agree when their outcomes are equal and their
 standard outputs are byte-identical (equal length and SHA-256 digest), and, for `exit`,
-their statuses are equal, and, for `trap`, their kinds and files are equal and their spans are equal unless the
-kind is `stack` (ADR-012: the native stack-fault record has no span,
-and the response reports the span the record carries, `{"start": 0,
-"end": 0}` natively). The record's `thread` field is
+their statuses are equal, and, for `trap`, their kinds are equal and, unless the kind is `stack`, their files and
+spans are equal (ADR-012: the native stack-fault record has no location,
+and the response reports the span and file the record carries, `{"start":
+0, "end": 0}` and the program's file natively; the file exception was
+added by `specs/runtime-trap-file/SPEC.md` R7). The record's `thread` field is
 not compared. These are the fixture harness's rules. *Verified by:* unit
 tests of the comparison over each field, and a CLI test of a test whose
 output differs by opt level (it prints `container_identity()`, 1 or more

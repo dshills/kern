@@ -1,0 +1,11 @@
+//! phase: 3
+//! expect: trap stack
+// Unbounded recursion in an imported module's function. Natively the
+// fault handler knows no location (ADR-012), so neither the span nor the
+// file of a stack record is compared (specs/runtime-trap-file/SPEC.md R7).
+module app
+import "lib"
+func main() -> i32 {
+    print_u64(lib.Down(0u64))
+    return 0i32
+}

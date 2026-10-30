@@ -1,0 +1,13 @@
+//! phase: 3
+//! expect: trap oom
+//! test-hooks: true
+// The runtime's allocation for a new runtime object fails (the armed
+// hook): oom at the constructor's call, in both engines
+// (specs/runtime-trap-file/SPEC.md R4).
+module t
+func main() -> i32 {
+    testing.fail_next_alloc()
+    s := Shared[u64].new(1u64)
+    print_str("after the trap")
+    return 0i32
+}

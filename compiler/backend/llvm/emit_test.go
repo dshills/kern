@@ -1,6 +1,7 @@
 package llvm_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -250,5 +251,47 @@ func main() -> i32 {
 	cmd := exec.Command(clang, "-x", "ir", "-c", "-Wno-override-module", "-o", filepath.Join(dir, "app.o"), path)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("clang rejected the module: %v\n%s\n%s", err, out, text)
+	}
+}
+
+// Runtime-raised traps take the user-level call's location
+// (specs/runtime-trap-file/SPEC.md R2): in an imported module's function
+// the module's file constant and the call's span; inside a library
+// function the location its caller passed.
+func TestEmitRuntimeTrapLocation(t *testing.T) {
+	lib := "module lib\nfunc Locked() -> u64 {\n    m := Mutex[u64].new(3u64)\n    with g := m.lock() { return g }\n}\n"
+	files := map[string]string{
+		"app.kern":     "module app\nimport \"lib\"\nfunc main() -> i32 {\n    v := Vec[u64].new()\n    v.push(lib.Locked())\n    print_u64(v.get(0usize))\n    return 0i32\n}\n",
+		"lib/lib.kern": lib,
+	}
+	text := emitFiles(t, files, "debug", false)
+	sym := regexp.MustCompile(`(@kern\.file\.\d+) = private constant \[13 x i8\] c"lib/lib\.kern\\00"`).FindStringSubmatch(text)
+	if sym == nil {
+		t.Fatalf("no file constant for lib/lib.kern\n%s", text)
+	}
+	body := text[strings.Index(text, `define internal i64 @"lib.Locked"(`):]
+	body = body[:strings.Index(body, "\n}\n")]
+	newAt := strings.Index(lib, "Mutex[u64].new(3u64)")
+	lockAt := strings.Index(lib, "m.lock()")
+	// each call passes one pointer to a constant record of its span in
+	// lib/lib.kern and that file's constant
+	for name, span := range map[string][2]int{
+		"kern_mutex_new":  {newAt, newAt + len("Mutex[u64].new(3u64)")},
+		"kern_mutex_lock": {lockAt, lockAt + len("m.lock()")},
+	} {
+		m := regexp.MustCompile(`@` + name + `\([^)]*, ptr (@kern\.loc\.\d+)\)`).FindStringSubmatch(body)
+		if m == nil {
+			t.Errorf("lib.Locked's call to %s passes no location record\n%s", name, body)
+			continue
+		}
+		want := fmt.Sprintf("%s = private constant { i64, i64, ptr } { i64 %d, i64 %d, ptr %s }", m[1], span[0], span[1], sym[1])
+		if !strings.Contains(text, want) {
+			t.Errorf("%s's record: want %q\n%s", name, want, text)
+		}
+	}
+	// a library function passes on the location it was given, in a slot
+	// filled from its span and file parameters
+	if !strings.Contains(text, "store ptr %span.f, ptr") || !regexp.MustCompile(`call void @kern_sysalloc_alloc\([^)]*, ptr %a\d+\)`).MatchString(text) {
+		t.Errorf("heap_try_alloc's allocator call must pass its caller's location\n%s", text)
 	}
 }

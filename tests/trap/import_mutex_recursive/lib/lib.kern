@@ -1,0 +1,10 @@
+module lib
+func Twice() -> u64 {
+    a := Shared[Mutex[u64]].new(Mutex[u64].new(1u64))
+    b := a.clone()
+    with g := a.get().lock() {
+        with h := b.get().lock() { h = h + 1u64 }
+        g = g + 1u64
+    }
+    return 0u64
+}

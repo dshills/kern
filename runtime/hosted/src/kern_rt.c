@@ -248,10 +248,27 @@ void kern_test_fail_next_alloc(void) { atomic_store(&kern_fail_next, 1); }
 // using the kern-side test hooks without it fails to link.
 void kern_test_require_hooks(void) {}
 #endif
-static void *kern_alloc(size_t n, int64_t start, int64_t end) {
-    if (atomic_exchange(&kern_fail_next, 0)) kern_trap(9, start, end, NULL);
+// Every entry point below that can raise a trap takes the location of the
+// user-level call last, as a pointer to a record the backend emits once
+// per call site (a constant, or a stack slot inside a library function,
+// whose location is its caller's), and raises its traps there, so that a
+// runtime-raised trap names that call as the interpreter does
+// (specs/runtime-trap-file/SPEC.md). One pointer costs what the two span
+// immediates of the old kern_mutex_lock did; three arguments cost the
+// uncontended lock four instructions. A null record is no location: the
+// span 0-0 and the program's file. A null file in a record is the
+// program's file with the record's span, as a null file is for kern_trap
+// (a function without a file of its own; the interpreter reports the
+// same).
+typedef struct { int64_t start, end; const char *file; } kern_loc;
+static void kern_trap_loc(int32_t kind, const kern_loc *at) {
+    if (at == NULL) kern_trap(kind, 0, 0, NULL);
+    kern_trap(kind, at->start, at->end, at->file);
+}
+static void *kern_alloc(size_t n, const kern_loc *at) {
+    if (atomic_exchange(&kern_fail_next, 0)) kern_trap_loc(9, at);
     void *p = malloc(n ? n : 1);
-    if (p == NULL) kern_trap(9, start, end, NULL);
+    if (p == NULL) kern_trap_loc(9, at);
     return p;
 }
 
@@ -272,17 +289,17 @@ uint32_t kern_next_identity(void) {
 // ---- Shared ----
 
 typedef struct { _Atomic uint64_t count; int64_t size; char data[]; } kern_shared;
-void *kern_shared_new(int64_t size, const void *src) {
-    kern_shared *s = kern_alloc(sizeof *s + (size_t)size, 0, 0);
+void *kern_shared_new(int64_t size, const void *src, const kern_loc *at) {
+    kern_shared *s = kern_alloc(sizeof *s + (size_t)size, at);
     atomic_store(&s->count, 1); s->size = size;
     memcpy(s->data, src, (size_t)size);
     return s;
 }
 void *kern_shared_get(kern_shared *s) { return s->data; }
-void *kern_shared_clone(kern_shared *s) {
+void *kern_shared_clone(kern_shared *s, const kern_loc *at) {
     uint64_t c = atomic_load(&s->count);
     for (;;) {
-        if (c == UINT64_MAX) kern_trap(1, 0, 0, NULL);
+        if (c == UINT64_MAX) kern_trap_loc(1, at);
         if (atomic_compare_exchange_weak(&s->count, &c, c + 1)) return s;
     }
 }
@@ -345,8 +362,8 @@ static void kern_unpark_all(_Atomic(uint32_t) *w) { (void)syscall(SYS_futex, w, 
 typedef struct { _Atomic(uint32_t) state; _Atomic(uintptr_t) owner; int64_t size; char data[]; } kern_mutex;
 _Static_assert(offsetof(kern_mutex, owner) == 8 && offsetof(kern_mutex, size) == 16 && offsetof(kern_mutex, data) == 24, "the state and the owner share the first 16 bytes (specs/perf-gaps/SPEC.md R6)");
 static inline uintptr_t kern_self(void) { return (uintptr_t)pthread_self(); }
-void *kern_mutex_new(int64_t size, const void *src) {
-    kern_mutex *mx = kern_alloc(sizeof *mx + (size_t)size, 0, 0);
+void *kern_mutex_new(int64_t size, const void *src, const kern_loc *at) {
+    kern_mutex *mx = kern_alloc(sizeof *mx + (size_t)size, at);
     atomic_init(&mx->state, 0);
     atomic_init(&mx->owner, 0);
     mx->size = size;
@@ -360,11 +377,11 @@ void *kern_mutex_new(int64_t size, const void *src) {
 static void kern_mutex_acquire(kern_mutex *mx) {
     while (atomic_exchange_explicit(&mx->state, 2, memory_order_acquire) != 0) kern_park(&mx->state, 2);
 }
-void *kern_mutex_lock(kern_mutex *mx, int64_t start, int64_t end) {
+void *kern_mutex_lock(kern_mutex *mx, const kern_loc *at) {
     uintptr_t self = kern_self();
     uint32_t s = 0;
     if (!atomic_compare_exchange_strong_explicit(&mx->state, &s, 1, memory_order_acquire, memory_order_relaxed)) {
-        if (atomic_load_explicit(&mx->owner, memory_order_relaxed) == self) kern_trap(11, start, end, NULL); // recursive acquisition
+        if (atomic_load_explicit(&mx->owner, memory_order_relaxed) == self) kern_trap_loc(11, at); // recursive acquisition
         kern_mutex_acquire(mx);
     }
     atomic_store_explicit(&mx->owner, self, memory_order_relaxed);
@@ -392,18 +409,18 @@ void kern_mutex_drop(kern_mutex *mx, kern_glue g) { if (mx == NULL) return; if (
 // of 2^32 notifies between the read and the park is the accepted
 // limitation of every 32-bit sequence (specs/perf-gaps/SPEC.md §2).
 typedef struct { _Atomic(uint32_t) seq; _Atomic(uintptr_t) mutex; } kern_condvar;
-void *kern_condvar_new(void) {
-    kern_condvar *cv = kern_alloc(sizeof *cv, 0, 0);
+void *kern_condvar_new(const kern_loc *at) {
+    kern_condvar *cv = kern_alloc(sizeof *cv, at);
     atomic_init(&cv->seq, 0);
     atomic_init(&cv->mutex, 0);
     return cv;
 }
-void kern_condvar_wait(kern_condvar *cv, void *data, int64_t start, int64_t end) {
+void kern_condvar_wait(kern_condvar *cv, void *data, const kern_loc *at) {
     kern_mutex *mx = (kern_mutex *)((char *)data - offsetof(kern_mutex, data));
     uintptr_t self = kern_self();
-    if (atomic_load_explicit(&mx->owner, memory_order_relaxed) != self) kern_trap(11, start, end, NULL); // the lock is not held by this thread
+    if (atomic_load_explicit(&mx->owner, memory_order_relaxed) != self) kern_trap_loc(11, at); // the lock is not held by this thread
     uintptr_t bound = atomic_load_explicit(&cv->mutex, memory_order_relaxed), want = 0;
-    if (bound != (uintptr_t)mx && !atomic_compare_exchange_strong(&cv->mutex, &want, (uintptr_t)mx) && want != (uintptr_t)mx) kern_trap(11, start, end, NULL); // a second Mutex on one Condvar
+    if (bound != (uintptr_t)mx && !atomic_compare_exchange_strong(&cv->mutex, &want, (uintptr_t)mx) && want != (uintptr_t)mx) kern_trap_loc(11, at); // a second Mutex on one Condvar
     uint32_t seq = atomic_load_explicit(&cv->seq, memory_order_relaxed);
     kern_mutex_release(mx);
     kern_park(&cv->seq, seq);
@@ -433,21 +450,21 @@ static void *kern_thread_run(void *arg) {
     free(s);
     return NULL;
 }
-static kern_thread *kern_spawn_common(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, int *ok) {
-    kern_thread *t = kern_alloc(sizeof *t, 0, 0);
-    t->block = kern_alloc((size_t)size, 0, 0);
+static kern_thread *kern_spawn_common(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, int *ok, const kern_loc *at) {
+    kern_thread *t = kern_alloc(sizeof *t, at);
+    t->block = kern_alloc((size_t)size, at);
     memcpy(t->block, pack, (size_t)size);
     t->roff = roff; t->joined = 0; t->started = 0;
-    kern_spawn_arg *s = kern_alloc(sizeof *s, 0, 0);
+    kern_spawn_arg *s = kern_alloc(sizeof *s, at);
     s->thunk = thunk; s->block = t->block;
     if (pthread_create(&t->t, NULL, kern_thread_run, s) != 0) { free(s); free(t->block); free(t); *ok = 0; return NULL; }
     t->started = 1;
     *ok = 1;
     return t;
 }
-void kern_thread_spawn(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off) {
+void kern_thread_spawn(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off, const kern_loc *at) {
     int ok;
-    kern_thread *t = kern_spawn_common(thunk, pack, size, roff, &ok);
+    kern_thread *t = kern_spawn_common(thunk, pack, size, roff, &ok, at);
     if (!ok) { out[0] = 1; return; }
     out[0] = 0;
     memcpy(out + off, &t, sizeof t);
@@ -462,8 +479,8 @@ void kern_thread_drop(kern_thread *t) {
     if (!t->joined) pthread_detach(t->t); // the detached thread's result is leaked (Phase 2 limitation)
     free(t);
 }
-void *kern_scope_new(void) { kern_scope *s = kern_alloc(sizeof *s, 0, 0); memset(s, 0, sizeof *s); return s; }
-void kern_scope_spawn(kern_scope *sc, void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off) {
+void *kern_scope_new(const kern_loc *at) { kern_scope *s = kern_alloc(sizeof *s, at); memset(s, 0, sizeof *s); return s; }
+void kern_scope_spawn(kern_scope *sc, void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off, const kern_loc *at) {
     // reserve the join slot before the worker starts, so a failed
     // reservation is an ordinary spawn failure
     if (sc->n == sc->cap) {
@@ -473,10 +490,10 @@ void kern_scope_spawn(kern_scope *sc, void (*thunk)(void *), const void *pack, i
         sc->joins = nj; sc->cap = ncap;
     }
     int ok;
-    kern_thread *t = kern_spawn_common(thunk, pack, size, roff, &ok);
+    kern_thread *t = kern_spawn_common(thunk, pack, size, roff, &ok, at);
     if (!ok) { out[0] = 1; return; }
     sc->joins[sc->n++] = t;
-    kern_join *j = kern_alloc(sizeof *j, 0, 0);
+    kern_join *j = kern_alloc(sizeof *j, at);
     j->t = t; j->taken = 0;
     out[0] = 0;
     memcpy(out + off, &j, sizeof j);
@@ -509,9 +526,9 @@ void kern_scope_drop(kern_scope *sc) {
 
 typedef struct { int unused; } kern_sysalloc;
 void *kern_sysalloc_new(void) { static kern_sysalloc a; return &a; }
-void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off) {
+void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at) {
     (void)a;
-    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0, NULL);
+    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap_loc(11, at);
     if (atomic_exchange(&kern_fail_next, 0)) { out[0] = 1; return; } // the armed failure: Err(OutOfMemory)
     // aligned_alloc needs an alignment of at least sizeof(void *) and a size
     // that is a multiple of it (macOS rejects smaller alignments): the
@@ -527,9 +544,9 @@ void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *ou
 // kern_sysalloc_realloc resizes an allocation in place when the allocator
 // can (realloc, whose result is 16-byte aligned on every supported host),
 // else by aligned_alloc, copy and free; on failure the old allocation stays.
-void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t size, int64_t align, char *out, int64_t off) {
+void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at) {
     (void)a;
-    if (old_size < 0 || size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0, NULL);
+    if (old_size < 0 || size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap_loc(11, at);
     if (atomic_exchange(&kern_fail_next, 0)) { out[0] = 1; return; }
     size_t al = (size_t)align < sizeof(void *) ? sizeof(void *) : (size_t)align;
     if ((uint64_t)size > SIZE_MAX - (al - 1)) { out[0] = 1; return; }
@@ -548,9 +565,9 @@ void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t 
 // kern_sysalloc_alloc_zeroed is kern_sysalloc_alloc with zeroed bytes:
 // calloc (16-byte aligned on every supported host, and a large block comes
 // from fresh zero pages without a memset), else aligned_alloc and memset.
-void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off) {
+void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at) {
     (void)a;
-    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap(11, 0, 0, NULL);
+    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap_loc(11, at);
     if (atomic_exchange(&kern_fail_next, 0)) { out[0] = 1; return; }
     size_t al = (size_t)align < sizeof(void *) ? sizeof(void *) : (size_t)align;
     if ((uint64_t)size > SIZE_MAX - (al - 1)) { out[0] = 1; return; }
@@ -566,4 +583,4 @@ void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, c
     out[0] = 0;
     memcpy(out + off, &p, sizeof p);
 }
-void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align) { (void)a; (void)size; (void)align; free(p); }
+void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align, const kern_loc *at) { (void)a; (void)size; (void)align; (void)at; free(p); }

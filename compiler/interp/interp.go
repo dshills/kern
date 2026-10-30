@@ -110,6 +110,16 @@ func (it *Interp) newIdentity() uint32 {
 	return id
 }
 
+// runtimeAlloc is the allocation of a runtime object (Shared, Mutex,
+// Condvar, a scope, a spawned thread): natively the runtime's first
+// allocation for it consumes an armed fail_next_alloc hook and traps oom
+// at the call (specs/runtime-trap-file/SPEC.md §2), and so does this.
+func (it *Interp) runtimeAlloc(pos ast.Pos) {
+	if it.takeFailNextAlloc() {
+		it.trap("oom", pos)
+	}
+}
+
 // takeFailNextAlloc consumes the fail_next_alloc hook.
 func (it *Interp) takeFailNextAlloc() bool {
 	it.sh.mu.Lock()

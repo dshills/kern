@@ -39,7 +39,7 @@ type Options struct {
 
 // EmitWith renders a module for the given options.
 func EmitWith(mod *ir.Module, opts Options) (string, []error) {
-	e := &emitter{mod: mod, opts: opts, types: map[string]bool{}, glue: map[string]bool{}, runtime: map[string]bool{}, files: map[string]string{}}
+	e := &emitter{mod: mod, opts: opts, types: map[string]bool{}, glue: map[string]bool{}, runtime: map[string]bool{}, files: map[string]string{}, locs: map[string]string{}}
 	if opts.Sources != nil {
 		e.dbg = newDebugInfo(opts.Sources)
 	}

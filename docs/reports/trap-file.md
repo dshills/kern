@@ -54,6 +54,9 @@ span of the access in that file, in both backends.
 
 ## Not done
 
-A trap the runtime raises itself (stack, mutex, condition variable, oom)
-names the program's file even when the user-level call is in another
-module; carrying a file through those intrinsics is a wider ABI change.
+A trap the runtime raises itself (stack, mutex, condition variable, oom) names the program's file even when the user-level call is in another module; carrying a file through those intrinsics is a wider ABI change.
+*Done 2026-10-30* (`specs/runtime-trap-file/SPEC.md`,
+`docs/reports/runtime-trap-file.md`) for every runtime-raised trap: each
+trapping runtime entry point takes a pointer to a location record of the
+user-level call. A native `stack` record still has no location
+(ADR-012); neither its span nor its file is compared.

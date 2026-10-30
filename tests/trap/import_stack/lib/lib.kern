@@ -1,0 +1,2 @@
+module lib
+func Down(n: u64) -> u64 { return Down(n + 1u64) + 1u64 }

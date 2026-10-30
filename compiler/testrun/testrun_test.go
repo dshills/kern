@@ -165,6 +165,12 @@ func TestAgree(t *testing.T) {
 	if !Agree(trapRun("stack", "a.kern", 3, ""), trapRun("stack", "a.kern", 5, "")) {
 		t.Error("stack spans are not compared (ADR-012)")
 	}
+	if !Agree(trapRun("stack", "lib/lib.kern", 3, ""), trapRun("stack", "app.kern", 0, "")) {
+		t.Error("stack files are not compared (specs/runtime-trap-file R7)")
+	}
+	if Agree(trapRun("bounds", "lib/lib.kern", 3, ""), trapRun("bounds", "app.kern", 3, "")) {
+		t.Error("the file of any other kind is compared")
+	}
 	e3 := Classify(3, false, false, nil, nil, 0)
 	e4 := Classify(4, false, false, nil, nil, 0)
 	if Agree(e3, e4) || !Agree(e3, Classify(3, false, false, nil, nil, 0)) {

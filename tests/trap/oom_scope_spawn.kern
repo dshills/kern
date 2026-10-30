@@ -1,0 +1,23 @@
+//! phase: 3
+//! expect: trap oom
+//! test-hooks: true
+// The scope exists; the runtime's allocation for the thread it spawns
+// fails (the hook armed after the scope): oom at the spawn, in both
+// engines (specs/runtime-trap-file/SPEC.md R4).
+module t
+func one(n: u64) -> u64 { return n + 1u64 }
+func run() -> Result[u64, SpawnErr] {
+    with s := thread.scope() {
+        testing.fail_next_alloc()
+        h := s.spawn(one, 1u64)?
+        return Ok(h.get())
+    }
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => print_u64(v)
+        Err(e) => print_str("spawn failed")
+    }
+    print_str("after the trap")
+    return 0i32
+}

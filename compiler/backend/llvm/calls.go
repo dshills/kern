@@ -390,6 +390,38 @@ func (e *emitter) fileSym(name string) string {
 	return s
 }
 
+// loc renders the location operand of a runtime entry point that can raise
+// a trap (specs/runtime-trap-file/SPEC.md): a pointer to a { i64, i64,
+// ptr } record of the user-level call's span and file. In user code the
+// record is a private constant, one per distinct location; inside a
+// library function, whose location is the one its caller passed, a stack
+// slot filled from %span.s, %span.e and %span.f at the call.
+func (fe *fnEmit) loc(p ast.Pos) string {
+	if fe.f.Library {
+		a := fe.alloca("{ i64, i64, ptr }")
+		for k, v := range []string{"i64 %span.s", "i64 %span.e", "ptr %span.f"} {
+			f := fe.next("t")
+			fe.emit("%s = getelementptr inbounds { i64, i64, ptr }, ptr %s, i32 0, i32 %d", f, a, k)
+			fe.emit("store %s, ptr %s", v, f)
+		}
+		return a
+	}
+	return fe.e.locSym(p.Start, p.End, fe.file())
+}
+
+// locSym is the constant location record of a span and file operand,
+// emitted once.
+func (e *emitter) locSym(start, end int, file string) string {
+	key := fmt.Sprintf("%d:%d:%s", start, end, file)
+	if s, ok := e.locs[key]; ok {
+		return s
+	}
+	s := fmt.Sprintf("@kern.loc.%d", len(e.locs))
+	e.locs[key] = s
+	fmt.Fprintf(&e.decls, "%s = private constant { i64, i64, ptr } { i64 %d, i64 %d, ptr %s }\n", s, start, end, file)
+	return s
+}
+
 // withSpan appends the span and file arguments a library callee takes.
 func (fe *fnEmit) withSpan(args string, p ast.Pos) string {
 	if args == "" {
@@ -731,7 +763,7 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 			h := fe.handle(a[0])
 			switch n.Decl.Name {
 			case "Shared":
-				setDst(fe.rt("kern_shared_clone", "ptr (ptr)", "ptr "+h))
+				setDst(fe.rt("kern_shared_clone", "ptr (ptr, ptr)", "ptr "+h+", ptr "+fe.loc(c.Pos)))
 			default:
 				fe.fail("clone of %s is not supported natively", n)
 			}
@@ -740,24 +772,24 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.loadFrom(fe.v(dst()), dst().Type, fe.v(a[0]))
 	// Shared / Mutex / Atomic
 	case "Shared.new":
-		setDst(fe.rt("kern_shared_new", "ptr (i64, ptr)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])))
+		setDst(fe.rt("kern_shared_new", "ptr (i64, ptr, ptr)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])+", ptr "+fe.loc(c.Pos)))
 	case "Shared.get":
 		setDst(fe.rt("kern_shared_get", "ptr (ptr)", "ptr "+fe.handle(a[0])))
 	case "Shared.clone":
-		setDst(fe.rt("kern_shared_clone", "ptr (ptr)", "ptr "+fe.handle(a[0])))
+		setDst(fe.rt("kern_shared_clone", "ptr (ptr, ptr)", "ptr "+fe.handle(a[0])+", ptr "+fe.loc(c.Pos)))
 	case "Mutex.new":
-		setDst(fe.rt("kern_mutex_new", "ptr (i64, ptr)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])))
+		setDst(fe.rt("kern_mutex_new", "ptr (i64, ptr, ptr)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])+", ptr "+fe.loc(c.Pos)))
 	case "Mutex.lock":
-		setDst(fe.rt("kern_mutex_lock", "ptr (ptr, i64, i64)", "ptr "+fe.handle(a[0])+", "+fe.span(c.Pos)))
+		setDst(fe.rt("kern_mutex_lock", "ptr (ptr, ptr)", "ptr "+fe.handle(a[0])+", ptr "+fe.loc(c.Pos)))
 	case "Mutex.unlock":
 		fe.rt("kern_mutex_unlock", "void (ptr)", "ptr "+fe.handle(a[0]))
 	// Condvar: wait is given the guard (the Mutex's data pointer, which the
 	// checker requires to be the edit bound by a Mutex lock); the runtime
 	// recovers the Mutex from it
 	case "Condvar.new":
-		setDst(fe.rt("kern_condvar_new", "ptr ()", ""))
+		setDst(fe.rt("kern_condvar_new", "ptr (ptr)", "ptr "+fe.loc(c.Pos)))
 	case "Condvar.wait":
-		fe.rt("kern_condvar_wait", "void (ptr, ptr, i64, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.v(a[1])+", "+fe.span(c.Pos))
+		fe.rt("kern_condvar_wait", "void (ptr, ptr, ptr)", "ptr "+fe.handle(a[0])+", ptr "+fe.v(a[1])+", ptr "+fe.loc(c.Pos))
 	case "Condvar.notify_one":
 		fe.rt("kern_condvar_notify_one", "void (ptr)", "ptr "+fe.handle(a[0]))
 	case "Condvar.notify_all":
@@ -810,7 +842,7 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.loadResult(d, out)
 	// threads
 	case "thread.scope":
-		setDst(fe.rt("kern_scope_new", "ptr ()", ""))
+		setDst(fe.rt("kern_scope_new", "ptr (ptr)", "ptr "+fe.loc(c.Pos)))
 	case "thread.spawn", "scope.spawn":
 		fe.spawn(c)
 	case "Thread.join":
@@ -831,20 +863,20 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	case "SystemAllocator.alloc":
 		d := dst()
 		out, off := fe.unionOut(d)
-		fe.rt("kern_sysalloc_alloc", "void (ptr, i64, i64, ptr, i64)", "ptr "+fe.handle(a[0])+", i64 "+fe.v(a[1])+", i64 "+fe.v(a[2])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.rt("kern_sysalloc_alloc", "void (ptr, i64, i64, ptr, i64, ptr)", "ptr "+fe.handle(a[0])+", i64 "+fe.v(a[1])+", i64 "+fe.v(a[2])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off)+", ptr "+fe.loc(c.Pos))
 		fe.loadResult(d, out)
 	case "SystemAllocator.alloc_zeroed":
 		d := dst()
 		out, off := fe.unionOut(d)
-		fe.rt("kern_sysalloc_alloc_zeroed", "void (ptr, i64, i64, ptr, i64)", "ptr "+fe.handle(a[0])+", i64 "+fe.v(a[1])+", i64 "+fe.v(a[2])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.rt("kern_sysalloc_alloc_zeroed", "void (ptr, i64, i64, ptr, i64, ptr)", "ptr "+fe.handle(a[0])+", i64 "+fe.v(a[1])+", i64 "+fe.v(a[2])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off)+", ptr "+fe.loc(c.Pos))
 		fe.loadResult(d, out)
 	case "SystemAllocator.realloc":
 		d := dst()
 		out, off := fe.unionOut(d)
-		fe.rt("kern_sysalloc_realloc", "void (ptr, ptr, i64, i64, i64, ptr, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.v(a[1])+", i64 "+fe.v(a[2])+", i64 "+fe.v(a[3])+", i64 "+fe.v(a[4])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.rt("kern_sysalloc_realloc", "void (ptr, ptr, i64, i64, i64, ptr, i64, ptr)", "ptr "+fe.handle(a[0])+", ptr "+fe.v(a[1])+", i64 "+fe.v(a[2])+", i64 "+fe.v(a[3])+", i64 "+fe.v(a[4])+", ptr "+out+", i64 "+fmt.Sprintf("%d", off)+", ptr "+fe.loc(c.Pos))
 		fe.loadResult(d, out)
 	case "SystemAllocator.free":
-		fe.rt("kern_sysalloc_free", "void (ptr, ptr, i64, i64)", "ptr "+fe.handle(a[0])+", ptr "+fe.v(a[1])+", i64 "+fe.v(a[2])+", i64 "+fe.v(a[3]))
+		fe.rt("kern_sysalloc_free", "void (ptr, ptr, i64, i64, ptr)", "ptr "+fe.handle(a[0])+", ptr "+fe.v(a[1])+", i64 "+fe.v(a[2])+", i64 "+fe.v(a[3])+", ptr "+fe.loc(c.Pos))
 	// test hooks
 	case "testing.require_hooks":
 		fe.rt("kern_test_require_hooks", "void ()", "")
@@ -946,9 +978,9 @@ func (fe *fnEmit) spawn(c *ir.Call) {
 	size := fmt.Sprintf("%d", bl.Size)
 	roff := fmt.Sprintf("%d", bl.Fields[1])
 	if c.Intrinsic == "scope.spawn" {
-		fe.rt("kern_scope_spawn", "void (ptr, ptr, ptr, i64, i64, ptr, i64)", "ptr "+scope+", ptr "+thunk+", ptr "+pack+", i64 "+size+", i64 "+roff+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.rt("kern_scope_spawn", "void (ptr, ptr, ptr, i64, i64, ptr, i64, ptr)", "ptr "+scope+", ptr "+thunk+", ptr "+pack+", i64 "+size+", i64 "+roff+", ptr "+out+", i64 "+fmt.Sprintf("%d", off)+", ptr "+fe.loc(c.Pos))
 	} else {
-		fe.rt("kern_thread_spawn", "void (ptr, ptr, i64, i64, ptr, i64)", "ptr "+thunk+", ptr "+pack+", i64 "+size+", i64 "+roff+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.rt("kern_thread_spawn", "void (ptr, ptr, i64, i64, ptr, i64, ptr)", "ptr "+thunk+", ptr "+pack+", i64 "+size+", i64 "+roff+", ptr "+out+", i64 "+fmt.Sprintf("%d", off)+", ptr "+fe.loc(c.Pos))
 	}
 	fe.loadResult(d, out)
 }

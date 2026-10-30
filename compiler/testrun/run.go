@@ -452,8 +452,8 @@ func lastRecord(stderr []byte) *TrapInfo {
 
 // Agree reports whether two runs of one test agree (R9): the outcome, the
 // whole output (by length and SHA-256), the status of an exit, and a trap's kind, file and span
-// (not the span of a stack trap, which the native fault handler cannot
-// give, ADR-012). The record's thread is not compared.
+// (neither the span nor the file of a stack trap, which the native fault
+// handler cannot give, ADR-012). The record's thread is not compared.
 func Agree(a, b Run) bool {
 	if a.Outcome != b.Outcome || a.out.n != b.out.n || a.out.digest != b.out.digest {
 		return false
@@ -465,7 +465,9 @@ func Agree(a, b Run) bool {
 		if a.Trap == nil || b.Trap == nil {
 			return a.Trap == b.Trap
 		}
-		return a.Trap.Kind == b.Trap.Kind && a.Trap.File == b.Trap.File && (a.Trap.Kind == "stack" || a.Trap.Span == b.Trap.Span)
+		// a native stack record has no location (ADR-012): neither its
+		// span nor its file is compared (specs/runtime-trap-file R7)
+		return a.Trap.Kind == b.Trap.Kind && (a.Trap.Kind == "stack" || a.Trap.File == b.Trap.File && a.Trap.Span == b.Trap.Span)
 	}
 	return true
 }

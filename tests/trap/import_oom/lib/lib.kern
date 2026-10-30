@@ -1,0 +1,5 @@
+module lib
+func Locked() -> u64 {
+    m := Mutex[u64].new(3u64)
+    with g := m.lock() { return g }
+}

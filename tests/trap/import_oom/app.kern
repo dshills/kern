@@ -1,0 +1,14 @@
+//! phase: 3
+//! expect: trap oom
+//! test-hooks: true
+//! trap-file: lib/lib.kern
+// The runtime's allocation of a Mutex fails (the armed hook) inside an
+// imported module's function: the record names the module's file and the
+// Mutex.new call, in both engines (specs/runtime-trap-file/SPEC.md R4).
+module app
+import "lib"
+func main() -> i32 {
+    testing.fail_next_alloc()
+    print_u64(lib.Locked())
+    return 0i32
+}

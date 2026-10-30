@@ -1,0 +1,12 @@
+//! phase: 3
+//! expect: trap explicit
+//! trap-file: lib/lib.kern
+// A recursive Mutex.lock inside an imported module's function: the runtime
+// raises the trap, and its record names the module's file and the inner
+// lock call, in both engines (specs/runtime-trap-file/SPEC.md R3).
+module app
+import "lib"
+func main() -> i32 {
+    print_u64(lib.Twice())
+    return 0i32
+}

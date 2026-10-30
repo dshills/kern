@@ -1,0 +1,13 @@
+//! phase: 3
+//! expect: trap explicit
+//! trap-file: lib/lib.kern
+// A second Mutex on one Condvar, waited on inside an imported module's
+// function (the shape of tests/trap/condvar_mismatch): the runtime's
+// record names the module's file and the wait call
+// (specs/runtime-trap-file/SPEC.md R3).
+module app
+import "lib"
+func main() -> i32 {
+    lib.Main()
+    return 0i32
+}

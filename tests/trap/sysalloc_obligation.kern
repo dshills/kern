@@ -1,0 +1,24 @@
+//! phase: 3
+//! expect: trap explicit
+// A SystemAllocator.alloc whose alignment is not a power of two violates
+// the allocator's obligation (spec §6): the runtime traps explicit at the
+// call, in both engines and both opt levels
+// (specs/runtime-trap-file/SPEC.md R6).
+module t
+contract { requires "the request's alignment is a power of two at most 4096 and its size a multiple of it" }
+func request(size: usize, align: usize) -> bool {
+    a := SystemAllocator.new()
+    unsafe {
+        match a.alloc(size, align) {
+            Ok(p) => { a.free(p, size, align); return true }
+            Err(e) => return false
+        }
+    }
+}
+func main() -> i32 {
+    print_bool(request(8usize, 8usize))
+    println()
+    print_bool(request(9usize, 3usize))
+    print_str("after the trap")
+    return 0i32
+}

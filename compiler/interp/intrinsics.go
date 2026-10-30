@@ -197,7 +197,10 @@ func init() {
 			return []Value{deepClone(it, acc(a[0]).Ref.get(), c.pos)}
 		},
 		// Shared / Mutex / Atomic
-		"Shared.new": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Shared{Val: a[0], Count: 1}} },
+		"Shared.new": func(it *Interp, a []Value, c callCtx) []Value {
+			it.runtimeAlloc(c.pos)
+			return []Value{&Shared{Val: a[0], Count: 1}}
+		},
 		"Shared.get": func(it *Interp, a []Value, _ callCtx) []Value {
 			s := acc(a[0]).Ref.get().(*Shared)
 			return []Value{&Access{Ref: slotRef{&s.Val}}}
@@ -214,7 +217,10 @@ func init() {
 			atomicMu.Unlock()
 			return []Value{s}
 		},
-		"Mutex.new": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Mutex{Val: a[0]}} },
+		"Mutex.new": func(it *Interp, a []Value, c callCtx) []Value {
+			it.runtimeAlloc(c.pos)
+			return []Value{&Mutex{Val: a[0]}}
+		},
 		"Mutex.lock": func(it *Interp, a []Value, c callCtx) []Value {
 			pos := c.pos
 			m := acc(a[0]).Ref.get().(*Mutex)
@@ -239,7 +245,8 @@ func init() {
 			m.lock.Unlock()
 			return nil
 		},
-		"Condvar.new": func(it *Interp, a []Value, _ callCtx) []Value {
+		"Condvar.new": func(it *Interp, a []Value, c callCtx) []Value {
+			it.runtimeAlloc(c.pos)
 			return []Value{&Condvar{gen: make(chan struct{})}}
 		},
 		"Condvar.wait": func(it *Interp, a []Value, c callCtx) []Value {
@@ -316,13 +323,18 @@ func init() {
 		"Atomic.fetch_xor":             atomicRMW("^"),
 		"fence":                        func(it *Interp, a []Value, _ callCtx) []Value { return nil },
 		// threads: goroutines with their own interpreter copy (PLAN.md 3.3)
-		"thread.scope": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{&Scope{}} },
-		"thread.spawn": func(it *Interp, a []Value, _ callCtx) []Value {
+		"thread.scope": func(it *Interp, a []Value, c callCtx) []Value {
+			it.runtimeAlloc(c.pos)
+			return []Value{&Scope{}}
+		},
+		"thread.spawn": func(it *Interp, a []Value, c callCtx) []Value {
+			it.runtimeAlloc(c.pos)
 			t := &Thread{done: make(chan struct{})}
 			it.spawned(a[0].(FuncVal).Name, a[1:], func(v Value, tr *Trap) { t.Result, t.trap, t.Done = v, tr, true; close(t.done) })
 			return []Value{&Union{Tag: 0, Fields: []Value{t}}}
 		},
-		"scope.spawn": func(it *Interp, a []Value, _ callCtx) []Value {
+		"scope.spawn": func(it *Interp, a []Value, c callCtx) []Value {
+			it.runtimeAlloc(c.pos)
 			sc := acc(a[1]).Ref.get().(*Scope)
 			j := &Join{done: make(chan struct{})}
 			sc.Joins = append(sc.Joins, j)

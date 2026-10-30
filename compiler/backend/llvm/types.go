@@ -20,6 +20,7 @@ type emitter struct {
 	types    map[string]bool   // emitted named types
 	strs     []string          // string literal globals
 	files    map[string]string // file-name constants for trap records, by file
+	locs     map[string]string // location records of runtime entry points, by span and file operand
 	glue     map[string]bool   // emitted drop glue
 	eqs      map[string]bool   // emitted equality glue
 	glueBody strings.Builder
