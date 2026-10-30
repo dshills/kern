@@ -33,7 +33,7 @@ import (
 
 // Phase is the current implementation phase; fixtures whose executable phase
 // is later are check-only.
-const Phase = 5
+const Phase = 6
 
 type header struct {
 	phase     int

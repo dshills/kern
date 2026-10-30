@@ -38,6 +38,14 @@ func signed(xs: view[]u8, i: i64) -> u8 {
     }
     return 0u8
 }
+// masks the pass does not prove (specs/prove-masks): one that reaches the
+// length, an offset that reaches it, a mask that is not a constant, and a
+// masked value read in another function
+func mask_len(r: view[[8]u64], x: usize) -> u64 { return r[x & 8usize] }
+func mask_past(r: view[[8]u64], x: usize) -> u64 { return r[(x & 3usize) + 5usize] }
+func mask_var(r: view[[8]u64], x: usize, m: usize) -> u64 { return r[x & m] }
+func masked(x: usize) -> usize { return x & 7usize }
+func mask_call(r: view[[8]u64], x: usize) -> u64 { return r[masked(x)] }
 func main() -> i32 {
     xs := [1u64, 2u64, 3u64]
     ys := [10u64, 20u64, 30u64]
@@ -51,6 +59,11 @@ func main() -> i32 {
     print_u64(vec_len(v, 0usize) + vec_len(v, 1usize))
     println()
     print_u64(u64(signed(bytes[0usize:4usize], 1i64)) + u64(signed(bytes[0usize:4usize], -1i64)))
+    println()
+    var mr: [8]u64 = zero()
+    mr[3usize] = 30u64
+    mr[6usize] = 60u64
+    print_u64(mask_len(mr, 7usize) + mask_past(mr, 1usize) + mask_var(mr, 11usize, 7usize) + mask_call(mr, 14usize))
     println()
     return 0i32
 }

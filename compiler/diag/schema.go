@@ -381,7 +381,7 @@ var Notes = map[string]string{
 	"FunctionEffects.unsafe":    "Possible unless proven impossible (`false` only with label `proven`).",
 	"BoundsCheck.kind":          "`bounds`, `generation`, `disjoint` or `overflow`.",
 	"BoundsCheck.label":         "`runtime-checked` or `proven`.",
-	"BoundsCheck.proven_by":     "Non-null iff `label` is `proven`: `loop_bound`, `dominated_by_check` or `constant`.",
+	"BoundsCheck.proven_by":     "Non-null iff `label` is `proven`: `loop_bound`, `dominated_by_check` or `constant`. `constant` covers a literal index into an array whose length its type gives, and an index bounded by a constant mask (`x & c`, through conversions, plus a constant offset) below such a length; a masked index below a length a guard bounded from below is `dominated_by_check`.",
 	"ApplyEditResult.files":     "Every changed file.",
 	"ApplyEditResult.applied":   "Number of ops applied.",
 	"EditedFile.formatted":      "`true` when the new source parses and is returned formatted; `false` when it is returned verbatim with the parse diagnostics.",

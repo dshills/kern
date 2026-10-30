@@ -149,6 +149,18 @@ func tail_sum(xs: view[]u64, i: usize) -> u64 {
 func head2(r: view[Ring]) -> u64 {
     return sum32(r.buf[0usize:2usize])
 }
+// masked indexes (specs/prove-masks): a constant mask below the length
+func mask_ring(r: view[[16]u64], head: usize, n: usize) -> u64 { return r[(head + n) & 15usize] }
+func mask_local(r: view[[16]u64], x: usize) -> u64 {
+    j := x & 15usize
+    return r[j]
+}
+func mask_conv(r: view[[16]u64], x: u64) -> u64 { return r[usize(x & 15u64)] }
+func mask_off(r: view[[16]u64], x: usize) -> u64 { return r[(x & 7usize) + 8usize] }
+func mask_guard(p: view[]u64, x: usize) -> u64 {
+    if len(p) >= 4usize { return p[x & 3usize] }
+    return 0u64
+}
 func main() -> i32 {
     xs := [1u64, 2u64, 3u64, 4u64, 5u64]
     ys := [10u64, 20u64, 30u64, 40u64, 50u64]
@@ -189,6 +201,16 @@ func main() -> i32 {
     print_u64(u64(after_call(dst[0usize:4usize], 1usize)))
     println()
     print_u64(mid(xs[0usize:5usize], 3usize) + mid(xs[0usize:5usize], 4usize) + tail_sum(xs[0usize:5usize], 2usize) + head2(r))
+    println()
+    var mr: [16]u64 = zero()
+    var mi: usize = 0usize
+    while mi < 16usize {
+        mr[mi] = u64(mi) * 3u64
+        mi = mi + 1usize
+    }
+    print_u64(mask_ring(mr, 14usize, 5usize) + mask_local(mr, 35usize) + mask_conv(mr, 4097u64) + mask_off(mr, 13usize))
+    println()
+    print_u64(mask_guard(xs[0usize:5usize], 7usize) + mask_guard(xs[0usize:2usize], 7usize))
     println()
     return 0i32
 }

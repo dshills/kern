@@ -289,7 +289,7 @@ Every `check_*` instruction of the IR, kept or replaced by a recorded proof fact
 | `Loc` | `loc` | loc |  |
 | `Kind` | `kind` | string | `bounds`, `generation`, `disjoint` or `overflow`. |
 | `Label` | `label` | label | `runtime-checked` or `proven`. |
-| `ProvenBy` | `proven_by` | string \| null | Non-null iff `label` is `proven`: `loop_bound`, `dominated_by_check` or `constant`. |
+| `ProvenBy` | `proven_by` | string \| null | Non-null iff `label` is `proven`: `loop_bound`, `dominated_by_check` or `constant`. `constant` covers a literal index into an array whose length its type gives, and an index bounded by a constant mask (`x & c`, through conversions, plus a constant offset) below such a length; a masked index below a length a guard bounded from below is `dominated_by_check`. |
 
 ### emit-ir
 

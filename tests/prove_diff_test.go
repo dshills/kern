@@ -213,6 +213,26 @@ func arr8(idx: usize) -> u64 {
     if idx < 8usize { return a[idx] }
     return a[idx - 8usize]
 }
+func marr(x: usize, y: u64) -> u64 {
+    var a: [8]u64 = zero()
+    a[3usize] = 7u64
+    a[7usize] = 9u64
+    s := wrapping_add(a[x & 7usize], a[(x & 3usize) + 4usize])
+    j := x & 7usize
+    s = wrapping_add(s, a[j])
+    return wrapping_add(s, a[usize(y & 7u64)])
+}
+func mtrap(x: usize, which: usize) -> u64 {
+    var a: [8]u64 = zero()
+    a[1usize] = 2u64
+    if which == 0usize { return a[x & 8usize] }
+    if which == 1usize { return a[x & 15usize] }
+    return a[(x & 7usize) + 1usize]
+}
+func mslice(p: view[]u64, x: usize) -> u64 {
+    if len(p) >= 4usize { return p[x & 3usize] }
+    return p[x & 7usize]
+}
 func main() -> i32 {
     v := Vec[u64].new()
     q := Vec[u64].new()
@@ -228,7 +248,14 @@ func main() -> i32 {
 	stmts := 2 + r.Intn(6)
 	for k := 0; k < stmts; k++ {
 		idx := func() int { return r.Intn(live + 2) } // 0..live+1: past the end about a third of the time
-		switch r.Intn(26) {
+		switch r.Intn(29) {
+		case 26:
+			fmt.Fprintf(&b, "    print_u64(marr(%dusize, %du64))\n", r.Intn(100), r.Intn(100))
+		case 27:
+			// masks that reach the length must stay checked: they trap when x has the high bits
+			fmt.Fprintf(&b, "    print_u64(mtrap(%dusize, %dusize))\n", r.Intn(32), r.Intn(3))
+		case 28:
+			fmt.Fprintf(&b, "    with d := v.as_view() { print_u64(mslice(d, %dusize)) }\n", r.Intn(16))
 		case 15:
 			b.WriteString("    with d := v.as_view() { print_u64(cached(d)) }\n")
 		case 16:

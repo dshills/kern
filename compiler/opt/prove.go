@@ -1063,6 +1063,22 @@ func (p *prover) indexCheck(s *facts, i *ir.CheckBounds, mark bool) {
 				i.Prov = ir.Provenance{Label: "proven", ProvenBy: "constant"}
 			}
 		}
+		// a masked index (specs/prove-masks): at most the mask plus a
+		// positive offset, below a known length (constant) or a literal
+		// a guard put below the length (dominated_by_check); tried before
+		// the general guard rule so that a masked index under a guard is
+		// labelled constant
+		if c, masked := p.maskBound(s, base); i.Prov.Label != "proven" && masked {
+			m := c
+			if off > 0 {
+				m += uint64(off) // c <= 2^62 and off <= 2^62: no overflow
+			}
+			if n, ok := p.classLen(s, ln); ok && m < n {
+				i.Prov = ir.Provenance{Label: "proven", ProvenBy: "constant"}
+			} else if k, ok := s.bound(nil, ln); ok && k >= 0 && uint64(k) >= m {
+				i.Prov = ir.Provenance{Label: "proven", ProvenBy: "dominated_by_check"}
+			}
+		}
 		if i.Prov.Label != "proven" {
 			if k, ok := s.bound(base, ln); ok && k >= off {
 				i.Prov = ir.Provenance{Label: "proven", ProvenBy: "dominated_by_check"}
@@ -1070,6 +1086,33 @@ func (p *prover) indexCheck(s *facts, i *ir.CheckBounds, mark bool) {
 		}
 	}
 	s.addLt(base, off, ln) // past the check (proven or passed), the index is in range
+}
+
+// maskBound reports that v is at most a constant: v is an unsigned
+// bitwise and with a constant operand (the constant bounds it), or a
+// conversion to an unsigned type of such a value (a conversion that passes
+// its range check keeps the value, and a truncation only lowers it).
+func (p *prover) maskBound(s *facts, v *ir.Value) (uint64, bool) {
+	if v == nil {
+		return 0, false
+	}
+	switch d := p.def[p.canon(s, v)].(type) {
+	case *ir.Binary:
+		if d.Op != "&" || !unsigned(d.Dst.Type) {
+			return 0, false
+		}
+		if c, ok := p.constant(p.canon(s, d.R)); ok {
+			return c, true
+		}
+		if c, ok := p.constant(p.canon(s, d.L)); ok {
+			return c, true
+		}
+	case *ir.Conv:
+		if unsigned(d.Dst.Type) && unsigned(d.X.Type) {
+			return p.maskBound(s, d.X)
+		}
+	}
+	return 0, false
 }
 
 // sliceCheck proves a slice check (spec F9): the high bound in range (the

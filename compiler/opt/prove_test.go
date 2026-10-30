@@ -493,3 +493,83 @@ func TestProveSolver(t *testing.T) {
 		}
 	}
 }
+
+const masksSource = `module t
+struct Q { ring: [2048]u64; head: usize; len: usize }
+func direct(q: edit[Q], b: u64) { q.ring[(q.head + q.len) & 2047usize] = b }
+func local(a: view[[1024]u64], x: usize) -> u64 { j := x & 1023usize; return a[j] }
+func conv(a: view[[1024]u64], x: u64) -> u64 { return a[usize(x & 1023u64)] }
+func off(a: view[[9]u64], x: usize) -> u64 { return a[(x & 7usize) + 1usize] }
+func eq(a: view[[8]u64], x: usize) -> u64 { return a[x & 8usize] }
+func over(a: view[[8]u64], x: usize) -> u64 { return a[(x & 7usize) + 1usize] }
+func guarded(p: view[]u64, x: usize) -> u64 {
+    if len(p) >= 1024usize { return p[x & 1023usize] }
+    return 0u64
+}
+func param(a: view[[8]u64], x: usize, m: usize) -> u64 { return a[x & m] }
+func zero(a: view[[1]u64], x: usize) -> u64 { return a[x & 0usize] }
+func both(a: view[[8]u64], x: usize) -> u64 {
+    if x < 8usize { return a[x & 7usize] }
+    return 0u64
+}
+func neg(a: view[[8]u64], x: usize) -> u64 { return a[(x & 7usize) - 1usize] }
+func big(a: view[[8]u64], x: usize) -> u64 { return a[x & 4611686018427387904usize] }
+func u8mask(a: view[[16]u64], x: u8) -> u64 { return a[usize(x & 15u8)] }
+func u32mask(a: view[[16]u64], x: u32) -> u64 { return a[usize(x & 15u32)] }
+`
+
+// TestProveMasks: an index bounded by a constant mask is proven against an
+// array's length (constant) or a guarded lower bound (dominated_by_check),
+// and nowhere else (specs/prove-masks).
+func TestProveMasks(t *testing.T) {
+	mod := proveWith(t, masksSource)
+	want := map[string]string{
+		"t.direct":  "constant",
+		"t.local":   "constant",
+		"t.conv":    "constant",
+		"t.off":     "constant",
+		"t.eq":      "runtime", // x & 8 can be 8, the length
+		"t.over":    "runtime", // (x & 7) + 1 can be 8
+		"t.guarded": "dominated_by_check",
+		"t.param":   "runtime", // a mask by a value that is not a constant
+		"t.zero":    "constant",
+		"t.both":    "constant", // the mask rule is tried before the guard rule
+		"t.neg":     "constant", // (x & 7) - 1 is at most 6
+		"t.big":     "runtime",  // the largest admitted constant, far past the length
+		"t.u8mask":  "constant",
+		"t.u32mask": "constant",
+	}
+	for name, exp := range want {
+		if got := checkLabels(mod, name); got != exp {
+			t.Errorf("%s: checks %q, want %q", name, got, exp)
+		}
+	}
+}
+
+// TestProveMaskFixtures pins the labels of the masked-index functions of
+// the two run fixtures, which the harness executes in both engines
+// (specs/prove-masks R4).
+func TestProveMaskFixtures(t *testing.T) {
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join("..", "..", "tests", "run", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	proven := proveWith(t, read("prove_forms.kern"))
+	for _, fn := range []string{"mask_ring", "mask_local", "mask_conv", "mask_off"} {
+		if got := checkLabels(proven, "run."+fn); got != "constant" {
+			t.Errorf("%s: %q, want constant", fn, got)
+		}
+	}
+	if got := checkLabels(proven, "run.mask_guard"); got != "dominated_by_check" {
+		t.Errorf("mask_guard: %q, want dominated_by_check", got)
+	}
+	not := proveWith(t, read("prove_forms_not.kern"))
+	for _, fn := range []string{"mask_len", "mask_past", "mask_var", "mask_call"} {
+		if got := checkLabels(not, "run."+fn); got != "runtime" {
+			t.Errorf("%s: %q, want runtime", fn, got)
+		}
+	}
+}
