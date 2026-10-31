@@ -211,10 +211,10 @@ func remove[K comparable, V comparable](n *pnode[K, V], shift uint, h uint64, k 
 		return without(n, i, bit, n.size-1)
 	}
 	sub := remove(s.sub, shift+pmapBits, h, k)
-	switch {
-	case sub == s.sub:
+	switch sub {
+	case s.sub:
 		return n
-	case sub == nil:
+	case nil:
 		return without(n, i, bit, n.size-s.sub.size)
 	}
 	return withSlot(n, i, pslot[K, V]{sub: sub}, n.size-s.sub.size+sub.size)
