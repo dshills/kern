@@ -2,15 +2,15 @@ package interp
 
 import (
 	"bytes"
-	"syscall"
-	"os"
-	"io/fs"
-	"io"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"math"
+	"os"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dshills/kern/compiler/ast"

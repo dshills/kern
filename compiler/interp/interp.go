@@ -1,12 +1,12 @@
 package interp
 
 import (
-	"os"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"math/bits"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -43,6 +43,10 @@ type Interp struct {
 	// Freestanding selects the freestanding emulation: console device
 	// writes go to standard output and the halt line ends the run.
 	Freestanding bool
+	// genericExec runs every instruction through exec instead of the
+	// compiled form: the reference the compiled form is tested against
+	// (specs/interp-compile).
+	genericExec bool
 }
 
 // New creates an interpreter for a module. out receives program output,
@@ -57,8 +61,8 @@ func New(mod *ir.Module, file string, out, errOut io.Writer) *Interp {
 // sharedState is the process-wide interpreter state shared by every thread
 // (spawned threads are goroutines with their own Interp copy).
 type sharedState struct {
-	args  []string           // the program's arguments (std/io args)
-	files map[int64]*os.File // open files by descriptor (std/io)
+	args          []string           // the program's arguments (std/io args)
+	files         map[int64]*os.File // open files by descriptor (std/io)
 	mu            sync.Mutex
 	handler       *FuncVal
 	nextIdent     uint32
@@ -426,6 +430,9 @@ type funcInfo struct {
 	// calls are the direct calls' targets: an intrinsic's function or the
 	// callee, looked up by name once rather than at every call
 	calls map[*ir.Call]callTarget
+	// code is the function's blocks compiled, by block ID
+	// (specs/interp-compile)
+	code []*cblock
 }
 
 // callTarget is what a direct call runs: an intrinsic or a function of the
@@ -463,6 +470,7 @@ func (it *Interp) info(f *ir.Func) *funcInfo {
 			}
 		}
 	}
+	fi.code = compile(f, fi)
 	it.sh.funcs.Store(f, fi)
 	return fi
 }
@@ -558,6 +566,9 @@ func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
 				a.Ref.set(zeroOf(p.Type))
 			}
 		}
+	}
+	if !it.genericExec {
+		return it.run(fr, fi.code, f.Entry)
 	}
 	b := f.Entry
 	for {
