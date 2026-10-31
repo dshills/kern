@@ -1,0 +1,405 @@
+// std/json: JSON values (RFC 8259), a parser and a writer. Imported with
+// `import "std/json"`.
+//
+// A number keeps its text exactly as written, so nothing is lost to a
+// conversion; as_u64 and as_i64 read integral ones. An object keeps its
+// members in order, a repeated key included; find returns the first.
+// Strings are UTF-8: the parser rejects invalid UTF-8 and lone surrogate
+// escapes, and decodes every escape.
+module json
+import "std/str"
+
+union Value { Null; Bool(b: bool); Number(text: str.String); Text(s: str.String); Array(items: Vec[Value]); Object(members: Vec[Member]) }
+struct Member { key: str.String; value: Value }
+
+// JsonErr is why parsing failed and at which byte offset: a syntax error,
+// or nesting deeper than max_depth arrays and objects.
+union JsonErr { Syntax(at: usize); TooDeep(at: usize) }
+
+// max_depth bounds the nesting the parser accepts, so that a hostile
+// input cannot exhaust the stack.
+const max_depth: usize = 512usize
+
+struct Parser { at: usize; depth: usize }
+
+// parse reads one JSON value, surrounded by optional whitespace, which
+// must be the whole text.
+func parse(text: view[]u8) -> Result[Value, JsonErr] {
+    var p: Parser = Parser { at: 0usize, depth: 0usize }
+    skip_ws(p, text)
+    v := parse_value(p, text)?
+    skip_ws(p, text)
+    if p.at != len(text) { return Err(Syntax(p.at)) }
+    return Ok(v)
+}
+
+func skip_ws(p: edit[Parser], s: view[]u8) {
+    while p.at < len(s) && (s[p.at] == 32u8 || s[p.at] == 9u8 || s[p.at] == 10u8 || s[p.at] == 13u8) {
+        p.at = p.at + 1usize
+    }
+}
+
+// literal consumes word at the parser's position.
+func literal(p: edit[Parser], s: view[]u8, word: view[]u8) -> bool {
+    if len(s) - p.at < len(word) { return false }
+    var i: usize = 0usize
+    while i < len(word) {
+        if s[p.at + i] != word[i] { return false }
+        i = i + 1usize
+    }
+    p.at = p.at + len(word)
+    return true
+}
+
+func parse_value(p: edit[Parser], s: view[]u8) -> Result[Value, JsonErr] {
+    if p.at >= len(s) { return Err(Syntax(p.at)) }
+    c := s[p.at]
+    if c == 123u8 { return parse_object(p, s) }
+    if c == 91u8 { return parse_array(p, s) }
+    if c == 34u8 {
+        t := parse_string(p, s)?
+        return Ok(Text(t))
+    }
+    if c == 45u8 || (c >= 48u8 && c <= 57u8) { return parse_number(p, s) }
+    if literal(p, s, "true") { return Ok(Bool(true)) }
+    if literal(p, s, "false") { return Ok(Bool(false)) }
+    if literal(p, s, "null") { return Ok(Null) }
+    return Err(Syntax(p.at))
+}
+
+func digits(p: edit[Parser], s: view[]u8) -> usize {
+    start := p.at
+    while p.at < len(s) && s[p.at] >= 48u8 && s[p.at] <= 57u8 { p.at = p.at + 1usize }
+    return p.at - start
+}
+
+// parse_number accepts -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
+func parse_number(p: edit[Parser], s: view[]u8) -> Result[Value, JsonErr] {
+    start := p.at
+    if s[p.at] == 45u8 { p.at = p.at + 1usize }
+    if p.at < len(s) && s[p.at] == 48u8 {
+        p.at = p.at + 1usize
+    } else if digits(p, s) == 0usize {
+        return Err(Syntax(p.at))
+    }
+    if p.at < len(s) && s[p.at] == 46u8 {
+        p.at = p.at + 1usize
+        if digits(p, s) == 0usize { return Err(Syntax(p.at)) }
+    }
+    if p.at < len(s) && (s[p.at] == 101u8 || s[p.at] == 69u8) {
+        p.at = p.at + 1usize
+        if p.at < len(s) && (s[p.at] == 43u8 || s[p.at] == 45u8) { p.at = p.at + 1usize }
+        if digits(p, s) == 0usize { return Err(Syntax(p.at)) }
+    }
+    return Ok(Number(str.String.from(s[start:p.at])))
+}
+
+func hex4(s: view[]u8, at: usize) -> Option[u32] {
+    if len(s) - at < 4usize { return None }
+    var v: u32 = 0u32
+    var i: usize = 0usize
+    while i < 4usize {
+        c := s[at + i]
+        var d: u32 = 0u32
+        if c >= 48u8 && c <= 57u8 {
+            d = u32(c - 48u8)
+        } else if c >= 97u8 && c <= 102u8 {
+            d = u32(c - 87u8)
+        } else if c >= 65u8 && c <= 70u8 {
+            d = u32(c - 55u8)
+        } else {
+            return None
+        }
+        v = v * 16u32 + d
+        i = i + 1usize
+    }
+    return Some(v)
+}
+
+// parse_string reads a string token, its escapes decoded.
+func parse_string(p: edit[Parser], s: view[]u8) -> Result[str.String, JsonErr] {
+    dst := str.String.new()
+    p.at = p.at + 1usize // the opening quote
+    while true {
+        if p.at >= len(s) { return Err(Syntax(p.at)) }
+        c := s[p.at]
+        if c == 34u8 {
+            p.at = p.at + 1usize
+            return Ok(dst)
+        }
+        if c < 32u8 { return Err(Syntax(p.at)) }
+        if c == 92u8 {
+            if p.at + 1usize >= len(s) { return Err(Syntax(p.at)) }
+            e := s[p.at + 1usize]
+            if e == 34u8 || e == 92u8 || e == 47u8 {
+                dst.push(e)
+            } else if e == 98u8 {
+                dst.push(8u8)
+            } else if e == 102u8 {
+                dst.push(12u8)
+            } else if e == 110u8 {
+                dst.push(10u8)
+            } else if e == 114u8 {
+                dst.push(13u8)
+            } else if e == 116u8 {
+                dst.push(9u8)
+            } else if e == 117u8 {
+                var code: u32 = 0u32
+                match hex4(s, p.at + 2usize) {
+                    Some(v) => { code = v }
+                    None => { return Err(Syntax(p.at)) }
+                }
+                if code >= 55296u32 && code <= 57343u32 {
+                    // a surrogate: a high one must be followed by \u and a low one
+                    if code > 56319u32 { return Err(Syntax(p.at)) }
+                    at := p.at + 6usize
+                    if len(s) - at < 6usize || s[at] != 92u8 || s[at + 1usize] != 117u8 { return Err(Syntax(p.at)) }
+                    var low: u32 = 0u32
+                    match hex4(s, at + 2usize) {
+                        Some(v) => { low = v }
+                        None => { return Err(Syntax(at)) }
+                    }
+                    if low < 56320u32 || low > 57343u32 { return Err(Syntax(at)) }
+                    code = 65536u32 + (code - 55296u32) * 1024u32 + (low - 56320u32)
+                    p.at = p.at + 6usize
+                }
+                ok := dst.push_rune(code)
+                p.at = p.at + 4usize
+            } else {
+                return Err(Syntax(p.at))
+            }
+            p.at = p.at + 2usize
+        } else if c < 128u8 {
+            dst.push(c)
+            p.at = p.at + 1usize
+        } else {
+            match str.utf8_decode(s, p.at) {
+                Some(r) => {
+                    dst.push_str(s[p.at:p.at + r.len])
+                    p.at = p.at + r.len
+                }
+                None => { return Err(Syntax(p.at)) }
+            }
+        }
+    }
+    return Err(Syntax(p.at))
+}
+
+func parse_array(p: edit[Parser], s: view[]u8) -> Result[Value, JsonErr] {
+    if p.depth >= max_depth { return Err(TooDeep(p.at)) }
+    p.depth = p.depth + 1usize
+    p.at = p.at + 1usize
+    items := Vec[Value].new()
+    skip_ws(p, s)
+    if p.at < len(s) && s[p.at] == 93u8 {
+        p.at = p.at + 1usize
+        p.depth = p.depth - 1usize
+        return Ok(Array(items))
+    }
+    while true {
+        skip_ws(p, s)
+        v := parse_value(p, s)?
+        items.push(v)
+        skip_ws(p, s)
+        if p.at >= len(s) { return Err(Syntax(p.at)) }
+        if s[p.at] == 93u8 {
+            p.at = p.at + 1usize
+            p.depth = p.depth - 1usize
+            return Ok(Array(items))
+        }
+        if s[p.at] != 44u8 { return Err(Syntax(p.at)) }
+        p.at = p.at + 1usize
+    }
+    return Err(Syntax(p.at))
+}
+
+func parse_object(p: edit[Parser], s: view[]u8) -> Result[Value, JsonErr] {
+    if p.depth >= max_depth { return Err(TooDeep(p.at)) }
+    p.depth = p.depth + 1usize
+    p.at = p.at + 1usize
+    members := Vec[Member].new()
+    skip_ws(p, s)
+    if p.at < len(s) && s[p.at] == 125u8 {
+        p.at = p.at + 1usize
+        p.depth = p.depth - 1usize
+        return Ok(Object(members))
+    }
+    while true {
+        skip_ws(p, s)
+        if p.at >= len(s) || s[p.at] != 34u8 { return Err(Syntax(p.at)) }
+        k := parse_string(p, s)?
+        skip_ws(p, s)
+        if p.at >= len(s) || s[p.at] != 58u8 { return Err(Syntax(p.at)) }
+        p.at = p.at + 1usize
+        skip_ws(p, s)
+        v := parse_value(p, s)?
+        members.push(Member { key: k, value: v })
+        skip_ws(p, s)
+        if p.at >= len(s) { return Err(Syntax(p.at)) }
+        if s[p.at] == 125u8 {
+            p.at = p.at + 1usize
+            p.depth = p.depth - 1usize
+            return Ok(Object(members))
+        }
+        if s[p.at] != 44u8 { return Err(Syntax(p.at)) }
+        p.at = p.at + 1usize
+    }
+    return Err(Syntax(p.at))
+}
+
+// write appends the compact JSON text of v: no whitespace, a string's
+// `"`, `\` and control bytes escaped, everything else as is, except that a
+// byte that is not part of valid UTF-8 (a Text built from arbitrary bytes)
+// is written as U+FFFD, and a Number whose text is not a JSON number (one
+// built by hand) is written as null, so the text is always valid JSON.
+func write(v: view[Value], dst: edit[str.String]) {
+    match v {
+        Null => dst.push_str("null")
+        Bool(b) => { if b { dst.push_str("true") } else { dst.push_str("false") } }
+        Number(t) => {
+            if is_number(t.as_view()) { dst.push_str(t.as_view()) } else { dst.push_str("null") }
+        }
+        Text(t) => write_string(t.as_view(), dst)
+        Array(items) => {
+            dst.push(91u8)
+            var first: bool = true
+            for x in items.as_view() {
+                if !first { dst.push(44u8) }
+                first = false
+                write(x, dst)
+            }
+            dst.push(93u8)
+        }
+        Object(members) => {
+            dst.push(123u8)
+            var first: bool = true
+            for m in members.as_view() {
+                if !first { dst.push(44u8) }
+                first = false
+                write_string(m.key.as_view(), dst)
+                dst.push(58u8)
+                write(m.value, dst)
+            }
+            dst.push(125u8)
+        }
+    }
+}
+
+// is_number reports whether s is exactly one JSON number.
+func is_number(s: view[]u8) -> bool {
+    if len(s) == 0usize { return false }
+    var p: Parser = Parser { at: 0usize, depth: 0usize }
+    with r := parse_number(p, s) {
+        match r {
+            Ok(v) => { return p.at == len(s) }
+            Err(e) => { return false }
+        }
+    }
+}
+
+// write_string appends s as a JSON string.
+func write_string(s: view[]u8, dst: edit[str.String]) {
+    dst.push(34u8)
+    var i: usize = 0usize
+    while i < len(s) {
+        b := s[i]
+        i = i + 1usize
+        if b >= 128u8 {
+            match str.utf8_decode(s, i - 1usize) {
+                Some(r) => {
+                    dst.push_str(s[i - 1usize:i - 1usize + r.len])
+                    i = i - 1usize + r.len
+                }
+                None => {
+                    dst.push(239u8)
+                    dst.push(191u8)
+                    dst.push(189u8)
+                }
+            }
+        } else if b == 34u8 {
+            dst.push_str("\\\"")
+        } else if b == 92u8 {
+            dst.push_str("\\\\")
+        } else if b == 10u8 {
+            dst.push_str("\\n")
+        } else if b == 13u8 {
+            dst.push_str("\\r")
+        } else if b == 9u8 {
+            dst.push_str("\\t")
+        } else if b < 32u8 {
+            dst.push_str("\\u00")
+            dst.push_padded(u64(b) / 16u64, 1usize, 48u8)
+            dst.push_hex(u64(b) % 16u64)
+        } else {
+            dst.push(b)
+        }
+    }
+    dst.push(34u8)
+}
+
+// find is the index of the first member of an object whose key is key;
+// None for another value or a missing key.
+func find(v: view[Value], key: view[]u8) -> Option[usize] {
+    match v {
+        Object(members) => {
+            var i: usize = 0usize
+            for m in members.as_view() {
+                if m.key.equals(key) { return Some(i) }
+                i = i + 1usize
+            }
+            return None
+        }
+        _ => { return None }
+    }
+}
+
+// as_u64 is a number written as a non-negative integer that fits u64.
+func as_u64(v: view[Value]) -> Option[u64] {
+    match v {
+        Number(t) => { return str.parse_u64(t.as_view()) }
+        _ => { return None }
+    }
+}
+
+// as_i64 is a number written as an integer that fits i64.
+func as_i64(v: view[Value]) -> Option[i64] {
+    match v {
+        Number(t) => {
+            with b := t.as_view() {
+                if len(b) > 1usize && b[0usize] == 45u8 {
+                    match str.parse_u64(b[1usize:len(b)]) {
+                        Some(n) => {
+                            if n == 0u64 { return Some(0i64) } // -0
+                            if n <= 9223372036854775808u64 { return Some(0i64 - i64(n - 1u64) - 1i64) }
+                            return None
+                        }
+                        None => { return None }
+                    }
+                }
+                match str.parse_u64(b) {
+                    Some(n) => {
+                        if n <= 9223372036854775807u64 { return Some(i64(n)) }
+                        return None
+                    }
+                    None => { return None }
+                }
+            }
+        }
+        _ => { return None }
+    }
+}
+
+// number_u64, number_i64 and text build values whose text they format or
+// copy; the other variants are built by name (json.Value.Null,
+// json.Value.Array(items), json.Member { key: k, value: v }).
+func number_u64(n: u64) -> Value {
+    t := str.String.new()
+    t.push_u64(n)
+    return Number(t)
+}
+func number_i64(n: i64) -> Value {
+    t := str.String.new()
+    t.push_i64(n)
+    return Number(t)
+}
+func text(s: view[]u8) -> Value { return Text(str.String.from(s)) }

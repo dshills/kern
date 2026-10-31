@@ -1,0 +1,95 @@
+//! phase: 6
+//! expect: output
+// std/json (specs/std-files): parse a document, look up members, read
+// integers, write values back (control bytes and quotes escaped), build
+// values (an invalid UTF-8 byte written as U+FFFD, a Number whose text is
+// not a JSON number as null), and report syntax
+// errors and excessive nesting by offset.
+module t
+import "std/json"
+import "std/str"
+func say(s: view[]u8) { print_str(s); println() }
+func written(v: view[json.Value]) {
+    d := str.String.new()
+    json.write(v, d)
+    say(d.as_view())
+}
+func report(src: view[]u8) {
+    with r := json.parse(src) {
+        match r {
+            Ok(v) => written(v)
+            Err(e) => {
+                match e {
+                    Syntax(at) => { print_str("syntax at "); print_u64(u64(at)); println() }
+                    TooDeep(at) => { print_str("too deep at "); print_u64(u64(at)); println() }
+                }
+            }
+        }
+    }
+}
+func show_u64(o: Option[u64]) {
+    match o {
+        Some(n) => { print_u64(n); println() }
+        None => say("none")
+    }
+}
+func show_i64(o: Option[i64]) {
+    match o {
+        Some(n) => { print_i64(n); println() }
+        None => say("none")
+    }
+}
+func main() -> i32 {
+    with r := json.parse("{ \"name\": \"kern\\tc\", \"id\": 18446744073709551615, \"delta\": -9223372036854775808, \"zero\": -0, \"tags\": [\"a\", \"b\\u0001\"], \"name\": \"second\" }") {
+        match r {
+            Ok(v) => {
+                written(v)
+                match json.find(v, "name") {
+                    Some(i) => { print_u64(u64(i)); println() }
+                    None => say("missing")
+                }
+                match json.find(v, "nope") {
+                    Some(i) => say("found")
+                    None => say("missing")
+                }
+                match v {
+                    Object(members) => {
+                        for m in members.as_view() {
+                            print_str(m.key.as_view())
+                            print_str(" ")
+                            show_u64(json.as_u64(m.value))
+                            print_str("  as i64 ")
+                            show_i64(json.as_i64(m.value))
+                        }
+                    }
+                    _ => say("not an object")
+                }
+            }
+            Err(e) => say("parse failed")
+        }
+    }
+    items := Vec[json.Value].new()
+    items.push(json.number_i64(-42i64))
+    items.push(json.text("q\"\\"))
+    items.push(json.Value.Null)
+    items.push(json.Value.Bool(false))
+    members := Vec[json.Member].new()
+    members.push(json.Member { key: str.String.from("k"), value: json.Value.Array(items) })
+    obj := json.Value.Object(members)
+    written(obj)
+    bad := Vec[u8].new()
+    bad.push(97u8)
+    bad.push(255u8)
+    bad.push(98u8)
+    tv := json.text(bad.as_view())
+    written(tv)
+    nan := json.Value.Number(str.String.from("NaN"))
+    written(nan)
+    report("[1, 2,]")
+    report("{\"a\" 1}")
+    report("-")
+    report("1.5e")
+    report("[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[")
+    report("  true  ")
+    return 0i32
+}

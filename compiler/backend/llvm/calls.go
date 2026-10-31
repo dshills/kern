@@ -521,9 +521,19 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		setDst(fe.rt("kern_"+c.Intrinsic, "i64 (i32, ptr, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l))
 	case "io_close":
 		setDst(fe.rt("kern_io_close", "i32 (i32)", "i32 "+fe.v(a[0])))
-	case "io_remove":
+	case "io_remove", "io_mkdir", "io_rmdir", "io_kind":
 		p, l := fe.seqParts(a[0])
-		setDst(fe.rt("kern_io_remove", "i32 (ptr, i64)", "ptr "+p+", i64 "+l))
+		setDst(fe.rt("kern_"+c.Intrinsic, "i32 (ptr, i64)", "ptr "+p+", i64 "+l))
+	case "io_list":
+		p, l := fe.seqParts(a[0])
+		bp, bl := fe.seqParts(a[1])
+		setDst(fe.rt("kern_io_list", "i64 (ptr, i64, ptr, i64)", "ptr "+p+", i64 "+l+", ptr "+bp+", i64 "+bl))
+	case "io_temp":
+		p, l := fe.seqParts(a[0])
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[1]))
+		bp, bl := fe.seqParts(a[2])
+		setDst(fe.rt("kern_io_temp", "i64 (ptr, i64, i8, ptr, i64)", "ptr "+p+", i64 "+l+", i8 "+z+", ptr "+bp+", i64 "+bl))
 	case "io_argc":
 		setDst(fe.rt("kern_io_argc", "i64 ()", ""))
 	case "io_arg":

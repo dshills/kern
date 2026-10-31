@@ -17,6 +17,8 @@
 #include <sched.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #ifdef __APPLE__
 #include <sys/ucontext.h>
 #else
@@ -119,13 +121,129 @@ int64_t kern_io_write(int32_t fd, const char *p, int64_t n) {
 // kern_io_close closes a descriptor the program opened (the kern side never
 // passes the standard streams); a delayed write error surfaces here.
 int32_t kern_io_close(int32_t fd) { if (fd < 0) return -EBADF; return close(fd) < 0 ? -errno : 0; }
-int32_t kern_io_remove(const char *p, int64_t n) {
-    char path[4096];
-    if (n < 0 || (size_t)n >= sizeof path) return -ENAMETOOLONG;
+// kern_cpath copies a kern path into a NUL-terminated buffer of 4096
+// bytes: 0, or -ENAMETOOLONG or -EINVAL (an embedded NUL).
+static int kern_cpath(char path[4096], const char *p, int64_t n) {
+    if (n < 0 || n >= 4096) return -ENAMETOOLONG;
     if (n > 0 && memchr(p, 0, (size_t)n) != NULL) return -EINVAL;
     memcpy(path, p, (size_t)n);
     path[n] = 0;
+    return 0;
+}
+int32_t kern_io_remove(const char *p, int64_t n) {
+    char path[4096];
+    int e = kern_cpath(path, p, n);
+    if (e < 0) return e;
     return unlink(path) < 0 ? -errno : 0;
+}
+// directories and temporary files (specs/std-files)
+int32_t kern_io_mkdir(const char *p, int64_t n) {
+    char path[4096];
+    int e = kern_cpath(path, p, n);
+    if (e < 0) return e;
+    return mkdir(path, 0777) < 0 ? -errno : 0;
+}
+int32_t kern_io_rmdir(const char *p, int64_t n) {
+    char path[4096];
+    int e = kern_cpath(path, p, n);
+    if (e < 0) return e;
+    return rmdir(path) < 0 ? -errno : 0;
+}
+// kern_io_kind is 1 for a regular file, 2 for a directory, 3 for anything
+// else, following symbolic links; -errno on failure.
+int32_t kern_io_kind(const char *p, int64_t n) {
+    char path[4096];
+    int e = kern_cpath(path, p, n);
+    if (e < 0) return e;
+    struct stat st;
+    if (stat(path, &st) < 0) return -errno;
+    return S_ISREG(st.st_mode) ? 1 : S_ISDIR(st.st_mode) ? 2 : 3;
+}
+static int kern_cmp_names(const void *a, const void *b) { return strcmp(*(const char *const *)a, *(const char *const *)b); }
+// kern_io_list writes the names of a directory's entries, `.` and `..`
+// left out, in bytewise order, each followed by a NUL, into buf when they
+// fit in cap bytes, and returns the bytes they need; -errno on failure.
+int64_t kern_io_list(const char *p, int64_t n, char *buf, int64_t cap) {
+    char path[4096];
+    int e = kern_cpath(path, p, n);
+    if (e < 0) return e;
+    DIR *d = opendir(path);
+    if (d == NULL) return -errno;
+    char **names = NULL;
+    size_t count = 0, room = 0;
+    int64_t total = 0;
+    for (;;) {
+        // errno is reset before each readdir: the allocations below may set
+        // it, and readdir leaves it alone at the end of the directory
+        errno = 0;
+        struct dirent *ent = readdir(d);
+        if (ent == NULL) {
+            if (errno != 0) e = -errno;
+            break;
+        }
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        if (count == room) {
+            room = room ? 2 * room : 64;
+            char **grown = realloc(names, room * sizeof *names);
+            if (grown == NULL) { e = -ENOMEM; break; }
+            names = grown;
+        }
+        names[count] = strdup(ent->d_name);
+        if (names[count] == NULL) { e = -ENOMEM; break; }
+        total += (int64_t)strlen(names[count]) + 1;
+        count++;
+    }
+    closedir(d);
+    if (e == 0) {
+        if (count > 1) qsort(names, count, sizeof *names, kern_cmp_names);
+        if (total <= cap) {
+            int64_t at = 0;
+            for (size_t i = 0; i < count; i++) {
+                size_t l = strlen(names[i]) + 1;
+                memcpy(buf + at, names[i], l);
+                at += (int64_t)l;
+            }
+        }
+    }
+    for (size_t i = 0; i < count; i++) free(names[i]);
+    free(names);
+    return e < 0 ? e : total;
+}
+// kern_io_temp creates a fresh directory (dir) or empty file named prefix
+// and six random characters in $TMPDIR (/tmp when unset) and writes its
+// path into buf; the path's length, or -errno (-EINVAL for a prefix with a
+// '/' or a NUL, -ENAMETOOLONG when it does not fit).
+int64_t kern_io_temp(const char *p, int64_t n, uint8_t dir, char *buf, int64_t cap) {
+    if (n < 0 || n > 255) return -ENAMETOOLONG;
+    if (n > 0 && (memchr(p, 0, (size_t)n) != NULL || memchr(p, '/', (size_t)n) != NULL)) return -EINVAL;
+    const char *t = getenv("TMPDIR");
+    if (t == NULL || *t == 0) t = "/tmp";
+    size_t tl = strlen(t);
+    while (tl > 1 && t[tl - 1] == '/') tl--;
+    char tmpl[4096];
+    if (tl + 1 + (size_t)n + 6 >= sizeof tmpl) return -ENAMETOOLONG;
+    memcpy(tmpl, t, tl);
+    tmpl[tl] = '/';
+    memcpy(tmpl + tl + 1, p, (size_t)n);
+    memcpy(tmpl + tl + 1 + n, "XXXXXX", 7);
+    if (dir) {
+        if (mkdtemp(tmpl) == NULL) return -errno;
+    } else {
+        int fd = mkstemp(tmpl);
+        if (fd < 0) return -errno;
+        if (close(fd) < 0) {
+            int ce = errno;
+            unlink(tmpl);
+            return -ce;
+        }
+    }
+    size_t l = strlen(tmpl);
+    if ((int64_t)l > cap) {
+        if (dir) rmdir(tmpl); else unlink(tmpl);
+        return -ENAMETOOLONG;
+    }
+    memcpy(buf, tmpl, l);
+    return (int64_t)l;
 }
 int64_t kern_io_argc(void) { return kern_argc; }
 int64_t kern_io_arg(int64_t i, char *buf, int64_t n) {

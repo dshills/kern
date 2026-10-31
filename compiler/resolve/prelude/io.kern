@@ -14,6 +14,11 @@ func io_read(fd: i32, buf: edit[]u8) -> i64
 func io_write(fd: i32, data: view[]u8) -> i64
 func io_close(fd: i32) -> i32
 func io_remove(path: view[]u8) -> i32
+func io_mkdir(path: view[]u8) -> i32
+func io_rmdir(path: view[]u8) -> i32
+func io_kind(path: view[]u8) -> i32
+func io_list(path: view[]u8, buf: edit[]u8) -> i64
+func io_temp(prefix: view[]u8, dir: bool, buf: edit[]u8) -> i64
 func io_argc() -> usize
 func io_arg(i: usize, buf: edit[]u8) -> usize
 
@@ -88,6 +93,81 @@ func remove_file(path: view[]u8) -> Result[(), IoErr] {
     if r < 0i32 { return Err(err_of(0i32 - r)) }
     return Ok(())
 }
+
+// FileKind is what a path names, symbolic links followed.
+union FileKind { RegularFile; Directory; OtherFile }
+
+// kind_of reports what path names.
+func kind_of(path: view[]u8) -> Result[FileKind, IoErr] {
+    k := io_kind(path)
+    if k < 0i32 { return Err(err_of(0i32 - k)) }
+    if k == 1i32 { return Ok(RegularFile) }
+    if k == 2i32 { return Ok(Directory) }
+    return Ok(OtherFile)
+}
+
+// make_dir creates a directory; Exists when path names anything already.
+func make_dir(path: view[]u8) -> Result[(), IoErr] {
+    r := io_mkdir(path)
+    if r < 0i32 { return Err(err_of(0i32 - r)) }
+    return Ok(())
+}
+
+// remove_dir deletes an empty directory.
+func remove_dir(path: view[]u8) -> Result[(), IoErr] {
+    r := io_rmdir(path)
+    if r < 0i32 { return Err(err_of(0i32 - r)) }
+    return Ok(())
+}
+
+// list_dir returns the names of a directory's entries, `.` and `..` left
+// out, in bytewise order.
+func list_dir(path: view[]u8) -> Result[Vec[Vec[u8]], IoErr] {
+    buf := Vec[u8].new()
+    buf.resize(4096usize, 0u8)
+    while true {
+        var n: i64 = 0i64
+        with e := buf.as_edit() { n = io_list(path, e) }
+        if n < 0i64 { return Err(err_of(truncate[i32](0i64 - n))) }
+        if usize(n) <= buf.len() {
+            names := Vec[Vec[u8]].new()
+            var start: usize = 0usize
+            var i: usize = 0usize
+            with b := buf.as_view() {
+                while i < usize(n) {
+                    if b[i] == 0u8 {
+                        name := Vec[u8].new()
+                        name.extend(b[start:i])
+                        names.push(name)
+                        start = i + 1usize
+                    }
+                    i = i + 1usize
+                }
+            }
+            return Ok(names)
+        }
+        // the names need more room (the directory may grow meanwhile)
+        buf.resize(usize(n), 0u8)
+    }
+    return Err(Other(0i32))
+}
+
+// temp_path creates a fresh directory or empty file in the system's
+// temporary directory ($TMPDIR, /tmp when unset), named prefix and random
+// characters, and returns its path; the prefix may not hold a '/'.
+func temp_path(prefix: view[]u8, dir: bool) -> Result[Vec[u8], IoErr] {
+    var buf: [4096]u8 = zero()
+    n := io_temp(prefix, dir, buf)
+    if n < 0i64 { return Err(err_of(truncate[i32](0i64 - n))) }
+    path := Vec[u8].new()
+    path.extend(buf[0usize : usize(n)])
+    return Ok(path)
+}
+
+// make_temp_dir and make_temp_file create a fresh directory or empty file
+// for the program's own use; removing it is the program's job.
+func make_temp_dir(prefix: view[]u8) -> Result[Vec[u8], IoErr] { return temp_path(prefix, true) }
+func make_temp_file(prefix: view[]u8) -> Result[Vec[u8], IoErr] { return temp_path(prefix, false) }
 
 // args returns the program's arguments, the program name first; an
 // argument longer than 4096 bytes is cut there.

@@ -1,6 +1,7 @@
 package interp
 
 import (
+	"bytes"
 	"syscall"
 	"os"
 	"io/fs"
@@ -178,10 +179,91 @@ func init() {
 			return []Value{mkInt("i32", 0)}
 		},
 		"io_remove": func(it *Interp, a []Value, _ callCtx) []Value {
-			if err := os.Remove(string(seqBytes(acc(a[0])))); err != nil {
+			// unlink, as natively: os.Remove would also remove an empty
+			// directory
+			return pathOp(a[0], syscall.Unlink)
+		},
+		// directories and temporary files (specs/std-files), as the hosted
+		// runtime does them
+		"io_mkdir": func(it *Interp, a []Value, _ callCtx) []Value {
+			return pathOp(a[0], func(p string) error { return syscall.Mkdir(p, 0o777) })
+		},
+		"io_rmdir": func(it *Interp, a []Value, _ callCtx) []Value { return pathOp(a[0], syscall.Rmdir) },
+		"io_kind": func(it *Interp, a []Value, _ callCtx) []Value {
+			p, e := cPath(seqBytes(acc(a[0])))
+			if e != 0 {
+				return []Value{mkInt("i32", uint64(uint32(-e)))}
+			}
+			fi, err := os.Stat(p)
+			if err != nil {
 				return []Value{mkInt("i32", uint64(uint32(-errnoOf(err))))}
 			}
-			return []Value{mkInt("i32", 0)}
+			k := 3
+			switch {
+			case fi.Mode().IsRegular():
+				k = 1
+			case fi.IsDir():
+				k = 2
+			}
+			return []Value{mkInt("i32", uint64(k))}
+		},
+		"io_list": func(it *Interp, a []Value, _ callCtx) []Value {
+			p, e := cPath(seqBytes(acc(a[0])))
+			if e != 0 {
+				return []Value{mkInt("i64", uint64(-int64(e)))}
+			}
+			ents, err := os.ReadDir(p) // sorted bytewise by name, as strcmp sorts natively
+			if err != nil {
+				return []Value{mkInt("i64", uint64(-int64(errnoOf(err))))}
+			}
+			var out []byte
+			for _, de := range ents {
+				out = append(append(out, de.Name()...), 0)
+			}
+			buf := byteSeq(acc(a[1]))
+			if len(out) <= buf.length() {
+				for i, b := range out {
+					buf.at(i).set(mkInt("u8", uint64(b)))
+				}
+			}
+			return []Value{mkInt("i64", uint64(len(out)))}
+		},
+		"io_temp": func(it *Interp, a []Value, _ callCtx) []Value {
+			fail := func(e int) []Value { return []Value{mkInt("i64", uint64(-int64(e)))} }
+			prefix := seqBytes(acc(a[0]))
+			if len(prefix) > 255 {
+				return fail(int(syscall.ENAMETOOLONG))
+			}
+			if bytes.IndexByte(prefix, 0) >= 0 || bytes.IndexByte(prefix, '/') >= 0 {
+				return fail(int(syscall.EINVAL))
+			}
+			var name string
+			if a[1].(Bool) {
+				d, err := os.MkdirTemp("", string(prefix)+"*")
+				if err != nil {
+					return fail(errnoOf(err))
+				}
+				name = d
+			} else {
+				f, err := os.CreateTemp("", string(prefix)+"*")
+				if err != nil {
+					return fail(errnoOf(err))
+				}
+				name = f.Name()
+				if err := f.Close(); err != nil {
+					_ = os.Remove(name)
+					return fail(errnoOf(err))
+				}
+			}
+			buf := byteSeq(acc(a[2]))
+			if len(name) > buf.length() {
+				_ = os.Remove(name)
+				return fail(int(syscall.ENAMETOOLONG))
+			}
+			for i := 0; i < len(name); i++ {
+				buf.at(i).set(mkInt("u8", uint64(name[i])))
+			}
+			return []Value{mkInt("i64", uint64(len(name)))}
 		},
 		"io_argc": func(it *Interp, a []Value, _ callCtx) []Value {
 			return []Value{mkInt("usize", uint64(len(it.sh.args)))}
@@ -821,6 +903,29 @@ func seqBytes(a *Access) []byte {
 		b[i] = byte(u64(seq.at(i).get()))
 	}
 	return b
+}
+
+// cPath is a kern path as the hosted runtime accepts it: an errno for one
+// of 4096 bytes or more (ENAMETOOLONG) or with a NUL (EINVAL), else 0.
+func cPath(b []byte) (string, int) {
+	if len(b) >= 4096 {
+		return "", int(syscall.ENAMETOOLONG)
+	}
+	if bytes.IndexByte(b, 0) >= 0 {
+		return "", int(syscall.EINVAL)
+	}
+	return string(b), 0
+}
+
+// pathOp runs a system call on a path argument and returns 0 or -errno.
+func pathOp(v Value, op func(string) error) []Value {
+	p, e := cPath(seqBytes(acc(v)))
+	if e == 0 {
+		if err := op(p); err != nil {
+			e = errnoOf(err)
+		}
+	}
+	return []Value{mkInt("i32", uint64(uint32(-e)))}
 }
 
 // errnoOf maps an I/O error to the errno std/io reports.

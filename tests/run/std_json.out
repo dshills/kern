@@ -1,0 +1,24 @@
+{"name":"kern\tc","id":18446744073709551615,"delta":-9223372036854775808,"zero":-0,"tags":["a","b\u0001"],"name":"second"}
+0
+missing
+name none
+  as i64 none
+id 18446744073709551615
+  as i64 none
+delta none
+  as i64 -9223372036854775808
+zero none
+  as i64 0
+tags none
+  as i64 none
+name none
+  as i64 none
+{"k":[-42,"q\"\\",null,false]}
+"a�b"
+null
+syntax at 6
+syntax at 5
+syntax at 1
+syntax at 4
+too deep at 512
+true

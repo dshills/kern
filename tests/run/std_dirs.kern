@@ -1,0 +1,107 @@
+//! phase: 6
+//! expect: output
+// std/io directories and temporary files (specs/std-files): a fresh
+// temporary directory, a subdirectory and two files made in it, its
+// listing in bytewise order, what each path names, the errors of a second
+// make_dir, of removing a non-empty directory and of a missing path, then
+// everything removed again; and a temporary file.
+module t
+import "std/io"
+func join(dir: view[]u8, name: view[]u8) -> Vec[u8] {
+    p := Vec[u8].new()
+    p.extend(dir)
+    p.push(47u8)
+    p.extend(name)
+    return p
+}
+func say(s: view[]u8) { print_str(s); println() }
+func err_name(e: view[io.IoErr]) {
+    match e {
+        NotFound => say("not found")
+        Permission => say("permission")
+        Exists => say("exists")
+        Other(c) => say("other")
+    }
+}
+func done(r: Result[(), io.IoErr], ok: view[]u8) {
+    match r {
+        Ok(u) => { if len(ok) > 0usize { say(ok) } }
+        Err(e) => err_name(e)
+    }
+}
+func kind(p: view[]u8) {
+    match io.kind_of(p) {
+        Ok(k) => {
+            match k {
+                RegularFile => say("file")
+                Directory => say("directory")
+                OtherFile => say("other kind")
+            }
+        }
+        Err(e) => err_name(e)
+    }
+}
+func main() -> i32 {
+    with td := io.make_temp_dir("kern-dirs-") {
+        match td {
+            Ok(dir) => {
+                sub := join(dir.as_view(), "sub")
+                b := join(dir.as_view(), "b.txt")
+                a := join(dir.as_view(), "a.txt")
+                done(io.make_dir(sub.as_view()), "made sub")
+                done(io.make_dir(sub.as_view()), "made twice")
+                done(io.write_file(b.as_view(), "bee"), "")
+                done(io.write_file(a.as_view(), "ay"), "")
+                with ls := io.list_dir(dir.as_view()) {
+                    match ls {
+                        Ok(names) => {
+                            print_u64(u64(names.len()))
+                            println()
+                            for n in names.as_view() { say(n.as_view()) }
+                        }
+                        Err(e) => err_name(e)
+                    }
+                }
+                kind(dir.as_view())
+                kind(a.as_view())
+                kind(join(dir.as_view(), "missing").as_view())
+                with ls := io.list_dir(join(dir.as_view(), "missing").as_view()) {
+                    match ls {
+                        Ok(names) => say("listed")
+                        Err(e) => err_name(e)
+                    }
+                }
+                match io.remove_dir(dir.as_view()) {
+                    Ok(u) => say("removed early")
+                    Err(e) => say("not empty")
+                }
+                match io.remove_file(sub.as_view()) {
+                    Ok(u) => say("unlinked a directory")
+                    Err(e) => say("not a file")
+                }
+                done(io.remove_file(a.as_view()), "")
+                done(io.remove_file(b.as_view()), "")
+                done(io.remove_dir(sub.as_view()), "")
+                done(io.remove_dir(dir.as_view()), "cleaned")
+                kind(dir.as_view())
+            }
+            Err(e) => { err_name(e); return 1i32 }
+        }
+    }
+    with tf := io.make_temp_file("kern-file-") {
+        match tf {
+            Ok(f) => {
+                kind(f.as_view())
+                done(io.remove_file(f.as_view()), "temp file removed")
+            }
+            Err(e) => { err_name(e); return 1i32 }
+        }
+    }
+    with bad := io.make_temp_dir("no/slash") {
+        match bad {
+            Ok(p) => say("made a nested name")
+            Err(e) => err_name(e)
+        }
+    }
+    return 0i32
+}
