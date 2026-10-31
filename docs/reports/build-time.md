@@ -122,9 +122,8 @@ same.
 | lexer | 1.81 ms, 1.28 MB, 14.0K allocs | 1.72 ms, 1.06 MB, 12.6K allocs |
 | guards | 2.57 ms, 2.21 MB, 16.2K allocs | 2.31 ms, 1.53 MB, 15.5K allocs |
 
-**Not reached:** the gate needs about 3.5x less work, and no
-representation tweak measured here gives more than a few percent. The
-lever is the state's structure: a persistent map whose meet compares
-shared subtrees, instead of chains of maps walked per key. That is a
-rewrite of `facts` and `meet`, about 1,000 lines with its own soundness
-tests, and is left as its own task.
+**Not reached here:** the gate needed about 3.5x less work, and no
+representation tweak measured here gave more than a few percent. The
+persistent-map state that followed (`docs/reports/prove-state.md`,
+`specs/prove-state`) took the lexer to the gate and the guards program
+to within 30% of it.

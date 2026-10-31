@@ -1,7 +1,7 @@
 package opt
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/dshills/kern/compiler/ir"
@@ -256,11 +256,9 @@ type prover struct {
 	// that receives the closure may write through them
 	closureCaps map[*ir.Value][]*ir.Value
 	constLens   map[uint64]*ir.Value // one synthetic length value per array length (never in the IR)
-	// scratch holds meet's key sets between meets
-	scratch meetScratch
 	// upper bounds kept on places (specs/prove-bounds): a place's bound is
 	// stored in the locals map under its key prefixed by ubPrefix, as the
-	// synthetic value of that constant, so that it is forgotten, flattened
+	// synthetic value of that constant, so that it is forgotten, met
 	// and compared with what the place holds; the meet keeps the larger
 	ubVals map[uint64]*ir.Value
 	ubOf   map[*ir.Value]uint64
@@ -288,82 +286,37 @@ func (p *prover) ubVal(c uint64) *ir.Value {
 // length key it is below.
 type ltKey struct{ base, ln *ir.Value }
 
-// facts is the state at a program point: what holds on every path to it.
-// States are layered: a child holds what its block added or removed over
-// its parent's, so taking a block's state as a child of its predecessor's
-// is constant work, and a join of two paths that diverged from one state
-// costs their deltas, not the whole state. A layer is never changed once
-// it has children; a chain deeper than maxDepth is flattened.
+// facts is the state at a program point: what holds on every path to it
+// (specs/prove-state). Each kind of fact is a persistent map, so taking a
+// block's state as a child of its predecessor's copies six roots, a write
+// replaces a root, and the meet of two paths that diverged from one state
+// returns every subtree they still share as it is (pmap.go).
 type facts struct {
-	parent *facts
-	depth  int
-	lt     map[ltKey]int64                    // the largest k with base + k < ln known (k < 0 when only a subtraction is known); never removed, only raised
-	locals map[*ir.Local]map[string]*ir.Value // the value a place rooted at a local holds, by path
-	lens   map[*ir.Local]map[string]*ir.Value // the value Len yielded for a place rooted at a local, by path
-	noLoc  map[*ir.Local]bool                 // the parents' locals of this root are gone
-	noLen  map[*ir.Local]bool                 // the parents' lens of this root are gone
-	equiv  map[*ir.Value]*ir.Value            // a value known equal to an earlier one (loads, lengths, recomputation); never removed
-	vn     map[string]*ir.Value               // value numbering: a pure operation on canonical operands, to its first value; never removed
-	rep    map[*ir.Value]*ir.Value            // same-length classes: a length key to its representative; whole when repOwn
-	repOwn bool
-	hasRep bool // some layer of the chain holds classes
+	lt     pmap[ltKey, int64, ltHash]            // the largest k with base + k < ln known (k < 0 when only a subtraction is known); never removed, only raised
+	locals pmap[*ir.Local, pathMap, localHash]   // the value a place rooted at a local holds, by path
+	lens   pmap[*ir.Local, pathMap, localHash]   // the value Len yielded for a place rooted at a local, by path
+	equiv  pmap[*ir.Value, *ir.Value, valueHash] // a value known equal to an earlier one (loads, lengths, recomputation); never removed
+	vn     pmap[string, *ir.Value, strHash]      // value numbering: a pure operation on canonical operands, to its first value; never removed
+	rep    pmap[*ir.Value, *ir.Value, valueHash] // same-length classes: a length key to its representative
 }
 
-const maxDepth = 32
+// pathMap is what one local's places hold, by path.
+type pathMap = pmap[string, *ir.Value, strHash]
 
-// newFacts is an empty layer; its maps are made on first write, since most
-// layers add a few entries of one or two kinds.
+// newFacts is the empty state.
 func newFacts() *facts { return &facts{} }
 
-func (s *facts) putLt(k ltKey, v int64) {
-	if s.lt == nil {
-		s.lt = map[ltKey]int64{}
-	}
-	s.lt[k] = v
-}
-
-func (s *facts) putEquiv(k, v *ir.Value) {
-	if s.equiv == nil {
-		s.equiv = map[*ir.Value]*ir.Value{}
-	}
-	s.equiv[k] = v
-}
-
-func (s *facts) putVn(k string, v *ir.Value) {
-	if s.vn == nil {
-		s.vn = map[string]*ir.Value{}
-	}
-	s.vn[k] = v
-}
-
-// child is a new layer over s.
+// child is a state to extend from s, which stays as it is.
 func (s *facts) child() *facts {
-	if s.depth >= maxDepth {
-		s = s.flatten()
-	}
-	c := newFacts()
-	c.parent, c.depth, c.hasRep = s, s.depth+1, s.hasRep
-	return c
+	c := *s
+	return &c
 }
 
-// flatten materialises the chain into one layer with no parent.
-func (s *facts) flatten() *facts {
-	f := newFacts()
-	f.lt, f.locals, f.lens, f.equiv, f.vn = s.allLt(), s.allLocals(), s.allLens(), s.allEquiv(), s.allVn()
-	f.rep, f.repOwn, f.hasRep = s.allRep(), true, s.hasRep
-	return f
-}
+// ---- lookups and updates ----
 
-// ---- lookups through the chain ----
+func (s *facts) getLt(k ltKey) (int64, bool) { return s.lt.get(k) }
 
-func (s *facts) getLt(k ltKey) (int64, bool) {
-	for l := s; l != nil; l = l.parent {
-		if v, ok := l.lt[k]; ok {
-			return v, true
-		}
-	}
-	return 0, false
-}
+func (s *facts) putLt(k ltKey, v int64) { s.lt = s.lt.set(k, v) }
 
 func (s *facts) addLt(base *ir.Value, off int64, ln *ir.Value) {
 	key := ltKey{base, ln}
@@ -373,295 +326,96 @@ func (s *facts) addLt(base *ir.Value, off int64, ln *ir.Value) {
 }
 
 func (s *facts) getLocal(root *ir.Local, path string) (*ir.Value, bool) {
-	for l := s; l != nil; l = l.parent {
-		if v, ok := l.locals[root][path]; ok {
-			return v, true
-		}
-		if l.noLoc[root] {
-			return nil, false
-		}
+	m, ok := s.locals.get(root)
+	if !ok {
+		return nil, false
 	}
-	return nil, false
+	return m.get(path)
 }
 
 func (s *facts) setLocal(root *ir.Local, path string, v *ir.Value) {
-	if s.locals == nil {
-		s.locals = map[*ir.Local]map[string]*ir.Value{}
-	}
-	if s.locals[root] == nil {
-		s.locals[root] = map[string]*ir.Value{}
-	}
-	s.locals[root][path] = v
+	m, _ := s.locals.get(root)
+	s.locals = s.locals.set(root, m.set(path, v))
 }
 
 func (s *facts) getLen(root *ir.Local, path string) (*ir.Value, bool) {
-	for l := s; l != nil; l = l.parent {
-		if v, ok := l.lens[root][path]; ok {
-			return v, true
-		}
-		if l.noLen[root] {
-			return nil, false
-		}
+	m, ok := s.lens.get(root)
+	if !ok {
+		return nil, false
 	}
-	return nil, false
+	return m.get(path)
 }
 
 func (s *facts) setLen(root *ir.Local, path string, v *ir.Value) {
-	if s.lens == nil {
-		s.lens = map[*ir.Local]map[string]*ir.Value{}
-	}
-	if s.lens[root] == nil {
-		s.lens[root] = map[string]*ir.Value{}
-	}
-	s.lens[root][path] = v
+	m, _ := s.lens.get(root)
+	s.lens = s.lens.set(root, m.set(path, v))
 }
 
-func (s *facts) getEquiv(v *ir.Value) (*ir.Value, bool) {
-	for l := s; l != nil; l = l.parent {
-		if w, ok := l.equiv[v]; ok {
-			return w, true
-		}
-	}
-	return nil, false
-}
+func (s *facts) getEquiv(v *ir.Value) (*ir.Value, bool) { return s.equiv.get(v) }
 
-func (s *facts) getVn(k string) (*ir.Value, bool) {
-	for l := s; l != nil; l = l.parent {
-		if v, ok := l.vn[k]; ok {
-			return v, true
-		}
-	}
-	return nil, false
-}
+func (s *facts) putEquiv(k, v *ir.Value) { s.equiv = s.equiv.set(k, v) }
+
+func (s *facts) getVn(k string) (*ir.Value, bool) { return s.vn.get(k) }
+
+func (s *facts) putVn(k string, v *ir.Value) { s.vn = s.vn.set(k, v) }
 
 // invalidate forgets what places rooted at a local hold and, unless
 // keepLens, the lengths they yielded. A write through an access or a call
 // cannot change the length of an array (its type's) or of a sequence (its
 // storage's), only a store, move or drop of the root can.
 func (s *facts) invalidate(l *ir.Local, keepLens bool) {
-	delete(s.locals, l)
-	if s.noLoc == nil {
-		s.noLoc = map[*ir.Local]bool{}
+	s.locals = s.locals.del(l)
+	if !keepLens {
+		s.lens = s.lens.del(l)
 	}
-	s.noLoc[l] = true
-	if keepLens {
-		return
-	}
-	delete(s.lens, l)
-	if s.noLen == nil {
-		s.noLen = map[*ir.Local]bool{}
-	}
-	s.noLen[l] = true
 }
 
-// ---- whole-state views (for joins across rounds, flattening and sizes) ----
+// ---- comparing states across rounds ----
 
-func (s *facts) allLt() map[ltKey]int64 {
-	out := map[ltKey]int64{}
-	for l := s; l != nil; l = l.parent {
-		for k, v := range l.lt {
-			if _, ok := out[k]; !ok {
-				out[k] = v
-			}
-		}
-	}
-	return out
-}
+// snapshot is a state as it stands, for comparing a header's entry state
+// between rounds: the maps are immutable, so a copy of the roots is the
+// whole state.
+type snapshot = facts
 
-func (s *facts) allLocals() map[*ir.Local]map[string]*ir.Value {
-	out := map[*ir.Local]map[string]*ir.Value{}
-	done := map[*ir.Local]bool{}
-	for l := s; l != nil; l = l.parent {
-		for r, m := range l.locals {
-			if done[r] {
-				continue
-			}
-			if out[r] == nil {
-				out[r] = map[string]*ir.Value{}
-			}
-			for path, v := range m {
-				if _, ok := out[r][path]; !ok {
-					out[r][path] = v
-				}
-			}
-		}
-		for r := range l.noLoc {
-			done[r] = true
-		}
-	}
-	return out
-}
+func (s *facts) snapshot() snapshot { return *s }
 
-func (s *facts) allLens() map[*ir.Local]map[string]*ir.Value {
-	out := map[*ir.Local]map[string]*ir.Value{}
-	done := map[*ir.Local]bool{}
-	for l := s; l != nil; l = l.parent {
-		for r, m := range l.lens {
-			if done[r] {
-				continue
-			}
-			if out[r] == nil {
-				out[r] = map[string]*ir.Value{}
-			}
-			for path, v := range m {
-				if _, ok := out[r][path]; !ok {
-					out[r][path] = v
-				}
-			}
-		}
-		for r := range l.noLen {
-			done[r] = true
-		}
-	}
-	return out
-}
-
-func (s *facts) allEquiv() map[*ir.Value]*ir.Value {
-	out := map[*ir.Value]*ir.Value{}
-	for l := s; l != nil; l = l.parent {
-		for k, v := range l.equiv {
-			if _, ok := out[k]; !ok {
-				out[k] = v
-			}
-		}
-	}
-	return out
-}
-
-func (s *facts) allVn() map[string]*ir.Value {
-	out := map[string]*ir.Value{}
-	for l := s; l != nil; l = l.parent {
-		for k, v := range l.vn {
-			if _, ok := out[k]; !ok {
-				out[k] = v
-			}
-		}
-	}
-	return out
-}
-
-func (s *facts) allRep() map[*ir.Value]*ir.Value {
-	for l := s; l != nil; l = l.parent {
-		if l.repOwn {
-			out := make(map[*ir.Value]*ir.Value, len(l.rep))
-			for k, v := range l.rep {
-				out[k] = v
-			}
-			return out
-		}
-	}
-	return map[*ir.Value]*ir.Value{}
-}
-
-// snapshot is the whole effective state, materialised, for comparing a
-// header's entry state between rounds.
-type snapshot struct {
-	lt     map[ltKey]int64
-	locals map[*ir.Local]map[string]*ir.Value
-	lens   map[*ir.Local]map[string]*ir.Value
-	equiv  map[*ir.Value]*ir.Value
-	vn     map[string]*ir.Value
-	rep    map[*ir.Value]*ir.Value
-}
-
-func (s *facts) snapshot() snapshot {
-	return snapshot{lt: s.allLt(), locals: s.allLocals(), lens: s.allLens(), equiv: s.allEquiv(), vn: s.allVn(), rep: s.allRep()}
-}
-
-// same reports whether two snapshots hold exactly the same facts: the same
+// same reports whether two states hold exactly the same facts: the same
 // keys with the same bounds, values and class representatives (the
 // representatives are canonical, the member with the smallest ID).
-func (a snapshot) same(b snapshot) bool {
-	if len(a.lt) != len(b.lt) || len(a.equiv) != len(b.equiv) || len(a.vn) != len(b.vn) || len(a.rep) != len(b.rep) || len(a.locals) != len(b.locals) || len(a.lens) != len(b.lens) {
-		return false
-	}
-	for k, v := range a.lt {
-		if w, ok := b.lt[k]; !ok || w != v {
-			return false
-		}
-	}
-	for k, v := range a.equiv {
-		if w, ok := b.equiv[k]; !ok || w != v {
-			return false
-		}
-	}
-	for k, v := range a.vn {
-		if w, ok := b.vn[k]; !ok || w != v {
-			return false
-		}
-	}
-	for k, v := range a.rep {
-		if w, ok := b.rep[k]; !ok || w != v {
-			return false
-		}
-	}
-	for r, m := range a.locals {
-		n, ok := b.locals[r]
-		if !ok || len(m) != len(n) {
-			return false
-		}
-		for path, v := range m {
-			if w, ok := n[path]; !ok || w != v {
-				return false
-			}
-		}
-	}
-	for r, m := range a.lens {
-		n, ok := b.lens[r]
-		if !ok || len(m) != len(n) {
-			return false
-		}
-		for path, v := range m {
-			if w, ok := n[path]; !ok || w != v {
-				return false
-			}
-		}
-	}
-	return true
+func (s facts) same(o facts) bool {
+	eqVal := func(x, y *ir.Value) bool { return x == y }
+	eqPaths := func(x, y pathMap) bool { return equal(x, y, eqVal) }
+	return equal(s.lt, o.lt, func(x, y int64) bool { return x == y }) &&
+		equal(s.equiv, o.equiv, eqVal) && equal(s.vn, o.vn, eqVal) && equal(s.rep, o.rep, eqVal) &&
+		equal(s.locals, o.locals, eqPaths) && equal(s.lens, o.lens, eqPaths)
 }
 
 // ---- same-length classes ----
 
-// ownRep makes the layer's class map whole and its own, so that it can be
-// changed.
-func (s *facts) ownRep() {
-	if !s.repOwn {
-		s.rep, s.repOwn, s.hasRep = s.allRep(), true, true
-	}
-}
-
 func (s *facts) find(v *ir.Value) *ir.Value {
-	if !s.hasRep {
-		return v
-	}
-	for l := s; l != nil; l = l.parent {
-		if l.repOwn {
-			if r, ok := l.rep[v]; ok {
-				return r
-			}
-			return v
-		}
+	if r, ok := s.rep.get(v); ok {
+		return r
 	}
 	return v
 }
 
 // members lists ln's same-length class, ln itself included.
 func (s *facts) members(ln *ir.Value) []*ir.Value {
-	if !s.hasRep {
+	if s.rep.size() == 0 {
 		return []*ir.Value{ln}
 	}
 	r := s.find(ln)
 	if r == ln {
-		if _, ok := s.allRep()[ln]; !ok {
+		if _, ok := s.rep.get(ln); !ok {
 			return []*ir.Value{ln}
 		}
 	}
 	out := []*ir.Value{}
-	for v, rv := range s.allRep() {
+	s.rep.each(func(v, rv *ir.Value) {
 		if rv == r {
 			out = append(out, v)
 		}
-	}
+	})
 	if len(out) == 0 {
 		return []*ir.Value{ln}
 	}
@@ -677,17 +431,20 @@ func (s *facts) union(a, b *ir.Value) {
 	if ra == rb {
 		return
 	}
-	s.ownRep()
 	r := ra
 	if rb.ID < ra.ID {
 		r = rb
 	}
-	for v, rv := range s.rep {
+	var moved []*ir.Value
+	s.rep.each(func(v, rv *ir.Value) {
 		if rv == ra || rv == rb {
-			s.rep[v] = r
+			moved = append(moved, v)
 		}
+	})
+	for _, v := range moved {
+		s.rep = s.rep.set(v, r)
 	}
-	s.rep[a], s.rep[b], s.rep[r] = r, r, r
+	s.rep = s.rep.set(a, r).set(b, r).set(r, r)
 }
 
 // bound is the largest known k with base + k < ln, through ln's class.
@@ -703,233 +460,79 @@ func (s *facts) bound(base *ir.Value, ln *ir.Value) (int64, bool) {
 
 // ---- the meet ----
 
-// meetScratch holds a meet's key sets.
-type meetScratch struct {
-	lt  map[ltKey]bool
-	eq  map[*ir.Value]bool
-	vn  map[string]bool
-	loc map[*ir.Local]bool
-	ln  map[*ir.Local]bool
-}
-
-// reset empties the sets, making them on first use.
-func (sc *meetScratch) reset() {
-	if sc.lt == nil {
-		sc.lt, sc.eq, sc.vn, sc.loc, sc.ln = map[ltKey]bool{}, map[*ir.Value]bool{}, map[string]bool{}, map[*ir.Local]bool{}, map[*ir.Local]bool{}
-		return
-	}
-	clear(sc.lt)
-	clear(sc.eq)
-	clear(sc.vn)
-	clear(sc.loc)
-	clear(sc.ln)
-}
-
-// ancestor is the nearest layer both chains share, or nil.
-func ancestor(a, b *facts) *facts {
-	for a != nil && b != nil && a != b {
-		switch {
-		case a.depth > b.depth:
-			a = a.parent
-		case b.depth > a.depth:
-			b = b.parent
-		default:
-			a, b = a.parent, b.parent
-		}
-	}
-	if a == b {
-		return a
-	}
-	return nil
-}
-
 // meet is the intersection of two states: what both know, with the
 // smaller bound, and two length keys in one class only when both states
-// have them in one class. The result is a child of the chains' common
-// ancestor holding only what the two paths changed since it; with no
-// common ancestor it is a whole layer.
+// have them in one class (specs/prove-state R3). Every map meets by
+// pmap intersection, so what the two states share costs nothing.
 func meet(a, b *facts, ub *prover) *facts {
-	l := ancestor(a, b)
-	c := newFacts()
-	if l != nil {
-		c.parent, c.depth = l, l.depth+1
-		if l.depth >= maxDepth {
-			l = l.flatten()
-			c.parent, c.depth = l, 1
+	sameVal := func(_ *ir.Value, x, y *ir.Value) (*ir.Value, bool) { return x, x == y }
+	samePath := func(_ string, x, y *ir.Value) (*ir.Value, bool) { return x, x == y }
+	c := &facts{
+		lt:    intersect(a.lt, b.lt, func(_ ltKey, x, y int64) (int64, bool) { return min(x, y), true }),
+		equiv: intersect(a.equiv, b.equiv, sameVal),
+		vn:    intersect(a.vn, b.vn, func(_ string, x, y *ir.Value) (*ir.Value, bool) { return x, x == y }),
+	}
+	// a place holds what both sides hold for it; a bound on either path:
+	// the larger holds on both
+	localPath := func(path string, x, y *ir.Value) (*ir.Value, bool) {
+		if x == y {
+			return x, true
 		}
-	}
-	// the keys either side touched since the ancestor, in sets the prover
-	// keeps between meets (cleared here) so that a meet allocates only
-	// the facts it keeps
-	sc := &meetScratch{}
-	if ub != nil {
-		sc = &ub.scratch
-	}
-	sc.reset()
-	ltKeys, eqKeys, vnKeys, locRoots, lenRoots := sc.lt, sc.eq, sc.vn, sc.loc, sc.ln
-	anyRep := false
-	for _, side := range []*facts{a, b} {
-		for x := side; x != nil && x != l; x = x.parent {
-			for k := range x.lt {
-				ltKeys[k] = true
-			}
-			for k := range x.equiv {
-				eqKeys[k] = true
-			}
-			for k := range x.vn {
-				vnKeys[k] = true
-			}
-			for r := range x.locals {
-				locRoots[r] = true
-			}
-			for r := range x.noLoc {
-				locRoots[r] = true
-			}
-			for r := range x.lens {
-				lenRoots[r] = true
-			}
-			for r := range x.noLen {
-				lenRoots[r] = true
-			}
-			if x.repOwn {
-				anyRep = true
+		if ub != nil && strings.HasPrefix(path, ubPrefix) {
+			bx, okx := ub.ubOf[x]
+			by, oky := ub.ubOf[y]
+			if okx && oky {
+				return ub.ubVal(max(bx, by)), true
 			}
 		}
+		return nil, false
 	}
-	for k := range ltKeys {
-		va, oka := a.getLt(k)
-		vb, okb := b.getLt(k)
-		if !oka || !okb {
-			continue
-		}
-		m := min(va, vb)
-		if l != nil {
-			if vl, ok := l.getLt(k); ok && vl == m {
-				continue
-			}
-		}
-		c.putLt(k, m)
-	}
-	for k := range eqKeys {
-		va, oka := a.getEquiv(k)
-		vb, okb := b.getEquiv(k)
-		if !oka || !okb || va != vb {
-			continue
-		}
-		if l != nil {
-			if _, ok := l.getEquiv(k); ok {
-				continue
-			}
-		}
-		c.putEquiv(k, va)
-	}
-	for k := range vnKeys {
-		va, oka := a.getVn(k)
-		vb, okb := b.getVn(k)
-		if !oka || !okb || va != vb {
-			continue
-		}
-		if l != nil {
-			if _, ok := l.getVn(k); ok {
-				continue
-			}
-		}
-		c.putVn(k, va)
-	}
-	// a root either side touched: its paths are what both sides hold the
-	// same value for, replacing whatever the ancestor held
-	paths := func(side *facts, r *ir.Local, get func(*facts, *ir.Local) map[string]*ir.Value) map[string]*ir.Value {
-		return get(side, r)
-	}
-	localsOf := func(x *facts, r *ir.Local) map[string]*ir.Value {
-		out := map[string]*ir.Value{}
-		for y := x; y != nil; y = y.parent {
-			for path, v := range y.locals[r] {
-				if _, ok := out[path]; !ok {
-					out[path] = v
-				}
-			}
-			if y.noLoc[r] {
-				break
-			}
-		}
-		return out
-	}
-	lensOf := func(x *facts, r *ir.Local) map[string]*ir.Value {
-		out := map[string]*ir.Value{}
-		for y := x; y != nil; y = y.parent {
-			for path, v := range y.lens[r] {
-				if _, ok := out[path]; !ok {
-					out[path] = v
-				}
-			}
-			if y.noLen[r] {
-				break
-			}
-		}
-		return out
-	}
-	if len(locRoots) > 0 {
-		c.noLoc = map[*ir.Local]bool{}
-	}
-	if len(lenRoots) > 0 {
-		c.noLen = map[*ir.Local]bool{}
-	}
-	for r := range locRoots {
-		ma, mb := paths(a, r, localsOf), paths(b, r, localsOf)
-		c.noLoc[r] = true
-		for path, v := range ma {
-			w, ok := mb[path]
-			if !ok {
-				continue
-			}
-			if v == w {
-				c.setLocal(r, path, v)
-			} else if ub != nil && strings.HasPrefix(path, ubPrefix) {
-				// a bound on either path: the larger holds on both
-				x, okx := ub.ubOf[v]
-				y, oky := ub.ubOf[w]
-				if okx && oky {
-					c.setLocal(r, path, ub.ubVal(max(x, y)))
-				}
-			}
-		}
-	}
-	for r := range lenRoots {
-		ma, mb := paths(a, r, lensOf), paths(b, r, lensOf)
-		c.noLen[r] = true
-		for path, v := range ma {
-			if w, ok := mb[path]; ok && v == w {
-				c.setLen(r, path, v)
-			}
-		}
-	}
-	if anyRep {
-		ra, rb := a.allRep(), b.allRep()
-		groups := map[[2]*ir.Value][]*ir.Value{}
-		for v, x := range ra {
-			if y, ok := rb[v]; ok {
-				key := [2]*ir.Value{x, y}
-				groups[key] = append(groups[key], v)
-			}
-		}
-		c.rep, c.repOwn, c.hasRep = map[*ir.Value]*ir.Value{}, true, true
-		for _, members := range groups {
-			if len(members) < 2 {
-				continue
-			}
-			r := members[0]
-			for _, m := range members[1:] {
-				if m.ID < r.ID {
-					r = m
-				}
-			}
-			for _, m := range members {
-				c.rep[m] = r
-			}
-		}
-	}
+	c.locals = intersect(a.locals, b.locals, func(_ *ir.Local, x, y pathMap) (pathMap, bool) {
+		m := intersect(x, y, localPath)
+		return m, m.size() > 0
+	})
+	c.lens = intersect(a.lens, b.lens, func(_ *ir.Local, x, y pathMap) (pathMap, bool) {
+		m := intersect(x, y, samePath)
+		return m, m.size() > 0
+	})
+	c.rep = meetClasses(a.rep, b.rep)
 	return c
+}
+
+// meetClasses keeps two length keys in one class when both sides have
+// them in one class, the class's member of smallest ID its representative.
+func meetClasses(ra, rb pmap[*ir.Value, *ir.Value, valueHash]) pmap[*ir.Value, *ir.Value, valueHash] {
+	if ra.root == rb.root {
+		return ra
+	}
+	groups := map[[2]*ir.Value][]*ir.Value{}
+	var keys [][2]*ir.Value
+	ra.each(func(v, x *ir.Value) {
+		if y, ok := rb.get(v); ok {
+			key := [2]*ir.Value{x, y}
+			if groups[key] == nil {
+				keys = append(keys, key)
+			}
+			groups[key] = append(groups[key], v)
+		}
+	})
+	var out pmap[*ir.Value, *ir.Value, valueHash]
+	for _, key := range keys {
+		members := groups[key]
+		if len(members) < 2 {
+			continue
+		}
+		r := members[0]
+		for _, m := range members[1:] {
+			if m.ID < r.ID {
+				r = m
+			}
+		}
+		for _, m := range members {
+			out = out.set(m, r)
+		}
+	}
+	return out
 }
 
 // invalidateEdits forgets every local an edit access may reach: a store
@@ -1110,15 +713,15 @@ func (p *prover) instr(s *facts, in, prev ir.Instr, mark bool) {
 		}
 	case *ir.Binary:
 		if unsigned(i.Dst.Type) {
-			p.number(s, i.Dst, fmt.Sprintf("b|%s|%s|%d|%d", i.Op, i.Mode, p.canon(s, i.L).ID, p.canon(s, i.R).ID))
+			p.number(s, i.Dst, "b|"+i.Op+"|"+i.Mode+"|"+strconv.Itoa(p.canon(s, i.L).ID)+"|"+strconv.Itoa(p.canon(s, i.R).ID))
 		}
 	case *ir.Conv:
 		if unsigned(i.Dst.Type) {
-			p.number(s, i.Dst, fmt.Sprintf("cv|%s|%v|%d", i.To, i.Truncate, p.canon(s, i.X).ID))
+			p.number(s, i.Dst, "cv|"+i.To+"|"+strconv.FormatBool(i.Truncate)+"|"+strconv.Itoa(p.canon(s, i.X).ID))
 		}
 	case *ir.Const:
 		if c, ok := p.constant(i.Dst); ok {
-			p.number(s, i.Dst, fmt.Sprintf("c|%s|%d", i.Dst.Type, c))
+			p.number(s, i.Dst, "c|"+i.Dst.Type.String()+"|"+strconv.FormatUint(c, 10))
 		}
 	case *ir.CheckBounds:
 		if i.Index != nil {
@@ -1538,11 +1141,11 @@ func (p *prover) placeKey(pl ir.Place) (string, *ir.Local) {
 	pl = p.resolve(pl)
 	switch {
 	case pl.Local != nil:
-		return fmt.Sprintf("l%d|", pl.Local.ID) + p.pathKey(pl.Path), pl.Local
+		return "l" + strconv.Itoa(pl.Local.ID) + "|" + p.pathKey(pl.Path), pl.Local
 	case pl.Access != nil:
-		return fmt.Sprintf("a%d|", pl.Access.ID) + p.pathKey(pl.Path), nil
+		return "a" + strconv.Itoa(pl.Access.ID) + "|" + p.pathKey(pl.Path), nil
 	case pl.Global != nil && pl.Global.ReadOnly:
-		return fmt.Sprintf("g%d|", pl.Global.ID) + p.pathKey(pl.Path), nil
+		return "g" + strconv.Itoa(pl.Global.ID) + "|" + p.pathKey(pl.Path), nil
 	}
 	return "", nil
 }
@@ -1550,15 +1153,19 @@ func (p *prover) placeKey(pl ir.Place) (string, *ir.Local) {
 // pathKey renders a path; an index or slice bound is named by its value's
 // ID (the IR's, not a canonical one: the key must be path-independent).
 func (p *prover) pathKey(path []ir.PathElem) string {
-	s := ""
+	if len(path) == 0 {
+		return ""
+	}
+	var b []byte
 	for _, e := range path {
 		switch e.Kind {
 		case ir.PathField:
-			s += fmt.Sprintf(".%d", e.Field)
+			b = strconv.AppendInt(append(b, '.'), int64(e.Field), 10)
 		case ir.PathVariant:
-			s += fmt.Sprintf(".v%d.%d", e.Tag, e.Field)
+			b = strconv.AppendInt(append(b, ".v"...), int64(e.Tag), 10)
+			b = strconv.AppendInt(append(b, '.'), int64(e.Field), 10)
 		case ir.PathIndex:
-			s += fmt.Sprintf("[%d]", e.Index.ID)
+			b = append(strconv.AppendInt(append(b, '['), int64(e.Index.ID), 10), ']')
 		case ir.PathSlice:
 			lo, hi := -1, -1
 			if e.Lo != nil {
@@ -1567,10 +1174,11 @@ func (p *prover) pathKey(path []ir.PathElem) string {
 			if e.Hi != nil {
 				hi = e.Hi.ID
 			}
-			s += fmt.Sprintf("[%d:%d]", lo, hi)
+			b = strconv.AppendInt(append(b, '['), int64(lo), 10)
+			b = append(strconv.AppendInt(append(b, ':'), int64(hi), 10), ']')
 		}
 	}
-	return s
+	return string(b)
 }
 
 // arrayLen is the length of a place whose type is a fixed-size array: a
