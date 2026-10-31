@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -58,7 +59,25 @@ func newClient(provider, model string) (llmClient, error) {
 		if key == "" {
 			return nil, fmt.Errorf("OPENAI_API_KEY is not set")
 		}
-		return &openaiClient{key: key, model: model}, nil
+		return &openaiClient{key: key, model: model, url: "https://api.openai.com/v1/responses"}, nil
+	case "wafer":
+		// Wafer serverless serves OpenAI's Responses API too
+		// (https://docs.wafer.ai/serverless); WAFER_API_URL may name any of
+		// its endpoints, and the base before /v1 is kept
+		key, base := os.Getenv("WAFER_API_KEY"), os.Getenv("WAFER_API_URL")
+		if key == "" {
+			return nil, fmt.Errorf("WAFER_API_KEY is not set")
+		}
+		if base == "" {
+			return nil, fmt.Errorf("WAFER_API_URL is not set")
+		}
+		// strip a /v1 path segment and what follows it
+		if i := strings.Index(base, "/v1/"); i >= 0 {
+			base = base[:i]
+		} else {
+			base = strings.TrimSuffix(base, "/v1")
+		}
+		return &openaiClient{key: key, model: model, url: strings.TrimRight(base, "/") + "/v1/responses"}, nil
 	case "anthropic":
 		key := os.Getenv("ANTHROPIC_API_KEY")
 		if key == "" {
@@ -133,17 +152,18 @@ func post(ctx context.Context, url string, headers map[string]string, body any) 
 // (function tools with reasoning models require the Responses API; the
 // whole conversation is resent each step, stateless)
 
-type openaiClient struct{ key, model string }
+type openaiClient struct{ key, model, url string }
 
 func (o *openaiClient) step(ctx context.Context, conv *conversation) (string, []toolCall, usage, error) {
 	var input []map[string]any
 	for _, t := range conv.turns {
 		switch t.role {
 		case "user":
-			input = append(input, map[string]any{"role": "user", "content": t.text})
+			// the explicit type, optional for OpenAI, is required by Wafer
+			input = append(input, map[string]any{"type": "message", "role": "user", "content": t.text})
 		case "assistant":
 			if t.text != "" {
-				input = append(input, map[string]any{"role": "assistant", "content": t.text})
+				input = append(input, map[string]any{"type": "message", "role": "assistant", "content": t.text})
 			}
 			for _, c := range t.calls {
 				input = append(input, map[string]any{"type": "function_call", "call_id": c.id, "name": c.name, "arguments": c.args})
@@ -157,7 +177,7 @@ func (o *openaiClient) step(ctx context.Context, conv *conversation) (string, []
 		tools = append(tools, map[string]any{"type": "function", "name": td.Name, "description": td.Description, "parameters": paramsSchema(td)})
 	}
 	body := map[string]any{"model": o.model, "instructions": conv.system, "input": input, "tools": tools, "store": false}
-	rb, err := post(ctx, "https://api.openai.com/v1/responses", map[string]string{"Authorization": "Bearer " + o.key}, body)
+	rb, err := post(ctx, o.url, map[string]string{"Authorization": "Bearer " + o.key}, body)
 	if err != nil {
 		return "", nil, usage{}, err
 	}

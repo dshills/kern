@@ -247,3 +247,36 @@ func TestTruncateAndRelRun(t *testing.T) {
 		t.Errorf("relRun outside root = %q, want the path as given", got)
 	}
 }
+
+// The wafer provider sends OpenAI Responses requests to Wafer's
+// /v1/responses whatever endpoint WAFER_API_URL names.
+func TestWaferClientURL(t *testing.T) {
+	t.Setenv("WAFER_API_KEY", "k")
+	for _, base := range []string{"https://pass.wafer.ai/v1/chat/completions", "https://pass.wafer.ai/v1", "https://pass.wafer.ai/", "https://pass.wafer.ai"} {
+		t.Setenv("WAFER_API_URL", base)
+		c, err := newClient("wafer", "GLM-5.3")
+		if err != nil {
+			t.Fatalf("%s: %v", base, err)
+		}
+		if oc, ok := c.(*openaiClient); !ok || oc.url != "https://pass.wafer.ai/v1/responses" || oc.model != "GLM-5.3" {
+			t.Errorf("%s: client %+v", base, c)
+		}
+	}
+	// a host that merely contains v1 is kept whole
+	t.Setenv("WAFER_API_URL", "https://v1.wafer.example/v1beta")
+	c, err := newClient("wafer", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oc, ok := c.(*openaiClient); !ok || oc.url != "https://v1.wafer.example/v1beta/v1/responses" {
+		t.Errorf("v1 inside a name: %+v", c)
+	}
+	t.Setenv("WAFER_API_URL", "")
+	if _, err := newClient("wafer", "GLM-5.3"); err == nil || !strings.Contains(err.Error(), "WAFER_API_URL") {
+		t.Errorf("a missing URL: %v", err)
+	}
+	t.Setenv("WAFER_API_KEY", "")
+	if _, err := newClient("wafer", "GLM-5.3"); err == nil || !strings.Contains(err.Error(), "WAFER_API_KEY") {
+		t.Errorf("a missing key: %v", err)
+	}
+}
