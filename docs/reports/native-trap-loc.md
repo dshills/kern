@@ -118,6 +118,21 @@ Run in OrbStack containers (Debian trixie, Go 1.25, clang 19):
   whole `tests` package and `kern test`'s tests also pass on x86-64
   (ThreadSanitizer is unavailable under emulation, so its fixtures skip).
 
+## CI (added 2026-10-31)
+
+CI already ran `go test ./...` on Ubuntu x86-64 and macOS, so these
+tests also passed on real x86-64 hardware at f65c0b7 (run 41197968257).
+Two changes followed:
+- **An arm64 Linux runner.** `ubuntu-24.04-arm` joins the matrix, so the
+  AArch64 Linux register reads run on every push, not only in a
+  container.
+- **`TestNativeStackTrapRepeated`.** It runs the overflow during
+  allocation 20 times per opt level and requires every run to die by
+  `SIGABRT` with a record naming `down`. Under emulation, the rejected
+  kern-code frame pointers broke about 8 runs in 12. The x86-64 container
+  was no longer running when the test was written, so its catching that
+  change is reasoned, not run.
+
 ## Not done
 
 - **Kern code on x86-64 keeps no frame pointer.** An overflow in a

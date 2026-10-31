@@ -15,7 +15,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # x86-64 and arm64 Linux, arm64 macOS: the native fault handler reads
+        # each platform's signal context its own way (specs/native-trap-loc)
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     env:
       KERN_REQUIRE_QEMU: "1"
     steps:

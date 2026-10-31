@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -164,6 +165,55 @@ func main() -> i32 {
 				}
 				t.Errorf("span %d-%d names none of %v", r.Span.Start, r.Span.End, c.fns)
 			})
+		}
+	}
+}
+
+// A stack overflow during allocation dies by SIGABRT with a located
+// record every time: the fault handler reads only what it knows it can,
+// so no run faults again inside it (specs/native-trap-loc R3). Repeated
+// because an address layout that breaks a read shows in some runs only;
+// CI runs it on x86-64 and arm64 Linux and on macOS.
+func TestNativeStackTrapRepeated(t *testing.T) {
+	if !native.Available() {
+		t.Skip("clang not available")
+	}
+	src := `module t
+func down(v: edit[Vec[u64]], n: u64) -> u64 {
+    v.push(n)
+    return down(v, n + 1u64) + 1u64
+}
+func main() -> i32 {
+    v := Vec[u64].new()
+    print_u64(down(v, 0u64))
+    return 0i32
+}
+`
+	for _, opt := range []string{"debug", "release"} {
+		exe := filepath.Join(t.TempDir(), "prog")
+		ds, err := native.Build([]*source.File{{Name: "push.kern", Bytes: []byte(src)}}, exe, native.Options{Opt: opt})
+		if err != nil || len(ds) > 0 {
+			t.Fatalf("native build: %v %v", err, ds)
+		}
+		start, end := declSpan(src, "down")
+		for i := 0; i < 20; i++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			cmd := exec.CommandContext(ctx, exe)
+			var eb bytes.Buffer
+			cmd.Stderr = &eb
+			err := cmd.Run()
+			cancel()
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				t.Fatalf("%s run %d: the program did not fail: %v", opt, i, err)
+			}
+			if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGABRT {
+				t.Fatalf("%s run %d: died by %v, not SIGABRT; stderr %q", opt, i, err, eb.String())
+			}
+			want := fmt.Sprintf(`"span":{"start":%d,"end":%d}`, start, end)
+			if !strings.Contains(eb.String(), want) {
+				t.Fatalf("%s run %d: record %q does not name down (%s)", opt, i, eb.String(), want)
+			}
 		}
 	}
 }

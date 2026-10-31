@@ -193,7 +193,7 @@ arithmetic near the type limits, and a mix of the whole language with the
 `std/str` and `std/map` code) and require the same agreement. Freestanding fixtures run under QEMU when it
 is installed and are skipped otherwise; `KERN_REQUIRE_QEMU=1` (set in CI) turns
 the skip into a failure. `golangci-lint run ./...` is part of CI, which runs on
-Ubuntu and macOS (`.github/workflows/ci.yml`).
+Ubuntu x86-64, Ubuntu arm64 and macOS (`.github/workflows/ci.yml`).
 
 ```bash
 go run ./bench/harness
