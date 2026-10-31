@@ -24,9 +24,9 @@
 - **Shared cold list.** `ir.ColdLibrary` is the backend's former
   `coldLibrary` list, now shared with the pass.
 
-Not copied: functions that return an access (`Vec.get`, `as_view`), as
-for user functions, since the returned projection is tied to the
-caller's `access_end`.
+Not copied at first: functions that return an access (`Vec.get`,
+`as_view`). They are copied since `specs/inline-access/SPEC.md`, when
+the copy can define the call's destination directly.
 
 ## Effect
 

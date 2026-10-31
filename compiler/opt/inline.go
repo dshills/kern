@@ -43,7 +43,8 @@ var MaxGrowth = 512
 // charged against the caller's MaxGrowth: charging it would starve the
 // small helpers at the sites after it (docs/reports/inliner-sizing.md
 // has the measurement). The callee is otherwise judged like any other
-// (no out parameters, no returned accesses, not recursive, not library).
+// (no out parameters, a returned access only as accessRetOK allows, not
+// recursive, not library).
 // A callee declared in another file is judged like any other: the copied
 // blocks carry its file (specs/cross-file-inlining/SPEC.md).
 var InlineSingleSite = true
@@ -176,13 +177,25 @@ func (in *inliner) eligible(f, g *ir.Func) bool {
 	if g.Closure {
 		return false // only ever called through its value
 	}
-	for _, r := range g.Rets {
-		if _, ok := r.(*resolve.Access); ok {
-			return false // a returned projection is tied to the caller's AccessEnd
-		}
-	}
 	if in.sizes[g] > MaxCalleeSize {
 		return InlineSingleSite && in.sites[g] == 1 // the copy replaces the body
+	}
+	return true
+}
+
+// accessRetOK reports whether a callee's returned accesses can be copied
+// to the site (specs/inline-access): they can when the copy defines the
+// call's destinations directly (one ret, its values distinct, defined by
+// the callee's own instructions and none of them a parameter's access),
+// so the caller's access_end of a destination ends the copied access; a
+// returned parameter access, or a projection carried through result
+// locals, cannot be.
+func accessRetOK(c *ir.Call, g *ir.Func) bool {
+	for _, r := range g.Rets {
+		if _, ok := r.(*resolve.Access); ok {
+			direct, _ := retPlan(c, g, paramAccesses(g))
+			return direct
+		}
 	}
 	return true
 }
@@ -393,7 +406,7 @@ func (in *inliner) inlineInto(f *ir.Func) {
 				continue
 			}
 			g := in.mod.Func(c.Callee)
-			if !in.eligible(f, g) {
+			if !in.eligible(f, g) || !accessRetOK(c, g) {
 				continue
 			}
 			if hasLoop(g) && onCycle(b) {

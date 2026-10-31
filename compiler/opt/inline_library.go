@@ -36,9 +36,10 @@ func InlineLibrary(mod *ir.Module) {
 }
 
 // libraryEligible reports whether a call from f to the library function g
-// may be copied: the user inliner's exclusions (returned accesses, out and
-// closure parameters, recursion, release functions), the containers'
-// cold growth paths, and the callee size limit.
+// may be copied: the user inliner's exclusions (out and closure
+// parameters, recursion, release functions), the containers'
+// cold growth paths, and the callee size limit; a returned access only
+// where accessRetOK allows it at the site.
 func (in *inliner) libraryEligible(f, g *ir.Func) bool {
 	switch {
 	case g == nil || g == f || g.Entry == nil || !g.Library:
@@ -58,11 +59,6 @@ func (in *inliner) libraryEligible(f, g *ir.Func) bool {
 			return false
 		}
 	}
-	for _, r := range g.Rets {
-		if _, ok := r.(*resolve.Access); ok {
-			return false
-		}
-	}
 	return true
 }
 
@@ -79,7 +75,7 @@ func (in *inliner) inlineLibraryInto(f *ir.Func) {
 				continue
 			}
 			g := in.mod.Func(c.Callee)
-			if !in.libraryEligible(f, g) {
+			if !in.libraryEligible(f, g) || !accessRetOK(c, g) {
 				continue
 			}
 			if hasLoop(g) && onCycle(b) {

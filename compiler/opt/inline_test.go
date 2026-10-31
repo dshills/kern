@@ -384,16 +384,22 @@ func main() -> i32 {
     return 0i32
 }
 `, "t.even"},
-		"access return": {`module t
-struct Box2 { v: u64 }
-func at(b: view[Box2]) -> view[u64] { return b.v }
+		// two returns of an access cannot define the call's destination
+		// directly, and an access cannot go through a result local
+		// (specs/inline-access)
+		"access returned twice": {`module t
+struct Box2 { v: u64; w: u64 }
+func pick(b: view[Box2], first: bool) -> view[u64] {
+    if first { return b.v }
+    return b.w
+}
 func main() -> i32 {
-    b := Box2 { v: 3u64 }
-    print_u64(at(b))
+    b := Box2 { v: 3u64, w: 4u64 }
+    print_u64(pick(b, true))
     println()
     return 0i32
 }
-`, "t.at"},
+`, "t.pick"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -1249,3 +1255,29 @@ func TestLibraryInlinerOptions(t *testing.T) {
 		}
 	}
 }
+
+// A function returning a projection of its parameter is copied: the copy
+// defines the call's destination, which the caller's access_end ends,
+// and the program's output is the same (specs/inline-access).
+func TestInlineAccessReturn(t *testing.T) {
+	src := `module t
+struct Box2 { v: u64; w: u64 }
+func at(b: view[Box2]) -> view[u64] { return b.v }
+func at_mut(b: edit[Box2]) -> edit[u64] { return b.w }
+func main() -> i32 {
+    b := Box2 { v: 3u64, w: 4u64 }
+    print_u64(at(b))
+    with w := at_mut(b) { w = w + 10u64 }
+    print_u64(b.w)
+    println()
+    return 0i32
+}
+`
+	_, inl := same(t, src)
+	for _, callee := range calls(inl.Func("t.main")) {
+		if callee == "t.at" || callee == "t.at_mut" {
+			t.Fatalf("%s should be copied\n%s", callee, ir.Print(inl))
+		}
+	}
+}
+
