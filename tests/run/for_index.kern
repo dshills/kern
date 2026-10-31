@@ -1,0 +1,37 @@
+//! phase: 6
+//! expect: output
+// `for i, x in xs` (spec/types.md §7): the index, a usize, and the
+// element, over an array (copies), a sequence view of Strings (views) and
+// a sequence edit (edits), with continue and break.
+module t
+import "std/str"
+func main() -> i32 {
+    xs := [5u64, 6u64, 7u64, 8u64]
+    var s: u64 = 0u64
+    for i, x in xs { s = s + u64(i) * x }
+    print_u64(s)
+    println()
+    var firsts: u64 = 0u64
+    for i, x in xs {
+        if i == 2usize { break }
+        firsts = firsts + x
+    }
+    print_u64(firsts)
+    println()
+    v := Vec[str.String].new()
+    v.push(str.String.from("a"))
+    v.push(str.String.from("b"))
+    v.push(str.String.from("c"))
+    with e := v.as_edit() {
+        for i, w in e { w.push(48u8 + u8(i)) }
+    }
+    with d := v.as_view() {
+        for i, w in d {
+            if i == 1usize { continue }
+            print_str(w.as_view())
+            print_str(" ")
+        }
+    }
+    println()
+    return 0i32
+}

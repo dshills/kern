@@ -54,7 +54,7 @@ func checksum(data: view[]u8) -> u64 {
 }
 ```
 
-`for x in p` over a place or view yields a copy of each element when the element type is `Copy`, and a per-iteration `view` (or `edit`, when iterating an `edit`) otherwise. A value of a type with the cursor protocol (methods over `usize` positions, `spec/types.md` §7; `std/map`'s `Map` has it) is iterated the same way, with one name through `cursor_get` or with two, `for k, v in m`, through `cursor_entry`; no access is stored, so the protocol stays within the second-class discipline. *(Added 2026-10-31, `specs/for-cursor/SPEC.md`.)*
+`for x in p` over a place or view yields a copy of each element when the element type is `Copy`, and a per-iteration `view` (or `edit`, when iterating an `edit`) otherwise. A value of a type with the cursor protocol (methods over `usize` positions, `spec/types.md` §7; `std/map`'s `Map` has it) is iterated the same way, with one name through `cursor_get` or with two, `for k, v in m`, through `cursor_entry`; no access is stored, so the protocol stays within the second-class discipline. Over an array or a sequence, `for i, x in p` binds the index (a `usize`) as well as the element. *(Added 2026-10-31, `specs/for-cursor/SPEC.md`, `specs/for-index/SPEC.md`.)*
 
 ### 4.1 Execution semantics (normative for the Phase 1 subset)
 These rules are the behavioral oracle shared by the interpreter and every native backend. Undefined behavior must not be reachable through safe language constructs.

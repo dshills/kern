@@ -297,6 +297,10 @@ func (f *For) Cursor() *Block { return f.cursor }
 // SetCursor records the desugared loop of a cursor-protocol for.
 func (f *For) SetCursor(b *Block) { f.cursor = b }
 
+// IndexKey is the key the index of `for i, x in xs` is declared under in
+// the resolver's Decls (the element is declared under the For itself).
+func (f *For) IndexKey() any { return &f.VarPos }
+
 // While is `while cond { }`.
 type While struct {
 	Pos

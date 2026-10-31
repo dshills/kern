@@ -179,6 +179,9 @@ func (c *fnCtx) expr(sc *scope, e ast.Expr, want Type) Type {
 	case *ast.ConvExpr:
 		t := c.expr(sc, x.X, nil)
 		to := &Prim{Name: x.To}
+		if _, bad := t.(*Bad); bad {
+			return c.record(e, to) // already reported where the operand failed
+		}
 		if x.Truncate {
 			if !IsInteger(t) || !IsInteger(to) {
 				c.errorf("TYPE_MISMATCH", x.Pos, "truncate requires integer types")

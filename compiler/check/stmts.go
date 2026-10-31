@@ -453,8 +453,13 @@ func (f *fn) forStmt(st *flow, s *ast.For) *flow {
 		f.encl = append(f.encl, &access{pl: r.pl, kind: accFreeze, start: 0, end: forever, pos: s.Iter.Span()})
 	}
 	sym := f.c.info.Decls[s]
+	isym := f.c.info.Decls[s.IndexKey()] // the index of `for i, x in xs`
 	out := f.loopBody(st, func(in *flow) *flow {
 		b := in.clone()
+		if isym != nil {
+			b.vars[isym] = &varState{st: stInit}
+			sc.owned = append(sc.owned, isym)
+		}
 		if sym != nil {
 			if sym.Kind == resolve.SymLocal {
 				b.vars[sym] = &varState{st: stInit}

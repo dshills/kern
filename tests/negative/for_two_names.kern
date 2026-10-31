@@ -1,11 +1,13 @@
 //! expect: reject TYPE_MISMATCH rule=T.5
 //! twin: for_two_names_ok
-// Two names iterate a type with the cursor protocol only; an array has
-// none (spec/types.md §7).
+// Two names iterate an array, a sequence (index and element) or a type
+// with the cursor protocol (spec/types.md §7); a struct without the
+// protocol is none of them.
 module m
+struct Pair { a: u64; b: u64 }
 func main() -> i32 {
-    xs := [1u64, 2u64, 3u64]
+    p := Pair { a: 1u64, b: 2u64 }
     var s: u64 = 0u64
-    for i, x in xs { s = s + x }
+    for i, x in p { s = s + x }
     return 0i32
 }

@@ -1,0 +1,16 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: for_cursor_nested_ok
+// The outer loop binds t for its body. The inner loop over the same map
+// reads t through its cursor methods, which that binding forbids
+// (spec §5.4). The conflict is reported once, though the desugared inner
+// loop reads t in several statements.
+module m
+import "std/map"
+func main() -> i32 {
+    t := map.Map[u64, u64].new()
+    var s: u64 = 0u64
+    for a, x in t {
+        for b, y in t { s = s + a * b }
+    }
+    return 0i32
+}

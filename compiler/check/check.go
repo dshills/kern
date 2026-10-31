@@ -91,7 +91,29 @@ func CheckModules(prog *resolve.Program, keep func(module string) bool) []diag.D
 		}
 	}
 	diag.Sort(c.diags)
-	return c.diags
+	return dedupe(c.diags)
+}
+
+// dedupe drops a diagnostic identical to an earlier one (code, rule,
+// file, span and message): a loop the resolver desugared (a cursor for)
+// checks the iterated place in several of its statements, and one
+// conflict would otherwise be reported once per statement.
+func dedupe(ds []diag.Diagnostic) []diag.Diagnostic {
+	type key struct {
+		code, rule, file, msg string
+		span                  diag.Span
+	}
+	seen := map[key]bool{}
+	out := ds[:0]
+	for _, d := range ds {
+		k := key{string(d.Code), d.Rule, d.File, d.Message, d.Span}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, d)
+	}
+	return out
 }
 
 type checker struct {

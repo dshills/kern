@@ -1,0 +1,14 @@
+//! phase: 6
+//! expect: accept
+//! twin: for_cursor_nested
+module m
+import "std/map"
+func main() -> i32 {
+    t := map.Map[u64, u64].new()
+    u := map.Map[u64, u64].new()
+    var s: u64 = 0u64
+    for a, x in t {
+        for b, y in u { s = s + a * b }
+    }
+    return 0i32
+}

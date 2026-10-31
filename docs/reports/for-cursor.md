@@ -87,8 +87,13 @@ prism, four passes; every finding fixed:
 
 ## Not done
 
-- **Nested loops over the same collection** are rejected: the inner
-  loop accesses a place the outer binding holds. This is the same as for
-  sequences today, and is the §5.4 rule.
-- **A two-name loop over a sequence** (`for i, x in xs`) is not
-  provided.
+- **Nested loops over the same map** are rejected: the inner loop reads
+  the map through its cursor methods, which the outer binding forbids
+  (§5.4).
+  - Correction (later that day): an earlier version of this report said
+    this was the same as for sequences. It is not. Two loops over the
+    same array nest, because the checker treats two loop freezes as
+    compatible. A read of the array in the body is rejected in both
+    kinds of loop.
+- **A two-name loop over a sequence** (`for i, x in xs`): added by
+  `specs/for-index/SPEC.md`.

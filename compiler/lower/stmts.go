@@ -448,6 +448,13 @@ func (fl *fnLower) forStmt(s *ast.For) {
 	var elemAcc *ir.Value
 	lf := fl.pushFrame()
 	lf.isLoop = true
+	if isym := fl.l.info.Decls[s.IndexKey()]; isym != nil {
+		// the index of `for i, x in xs`
+		loc := fl.local(isym)
+		fl.bindSym(isym)
+		fl.emit(&ir.Store{Place: ir.Place{Local: loc}, Src: idx})
+		fl.emit(&ir.Init{Place: ir.Place{Local: loc}})
+	}
 	if sym != nil {
 		fl.bindSym(sym)
 		et := fl.ty(sym.Type)

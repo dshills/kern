@@ -432,7 +432,7 @@ func (c *fnCtx) forStmt(sc *scope, s *ast.For) {
 	inner := sc.child()
 	if rg, ok := s.Iter.(*ast.RangeExpr); ok {
 		if s.Var2 != "" {
-			c.errorf("TYPE_MISMATCH", s.Var2Pos, "a for with two names iterates a type with the cursor protocol (cursor_first, cursor_next, cursor_end, cursor_entry), and a range has none")
+			c.errorf("TYPE_MISMATCH", s.Var2Pos, "a for with two names iterates an array, a sequence or a type with the cursor protocol, and a range is none (its values are the indexes)")
 			c.declare(inner, &s.Var2Pos, s.Var2, SymLocal, &Bad{}, ast.ConvValue, s.Var2Pos)
 		}
 		lt := c.expr(sc, rg.Lo, nil)
@@ -449,10 +449,6 @@ func (c *fnCtx) forStmt(sc *scope, s *ast.For) {
 	t := c.expr(sc, s.Iter, nil)
 	if c.cursorFor(sc, s, t) {
 		return
-	}
-	if s.Var2 != "" {
-		c.errorf("TYPE_MISMATCH", s.Var2Pos, "a for with two names iterates a type with the cursor protocol (cursor_first, cursor_next, cursor_end, cursor_entry), and %s has none", typeString(t))
-		c.declare(inner, &s.Var2Pos, s.Var2, SymLocal, &Bad{}, ast.ConvValue, s.Var2Pos)
 	}
 	var elem Type
 	edit := false
@@ -474,18 +470,32 @@ func (c *fnCtx) forStmt(sc *scope, s *ast.For) {
 		edit = c.placeIsMutable(sc, s.Iter)
 	}
 	if elem == nil {
-		c.errorf("TYPE_MISMATCH", s.Iter.Span(), "cannot iterate over %s", typeString(t))
+		if s.Var2 != "" {
+			c.errorf("TYPE_MISMATCH", s.Var2Pos, "a for with two names iterates an array, a sequence (index and element) or a type with the cursor protocol (cursor_first, cursor_next, cursor_end, cursor_entry), and %s is none", typeString(t))
+			c.declare(inner, &s.Var2Pos, s.Var2, SymLocal, &Bad{}, ast.ConvValue, s.Var2Pos)
+		} else {
+			c.errorf("TYPE_MISMATCH", s.Iter.Span(), "cannot iterate over %s", typeString(t))
+		}
+		// the body still sees its names, so it reports nothing more about them
+		c.declare(inner, s, s.Var, SymLocal, &Bad{}, ast.ConvValue, s.VarPos)
 		c.block(inner, s.Body)
 		return
 	}
+	// `for i, x in xs`: the first name is the index, a usize, and the
+	// second the element (spec/types.md §7)
+	name, pos := s.Var, s.VarPos
+	if s.Var2 != "" {
+		c.declare(inner, s.IndexKey(), s.Var, SymLocal, &Prim{Name: "usize"}, ast.ConvValue, s.VarPos)
+		name, pos = s.Var2, s.Var2Pos
+	}
 	if IsCopy(elem) {
-		c.declare(inner, s, s.Var, SymLocal, elem, ast.ConvValue, s.VarPos)
+		c.declare(inner, s, name, SymLocal, elem, ast.ConvValue, pos)
 	} else {
 		conv := ast.ConvView
 		if edit {
 			conv = ast.ConvEdit
 		}
-		c.declare(inner, s, s.Var, SymAccess, elem, conv, s.VarPos)
+		c.declare(inner, s, name, SymAccess, elem, conv, pos)
 	}
 	c.block(inner, s.Body)
 }
