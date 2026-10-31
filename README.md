@@ -206,12 +206,12 @@ implementations agree on their checksums. It measures each row in ten
 interleaved rounds and compares kern with its reference row as a paired ratio
 with a 95% interval; `-max-load` waits for a quiet host before each round.
 
-In the latest report (2026-10-31), user-level kern code meets the 10%
-throughput target on ten of the thirteen workloads, at 0.92× to 1.07× of the
-reference. packet_parser (0.91×), thread_pool (0.88×) and lock_free_queue
-(0.92×) are undecided, their intervals straddling the line, and none misses
-it. Peak memory meets the target on twelve of the thirteen; btree uses 1.23×
-the memory of C, the width of its checked 8-byte handles (ADR-014).
+In the latest measurements (2026-10-31, `docs/reports/quiet-host-2026-10-31.md`),
+user-level kern code meets the 10% throughput target on all thirteen workloads:
+four rows needed more rounds than the standard ten to settle (30, and 60 for
+btree). Peak memory meets the target on twelve of the thirteen; btree uses 1.23×
+the memory of C, the width of its checked 8-byte handles (ADR-014). kern's p99
+latency is within the interval of the better of C and Rust on every workload.
 
 ## Status
 
