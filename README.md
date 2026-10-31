@@ -201,12 +201,16 @@ Ubuntu x86-64, Ubuntu arm64 and macOS (`.github/workflows/ci.yml`).
 go run ./bench/harness
 ```
 
-regenerates `bench/REPORT.md` from five runs per row with 95% confidence
-intervals, checking that the C, Rust and kern implementations agree on their
-checksums. In the latest report (2026-10-28) user-level kern code meets the
-10% throughput target on eleven of the thirteen workloads, at 0.92× to 1.08× of
-the best of C and Rust; thread_pool (0.88×) and lock_protected_map (0.76×) miss
-it. Peak memory meets the 10% target on twelve of the thirteen: btree uses 1.23×
+regenerates `bench/REPORT.md` and checks that the C, Rust and kern
+implementations agree on their checksums. It measures each row in ten
+interleaved rounds and compares kern with its reference row as a paired ratio
+with a 95% interval; `-max-load` waits for a quiet host before each round.
+
+In the latest report (2026-10-31), user-level kern code meets the 10%
+throughput target on ten of the thirteen workloads, at 0.92× to 1.07× of the
+reference. packet_parser (0.91×), thread_pool (0.88×) and lock_free_queue
+(0.92×) are undecided, their intervals straddling the line, and none misses
+it. Peak memory meets the target on twelve of the thirteen; btree uses 1.23×
 the memory of C, the width of its checked 8-byte handles (ADR-014).
 
 ## Status
