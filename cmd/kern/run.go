@@ -62,9 +62,20 @@ func load(files []string, stdout io.Writer) (project.Result, bool) {
 	return pr, true
 }
 
-// Build resolves, checks, lowers and validates a program. Diagnostics are
-// returned for user errors; a validator failure is an internal error.
+// Build resolves, checks, lowers and validates a program for the analysis
+// commands. Diagnostics are returned for user errors; a validator failure
+// is an internal error.
 func Build(srcs []*source.File, optLevel string) (*ir.Module, []diag.Diagnostic, error) {
+	return buildWith(srcs, optLevel, opt.OptionsFor(optLevel))
+}
+
+// buildExec is Build for a program that runs: with the library inliner in
+// release (specs/inline-library).
+func buildExec(srcs []*source.File, optLevel string) (*ir.Module, []diag.Diagnostic, error) {
+	return buildWith(srcs, optLevel, opt.ExecOptionsFor(optLevel))
+}
+
+func buildWith(srcs []*source.File, optLevel string, o opt.Options) (*ir.Module, []diag.Diagnostic, error) {
 	prog := resolve.ResolveFor(srcs, optLevel == "release")
 	if len(prog.Diags) > 0 {
 		return nil, prog.Diags, nil
@@ -76,7 +87,7 @@ func Build(srcs []*source.File, optLevel string) (*ir.Module, []diag.Diagnostic,
 	if len(ds) > 0 {
 		return nil, nil, &InternalError{Err: fmt.Errorf("%s", ds[0].Message)}
 	}
-	if err := opt.Run(mod, opt.OptionsFor(optLevel)); err != nil {
+	if err := opt.Run(mod, o); err != nil {
 		return nil, nil, &InternalError{Err: fmt.Errorf("IR validation after %v", err)}
 	}
 	return mod, nil, nil
@@ -153,7 +164,7 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 		return fail(stdout, "CLI_INVALID_FLAGS", "--test-hooks requires --opt debug")
 	}
 	srcs, files := pr.Files, pr.Names()
-	mod, ds, err := Build(srcs, opts.Opt)
+	mod, ds, err := buildExec(srcs, opts.Opt)
 	req := Request{SchemaVersion: diag.SchemaVersion, Command: "run", Files: files}
 	if err != nil {
 		return internal(req, diag.SchemaVersion, err, stdout, stderr)

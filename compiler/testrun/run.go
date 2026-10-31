@@ -169,7 +169,7 @@ func Execute(srcs []*source.File, o Options) (*Result, []diag.Diagnostic, error)
 		if len(lds) > 0 {
 			return nil, nil, &InternalError{fmt.Errorf("lowering: %s", lds[0].Message)}
 		}
-		if err := opt.Run(mod, opt.OptionsFor(c.Opt)); err != nil {
+		if err := opt.Run(mod, opt.ExecOptionsFor(c.Opt)); err != nil {
 			return nil, nil, &InternalError{fmt.Errorf("IR validation after %v", err)}
 		}
 		if len(mod.Tests) != len(kept) {

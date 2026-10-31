@@ -638,7 +638,7 @@ func (e *emitter) function(f *ir.Func) {
 	linkage, attrs := "", ""
 	if f.Library {
 		linkage = "internal " // a library instantiation is private to the program: inlined and discarded
-		if coldLibrary[baseName(f.Name)] {
+		if ir.ColdLibrary[baseName(f.Name)] {
 			attrs = " noinline cold" // a growth or allocation path: kept out of the hot operations that call it
 		}
 	} else if (e.mod.Entry != "" || len(e.mod.Tests) > 0) && f.Extern == "" {
@@ -1645,14 +1645,6 @@ func (e *emitter) libraryThunk(f *ir.Func) string {
 	return sym
 }
 
-// coldLibrary names the prelude functions that are the containers' growth
-// and allocation paths (std/core.kern): they run once per doubling or per
-// object, so they are emitted noinline cold, which keeps the hot operations
-// around them (push, alloc) small enough to inline into their callers.
-var coldLibrary = map[string]bool{
-	"heap_alloc": true, "heap_try_alloc": true, "heap_realloc": true, "heap_try_realloc": true, "heap_free": true,
-	"Vec.grow": true, "Vec.reserve": true, "Pool.grow": true, "Arena.grow": true,
-}
 
 // baseName strips the specialization suffix: "Vec.grow[T=u64]" -> "Vec.grow".
 func baseName(name string) string {

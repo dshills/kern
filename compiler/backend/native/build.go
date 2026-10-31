@@ -125,7 +125,7 @@ func Build(srcs []*source.File, out string, opts Options) ([]diag.Diagnostic, er
 	if len(ds) > 0 {
 		return ds, nil
 	}
-	if err := opt.Run(mod, opt.OptionsFor(opts.Opt)); err != nil {
+	if err := opt.Run(mod, opt.ExecOptionsFor(opts.Opt)); err != nil {
 		return nil, fmt.Errorf("ir: %v", err)
 	}
 	return nil, BuildModule(mod, srcs, out, opts)

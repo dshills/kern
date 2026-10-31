@@ -369,7 +369,7 @@ Given `call %d1.. = g(%a1..)` in block `B` of `f`:
 - The existing fixtures and `bench/kern` checksums are unchanged; `emit-ir` on `packet_parser.kern` shows no call to `rd16` or `rd32` under `--opt release` and all of them under `--opt debug`.
 
 ### 6.6 Deferred
-- Library callees (`Vec.get`, `Box.get`): would need the trap-span parameters of a library function resolved to the call site's span during the copy, and `show-bounds-checks` to keep reporting those checks at the user-level call. Not needed for the measured gap (LLVM inlines them).
+- Library callees (`Vec.get`, `Box.get`): would need the trap-span parameters of a library function resolved to the call site's span during the copy, and `show-bounds-checks` to keep reporting those checks at the user-level call. Not needed for the measured gap (LLVM inlines them). *Done 2026-10-31* for library functions that return no access (`Vec.push`, `Vec.len`, `expect`, ...): a pass after the proof pass, in release execution only, gives every copied instruction the call site's position; the show-* commands never see it. `specs/inline-library/SPEC.md`, `docs/reports/inline-library.md`.
 - Cross-file inlining: needs a file on every position or on every instruction. Not needed by the benchmarks, every workload being one file. *Done 2026-10-30* with a file on every copied block: `specs/cross-file-inlining/SPEC.md`, `docs/reports/cross-file-inlining.md`.
 - Inlining through `thread.spawn` function values: never (the thunk takes the function by name).
 

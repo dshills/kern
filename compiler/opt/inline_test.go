@@ -1174,3 +1174,78 @@ func TestInlineKeepsTestRoots(t *testing.T) {
 		t.Fatalf("the printer lists the test roots\n%s", ir.Print(mod))
 	}
 }
+
+// TestInlineLibrary (specs/inline-library): small library bodies are
+// copied into user functions after the proof pass, cold growth paths and
+// access-returning functions stay calls, and every instruction of a copy
+// in user code takes the call site's position, so a trap inside it
+// reports the user-level call.
+func TestInlineLibrary(t *testing.T) {
+	src := "module t\nfunc main() -> i32 {\n    v := Vec[u64].new()\n    v.push(1u64)\n    print_u64(u64(v.len()))\n    expect(v.len() == 2usize)\n    return 0i32\n}\n"
+	build := func(lib bool) *ir.Module {
+		prog := resolve.ResolveFor([]*source.File{{Name: "t.kern", Bytes: []byte(src)}}, true)
+		if ds := check.Check(prog); len(prog.Diags)+len(ds) > 0 {
+			t.Fatalf("check: %v %v", prog.Diags, ds)
+		}
+		mod, ds := lower.Lower(prog)
+		if len(ds) > 0 {
+			t.Fatal(ds)
+		}
+		if err := Run(mod, Options{Inline: true, InlineLibrary: lib}); err != nil {
+			t.Fatal(err)
+		}
+		return mod
+	}
+	calls := func(mod *ir.Module) map[string]bool {
+		out := map[string]bool{}
+		for _, b := range mod.Func("t.main").Blocks {
+			for _, in := range b.Instrs {
+				if c, ok := in.(*ir.Call); ok && c.Intrinsic == "" {
+					out[baseName(c.Callee)] = true
+				}
+			}
+		}
+		return out
+	}
+	before, after := calls(build(false)), calls(build(true))
+	for _, name := range []string{"Vec.new", "Vec.push", "Vec.len", "core.expect"} {
+		if !before[name] || after[name] {
+			t.Errorf("%s: called before %v, after %v; want copied", name, before[name], after[name])
+		}
+	}
+	if !after["Vec.grow"] {
+		t.Errorf("the cold growth path must stay a call: %v", after)
+	}
+	// the copied expect's trap is at the expect call
+	at := strings.Index(src, "expect(")
+	end := strings.Index(src[at:], ")\n") + at + 1
+	found := false
+	for _, b := range build(true).Func("t.main").Blocks {
+		for _, in := range b.Instrs {
+			if tr, ok := in.(*ir.Trap); ok {
+				found = true
+				if tr.Pos.Start != at || tr.Pos.End != end {
+					t.Errorf("copied trap at %d-%d, want the call %d-%d", tr.Pos.Start, tr.Pos.End, at, end)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no copied trap in main")
+	}
+}
+
+// TestLibraryInlinerOptions: the library inliner runs only where a
+// release program executes; the show-* commands' options never include
+// it, so their user-level facts read library calls as calls
+// (specs/inline-library R1).
+func TestLibraryInlinerOptions(t *testing.T) {
+	for _, lvl := range []string{"debug", "release"} {
+		if OptionsFor(lvl).InlineLibrary {
+			t.Errorf("OptionsFor(%s) includes the library inliner", lvl)
+		}
+		if got := ExecOptionsFor(lvl); got.InlineLibrary != (lvl == "release") || got.Inline != OptionsFor(lvl).Inline {
+			t.Errorf("ExecOptionsFor(%s) = %+v", lvl, got)
+		}
+	}
+}

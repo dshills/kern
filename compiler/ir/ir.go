@@ -434,3 +434,13 @@ func (*CondBr) term()      {}
 func (*Switch) term()      {}
 func (*Ret) term()         {}
 func (*Unreachable) term() {}
+
+// ColdLibrary names the prelude functions that are the containers' growth
+// and allocation paths (std/core.kern): they run once per doubling or per
+// object, so the backend emits them noinline cold, which keeps the hot
+// operations around them (push, alloc) small enough to inline into their
+// callers, and the library inliner leaves them calls.
+var ColdLibrary = map[string]bool{
+	"heap_alloc": true, "heap_try_alloc": true, "heap_realloc": true, "heap_try_realloc": true, "heap_free": true,
+	"Vec.grow": true, "Vec.reserve": true, "Pool.grow": true, "Arena.grow": true,
+}
