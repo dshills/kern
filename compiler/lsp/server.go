@@ -340,6 +340,12 @@ func (s *Server) request(method string, params json.RawMessage) (result any, rer
 			return nil, invalidParams(err)
 		}
 		return s.references(p)
+	case "textDocument/completion":
+		var p textDocumentPositionParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.completion(p)
 	case "textDocument/prepareRename":
 		var p textDocumentPositionParams
 		if err := json.Unmarshal(params, &p); err != nil {
@@ -395,6 +401,7 @@ func (s *Server) initialize(params json.RawMessage) (any, *rpcError) {
 			"definitionProvider":         true,
 			"referencesProvider":         true,
 			"renameProvider":             map[string]any{"prepareProvider": true},
+			"completionProvider":         map[string]any{"triggerCharacters": []string{"."}},
 		},
 		"serverInfo": map[string]any{"name": "kern", "version": diag.SchemaVersion},
 	}, nil

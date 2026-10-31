@@ -46,8 +46,14 @@ error. The contract is `specs/language-server/SPEC.md`.
   re-checks the edited module, and the modules importing it only when
   its interface changed; other programs are not re-checked.
 
-It does not provide completion, semantic highlighting or a
-syntax grammar. Edits to `kern.mod` and new
+- **Completion.** After `x.`, the fields and methods of `x`'s type
+  (another module's private fields left out). After a type's name, its
+  static functions and variants, and after an imported module's name,
+  its exported declarations. Elsewhere, the locals in scope at the
+  cursor, the module's and the prelude's declarations, the imported
+  modules and the keywords. Typing `.` triggers it.
+
+It does not provide semantic highlighting or a syntax grammar. Edits to `kern.mod` and new
 files that are not yet saved in an imported module are seen when saved.
 
 ## Neovim (0.11 or later)

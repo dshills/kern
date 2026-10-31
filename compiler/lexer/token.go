@@ -1,6 +1,8 @@
 // Package lexer turns kern source into tokens.
 package lexer
 
+import "sort"
+
 // Kind is a token kind.
 type Kind int
 
@@ -146,4 +148,14 @@ type Token struct {
 func IsKeyword(s string) bool {
 	_, ok := keywords[s]
 	return ok
+}
+
+// Keywords lists the reserved words, sorted.
+func Keywords() []string {
+	out := make([]string, 0, len(keywords))
+	for w := range keywords {
+		out = append(out, w)
+	}
+	sort.Strings(out)
+	return out
 }
