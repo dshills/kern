@@ -54,22 +54,22 @@ func TestUnreachableTrap(t *testing.T) {
 func TestArithmeticSemantics(t *testing.T) {
 	it := New(&ir.Module{}, "x", &bytes.Buffer{}, &bytes.Buffer{})
 	// signed division truncates toward zero and remainder takes the dividend's sign (spec §4.1)
-	q := it.binary("/", mkInt("i32", sint(-7)), mkInt("i32", 2), "")
-	r := it.binary("%", mkInt("i32", sint(-7)), mkInt("i32", 2), "")
+	q := it.binary("/", mkInt(tyI32, sint(-7)), mkInt(tyI32, 2), "")
+	r := it.binary("%", mkInt(tyI32, sint(-7)), mkInt(tyI32, 2), "")
 	if signedOf(q.(Int)) != -3 || signedOf(r.(Int)) != -1 {
 		t.Fatalf("div/rem: %d %d", signedOf(q.(Int)), signedOf(r.(Int)))
 	}
 	// arithmetic right shift for signed, logical for unsigned
-	s := it.binary(">>", mkInt("i8", sint(-128)), mkInt("u32", 1), "")
+	s := it.binary(">>", mkInt(tyI8, sint(-128)), mkInt(tyU32, 1), "")
 	if signedOf(s.(Int)) != -64 {
 		t.Fatalf("signed shr: %d", signedOf(s.(Int)))
 	}
-	u := it.binary(">>", mkInt("u8", 128), mkInt("u32", 1), "")
+	u := it.binary(">>", mkInt(tyU8, 128), mkInt(tyU32, 1), "")
 	if u.(Int).Bits != 64 {
 		t.Fatalf("unsigned shr: %d", u.(Int).Bits)
 	}
 	// truncate keeps the low bits in the target's signedness
-	tr := it.conv(mkInt("i16", sint(-1)), "u8", true, false)
+	tr := it.conv(mkInt(tyI16, sint(-1)), "u8", true, false)
 	if tr.(Int).Bits != 255 {
 		t.Fatalf("truncate: %d", tr.(Int).Bits)
 	}
@@ -87,16 +87,16 @@ func TestArithmeticSemantics(t *testing.T) {
 		fn()
 		return ""
 	}
-	if k := trapped(func() { it.checkOverflow("*", mkInt("i64", 1<<62), mkInt("i64", 4), ast.Pos{}) }); k != "overflow" {
+	if k := trapped(func() { it.checkOverflow("*", mkInt(tyI64, 1<<62), mkInt(tyI64, 4), ast.Pos{}) }); k != "overflow" {
 		t.Fatalf("mul overflow: %q", k)
 	}
-	if k := trapped(func() { it.checkOverflow("/", mkInt("i8", 128), mkInt("i8", 255), ast.Pos{}) }); k != "overflow" {
+	if k := trapped(func() { it.checkOverflow("/", mkInt(tyI8, 128), mkInt(tyI8, 255), ast.Pos{}) }); k != "overflow" {
 		t.Fatalf("min/-1: %q", k)
 	}
-	if k := trapped(func() { it.checkOverflow("<<", mkInt("u8", 0x81), mkInt("u32", 1), ast.Pos{}) }); k != "overflow" {
+	if k := trapped(func() { it.checkOverflow("<<", mkInt(tyU8, 0x81), mkInt(tyU32, 1), ast.Pos{}) }); k != "overflow" {
 		t.Fatalf("shift-out: %q", k)
 	}
-	if k := trapped(func() { it.checkConv(mkInt("i8", sint(-1)), "u16", ast.Pos{}) }); k != "conversion" {
+	if k := trapped(func() { it.checkConv(mkInt(tyI8, sint(-1)), "u16", ast.Pos{}) }); k != "conversion" {
 		t.Fatalf("u16(i8(-1)): %q", k)
 	}
 }

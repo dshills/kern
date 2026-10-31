@@ -227,7 +227,7 @@ func globalInit(g *ir.Global) Value { return constValue(g.Type, g.Init) }
 func constValue(t resolve.Type, init any) Value {
 	switch v := init.(type) {
 	case int64:
-		return mkInt(t.(*resolve.Prim).Name, uint64(v))
+		return mkInt(tyOf(t.(*resolve.Prim).Name), uint64(v))
 	case float64:
 		return mkFloat(t.(*resolve.Prim).Name, v)
 	case bool:
@@ -357,7 +357,7 @@ func (it *Interp) trapRecord(tr *Trap) {
 		return
 	}
 	// a custom handler: TrapInfo is a struct {kind, file, start, end, thread_id}
-	info := &Struct{Fields: []Value{&Union{Tag: trapKindIndex(tr.Kind)}, Int{Ty: "usize"}, mkInt("usize", uint64(tr.Pos.Start)), mkInt("usize", uint64(tr.Pos.End)), mkInt("u64", it.tid)}}
+	info := &Struct{Fields: []Value{&Union{Tag: trapKindIndex(tr.Kind)}, Int{Ty: tyUsize}, mkInt(tyUsize, uint64(tr.Pos.Start)), mkInt(tyUsize, uint64(tr.Pos.End)), mkInt(tyU64, it.tid)}}
 	slot := Value(info)
 	h := handler
 	it.inTrap = true // a trap inside the handler terminates
@@ -423,6 +423,16 @@ type frame struct {
 type funcInfo struct {
 	frame  int
 	consts []Value // by value ID; nil where the value is no scalar constant
+	// calls are the direct calls' targets: an intrinsic's function or the
+	// callee, looked up by name once rather than at every call
+	calls map[*ir.Call]callTarget
+}
+
+// callTarget is what a direct call runs: an intrinsic or a function of the
+// module (neither for a name the module does not define).
+type callTarget struct {
+	intrinsic intrinsicFn
+	callee    *ir.Func
 }
 
 // info is f's funcInfo.
@@ -433,8 +443,23 @@ func (it *Interp) info(f *ir.Func) *funcInfo {
 	fi := &funcInfo{frame: frameSize(f), consts: make([]Value, f.NumValues)}
 	for _, b := range f.Blocks {
 		for _, in := range b.Instrs {
-			if c, ok := in.(*ir.Const); ok && c.Bytes == nil && c.Dst.ID < len(fi.consts) {
-				fi.consts[c.Dst.ID] = it.constValue(c)
+			switch c := in.(type) {
+			case *ir.Const:
+				if c.Bytes == nil && c.Dst.ID < len(fi.consts) {
+					fi.consts[c.Dst.ID] = it.constValue(c)
+				}
+			case *ir.Call:
+				if c.Fn != nil {
+					continue
+				}
+				if fi.calls == nil {
+					fi.calls = map[*ir.Call]callTarget{}
+				}
+				if c.Intrinsic != "" {
+					fi.calls[c] = callTarget{intrinsic: intrinsics[c.Intrinsic]}
+				} else {
+					fi.calls[c] = callTarget{callee: it.mod.Func(c.Callee)}
+				}
 			}
 		}
 	}
@@ -518,8 +543,9 @@ func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
 	}
 	it.stackUsed += frameBytes
 	defer func() { it.stackUsed -= frameBytes }()
-	fr.locals = make([]Value, len(f.Locals))
-	fr.vals = make([]Value, f.NumValues)
+	// locals and values in one allocation
+	slots := make([]Value, len(f.Locals)+f.NumValues)
+	fr.locals, fr.vals = slots[:len(f.Locals):len(f.Locals)], slots[len(f.Locals):]
 	for i, p := range f.Params {
 		if i < len(args) {
 			fr.locals[p.ID] = args[i]
@@ -701,13 +727,13 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 			args[k] = fr.vals[a.ID]
 		}
 		var rets []Value
+		target := fr.info.calls[i]
 		switch {
 		case i.Intrinsic != "":
-			fn, ok := intrinsics[i.Intrinsic]
-			if !ok {
+			if target.intrinsic == nil {
 				panic(fmt.Sprintf("interp: unknown intrinsic %s", i.Intrinsic))
 			}
-			rets = fn(it, args, callCtx{pos: fr.at(i.Pos), targs: i.TypeArgs})
+			rets = target.intrinsic(it, args, callCtx{pos: fr.at(i.Pos), targs: i.TypeArgs})
 		case i.Fn != nil:
 			switch fv := fr.vals[i.Fn.ID].(type) {
 			case ClosureVal:
@@ -716,11 +742,14 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 				rets = it.callNamed(fv.(FuncVal).Name, args)
 			}
 		default:
-			if callee := it.mod.Func(i.Callee); callee != nil && callee.Library {
+			switch callee := target.callee; {
+			case callee != nil && callee.Library:
 				// entering (or staying in) the library: traps report this call
 				pos := fr.at(i.Pos)
 				rets = it.callAt(callee, args, &pos)
-			} else {
+			case callee != nil:
+				rets = it.callAt(callee, args, nil)
+			default:
 				rets = it.callNamed(i.Callee, args)
 			}
 		}
@@ -741,7 +770,7 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 		default:
 			switch v := x.(type) {
 			case Int:
-				fr.vals[i.Dst.ID] = mkInt(v.Ty, -v.Bits)
+				fr.vals[i.Dst.ID] = intVal(v.Ty, -v.Bits)
 			case Float:
 				fr.vals[i.Dst.ID] = mkFloat(v.Ty, -v.V)
 			}
@@ -766,7 +795,7 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 	case *ir.CheckConv:
 		it.checkConv(fr.vals[i.X.ID], i.To, fr.at(i.Pos))
 	case *ir.Len:
-		fr.vals[i.Dst.ID] = mkInt("usize", uint64(it.length(fr, i.Place)))
+		fr.vals[i.Dst.ID] = mkInt(tyUsize, uint64(it.length(fr, i.Place)))
 	case *ir.MakeStruct:
 		s := &Struct{Fields: make([]Value, len(i.Fields))}
 		for k, f := range i.Fields {
@@ -789,7 +818,7 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 		fr.vals[i.Dst.ID] = zeroOf(i.Dst.Type)
 	case *ir.Tag:
 		r, _ := it.resolve(fr, i.Place)
-		fr.vals[i.Dst.ID] = mkInt("u32", uint64(r.get().(*Union).Tag))
+		fr.vals[i.Dst.ID] = mkInt(tyU32, uint64(r.get().(*Union).Tag))
 	case *ir.FuncRef:
 		fr.vals[i.Dst.ID] = FuncVal{Name: i.Name}
 	case *ir.MakeClosure:
@@ -815,7 +844,7 @@ func (it *Interp) constValue(c *ir.Const) Value {
 	case c.Bytes != nil:
 		elems := make([]Value, len(c.Bytes))
 		for i, b := range c.Bytes {
-			elems[i] = mkInt("u8", uint64(b))
+			elems[i] = mkInt(tyU8, uint64(b))
 		}
 		arr := &Array{Elems: elems}
 		return &Access{Seq: &seqRef{elems: func() []Value { return arr.Elems }, lo: 0, hi: len(elems)}}
@@ -832,7 +861,7 @@ func (it *Interp) constValue(c *ir.Const) Value {
 		if c.Neg {
 			v = -v
 		}
-		return mkInt(t.Name, v)
+		return mkInt(tyOf(t.Name), v)
 	}
 	return Unit{}
 }
@@ -842,7 +871,7 @@ func (it *Interp) constValue(c *ir.Const) Value {
 // shiftCount is the shift count the operation uses: in wrapping mode the
 // count masked to width - 1 (spec §4.1); otherwise the count as given, which
 // the preceding check bounded below the width.
-func shiftCount(n uint64, ty string, mode string) uint64 {
+func shiftCount(n uint64, ty IntTy, mode string) uint64 {
 	if mode == "wrapping" {
 		return n & uint64(width(ty)-1)
 	}
@@ -977,25 +1006,25 @@ func (it *Interp) binary(op string, l, r Value, mode string) Value {
 			x, y := signedOf(a), signedOf(b)
 			switch op {
 			case "+":
-				return mkInt(ty, uint64(x+y))
+				return intVal(ty, uint64(x+y))
 			case "-":
-				return mkInt(ty, uint64(x-y))
+				return intVal(ty, uint64(x-y))
 			case "*":
-				return mkInt(ty, uint64(x*y))
+				return intVal(ty, uint64(x*y))
 			case "/":
-				return mkInt(ty, uint64(x/y))
+				return intVal(ty, uint64(x/y))
 			case "%":
-				return mkInt(ty, uint64(x%y))
+				return intVal(ty, uint64(x%y))
 			case "<<":
-				return mkInt(ty, uint64(x<<shiftCount(b.Bits, ty, mode)))
+				return intVal(ty, uint64(x<<shiftCount(b.Bits, ty, mode)))
 			case ">>":
-				return mkInt(ty, uint64(x>>shiftCount(b.Bits, ty, mode)))
+				return intVal(ty, uint64(x>>shiftCount(b.Bits, ty, mode)))
 			case "&":
-				return mkInt(ty, a.Bits&b.Bits)
+				return intVal(ty, a.Bits&b.Bits)
 			case "|":
-				return mkInt(ty, a.Bits|b.Bits)
+				return intVal(ty, a.Bits|b.Bits)
 			case "^":
-				return mkInt(ty, a.Bits^b.Bits)
+				return intVal(ty, a.Bits^b.Bits)
 			case "==":
 				return Bool(x == y)
 			case "!=":
@@ -1013,25 +1042,25 @@ func (it *Interp) binary(op string, l, r Value, mode string) Value {
 		x, y := a.Bits, b.Bits
 		switch op {
 		case "+":
-			return mkInt(ty, x+y)
+			return intVal(ty, x+y)
 		case "-":
-			return mkInt(ty, x-y)
+			return intVal(ty, x-y)
 		case "*":
-			return mkInt(ty, x*y)
+			return intVal(ty, x*y)
 		case "/":
-			return mkInt(ty, x/y)
+			return intVal(ty, x/y)
 		case "%":
-			return mkInt(ty, x%y)
+			return intVal(ty, x%y)
 		case "<<":
-			return mkInt(ty, x<<shiftCount(y, ty, mode))
+			return intVal(ty, x<<shiftCount(y, ty, mode))
 		case ">>":
-			return mkInt(ty, x>>shiftCount(y, ty, mode))
+			return intVal(ty, x>>shiftCount(y, ty, mode))
 		case "&":
-			return mkInt(ty, x&y)
+			return intVal(ty, x&y)
 		case "|":
-			return mkInt(ty, x|y)
+			return intVal(ty, x|y)
 		case "^":
-			return mkInt(ty, x^y)
+			return intVal(ty, x^y)
 		case "==":
 			return Bool(x == y)
 		case "!=":
@@ -1121,8 +1150,9 @@ func (it *Interp) checkConv(x Value, to string, pos ast.Pos) {
 		} else {
 			val = int64(v.Bits)
 		}
-		w := width(to)
-		if signed(to) {
+		tt := tyOf(to)
+		w := width(tt)
+		if signed(tt) {
 			if big || val < minSigned(w) || val > maxSigned(w) {
 				it.trap("conversion", pos)
 			}
@@ -1142,8 +1172,9 @@ func (it *Interp) checkConv(x Value, to string, pos ast.Pos) {
 			it.trap("conversion", pos)
 		}
 		t := math.Trunc(v.V)
-		w := width(to)
-		if signed(to) {
+		tt := tyOf(to)
+		w := width(tt)
+		if signed(tt) {
 			if t < -math.Ldexp(1, int(w)-1) || t >= math.Ldexp(1, int(w)-1) {
 				it.trap("conversion", pos)
 			}
@@ -1166,34 +1197,35 @@ func (it *Interp) conv(x Value, to string, truncate, saturate bool) Value {
 		if signed(v.Ty) {
 			bitsv = uint64(signedOf(v)) // sign-extend to 64 bits
 		}
-		return mkInt(to, bitsv)
+		return intVal(tyOf(to), bitsv)
 	case Float:
 		if to == "f32" || to == "f64" {
 			return mkFloat(to, v.V)
 		}
 		t := math.Trunc(v.V)
-		w := width(to)
+		tt := tyOf(to)
+		w := width(tt)
 		if saturate {
 			if math.IsNaN(t) {
-				return Int{Ty: to}
+				return Int{Ty: tt}
 			}
-			if signed(to) {
+			if signed(tt) {
 				if t < -math.Ldexp(1, int(w)-1) {
-					return mkInt(to, uint64(minSigned(w)))
+					return intVal(tt, uint64(minSigned(w)))
 				}
 				if t >= math.Ldexp(1, int(w)-1) {
-					return mkInt(to, uint64(maxSigned(w)))
+					return intVal(tt, uint64(maxSigned(w)))
 				}
 			} else if t < 0 {
-				return Int{Ty: to}
+				return Int{Ty: tt}
 			} else if t >= math.Ldexp(1, int(w)) {
-				return mkInt(to, math.MaxUint64)
+				return intVal(tt, math.MaxUint64)
 			}
 		}
-		if signed(to) {
-			return mkInt(to, uint64(int64(t)))
+		if signed(tt) {
+			return intVal(tt, uint64(int64(t)))
 		}
-		return mkInt(to, uint64(t))
+		return intVal(tt, uint64(t))
 	}
 	return x
 }
@@ -1294,5 +1326,5 @@ func bitCount(op string, v Int) Int {
 	default:
 		n = bits.OnesCount64(v.Bits)
 	}
-	return mkInt("u32", uint64(n))
+	return mkInt(tyU32, uint64(n))
 }

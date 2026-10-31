@@ -242,9 +242,10 @@ func (it *Interp) decode(b []byte, t resolve.Type) Value {
 		case "f64":
 			return mkFloat("f64", math.Float64frombits(binary.LittleEndian.Uint64(b)))
 		}
-		return mkInt(x.Name, getInt(b, layout.Of(t).Size))
+		ty := tyOf(x.Name)
+		return mkInt(ty, getInt(b, int(width(ty)/8)))
 	case *resolve.RawPtr:
-		return mkInt("usize", getInt(b, 8))
+		return mkInt(tyUsize, getInt(b, 8))
 	case *resolve.Func:
 		if v := it.heap.handleValue(getInt(b, 8)); v != nil {
 			return v

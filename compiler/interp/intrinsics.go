@@ -95,7 +95,7 @@ func init() {
 			}
 			f, err := os.OpenFile(path, flags, 0o644)
 			if err != nil {
-				return []Value{mkInt("i32", uint64(uint32(-errnoOf(err))))}
+				return []Value{mkInt(tyI32, uint64(uint32(-errnoOf(err))))}
 			}
 			it.sh.mu.Lock()
 			if it.sh.files == nil {
@@ -107,7 +107,7 @@ func init() {
 			}
 			it.sh.files[fd] = f
 			it.sh.mu.Unlock()
-			return []Value{mkInt("i32", uint64(fd))}
+			return []Value{mkInt(tyI32, uint64(fd))}
 		},
 		"io_read": func(it *Interp, a []Value, _ callCtx) []Value {
 			fd := int64(int32(a[0].(Int).Bits))
@@ -122,20 +122,20 @@ func init() {
 				f := it.sh.files[fd]
 				it.sh.mu.Unlock()
 				if f == nil {
-					return []Value{mkInt("i64", ^uint64(8))} // EBADF, -9
+					return []Value{mkInt(tyI64, ^uint64(8))} // EBADF, -9
 				}
 				n, err = f.Read(buf)
 			}
 			if err != nil && n == 0 {
 				if errors.Is(err, io.EOF) {
-					return []Value{mkInt("i64", 0)}
+					return []Value{mkInt(tyI64, 0)}
 				}
-				return []Value{mkInt("i64", uint64(-errnoOf(err)))}
+				return []Value{mkInt(tyI64, uint64(-errnoOf(err)))}
 			}
 			for i := 0; i < n; i++ {
-				seq.at(i).set(mkInt("u8", uint64(buf[i])))
+				seq.at(i).set(mkInt(tyU8, uint64(buf[i])))
 			}
-			return []Value{mkInt("i64", uint64(n))}
+			return []Value{mkInt(tyI64, uint64(n))}
 		},
 		"io_write": func(it *Interp, a []Value, _ callCtx) []Value {
 			fd := int64(int32(a[0].(Int).Bits))
@@ -148,21 +148,21 @@ func init() {
 				}
 				n, err := w.Write(data)
 				if err != nil && n == 0 {
-					return []Value{mkInt("i64", uint64(-errnoOf(err)))}
+					return []Value{mkInt(tyI64, uint64(-errnoOf(err)))}
 				}
-				return []Value{mkInt("i64", uint64(n))}
+				return []Value{mkInt(tyI64, uint64(n))}
 			}
 			it.sh.mu.Lock()
 			f := it.sh.files[fd]
 			it.sh.mu.Unlock()
 			if f == nil {
-				return []Value{mkInt("i64", ^uint64(8))}
+				return []Value{mkInt(tyI64, ^uint64(8))}
 			}
 			n, err := f.Write(data)
 			if err != nil && n == 0 {
-				return []Value{mkInt("i64", uint64(-errnoOf(err)))}
+				return []Value{mkInt(tyI64, uint64(-errnoOf(err)))}
 			}
-			return []Value{mkInt("i64", uint64(n))}
+			return []Value{mkInt(tyI64, uint64(n))}
 		},
 		"io_close": func(it *Interp, a []Value, _ callCtx) []Value {
 			fd := int64(int32(a[0].(Int).Bits))
@@ -171,12 +171,12 @@ func init() {
 			delete(it.sh.files, fd)
 			it.sh.mu.Unlock()
 			if f == nil {
-				return []Value{mkInt("i32", uint64(^uint32(8)))} // EBADF, -9
+				return []Value{mkInt(tyI32, uint64(^uint32(8)))} // EBADF, -9
 			}
 			if err := f.Close(); err != nil {
-				return []Value{mkInt("i32", uint64(uint32(-errnoOf(err))))}
+				return []Value{mkInt(tyI32, uint64(uint32(-errnoOf(err))))}
 			}
-			return []Value{mkInt("i32", 0)}
+			return []Value{mkInt(tyI32, 0)}
 		},
 		"io_remove": func(it *Interp, a []Value, _ callCtx) []Value {
 			// unlink, as natively: os.Remove would also remove an empty
@@ -192,11 +192,11 @@ func init() {
 		"io_kind": func(it *Interp, a []Value, _ callCtx) []Value {
 			p, e := cPath(seqBytes(acc(a[0])))
 			if e != 0 {
-				return []Value{mkInt("i32", uint64(uint32(-e)))}
+				return []Value{mkInt(tyI32, uint64(uint32(-e)))}
 			}
 			fi, err := os.Stat(p)
 			if err != nil {
-				return []Value{mkInt("i32", uint64(uint32(-errnoOf(err))))}
+				return []Value{mkInt(tyI32, uint64(uint32(-errnoOf(err))))}
 			}
 			k := 3
 			switch {
@@ -205,16 +205,16 @@ func init() {
 			case fi.IsDir():
 				k = 2
 			}
-			return []Value{mkInt("i32", uint64(k))}
+			return []Value{mkInt(tyI32, uint64(k))}
 		},
 		"io_list": func(it *Interp, a []Value, _ callCtx) []Value {
 			p, e := cPath(seqBytes(acc(a[0])))
 			if e != 0 {
-				return []Value{mkInt("i64", uint64(-int64(e)))}
+				return []Value{mkInt(tyI64, uint64(-int64(e)))}
 			}
 			ents, err := os.ReadDir(p) // sorted bytewise by name, as strcmp sorts natively
 			if err != nil {
-				return []Value{mkInt("i64", uint64(-int64(errnoOf(err))))}
+				return []Value{mkInt(tyI64, uint64(-int64(errnoOf(err))))}
 			}
 			var out []byte
 			for _, de := range ents {
@@ -223,13 +223,13 @@ func init() {
 			buf := byteSeq(acc(a[1]))
 			if len(out) <= buf.length() {
 				for i, b := range out {
-					buf.at(i).set(mkInt("u8", uint64(b)))
+					buf.at(i).set(mkInt(tyU8, uint64(b)))
 				}
 			}
-			return []Value{mkInt("i64", uint64(len(out)))}
+			return []Value{mkInt(tyI64, uint64(len(out)))}
 		},
 		"io_temp": func(it *Interp, a []Value, _ callCtx) []Value {
-			fail := func(e int) []Value { return []Value{mkInt("i64", uint64(-int64(e)))} }
+			fail := func(e int) []Value { return []Value{mkInt(tyI64, uint64(-int64(e)))} }
 			prefix := seqBytes(acc(a[0]))
 			if len(prefix) > 255 {
 				return fail(int(syscall.ENAMETOOLONG))
@@ -261,27 +261,27 @@ func init() {
 				return fail(int(syscall.ENAMETOOLONG))
 			}
 			for i := 0; i < len(name); i++ {
-				buf.at(i).set(mkInt("u8", uint64(name[i])))
+				buf.at(i).set(mkInt(tyU8, uint64(name[i])))
 			}
-			return []Value{mkInt("i64", uint64(len(name)))}
+			return []Value{mkInt(tyI64, uint64(len(name)))}
 		},
 		"io_argc": func(it *Interp, a []Value, _ callCtx) []Value {
-			return []Value{mkInt("usize", uint64(len(it.sh.args)))}
+			return []Value{mkInt(tyUsize, uint64(len(it.sh.args)))}
 		},
 		"io_arg": func(it *Interp, a []Value, _ callCtx) []Value {
 			i := int(u64(a[0]))
 			if i < 0 || i >= len(it.sh.args) {
-				return []Value{mkInt("usize", 0)}
+				return []Value{mkInt(tyUsize, 0)}
 			}
 			arg := []byte(it.sh.args[i])
 			seq := byteSeq(acc(a[1]))
 			for k := 0; k < len(arg) && k < seq.length(); k++ {
-				seq.at(k).set(mkInt("u8", uint64(arg[k])))
+				seq.at(k).set(mkInt(tyU8, uint64(arg[k])))
 			}
-			return []Value{mkInt("usize", uint64(len(arg)))}
+			return []Value{mkInt(tyUsize, uint64(len(arg)))}
 		},
 		"now_ns": func(it *Interp, a []Value, _ callCtx) []Value {
-			return []Value{mkInt("u64", uint64(time.Now().UnixNano()))}
+			return []Value{mkInt(tyU64, uint64(time.Now().UnixNano()))}
 		},
 		"zero": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{Unit{}} },
 		"clone": func(it *Interp, a []Value, c callCtx) []Value {
@@ -472,7 +472,7 @@ func init() {
 			if addr == 0 {
 				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}} // Err(OutOfMemory)
 			}
-			return []Value{&Union{Tag: 0, Fields: []Value{mkInt("usize", addr)}}}
+			return []Value{&Union{Tag: 0, Fields: []Value{mkInt(tyUsize, addr)}}}
 		},
 		"SystemAllocator.alloc_zeroed": func(it *Interp, a []Value, c callCtx) []Value {
 			size, align := u64(a[1]), u64(a[2])
@@ -487,7 +487,7 @@ func init() {
 				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}} // Err(OutOfMemory)
 			}
 			it.heap.zero(addr, size)
-			return []Value{&Union{Tag: 0, Fields: []Value{mkInt("usize", addr)}}}
+			return []Value{&Union{Tag: 0, Fields: []Value{mkInt(tyUsize, addr)}}}
 		},
 		"SystemAllocator.realloc": func(it *Interp, a []Value, c callCtx) []Value {
 			addr, oldSize, size, align := u64(a[1]), u64(a[2]), u64(a[3]), u64(a[4])
@@ -504,7 +504,7 @@ func init() {
 			if n == 0 {
 				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}}
 			}
-			return []Value{&Union{Tag: 0, Fields: []Value{mkInt("usize", n)}}}
+			return []Value{&Union{Tag: 0, Fields: []Value{mkInt(tyUsize, n)}}}
 		},
 		"SystemAllocator.free": func(it *Interp, a []Value, c callCtx) []Value {
 			if !it.heap.free(u64(a[1])) {
@@ -513,14 +513,14 @@ func init() {
 			return nil
 		},
 		// raw pointers (spec §6) over the byte-addressed heap
-		"ptr_null":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt("usize", 0)} },
-		"ptr_from_addr": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt("usize", u64(a[0]))} },
-		"ptr_addr":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt("usize", u64(a[0]))} },
-		"ptr_cast":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt("usize", u64(a[0]))} },
+		"ptr_null":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt(tyUsize, 0)} },
+		"ptr_from_addr": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt(tyUsize, u64(a[0]))} },
+		"ptr_addr":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt(tyUsize, u64(a[0]))} },
+		"ptr_cast":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt(tyUsize, u64(a[0]))} },
 		"ptr_offset": func(it *Interp, a []Value, c callCtx) []Value {
 			n := signedOf(a[1].(Int))
 			size := int64(layout.Of(c.targ(0)).Size)
-			return []Value{mkInt("usize", uint64(int64(u64(a[0]))+n*size))}
+			return []Value{mkInt(tyUsize, uint64(int64(u64(a[0]))+n*size))}
 		},
 		"ptr_load": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{it.decode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0))}
@@ -614,13 +614,13 @@ func init() {
 			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}}, &Access{Ref: rawRef{it: it, addr: u64(a[1]), t: c.targ(1)}, Edit: true}}
 		},
 		"size_of": func(it *Interp, a []Value, c callCtx) []Value {
-			return []Value{mkInt("usize", uint64(layout.Of(c.targ(0)).Size))}
+			return []Value{mkInt(tyUsize, uint64(layout.Of(c.targ(0)).Size))}
 		},
 		"align_of": func(it *Interp, a []Value, c callCtx) []Value {
-			return []Value{mkInt("usize", uint64(layout.Of(c.targ(0)).Align))}
+			return []Value{mkInt(tyUsize, uint64(layout.Of(c.targ(0)).Align))}
 		},
 		"container_identity": func(it *Interp, a []Value, _ callCtx) []Value {
-			return []Value{mkInt("u32", uint64(it.newIdentity()))}
+			return []Value{mkInt(tyU32, uint64(it.newIdentity()))}
 		},
 		"asm": func(it *Interp, a []Value, c callCtx) []Value { it.trap("explicit", c.pos); return nil },
 		// SIMD: lane-wise over arrays, wrapping
@@ -897,7 +897,7 @@ func (it *Interp) storeWide(a []Value, c callCtx, be bool) {
 		if be {
 			b = buf[n-1-i]
 		}
-		seq.at(at + i).set(mkInt("u8", uint64(b)))
+		seq.at(at + i).set(mkInt(tyU8, uint64(b)))
 	}
 }
 
@@ -931,7 +931,7 @@ func pathOp(v Value, op func(string) error) []Value {
 			e = errnoOf(err)
 		}
 	}
-	return []Value{mkInt("i32", uint64(uint32(-e)))}
+	return []Value{mkInt(tyI32, uint64(uint32(-e)))}
 }
 
 // errnoOf maps an I/O error to the errno std/io reports.

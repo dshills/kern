@@ -18,7 +18,7 @@ func TestRawHeapRoundTrip(t *testing.T) {
 	}
 	u64 := &resolve.Prim{Name: "u64"}
 	tup := &resolve.Tuple{Elems: []resolve.Type{&resolve.Prim{Name: "u8"}, u64, &resolve.Prim{Name: "f32"}, &resolve.Prim{Name: "bool"}}}
-	val := &Struct{Fields: []Value{mkInt("u8", 7), mkInt("u64", 1<<40|5), mkFloat("f32", 1.5), Bool(true)}}
+	val := &Struct{Fields: []Value{mkInt(tyU8, 7), mkInt(tyU64, 1<<40|5), mkFloat("f32", 1.5), Bool(true)}}
 	b := it.rawAt(addr, tup, ast.Pos{})
 	it.encode(b, tup, val)
 	got := it.decode(b, tup).(*Struct)
@@ -26,7 +26,7 @@ func TestRawHeapRoundTrip(t *testing.T) {
 		t.Fatalf("tuple round trip: %+v", got.Fields)
 	}
 	arrT := &resolve.Array{Elem: &resolve.Prim{Name: "i16"}, Len: 3}
-	arr := &Array{Elems: []Value{mkInt("i16", 0xFFFF), mkInt("i16", 2), mkInt("i16", 3)}}
+	arr := &Array{Elems: []Value{mkInt(tyI16, 0xFFFF), mkInt(tyI16, 2), mkInt(tyI16, 3)}}
 	ab := it.rawAt(addr+24, arrT, ast.Pos{})
 	it.encode(ab, arrT, arr)
 	back := it.decode(ab, arrT).(*Array)

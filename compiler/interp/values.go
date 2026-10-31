@@ -20,10 +20,60 @@ import (
 type Value any
 
 // Int is an integer value of a named width; bits holds the two's complement
-// pattern masked to the width.
+// pattern masked to the width. It holds no pointer, so a boxed Int is a
+// small allocation the collector never scans.
 type Int struct {
 	Bits uint64
-	Ty   string
+	Ty   IntTy
+}
+
+// IntTy is one of the §4.1 integer types, as a one-byte code.
+type IntTy uint8
+
+// The integer types.
+const (
+	tyI8 IntTy = iota + 1
+	tyI16
+	tyI32
+	tyI64
+	tyIsize
+	tyU8
+	tyU16
+	tyU32
+	tyU64
+	tyUsize
+)
+
+var intTyNames = [...]string{"", "i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"}
+var intTyWidths = [...]uint{64, 8, 16, 32, 64, 64, 8, 16, 32, 64, 64}
+
+func (t IntTy) String() string { return intTyNames[t] }
+
+// tyOf is the code of an integer type's name.
+func tyOf(name string) IntTy {
+	switch name {
+	case "i8":
+		return tyI8
+	case "i16":
+		return tyI16
+	case "i32":
+		return tyI32
+	case "i64":
+		return tyI64
+	case "isize":
+		return tyIsize
+	case "u8":
+		return tyU8
+	case "u16":
+		return tyU16
+	case "u32":
+		return tyU32
+	case "u64":
+		return tyU64
+	case "usize":
+		return tyUsize
+	}
+	panic(fmt.Sprintf("interp: %q is not an integer type", name))
 }
 
 // Float is f32 or f64.
@@ -221,7 +271,27 @@ type SysAlloc struct{}
 
 // ---- construction helpers ----
 
-func mkInt(ty string, v uint64) Int { return Int{Bits: mask(ty, v), Ty: ty} }
+func mkInt(ty IntTy, v uint64) Int { return Int{Bits: mask(ty, v), Ty: ty} }
+
+// intVal is mkInt(ty, v) as a Value: a result below 256 comes from a table
+// of boxed values, so the commonest results cost no allocation.
+func intVal(ty IntTy, v uint64) Value {
+	i := mkInt(ty, v)
+	if i.Bits < uint64(len(smallInts[0])) {
+		return smallInts[ty][i.Bits]
+	}
+	return i
+}
+
+// smallInts are the boxed Ints below 256 of every type.
+var smallInts = func() (t [len(intTyNames)][256]Value) {
+	for ty := range t {
+		for v := range t[ty] {
+			t[ty][v] = Int{Bits: uint64(v), Ty: IntTy(ty)}
+		}
+	}
+	return t
+}()
 
 // mkFloat builds a float, rounding f32 values to single precision.
 func mkFloat(ty string, v float64) Float {
@@ -231,21 +301,11 @@ func mkFloat(ty string, v float64) Float {
 	return Float{V: v, Ty: ty}
 }
 
-func width(ty string) uint {
-	switch ty {
-	case "i8", "u8":
-		return 8
-	case "i16", "u16":
-		return 16
-	case "i32", "u32":
-		return 32
-	}
-	return 64
-}
+func width(ty IntTy) uint { return intTyWidths[ty] }
 
-func signed(ty string) bool { return ty[0] == 'i' }
+func signed(ty IntTy) bool { return ty <= tyIsize }
 
-func mask(ty string, v uint64) uint64 {
+func mask(ty IntTy, v uint64) uint64 {
 	w := width(ty)
 	if w == 64 {
 		return v
@@ -276,11 +336,11 @@ func zeroOf(t resolve.Type) Value {
 		case "f32", "f64":
 			return Float{Ty: x.Name}
 		}
-		return Int{Ty: x.Name}
+		return Int{Ty: tyOf(x.Name)}
 	case *resolve.Unit:
 		return Unit{}
 	case *resolve.RawPtr:
-		return Int{Ty: "usize"}
+		return Int{Ty: tyUsize}
 	case *resolve.Func:
 		return FuncVal{}
 	case *resolve.Array:

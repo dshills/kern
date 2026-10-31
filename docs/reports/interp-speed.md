@@ -1,4 +1,4 @@
-# Interpreter: three allocations per step removed
+# Interpreter: recomputation and allocation per step removed
 
 **Date:** 2026-10-31. **Host:** Apple silicon (arm64, macOS), busy.
 Instructions retired (`/usr/bin/time -l`) carry the comparison, with
@@ -67,11 +67,45 @@ through struct and union fields before and after replacing the whole
 value, and the interpreter and native builds agree on it in both
 configurations.
 
+## Second step: cheaper integers and calls
+
+The same day's follow-up (profile of `vector` after the change above):
+- **`Int.Ty`** was a string, so a boxed `Int` was a 24-byte object the
+  collector had to scan. It is now a one-byte `IntTy` code. `Int` is 16
+  bytes with no pointer, and width and signedness are table lookups
+  instead of string switches.
+- **Integer results below 256** come from a table of boxed values
+  (`intVal`) in `binary`, negation and conversions.
+- **A call's frame** allocates its locals and values as one slice, not
+  two.
+- **`funcInfo` holds each direct call's target**: the intrinsic's
+  function or the callee. This replaces up to two lookups by name per
+  call (the intrinsics map, then `Module.Func` twice for a user callee)
+  with one pointer-keyed lookup.
+
+| program | before | after | instructions |
+|---|---|---|---|
+| arena_ast | 2.78 s | 2.55 s | 86.5G → 81.6G (−5.6%) |
+| vector | 17.11 s | 15.96 s | 451.9G → 415.8G (−8.0%) |
+| hash_table | 42.98 s | 39.47 s | 1038.6G → 955.2G (−8.0%) |
+
+The checksums are unchanged. Over the day the interpreter went from
+6.4 s to 2.55 s on arena_ast, 23.6 s to 16.0 s on vector and 55.6 s to
+39.5 s on hash_table.
+
 ## What remains
 
-`vector`'s profile after the change: `exec` 21% flat, allocation 19%
-(`binary` and `conv` box every integer result, since `Int` is a 24-byte
-struct behind the `Value` interface), `resolve` 12%, drops 5%, and an
-intrinsic's lookup by name at each call (2%). The boxing is the next
-lever. Removing it means a `Value` representation that holds an integer
-without allocating, a change across the whole interpreter.
+Integer boxing is still the largest allocation: 78% of `intVal`'s
+allocations are results of 256 or more. `vector`'s container code
+computes raw memory addresses, which are large. No boxed `Int` can avoid
+the allocation while `Value` is an interface holding a struct.
+
+The alternative is `*Int` from a per-thread slab, a pointer-shaped
+value. But it would turn every comparison of two `Value`s holding
+integers into an identity comparison, a semantic change across the
+interpreter, so it was not taken. A `Value` struct with an inline word
+for scalars is the representation that would remove the boxing. It means
+rewriting every site that type-switches on a value.
+
+`exec` itself is 21% flat. The next costs are `resolve` (11%), drops and
+copies (8%), and the argument and return slices of each call (7%).
