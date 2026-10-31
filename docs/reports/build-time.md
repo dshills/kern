@@ -83,12 +83,48 @@ builds take the same path.
 
 **Limitation.** Old objects are not pruned; each is 25–100 KB.
 
-## Not changed: the proof pass
+## The proof pass
 
-`BenchmarkProveLexer` measures 1.9 ms per run (14,000 allocations) and
-`BenchmarkProveSequentialGuards` 2.7 ms (16,200), against the gate of
-twice the pre-join baseline (0.5 ms and 1.0 ms,
-`docs/reports/prove-guards.md`). Half of the pass is the meet. A
-persistent map could get under the gate, but that is a rewrite of the
-state for under 1% of a build, measured against the 60 ms the runtime
-cache saves. It stays the next lever, not taken here.
+`BenchmarkProveLexer` measures 1.8 ms per run and
+`BenchmarkProveSequentialGuards` 2.6 ms, against the gate of twice the
+pre-join baseline (0.5 ms and 1.0 ms, `docs/reports/prove-guards.md`).
+The pass is under 1% of a build.
+
+**Measuring it on this host.** The benchmarks' `ns/op` is wall time,
+which a loaded host inflates. Go's CPU profiles on macOS put most samples
+in `madvise` and the scheduler, so they can't attribute the pass. Two
+methods do work:
+- **Instructions retired** for 3,000 runs on one lowered module
+  (scratch test), with `GOGC=off` to separate the collector. The pass
+  costs 23.5M instructions per run on the lexer, and the collector adds
+  about 10% on top.
+- **The system's `sample` tool** on the same loop. It attributes nearly
+  all of the pass's time to `meet`, in map lookups and iteration. Each
+  key either branch touched is looked up through both chains of fact
+  layers (up to the depth limit) and through their common ancestor.
+
+**Changed (2026-10-31, second batch):**
+- `meet`'s five key sets are kept on the prover and cleared between
+  meets, instead of allocated per meet.
+- The fact-chain depth limit (`maxDepth`) is 32 instead of 16.
+  Instructions per run by limit:
+
+  | limit | 2 | 4 | 8 | 16 | 32 | 64 |
+  |---|---|---|---|---|---|---|
+  | lexer | 25.2M | 26.9M | 25.9M | 23.5M | 22.5M | 22.5M |
+  | guards | 113.5M | 71.2M | 50.9M | 40.7M | 40.0M | 46.1M |
+
+Both are representation only: the facts, and so every proof, are the
+same.
+
+| benchmark | before | after |
+|---|---|---|
+| lexer | 1.81 ms, 1.28 MB, 14.0K allocs | 1.72 ms, 1.06 MB, 12.6K allocs |
+| guards | 2.57 ms, 2.21 MB, 16.2K allocs | 2.31 ms, 1.53 MB, 15.5K allocs |
+
+**Not reached:** the gate needs about 3.5x less work, and no
+representation tweak measured here gives more than a few percent. The
+lever is the state's structure: a persistent map whose meet compares
+shared subtrees, instead of chains of maps walked per key. That is a
+rewrite of `facts` and `meet`, about 1,000 lines with its own soundness
+tests, and is left as its own task.

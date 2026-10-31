@@ -256,6 +256,8 @@ type prover struct {
 	// that receives the closure may write through them
 	closureCaps map[*ir.Value][]*ir.Value
 	constLens   map[uint64]*ir.Value // one synthetic length value per array length (never in the IR)
+	// scratch holds meet's key sets between meets
+	scratch meetScratch
 	// upper bounds kept on places (specs/prove-bounds): a place's bound is
 	// stored in the locals map under its key prefixed by ubPrefix, as the
 	// synthetic value of that constant, so that it is forgotten, flattened
@@ -307,7 +309,7 @@ type facts struct {
 	hasRep bool // some layer of the chain holds classes
 }
 
-const maxDepth = 16
+const maxDepth = 32
 
 // newFacts is an empty layer; its maps are made on first write, since most
 // layers add a few entries of one or two kinds.
@@ -701,6 +703,28 @@ func (s *facts) bound(base *ir.Value, ln *ir.Value) (int64, bool) {
 
 // ---- the meet ----
 
+// meetScratch holds a meet's key sets.
+type meetScratch struct {
+	lt  map[ltKey]bool
+	eq  map[*ir.Value]bool
+	vn  map[string]bool
+	loc map[*ir.Local]bool
+	ln  map[*ir.Local]bool
+}
+
+// reset empties the sets, making them on first use.
+func (sc *meetScratch) reset() {
+	if sc.lt == nil {
+		sc.lt, sc.eq, sc.vn, sc.loc, sc.ln = map[ltKey]bool{}, map[*ir.Value]bool{}, map[string]bool{}, map[*ir.Local]bool{}, map[*ir.Local]bool{}
+		return
+	}
+	clear(sc.lt)
+	clear(sc.eq)
+	clear(sc.vn)
+	clear(sc.loc)
+	clear(sc.ln)
+}
+
 // ancestor is the nearest layer both chains share, or nil.
 func ancestor(a, b *facts) *facts {
 	for a != nil && b != nil && a != b {
@@ -734,12 +758,15 @@ func meet(a, b *facts, ub *prover) *facts {
 			c.parent, c.depth = l, 1
 		}
 	}
-	// the keys either side touched since the ancestor
-	ltKeys := map[ltKey]bool{}
-	eqKeys := map[*ir.Value]bool{}
-	vnKeys := map[string]bool{}
-	locRoots := map[*ir.Local]bool{}
-	lenRoots := map[*ir.Local]bool{}
+	// the keys either side touched since the ancestor, in sets the prover
+	// keeps between meets (cleared here) so that a meet allocates only
+	// the facts it keeps
+	sc := &meetScratch{}
+	if ub != nil {
+		sc = &ub.scratch
+	}
+	sc.reset()
+	ltKeys, eqKeys, vnKeys, locRoots, lenRoots := sc.lt, sc.eq, sc.vn, sc.loc, sc.ln
 	anyRep := false
 	for _, side := range []*facts{a, b} {
 		for x := side; x != nil && x != l; x = x.parent {
