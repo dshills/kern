@@ -80,3 +80,33 @@ objects. Bytes fell on the lexer and are level on the guards program.
 
 A transient (mutable while one block is processed) variant of the map
 would remove most of the copying, at the cost of tracking ownership.
+
+## Second step: transients and tables by ID
+
+Same host and method. Each step is measured against the one before.
+
+- **Transient writes** (`pmap.go`, `token`):
+  - A node records the state that made it, and that state's writes
+    change it in place. A block's run of inserts therefore copies each
+    node once, not once per insert.
+  - A state retires its token whenever its maps become shared: on
+    `child()` (both sides take fresh tokens) and on `snapshot()`.
+  - A meet's new nodes belong to no token. Nothing shared is ever
+    changed.
+- **Per-function tables by ID:** each value's defining instruction, and
+  the block order, predecessors, loop headers and per-round states, are
+  slices indexed by value and block IDs instead of Go maps keyed by
+  pointer. `postorder`'s visited set is one too.
+
+Results:
+
+| program | a52c790 | after |
+|---|---|---|
+| lexer, per run | 8.20M instructions, 1.83M cycles | 6.69M, 1.43M |
+| guards, per run | 15.96M instructions, 3.79M cycles | 12.11M, 2.64M |
+| `BenchmarkProveLexer` | 0.51 ms, 0.63 MB | 0.39 ms, 0.50 MB |
+| `BenchmarkProveSequentialGuards` | 1.30 ms, 1.66 MB | 0.86 ms, 1.04 MB |
+
+**Both programs now meet their gates** (0.5 ms and 1.0 ms), measured on
+a loaded host. The labels are byte-identical to 703fb12's again, over
+the same 312 files.

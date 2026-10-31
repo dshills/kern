@@ -31,11 +31,26 @@ type pmap[K comparable, V comparable, H hasher[K]] struct {
 // of entries with one hash and no bitmap. size counts the entries below.
 // A slot points at its entry, so that copying a node on a write moves
 // two words a slot and the entries it keeps stay shared.
+// owner is the transient that made the node (see token), or nil.
 type pnode[K comparable, V comparable] struct {
 	bitmap uint32
 	size   int
 	slots  []pslot[K, V]
+	owner  *token
 }
+
+// token identifies a transient: a state that may change in place the
+// nodes it made itself, because nothing else can reach them yet. A write
+// under a token copies a node made by anything else (and owns the copy)
+// and changes a node it owns in place, so a run of writes to one state
+// copies each node at most once. A token is retired, and its nodes
+// become immutable, once the state is shared (facts.child, snapshot);
+// the nil token owns nothing, so a write under it always copies.
+type token struct{ _ byte }
+
+func newToken() *token { return &token{} }
+
+func (n *pnode[K, V]) ownedBy(tok *token) bool { return tok != nil && n.owner == tok }
 
 type pslot[K comparable, V comparable] struct {
 	sub *pnode[K, V]  // a subtree, or nil for an entry
@@ -112,29 +127,54 @@ func lookup[K comparable, V comparable](n *pnode[K, V], shift uint, h uint64, k 
 }
 
 // set is the map with k bound to v; the map itself when it already is.
-func (m pmap[K, V, H]) set(k K, v V) pmap[K, V, H] {
-	return pmap[K, V, H]{root: insert(m.root, 0, m.hashOf(k), k, v)}
+func (m pmap[K, V, H]) set(k K, v V) pmap[K, V, H] { return m.setT(k, v, nil) }
+
+// setT is set under a transient's token: nodes tok owns change in place.
+func (m pmap[K, V, H]) setT(k K, v V, tok *token) pmap[K, V, H] {
+	return pmap[K, V, H]{root: insert(m.root, 0, m.hashOf(k), k, v, tok)}
 }
 
-func leafNode[K comparable, V comparable](shift uint, h uint64, k K, v V) *pnode[K, V] {
-	n := &pnode[K, V]{size: 1, slots: []pslot[K, V]{entrySlot(h, k, v)}}
+func leafNode[K comparable, V comparable](shift uint, h uint64, k K, v V, tok *token) *pnode[K, V] {
+	n := &pnode[K, V]{size: 1, slots: []pslot[K, V]{entrySlot(h, k, v)}, owner: tok}
 	if shift < 64 {
 		n.bitmap = chunk(h, shift)
 	}
 	return n
 }
 
-// withSlot is n with slot i replaced by s.
-func withSlot[K comparable, V comparable](n *pnode[K, V], i int, s pslot[K, V], size int) *pnode[K, V] {
+// withSlot is n with slot i replaced by s and its size set: n itself
+// when tok owns it, else a copy tok owns.
+func withSlot[K comparable, V comparable](n *pnode[K, V], i int, s pslot[K, V], size int, tok *token) *pnode[K, V] {
+	if n.ownedBy(tok) {
+		n.slots[i], n.size = s, size
+		return n
+	}
 	slots := make([]pslot[K, V], len(n.slots))
 	copy(slots, n.slots)
 	slots[i] = s
-	return &pnode[K, V]{bitmap: n.bitmap, size: size, slots: slots}
+	return &pnode[K, V]{bitmap: n.bitmap, size: size, slots: slots, owner: tok}
 }
 
-func insert[K comparable, V comparable](n *pnode[K, V], shift uint, h uint64, k K, v V) *pnode[K, V] {
+// withInserted is n with s inserted at slot i (of bit, 0 at the bottom).
+func withInserted[K comparable, V comparable](n *pnode[K, V], i int, bit uint32, s pslot[K, V], tok *token) *pnode[K, V] {
+	if n.ownedBy(tok) {
+		n.slots = append(n.slots, pslot[K, V]{})
+		copy(n.slots[i+1:], n.slots[i:])
+		n.slots[i] = s
+		n.bitmap |= bit
+		n.size++
+		return n
+	}
+	slots := make([]pslot[K, V], len(n.slots)+1)
+	copy(slots, n.slots[:i])
+	slots[i] = s
+	copy(slots[i+1:], n.slots[i:])
+	return &pnode[K, V]{bitmap: n.bitmap | bit, size: n.size + 1, slots: slots, owner: tok}
+}
+
+func insert[K comparable, V comparable](n *pnode[K, V], shift uint, h uint64, k K, v V, tok *token) *pnode[K, V] {
 	if n == nil {
-		return leafNode(shift, h, k, v)
+		return leafNode(shift, h, k, v, tok)
 	}
 	if shift >= 64 {
 		for i, s := range n.slots {
@@ -142,58 +182,58 @@ func insert[K comparable, V comparable](n *pnode[K, V], shift uint, h uint64, k 
 				if s.e.v == v {
 					return n
 				}
-				return withSlot(n, i, entrySlot(h, k, v), n.size)
+				return withSlot(n, i, entrySlot(h, k, v), n.size, tok)
 			}
 		}
-		slots := make([]pslot[K, V], len(n.slots), len(n.slots)+1)
-		copy(slots, n.slots)
-		return &pnode[K, V]{size: n.size + 1, slots: append(slots, entrySlot(h, k, v))}
+		return withInserted(n, len(n.slots), 0, entrySlot(h, k, v), tok)
 	}
 	bit := chunk(h, shift)
 	i := slotIndex(n.bitmap, bit)
 	if n.bitmap&bit == 0 {
-		slots := make([]pslot[K, V], len(n.slots)+1)
-		copy(slots, n.slots[:i])
-		slots[i] = entrySlot(h, k, v)
-		copy(slots[i+1:], n.slots[i:])
-		return &pnode[K, V]{bitmap: n.bitmap | bit, size: n.size + 1, slots: slots}
+		return withInserted(n, i, bit, entrySlot(h, k, v), tok)
 	}
 	s := n.slots[i]
 	switch {
 	case s.sub != nil:
-		sub := insert(s.sub, shift+pmapBits, h, k, v)
-		if sub == s.sub {
+		// a subtree tok owns may grow in place: its pointer stays, its size
+		// does not
+		old := s.sub.size
+		sub := insert(s.sub, shift+pmapBits, h, k, v, tok)
+		if sub == s.sub && sub.size == old {
 			return n
 		}
-		return withSlot(n, i, pslot[K, V]{sub: sub}, n.size-s.sub.size+sub.size)
+		return withSlot(n, i, pslot[K, V]{sub: sub}, n.size-old+sub.size, tok)
 	case s.e.k == k:
 		if s.e.v == v {
 			return n
 		}
-		return withSlot(n, i, entrySlot(h, k, v), n.size)
+		return withSlot(n, i, entrySlot(h, k, v), n.size, tok)
 	}
 	// two keys in one slot: a subtree holds both
-	leaf := &pnode[K, V]{size: 1, slots: []pslot[K, V]{s}}
+	leaf := &pnode[K, V]{size: 1, slots: []pslot[K, V]{s}, owner: tok}
 	if shift+pmapBits < 64 {
 		leaf.bitmap = chunk(s.e.h, shift+pmapBits)
 	}
-	sub := insert(leaf, shift+pmapBits, h, k, v)
-	return withSlot(n, i, pslot[K, V]{sub: sub}, n.size+1)
+	sub := insert(leaf, shift+pmapBits, h, k, v, tok)
+	return withSlot(n, i, pslot[K, V]{sub: sub}, n.size+1, tok)
 }
 
 // del is the map without k; the map itself when k is absent.
-func (m pmap[K, V, H]) del(k K) pmap[K, V, H] {
-	return pmap[K, V, H]{root: remove(m.root, 0, m.hashOf(k), k)}
+func (m pmap[K, V, H]) del(k K) pmap[K, V, H] { return m.delT(k, nil) }
+
+// delT is del under a transient's token.
+func (m pmap[K, V, H]) delT(k K, tok *token) pmap[K, V, H] {
+	return pmap[K, V, H]{root: remove(m.root, 0, m.hashOf(k), k, tok)}
 }
 
-func remove[K comparable, V comparable](n *pnode[K, V], shift uint, h uint64, k K) *pnode[K, V] {
+func remove[K comparable, V comparable](n *pnode[K, V], shift uint, h uint64, k K, tok *token) *pnode[K, V] {
 	if n == nil {
 		return nil
 	}
 	if shift >= 64 {
 		for i, s := range n.slots {
 			if s.e.k == k {
-				return without(n, i, 0, n.size-1)
+				return without(n, i, 0, n.size-1, tok)
 			}
 		}
 		return n
@@ -208,28 +248,37 @@ func remove[K comparable, V comparable](n *pnode[K, V], shift uint, h uint64, k 
 		if s.e.k != k {
 			return n
 		}
-		return without(n, i, bit, n.size-1)
+		return without(n, i, bit, n.size-1, tok)
 	}
-	sub := remove(s.sub, shift+pmapBits, h, k)
-	switch sub {
-	case s.sub:
+	old := s.sub.size
+	sub := remove(s.sub, shift+pmapBits, h, k, tok)
+	switch {
+	case sub == nil:
+		return without(n, i, bit, n.size-old, tok)
+	case sub == s.sub && sub.size == old:
 		return n
-	case nil:
-		return without(n, i, bit, n.size-s.sub.size)
 	}
-	return withSlot(n, i, pslot[K, V]{sub: sub}, n.size-s.sub.size+sub.size)
+	return withSlot(n, i, pslot[K, V]{sub: sub}, n.size-old+sub.size, tok)
 }
 
 // without is n with slot i (of bit, 0 at the bottom) removed, or nil when
 // it was the last.
-func without[K comparable, V comparable](n *pnode[K, V], i int, bit uint32, size int) *pnode[K, V] {
+func without[K comparable, V comparable](n *pnode[K, V], i int, bit uint32, size int, tok *token) *pnode[K, V] {
 	if len(n.slots) == 1 {
 		return nil
+	}
+	if n.ownedBy(tok) {
+		copy(n.slots[i:], n.slots[i+1:])
+		n.slots[len(n.slots)-1] = pslot[K, V]{} // the removed entry can be collected
+		n.slots = n.slots[:len(n.slots)-1]
+		n.bitmap &^= bit
+		n.size = size
+		return n
 	}
 	slots := make([]pslot[K, V], 0, len(n.slots)-1)
 	slots = append(slots, n.slots[:i]...)
 	slots = append(slots, n.slots[i+1:]...)
-	return &pnode[K, V]{bitmap: n.bitmap &^ bit, size: size, slots: slots}
+	return &pnode[K, V]{bitmap: n.bitmap &^ bit, size: size, slots: slots, owner: tok}
 }
 
 // each calls f on every entry, in hash order.

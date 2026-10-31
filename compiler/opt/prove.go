@@ -66,13 +66,13 @@ func prove(f *ir.Func) {
 	if f.Entry == nil {
 		return
 	}
-	p := &prover{f: f, def: map[*ir.Value]ir.Instr{}, gequiv: map[*ir.Value]*ir.Value{}, edits: map[*ir.Local]bool{}, accessed: map[*ir.Local]bool{}, alias: map[*ir.Value][]*ir.Value{}, clen: map[*ir.Value]uint64{}, single: map[*ir.Local]*ir.Value{}, alens: map[string]*ir.Value{}, reborrow: map[*ir.Value]ir.Place{}, closureCaps: map[*ir.Value][]*ir.Value{}, constLens: map[uint64]*ir.Value{}, ubVals: map[uint64]*ir.Value{}, ubOf: map[*ir.Value]uint64{}, loadUb: map[*ir.Value]uint64{}}
+	p := &prover{f: f, def: make([]ir.Instr, f.NumValues), gequiv: map[*ir.Value]*ir.Value{}, edits: map[*ir.Local]bool{}, accessed: map[*ir.Local]bool{}, alias: map[*ir.Value][]*ir.Value{}, clen: map[*ir.Value]uint64{}, single: map[*ir.Local]*ir.Value{}, alens: map[string]*ir.Value{}, reborrow: map[*ir.Value]ir.Place{}, closureCaps: map[*ir.Value][]*ir.Value{}, constLens: map[uint64]*ir.Value{}, ubVals: map[uint64]*ir.Value{}, ubOf: map[*ir.Value]uint64{}, loadUb: map[*ir.Value]uint64{}}
 	stores := map[*ir.Local]int{}
 	unstable := map[*ir.Local]bool{}
 	for _, b := range f.Blocks {
 		for _, in := range b.Instrs {
 			for _, d := range defs(in) {
-				p.def[d] = in
+				p.setDef(d, in)
 			}
 			switch i := in.(type) {
 			case *ir.AccessBegin:
@@ -135,37 +135,44 @@ func prove(f *ir.Func) {
 	for _, l := range f.Params {
 		delete(p.single, l) // a parameter arrives initialized: its store, if any, is a reassignment
 	}
-	rpo := postorder(f.Entry)
-	order := map[*ir.Block]int{}
-	for i, b := range rpo {
-		order[b] = i
+	// the block tables are indexed by block ID
+	nb := 0
+	for _, b := range f.Blocks {
+		nb = max(nb, b.ID+1)
 	}
-	preds := map[*ir.Block][]*ir.Block{}
+	rpo := postorder(f.Entry, nb)
+	order := make([]int, nb)
+	for i, b := range rpo {
+		order[b.ID] = i
+	}
+	preds := make([][]*ir.Block, nb)
 	for _, b := range rpo {
 		for _, s := range successors(b.Term) {
-			preds[s] = append(preds[s], b)
+			preds[s.ID] = append(preds[s.ID], b)
 		}
 	}
-	headers := map[*ir.Block]bool{}
+	headers := make([]bool, nb)
+	nheaders := 0
 	for _, b := range rpo {
-		for _, pr := range preds[b] {
-			if order[pr] >= order[b] {
-				headers[b] = true
+		for _, pr := range preds[b.ID] {
+			if order[pr.ID] >= order[b.ID] && !headers[b.ID] {
+				headers[b.ID] = true
+				nheaders++
 			}
 		}
 	}
 	// entry computes a block's state from its predecessors: those already
 	// visited in the round through out, a back edge through prev (nil to
 	// leave it out), or no facts for a header when pessimistic
-	entry := func(b *ir.Block, out, prev map[*ir.Block]*facts, pessimistic bool) *facts {
+	entry := func(b *ir.Block, out, prev []*facts, pessimistic bool) *facts {
 		var st *facts
-		if !pessimistic || !headers[b] {
-			for _, pr := range preds[b] {
+		if !pessimistic || !headers[b.ID] {
+			for _, pr := range preds[b.ID] {
 				var po *facts
-				if order[pr] < order[b] {
-					po = out[pr]
+				if order[pr.ID] < order[b.ID] {
+					po = out[pr.ID]
 				} else if prev != nil {
-					po = prev[pr]
+					po = prev[pr.ID]
 				} else {
 					continue
 				}
@@ -193,26 +200,26 @@ func prove(f *ir.Func) {
 	// block is computed from the headers and from earlier blocks of the
 	// same round), so the headers' entry states, compared whole, decide
 	// convergence.
-	var prev map[*ir.Block]*facts
+	var prev []*facts
 	headerState := map[*ir.Block]snapshot{}
-	converged := len(headers) == 0
+	converged := nheaders == 0
 	pessimistic := false
 	if converged {
 		// no loop: one pass is the fixed point, and it can mark as it goes
-		out := map[*ir.Block]*facts{}
+		out := make([]*facts, nb)
 		for _, b := range rpo {
 			st := entry(b, out, nil, false)
 			p.block(st, b, true)
-			out[b] = st
+			out[b.ID] = st
 		}
 		return
 	}
 	for round := 1; round <= maxRounds; round++ {
-		out := map[*ir.Block]*facts{}
+		out := make([]*facts, nb)
 		changed := round == 1
 		for _, b := range rpo {
 			st := entry(b, out, prev, false)
-			if headers[b] {
+			if headers[b.ID] {
 				snap := st.snapshot()
 				if round > 1 && !snap.same(headerState[b]) {
 					changed = true
@@ -220,7 +227,7 @@ func prove(f *ir.Func) {
 				headerState[b] = snap
 			}
 			p.block(st, b, false)
-			out[b] = st
+			out[b.ID] = st
 		}
 		prev = out
 		if !changed || converged {
@@ -233,17 +240,17 @@ func prove(f *ir.Func) {
 	}
 	// the marking pass: each block's state from the converged (or
 	// pessimistic) predecessors, with proofs assigned
-	out := map[*ir.Block]*facts{}
+	out := make([]*facts, nb)
 	for _, b := range rpo {
 		st := entry(b, out, prev, pessimistic)
 		p.block(st, b, true)
-		out[b] = st
+		out[b.ID] = st
 	}
 }
 
 type prover struct {
 	f        *ir.Func
-	def      map[*ir.Value]ir.Instr    // the defining instruction of every value
+	def      []ir.Instr                // the defining instruction of every value, by ID
 	gequiv   map[*ir.Value]*ir.Value   // path-independent equalities: the first Len of an access referent
 	edits    map[*ir.Local]bool        // locals an edit access is opened on somewhere in the function
 	accessed map[*ir.Local]bool        // locals any access is opened on somewhere in the function
@@ -266,6 +273,23 @@ type prover struct {
 	// the load in the latest visit of the load (a value is defined once, so
 	// its uses, later in the same pass, see the bound of that visit)
 	loadUb map[*ir.Value]uint64
+}
+
+// setDef records in as v's defining instruction.
+func (p *prover) setDef(v *ir.Value, in ir.Instr) {
+	for v.ID >= len(p.def) {
+		p.def = append(p.def, nil)
+	}
+	p.def[v.ID] = in
+}
+
+// defOf is v's defining instruction in the function, or nil (a synthetic
+// value has a negative ID and none).
+func (p *prover) defOf(v *ir.Value) ir.Instr {
+	if v == nil || v.ID < 0 || v.ID >= len(p.def) {
+		return nil
+	}
+	return p.def[v.ID]
 }
 
 // ubPrefix marks a locals key that holds a place's upper bound rather
@@ -298,17 +322,24 @@ type facts struct {
 	equiv  pmap[*ir.Value, *ir.Value, valueHash] // a value known equal to an earlier one (loads, lengths, recomputation); never removed
 	vn     pmap[string, *ir.Value, strHash]      // value numbering: a pure operation on canonical operands, to its first value; never removed
 	rep    pmap[*ir.Value, *ir.Value, valueHash] // same-length classes: a length key to its representative
+	// edit is the state's transient token: its writes change in place the
+	// nodes it made since its maps were last shared (pmap.go, token)
+	edit *token
 }
 
 // pathMap is what one local's places hold, by path.
 type pathMap = pmap[string, *ir.Value, strHash]
 
 // newFacts is the empty state.
-func newFacts() *facts { return &facts{} }
+func newFacts() *facts { return &facts{edit: newToken()} }
 
-// child is a state to extend from s, which stays as it is.
+// child is a state to extend from s, which stays as it is. The two now
+// share every node, so both take fresh tokens: neither may change a node
+// in place until it has copied it.
 func (s *facts) child() *facts {
+	s.edit = newToken()
 	c := *s
+	c.edit = newToken()
 	return &c
 }
 
@@ -316,7 +347,7 @@ func (s *facts) child() *facts {
 
 func (s *facts) getLt(k ltKey) (int64, bool) { return s.lt.get(k) }
 
-func (s *facts) putLt(k ltKey, v int64) { s.lt = s.lt.set(k, v) }
+func (s *facts) putLt(k ltKey, v int64) { s.lt = s.lt.setT(k, v, s.edit) }
 
 func (s *facts) addLt(base *ir.Value, off int64, ln *ir.Value) {
 	key := ltKey{base, ln}
@@ -335,7 +366,7 @@ func (s *facts) getLocal(root *ir.Local, path string) (*ir.Value, bool) {
 
 func (s *facts) setLocal(root *ir.Local, path string, v *ir.Value) {
 	m, _ := s.locals.get(root)
-	s.locals = s.locals.set(root, m.set(path, v))
+	s.locals = s.locals.setT(root, m.setT(path, v, s.edit), s.edit)
 }
 
 func (s *facts) getLen(root *ir.Local, path string) (*ir.Value, bool) {
@@ -348,36 +379,41 @@ func (s *facts) getLen(root *ir.Local, path string) (*ir.Value, bool) {
 
 func (s *facts) setLen(root *ir.Local, path string, v *ir.Value) {
 	m, _ := s.lens.get(root)
-	s.lens = s.lens.set(root, m.set(path, v))
+	s.lens = s.lens.setT(root, m.setT(path, v, s.edit), s.edit)
 }
 
 func (s *facts) getEquiv(v *ir.Value) (*ir.Value, bool) { return s.equiv.get(v) }
 
-func (s *facts) putEquiv(k, v *ir.Value) { s.equiv = s.equiv.set(k, v) }
+func (s *facts) putEquiv(k, v *ir.Value) { s.equiv = s.equiv.setT(k, v, s.edit) }
 
 func (s *facts) getVn(k string) (*ir.Value, bool) { return s.vn.get(k) }
 
-func (s *facts) putVn(k string, v *ir.Value) { s.vn = s.vn.set(k, v) }
+func (s *facts) putVn(k string, v *ir.Value) { s.vn = s.vn.setT(k, v, s.edit) }
 
 // invalidate forgets what places rooted at a local hold and, unless
 // keepLens, the lengths they yielded. A write through an access or a call
 // cannot change the length of an array (its type's) or of a sequence (its
 // storage's), only a store, move or drop of the root can.
 func (s *facts) invalidate(l *ir.Local, keepLens bool) {
-	s.locals = s.locals.del(l)
+	s.locals = s.locals.delT(l, s.edit)
 	if !keepLens {
-		s.lens = s.lens.del(l)
+		s.lens = s.lens.delT(l, s.edit)
 	}
 }
 
 // ---- comparing states across rounds ----
 
 // snapshot is a state as it stands, for comparing a header's entry state
-// between rounds: the maps are immutable, so a copy of the roots is the
-// whole state.
+// between rounds: a copy of the roots, with s taking a fresh token so that
+// its later writes copy what the snapshot holds.
 type snapshot = facts
 
-func (s *facts) snapshot() snapshot { return *s }
+func (s *facts) snapshot() snapshot {
+	s.edit = newToken()
+	snap := *s
+	snap.edit = nil
+	return snap
+}
 
 // same reports whether two states hold exactly the same facts: the same
 // keys with the same bounds, values and class representatives (the
@@ -442,9 +478,9 @@ func (s *facts) union(a, b *ir.Value) {
 		}
 	})
 	for _, v := range moved {
-		s.rep = s.rep.set(v, r)
+		s.rep = s.rep.setT(v, r, s.edit)
 	}
-	s.rep = s.rep.set(a, r).set(b, r).set(r, r)
+	s.rep = s.rep.setT(a, r, s.edit).setT(b, r, s.edit).setT(r, r, s.edit)
 }
 
 // bound is the largest known k with base + k < ln, through ln's class.
@@ -468,6 +504,7 @@ func meet(a, b *facts, ub *prover) *facts {
 	sameVal := func(_ *ir.Value, x, y *ir.Value) (*ir.Value, bool) { return x, x == y }
 	samePath := func(_ string, x, y *ir.Value) (*ir.Value, bool) { return x, x == y }
 	c := &facts{
+		edit:  newToken(),
 		lt:    intersect(a.lt, b.lt, func(_ ltKey, x, y int64) (int64, bool) { return min(x, y), true }),
 		equiv: intersect(a.equiv, b.equiv, sameVal),
 		vn:    intersect(a.vn, b.vn, func(_ string, x, y *ir.Value) (*ir.Value, bool) { return x, x == y }),
@@ -825,7 +862,7 @@ func (p *prover) upperOf(s *facts, v *ir.Value, memo map[*ir.Value]ubResult, dep
 	if c, ok := p.loadUb[v]; ok {
 		return c, true
 	}
-	switch d := p.def[v].(type) {
+	switch d := p.defOf(v).(type) {
 	case *ir.Binary:
 		if !unsigned(d.Dst.Type) {
 			return 0, false
@@ -867,7 +904,7 @@ func (p *prover) maskedBelow(s *facts, base *ir.Value, off int64, ln *ir.Value) 
 	if base == nil {
 		return false
 	}
-	d, ok := p.def[p.canon(s, base)].(*ir.Binary)
+	d, ok := p.defOf(p.canon(s, base)).(*ir.Binary)
 	if !ok || d.Op != "&" || !unsigned(d.Dst.Type) {
 		return false
 	}
@@ -994,7 +1031,7 @@ func (p *prover) edgeFacts(s *facts, pred, b *ir.Block) {
 	if !ok || cb.Then == cb.Else {
 		return
 	}
-	cmp, ok := p.def[p.canon(s, cb.Cond)].(*ir.Binary)
+	cmp, ok := p.defOf(p.canon(s, cb.Cond)).(*ir.Binary)
 	if !ok || !unsigned(cmp.L.Type) {
 		return
 	}
@@ -1080,7 +1117,7 @@ func (p *prover) index(s *facts, v *ir.Value) (*ir.Value, int64) {
 	if c, ok := p.constant(v); ok {
 		return nil, int64(c) //nolint:gosec // constant refuses values past MaxInt64
 	}
-	if bin, ok := p.def[v].(*ir.Binary); ok && (bin.Op == "+" || bin.Op == "-") && bin.Mode == "" && unsigned(bin.L.Type) {
+	if bin, ok := p.defOf(v).(*ir.Binary); ok && (bin.Op == "+" || bin.Op == "-") && bin.Mode == "" && unsigned(bin.L.Type) {
 		var other *ir.Value
 		var k uint64
 		if c, ok := p.constant(p.canon(s, bin.R)); ok {
@@ -1107,7 +1144,7 @@ func (p *prover) index(s *facts, v *ir.Value) (*ir.Value, int64) {
 // constant reports an unsigned integer literal that fits a non-negative
 // int64 offset.
 func (p *prover) constant(v *ir.Value) (uint64, bool) {
-	c, ok := p.def[v].(*ir.Const)
+	c, ok := p.defOf(v).(*ir.Const)
 	if !ok || c.Neg || c.Bool || c.Unit || c.Bytes != nil || !unsigned(v.Type) || c.Int > 1<<62 {
 		return 0, false
 	}
@@ -1253,15 +1290,15 @@ func unsigned(t resolve.Type) bool {
 
 // postorder lists the blocks reachable from entry in reverse postorder:
 // every block after its non-back-edge predecessors.
-func postorder(entry *ir.Block) []*ir.Block {
+func postorder(entry *ir.Block, nb int) []*ir.Block {
 	var order []*ir.Block
-	seen := map[*ir.Block]bool{}
+	seen := make([]bool, nb) // by block ID
 	var visit func(b *ir.Block)
 	visit = func(b *ir.Block) {
-		if seen[b] {
+		if seen[b.ID] {
 			return
 		}
-		seen[b] = true
+		seen[b.ID] = true
 		for _, s := range successors(b.Term) {
 			visit(s)
 		}
