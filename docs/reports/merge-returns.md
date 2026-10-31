@@ -86,3 +86,21 @@ median timed `ns`:
 arena_ast now meets the 10% target against both counterparts on this
 host. The committed `bench/REPORT.md` changes only with the next full
 harness run on a quiet machine.
+
+## Phase review (2026-10-31, later)
+
+- **realitycheck** (gpt-6.1-sol, the spec as its own plan, against
+  `compiler/opt`): PARTIALLY_ALIGNED, score 100, no drift, no
+  violations. Its items read UNCLEAR because it sees symbols, not
+  function bodies.
+- **verifier analyze** (offline): three medium, low-confidence (0.1)
+  property-test recommendations for `MergeReturns`. Added in answer:
+  - `TestMergeReturnsGenerated`: 40 seeded programs whose functions end
+    in two or three returns differing in a constant or a union tag,
+    under random guards, with callees that can overflow. The
+    interpreter's output and trap record agree with and without the
+    pass, and the generator must produce both merges and traps.
+  - `TestExecOptions`: the exec pipelines' option sets.
+
+  verifier's offline matching still lists the recommendations; it does
+  not tie tests to targets whose names differ.

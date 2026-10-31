@@ -1288,3 +1288,18 @@ func main() -> i32 {
 		}
 	}
 }
+
+// The exec pipelines add the return merging and the library inliner in
+// release only; the analysis commands never do (specs/merge-returns R4,
+// specs/inline-library).
+func TestExecOptions(t *testing.T) {
+	if o := ExecOptionsFor("release"); !o.Inline || !o.InlineLibrary || !o.MergeReturns {
+		t.Fatalf("ExecOptionsFor(release) = %+v, want every pass", o)
+	}
+	if o := ExecOptionsFor("debug"); o.Inline || o.InlineLibrary || o.MergeReturns {
+		t.Fatalf("ExecOptionsFor(debug) = %+v, want none", o)
+	}
+	if o := OptionsFor("release"); !o.Inline || o.InlineLibrary || o.MergeReturns {
+		t.Fatalf("OptionsFor(release) = %+v, want the user inliner only", o)
+	}
+}

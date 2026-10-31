@@ -110,3 +110,14 @@ Results:
 **Both programs now meet their gates** (0.5 ms and 1.0 ms), measured on
 a loaded host. The labels are byte-identical to 703fb12's again, over
 the same 312 files.
+
+## Phase review
+
+- **realitycheck** (gpt-6.1-sol, the spec as its own plan, against
+  `compiler/opt`): PARTIALLY_ALIGNED, score 100, no drift, no
+  violations. Several items read UNCLEAR or PARTIAL because it sees
+  symbols, not bodies; R1–R4 are verified by the tests and the label
+  comparison above.
+- **verifier analyze** (offline): five low-priority unit-test
+  recommendations, none on the fact state. The one on `ExecOptionsFor`
+  is answered by `TestExecOptions`.

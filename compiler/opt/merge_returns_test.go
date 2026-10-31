@@ -1,6 +1,8 @@
 package opt
 
 import (
+	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -211,5 +213,73 @@ func TestMergeReturnsLoadBarriers(t *testing.T) {
 		if got := touches(c.in, l); got != c.want {
 			t.Errorf("touches(%T %+v) = %v, want %v", c.in, c.in, got, c.want)
 		}
+	}
+}
+
+// The pass preserves behaviour on generated programs (specs/merge-returns
+// R6, a property test): functions whose two or three returns call one
+// callee with arguments that differ in a constant or a union tag, under
+// random guards, with callees whose arithmetic can overflow and trap. The
+// interpreter's output and trap record agree with and without the pass,
+// and the generator's shapes do merge.
+func TestMergeReturnsGenerated(t *testing.T) {
+	r := rand.New(rand.NewSource(7))
+	mergedAny, traps := 0, 0
+	for n := 0; n < 40; n++ {
+		var sb strings.Builder
+		sb.WriteString("module t\nunion Op { Add(a: u64, b: u64); Mul(a: u64, b: u64); Sub(a: u64, b: u64) }\n")
+		sb.WriteString("func eval(o: Op, k: u64) -> u64 {\n    match o {\n        Add(a, b) => return a + b + k\n        Mul(a, b) => return a * b * k\n        Sub(a, b) => return a - b + k\n    }\n}\n")
+		sb.WriteString("func scale(x: u64, k: u64) -> u64 { return x * k + 1u64 }\n")
+		nf := 1 + r.Intn(3)
+		for f := 0; f < nf; f++ {
+			fmt.Fprintf(&sb, "func f%d(x: u64, y: u64) -> u64 {\n", f)
+			returns := 2 + r.Intn(2)
+			useUnion := r.Intn(2) == 0
+			for i := 0; i < returns; i++ {
+				ret := ""
+				if useUnion {
+					// all returns of a function share the constant, so they
+					// differ in the tag only
+					ret = fmt.Sprintf("eval(%s(x, y), 2u64)", []string{"Add", "Mul", "Sub"}[r.Intn(3)])
+				} else {
+					ret = fmt.Sprintf("scale(x, %du64)", r.Intn(1000))
+				}
+				if i < returns-1 {
+					fmt.Fprintf(&sb, "    if x %% %du64 == %du64 { return %s }\n", 2+i, r.Intn(2+i), ret)
+				} else {
+					fmt.Fprintf(&sb, "    return %s\n", ret)
+				}
+			}
+			sb.WriteString("}\n")
+		}
+		sb.WriteString("func main() -> i32 {\n    var s: u64 = 0u64\n    var i: u64 = 0u64\n    while i < 12u64 {\n")
+		for f := 0; f < nf; f++ {
+			fmt.Fprintf(&sb, "        s = wrapping_add(s, f%d(i, %du64))\n", f, r.Intn(5))
+		}
+		// one input in eight starts the operands near the top of u64, so
+		// that some programs trap with an overflow inside a merged return
+		big := "i"
+		if r.Intn(8) == 0 {
+			big = "18446744073709551610u64 + i"
+		}
+		fmt.Fprintf(&sb, "        s = wrapping_add(s, f0(%s, 3u64))\n", big)
+		sb.WriteString("        i = i + 1u64\n    }\n    print_u64(s); println()\n    return 0i32\n}\n")
+		src := sb.String()
+		plain := lowerSrc(t, src)
+		mod := lowerSrc(t, src)
+		MergeReturns(mod)
+		validate(t, mod)
+		mergedAny += len(merged(mod))
+		wantOut, wantStatus := run(t, plain)
+		gotOut, gotStatus := run(t, mod)
+		if gotOut != wantOut || gotStatus != wantStatus {
+			t.Fatalf("program %d: merged %q (status %d), plain %q (status %d)\n%s", n, gotOut, gotStatus, wantOut, wantStatus, src)
+		}
+		if gotStatus != 0 {
+			traps++
+		}
+	}
+	if mergedAny == 0 || traps == 0 {
+		t.Fatalf("%d functions merged and %d programs trapped; the generator must produce both", mergedAny, traps)
 	}
 }
