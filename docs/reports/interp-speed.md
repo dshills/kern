@@ -109,3 +109,33 @@ rewriting every site that type-switches on a value.
 
 `exec` itself is 21% flat. The next costs are `resolve` (11%), drops and
 copies (8%), and the argument and return slices of each call (7%).
+
+## Boxing integers: measured, not taken (2026-10-31, later)
+
+The next step proposed was integers without boxing. Measured first, with
+macOS `sample` on `kern run --opt=release` of `vector` at ea119b0 (Go's
+CPU profiler misattributes on this host):
+
+| part | share of busy samples |
+|---|---|
+| `exec`'s own dispatch | 26% |
+| `resolve` | 12% |
+| `callAt` | 8.5% |
+| allocation in all | about 17% |
+| unscanned 16-byte objects, the boxed `Int`s | about 9% |
+
+The usual design keeps integer SSA values in typed frame slots and
+boxes a value only when it escapes to a generic consumer: a store to a
+place, a call or intrinsic argument, a constructor. In `vector`'s
+release IR, 24 of the 31 integer-producing instructions have such a use,
+so typed slots would remove about a quarter of the boxing, some 2% of
+the run.
+
+Removing the rest means holding scalars inline in every local, field,
+argument and element: replacing `Value`, an interface, with a struct
+across the interpreter (3,000 lines of type switches and assertions).
+That is too much rewrite for at most the 9% plus its collection cost.
+The larger costs are dispatch and place resolution. Compiling each
+function's instructions once into closures (or a dense instruction array
+with pre-resolved operands) is the lever there, measurable the same way.
+
