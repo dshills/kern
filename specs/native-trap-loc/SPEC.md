@@ -65,7 +65,13 @@ nearest magic word before it, at a 4-byte boundary.
 - the kern text section;
 - stack words at or above the stack pointer, the thread's recorded stack
   base and, for a stack fault, the end of the faulting page (with the
-  system page size), and below the stack's top.
+  system page size), and below the stack's top. It copies them through a
+  pipe made at start, so that the kernel, not a load, reads them and an
+  unreadable word fails the read instead of faulting.
+
+The runtime's C code (and FFI C sources) keeps frame pointers
+(`-fno-omit-frame-pointer`) so that the chain passes through it on
+x86-64 too.
 
 A chain that leaves this range, does not grow upward, or exceeds 4096
 frames ends the search.

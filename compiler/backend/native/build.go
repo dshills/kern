@@ -191,7 +191,9 @@ func BuildModule(mod *ir.Module, srcs []*source.File, out string, opts Options) 
 	if opts.Opt == "release" {
 		level = "-O2"
 	}
-	args := []string{level, "-Wno-override-module", "-ffp-model=strict", "-o", out, ll, rt}
+	// frame pointers in the runtime too: the fault handler walks the chain
+	// through it (specs/native-trap-loc)
+	args := []string{level, "-Wno-override-module", "-ffp-model=strict", "-fno-omit-frame-pointer", "-o", out, ll, rt}
 	if opts.Opt == "release" {
 		args = append(args, "-DKERN_RELEASE") // identity tags off (PLAN.md 2.2)
 	}

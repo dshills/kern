@@ -85,14 +85,44 @@ not compared: the two engines run out of stack in different frames.
   for an address near the top of the address space, which a corrupt
   frame pointer could supply. It now compares without addition.
 
+## Linux (added 2026-10-31, the same day)
+
+Run in OrbStack containers (Debian trixie, Go 1.25, clang 19):
+
+- **Linux arm64, native.** `TestNativeTrapLocations` and every other
+  native trap test pass as written. So does the whole `tests` package,
+  freestanding fixtures under QEMU included.
+- **Linux x86-64, emulated (Rosetta).** Two things needed changing:
+  - **Frame pointers in the runtime.** The overflow inside the runtime's
+    C code was found only through the frame chain, and clang omits frame
+    pointers on x86-64 at `-O1` and above. The runtime (and any FFI C
+    source) is now compiled with `-fno-omit-frame-pointer`, which finds
+    it: the C function's own frame record leads to its kern caller. macOS
+    and AArch64 keep frame pointers by default, so nothing changes there.
+  - **Not in kern code.** Giving kern functions
+    `"frame-pointer"="non-leaf"` as well made a stack overflow die by
+    `SIGSEGV`, without a record, in 8 of 12 emulated runs. This happened
+    even with the walk removed, while the commit before this change
+    aborted 12 of 12. I could not tell whether real x86-64 hardware would
+    behave the same, so the attribute is not used.
+  - **Stack words through a pipe.** The handler reads stack words by
+    writing them into a pipe created at start and reading them back, so
+    the kernel answers `EFAULT` where a direct read would fault again.
+    Below the Linux main thread's stack lies an unmapped gap of up to
+    1 MiB in which a stack fault can land. `mincore` was tried first, but
+    it accepts a mapped page that cannot be read. An atomic flag pairs
+    each write with its own read when threads fault at once (prism).
+
+  With these, every native trap test passes three times in a row on
+  x86-64, and the overflow during allocation aborts cleanly 20 of 20. The
+  whole `tests` package and `kern test`'s tests also pass on x86-64
+  (ThreadSanitizer is unavailable under emulation, so its fixtures skip).
+
 ## Not done
 
-- **Linux is not exercised.** The register reads use glibc's
-  `REG_RIP`/`REG_RBP`/`REG_RSP` on x86-64 and `regs[29]`/`regs[30]`/`pc`/`sp`
-  on AArch64. The section bounds are the linker's `__start_kern_text`/
-  `__stop_kern_text`. There is no Linux toolchain or running container on
-  this host, so neither the build nor the lookup was run on Linux. The
-  macOS x86-64 path compiles.
-- **Optimised x86-64 Linux code may omit frame pointers.** The chain
-  then ends early, and a record falls back to 0-0 when the faulting
-  instruction is outside kern code.
+- **Kern code on x86-64 keeps no frame pointer.** An overflow in a
+  frameless library function called from kern code may be found only
+  through the next C frame. One whose whole chain is frameless falls back
+  to 0-0.
+- **Real x86-64 Linux hardware** was not available; the x86-64 runs are
+  emulated.

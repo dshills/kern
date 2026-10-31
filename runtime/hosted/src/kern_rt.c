@@ -370,18 +370,32 @@ static int kern_fn_at(uintptr_t a, const kern_fnloc **loc) {
     }
 }
 
+static uintptr_t kern_page = 4096; // the system page size, set at start
+
+// kern_probe is a pipe the fault handler copies stack words through: the
+// kernel reads the word for write(2) and answers EFAULT where a direct
+// read would fault again (below the Linux main thread's stack lies an
+// unmapped gap of up to 1 MiB in which a stack fault can land, and an
+// emulator may keep a guard region there that is mapped but unreadable).
+static int kern_probe[2] = {-1, -1};
+// kern_probe_busy pairs each write with its own read when threads fault
+// at once: held only across those two calls, which do not block (the pipe
+// has room for one word and then holds it), and never re-entered by its
+// holder, whose SIGSEGV is blocked while the handler runs.
+static atomic_flag kern_probe_busy = ATOMIC_FLAG_INIT;
+
 // kern_stack_word reads the word at a when it lies in the live part of the
-// thread's stack: at or above floor (the stack pointer, the thread's stack
-// base and, for a stack fault, the end of the faulting guard page; the
-// probes touch the stack page by page, so the fault is in the guard's top
-// page and everything above it is mapped) and below its top.
+// thread's stack (at or above floor, the stack pointer, the thread's stack
+// base and, for a stack fault, the end of the faulting page; below its
+// top) and the kernel can read it.
 static int kern_stack_word(uintptr_t a, uintptr_t floor, uintptr_t *w) {
     if (kern_stack_lo == 0 || a < floor || a < kern_stack_lo || a >= kern_stack_hi || kern_stack_hi - a < 8 || (a & 7) != 0) return 0;
-    __builtin_memcpy(w, (const void *)a, 8);
-    return 1;
+    if (kern_probe[0] < 0) return 0;
+    while (atomic_flag_test_and_set_explicit(&kern_probe_busy, memory_order_acquire)) { }
+    int ok = write(kern_probe[1], (const void *)a, 8) == 8 && read(kern_probe[0], w, 8) == 8;
+    atomic_flag_clear_explicit(&kern_probe_busy, memory_order_release);
+    return ok;
 }
-
-static uintptr_t kern_page = 4096; // the system page size, set at start
 
 static const kern_fnloc *kern_fault_loc(void *ctx, uintptr_t floor) {
     uintptr_t pc = 0, lr = 0, fp = 0, sp = 0;
@@ -457,6 +471,8 @@ void kern_start(void) {
     static char altstack[65536];
     long pg = sysconf(_SC_PAGESIZE);
     if (pg > 0) kern_page = (uintptr_t)pg;
+    if (pipe(kern_probe) != 0) kern_probe[0] = kern_probe[1] = -1; // no walk then
+    else { fcntl(kern_probe[0], F_SETFD, FD_CLOEXEC); fcntl(kern_probe[1], F_SETFD, FD_CLOEXEC); }
     kern_thread_init(altstack);
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
