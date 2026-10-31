@@ -173,9 +173,14 @@ func TestTargetedInvalidation(t *testing.T) {
 		if !same(t, got, full(fs)) {
 			t.Fatalf("%s: diverged", c.name)
 		}
+		// util is re-checked; its dependents only when its interface
+		// changed, and otherwise served from their entries
 		rechecked := strings.Join(st.Rechecked, ",")
-		if st.Hits != 0 {
-			t.Fatalf("%s: a change to util must miss, got hits %d", c.name, st.Hits)
+		if c.dep && (st.Hits != 0 || rechecked != "app,geo,util") {
+			t.Fatalf("%s: every module must be re-checked, got %+v", c.name, st)
+		}
+		if !c.dep && (st.Hits != 2 || rechecked != "util") {
+			t.Fatalf("%s: only util must be re-checked, got %+v", c.name, st)
 		}
 		// after the change, checking again hits everything; a change that
 		// left util's interface alone makes geo and app hit from before
@@ -183,7 +188,6 @@ func TestTargetedInvalidation(t *testing.T) {
 		if st2.Hits != 3 {
 			t.Fatalf("%s: second run should hit, got %+v", c.name, st2)
 		}
-		_ = rechecked
 		// dependents: geo's and app's entries under the old util interface
 		// must not be reused when the interface changed
 		geoKeyChanged := ifaceChanged(t, dir, base, fs, cfg)
@@ -235,6 +239,42 @@ func TestConfigurations(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// TestPerModuleReuse: an edit to one module re-checks that module alone
+// when its interface is unchanged, the others served from their entries,
+// with the full check's diagnostics, an introduced error included; a
+// module importing the embedded library is cached like any other.
+func TestPerModuleReuse(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{Target: "aarch64-apple-macosx", Opt: "debug", Env: "hosted"}
+	ioApp := strings.Replace(appSrc, "import \"util\"\n", "import \"util\"\nimport \"std/io\"\n", 1)
+	if _, _, err := Check(dir, files(utilSrc, geoSrc, ioApp), cfg); err != nil {
+		t.Fatal(err)
+	}
+	_, st, err := Check(dir, files(utilSrc, geoSrc, ioApp), cfg)
+	if err != nil || st.Hits != 3 {
+		t.Fatalf("a module importing std/io must hit: %+v %v", st, err)
+	}
+	for _, c := range []struct{ name, app string }{
+		{"body", strings.Replace(ioApp, "total % 100u64", "total % 99u64", 1)},
+		{"error", strings.Replace(ioApp, "v.push(n)\n", "v.push(n)\n    w := v\n    v.push(1u64)\n", 1)},
+	} {
+		fs := files(utilSrc, geoSrc, c.app)
+		got, st, err := Check(dir, fs, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !same(t, got, full(fs)) {
+			t.Fatalf("%s: diverged from the full check:\n%v\n%v", c.name, got, full(fs))
+		}
+		if st.Hits != 2 || strings.Join(st.Rechecked, ",") != "app" {
+			t.Fatalf("%s: only app must be re-checked, got %+v", c.name, st)
+		}
+		if c.name == "error" && len(got) == 0 {
+			t.Fatalf("the edit must introduce an error")
 		}
 	}
 }

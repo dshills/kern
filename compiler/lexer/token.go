@@ -141,3 +141,9 @@ type Token struct {
 	Start int
 	End   int
 }
+
+// IsKeyword reports whether s is a reserved word of the language.
+func IsKeyword(s string) bool {
+	_, ok := keywords[s]
+	return ok
+}

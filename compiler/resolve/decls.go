@@ -244,6 +244,10 @@ type Info struct {
 	// OwnedSubject marks with/match statements whose subject is an owned
 	// value consumed by the statement (a temporary the lowering must own).
 	OwnedSubject map[any]bool
+	// TypeNames and IfaceNames record what each nominal type reference
+	// denotes, for the editor's navigation (specs/editor-names).
+	TypeNames  map[*ast.TypeName]*TypeDecl
+	IfaceNames map[*ast.TypeName]*InterfaceDecl
 }
 
 func newInfo() *Info {
@@ -252,6 +256,7 @@ func newInfo() *Info {
 		Funcs: map[*ast.FuncDecl]*FuncDecl{}, Decls: map[any]*Symbol{}, Consts: map[ast.Expr]bool{}, ImportedConsts: map[*ast.FieldExpr]*ConstDecl{},
 		Fields: map[*ast.FieldExpr]*FieldDecl{}, Variants: map[*ast.Arm]*VariantDecl{}, Closures: map[*ast.ClosureExpr]*ClosureInfo{}, Consumed: map[ast.Expr]*ast.Ident{},
 		Drops: map[any][]*Symbol{}, OutFieldDrops: map[any]map[*Symbol][]string{}, OwnedSubject: map[any]bool{},
+		TypeNames: map[*ast.TypeName]*TypeDecl{}, IfaceNames: map[*ast.TypeName]*InterfaceDecl{},
 	}
 }
 
@@ -827,6 +832,7 @@ func (r *resolver) lookupIface(m *Module, file string, t *ast.TypeName) *Interfa
 		r.errorf("NAME_PRIVATE", file, t.Pos, "%s.%s is private to module %s", t.Pkg, t.Name, mod.Name)
 		return nil
 	}
+	r.prog.Info.IfaceNames[t] = id
 	return id
 }
 
@@ -929,6 +935,7 @@ func (r *resolver) resolveTypeName(m *Module, file string, sc *scope, t *ast.Typ
 		if !isExported(t.Name) && !mod.Std {
 			r.errorf("NAME_PRIVATE", file, t.Pos, "%s.%s is private to module %s", t.Pkg, t.Name, mod.Name)
 		}
+		r.prog.Info.TypeNames[t] = td
 		return r.instantiate(m, file, sc, td, t)
 	}
 	if sym := sc.lookup(t.Name); sym != nil && sym.Kind == SymTypeParam {
@@ -946,6 +953,7 @@ func (r *resolver) resolveTypeName(m *Module, file string, sc *scope, t *ast.Typ
 		}
 		return &Unit{}
 	}
+	r.prog.Info.TypeNames[t] = td
 	return r.instantiate(m, file, sc, td, t)
 }
 

@@ -1,8 +1,9 @@
 package lsp
 
-// Go-to-definition and find-references (specs/editor-nav R1-R4): the names
-// of a resolved program, each with a key that identifies its target, and
-// the declaration of every target the program declares.
+// Go-to-definition, find-references and rename (specs/editor-nav R1-R4,
+// specs/editor-names): the names of a resolved program, each with a key
+// that identifies its target, and the declaration of every target the
+// program declares.
 
 import (
 	"bytes"
@@ -199,6 +200,12 @@ func buildNav(prog *resolve.Program, text map[string][]byte) *navIndex {
 				case *ast.InterfaceDecl:
 					if id := m.Ifaces[x.Name]; id != nil {
 						add(f.Name, nameSpan(src, x.Start, x.End, "interface", x.Name), "iface|"+id.Module+"|"+id.Name, true)
+						// its methods: what a call through a constraint names
+						for _, fn := range x.Methods {
+							if fd := id.Methods[fn.Name]; fd != nil {
+								add(f.Name, nameSpan(src, fn.Start, fn.End, "func", fn.Name), fnKey(fd), true)
+							}
+						}
 					}
 				case *ast.ConstDecl:
 					if cd := m.Consts[x.Name]; cd != nil {
@@ -232,6 +239,28 @@ func buildNav(prog *resolve.Program, text map[string][]byte) *navIndex {
 					}
 					if cd := info.ImportedConsts[x]; cd != nil {
 						add(f.Name, span, "const|"+cd.Module+"|"+cd.Name, false)
+					}
+				case *ast.TypeName:
+					// a type or interface named in an annotation, a literal,
+					// an impl or a constraint (specs/editor-names R1)
+					from := x.Start
+					if x.Pkg != "" {
+						if i := bytes.IndexByte(src[min(x.Start, len(src)):min(x.End, len(src))], '.'); i >= 0 {
+							from = x.Start + i + 1
+						}
+					}
+					span := nameSpan(src, from, x.End, "", x.Name)
+					if td := info.TypeNames[x]; td != nil {
+						add(f.Name, span, tyKey(td), false)
+					} else if id := info.IfaceNames[x]; id != nil {
+						add(f.Name, span, "iface|"+id.Module+"|"+id.Name, false)
+					}
+				case *ast.StructLit:
+					// the field names of a struct literal (R1)
+					if td := ownerOf(info.Types[x]); td != nil {
+						for _, fi := range x.Fields {
+							add(f.Name, nameSpan(src, fi.Start, fi.End, "", fi.Name), "field|"+tyKey(td)+"|"+fi.Name, false)
+						}
 					}
 				}
 				return false

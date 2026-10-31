@@ -13,16 +13,28 @@ import (
 // module and of the prelude (the library containers are kern code) and
 // returns diagnostics.
 func Check(prog *resolve.Program) []diag.Diagnostic {
+	return CheckModules(prog, nil)
+}
+
+// CheckModules checks the declarations of the modules keep selects (every
+// module when keep is nil) of a resolved program: their diagnostics are
+// exactly those Check reports in their files, since a module's checking
+// reads only its own bodies and what resolution recorded about every
+// module (the per-module cache, compiler/incremental).
+func CheckModules(prog *resolve.Program, keep func(module string) bool) []diag.Diagnostic {
 	c := &checker{prog: prog, info: prog.Info}
 	// every module: the prelude, the std modules the program imports, the
 	// imported user modules and the main module, in a fixed order
+	// (only the selected ones: a cache miss checks one module, and must
+	// not walk the whole program's files for it)
+	kept := func(m *resolve.Module) bool { return m != nil && (keep == nil || keep(m.Name)) }
 	var files []*ast.File
-	if prog.Core != nil {
+	if kept(prog.Core) {
 		files = append(files, prog.Core.Files...)
 	}
 	var names []string
 	for name, m := range prog.Modules {
-		if m != prog.Core && m != prog.Main {
+		if m != prog.Core && m != prog.Main && kept(m) {
 			names = append(names, name)
 		}
 	}
@@ -30,7 +42,7 @@ func Check(prog *resolve.Program) []diag.Diagnostic {
 	for _, name := range names {
 		files = append(files, prog.Modules[name].Files...)
 	}
-	if prog.Main != nil && prog.Main != prog.Core {
+	if prog.Main != prog.Core && kept(prog.Main) {
 		files = append(files, prog.Main.Files...)
 	}
 	for _, f := range files {

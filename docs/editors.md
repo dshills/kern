@@ -30,13 +30,23 @@ error. The contract is `specs/language-server/SPEC.md`.
   bindings, functions, methods, types, interfaces, constants, globals
   and struct fields, across every file of the program, imported modules
   included. Prelude and `std/` declarations have no location to go to.
-  A struct literal's field names (`Point { X: 1u64 }`) and the names in
-  type annotations are not counted as references.
+  Names in type annotations (`v: view[lib.Point]`, `-> Point`, generic
+  arguments, constraints, impls) and a struct literal's field names
+  (`Point { X: 1u64 }`) count as references. Interface methods are
+  declarations, so a call through a constraint goes to the interface.
+- **Rename.** Every name of the target across the program is replaced.
+  The server first renames the program in memory and refuses the rename,
+  with a message, if it would add errors (a duplicate name, an exported
+  name made private) or make any name refer to a different declaration
+  (a local renamed to a name it would then shadow). Prelude and `std/`
+  names cannot be renamed. A rename covers the open file's program, so
+  another program importing a renamed exported name is not updated.
 - **Checks only what changed.** Each open file's program is checked
-  through the same per-module cache as `kern check --cache`, so an edit
-  re-checks only the programs that contain the edited file.
+  through the same per-module cache as `kern check --cache`. An edit
+  re-checks the edited module, and the modules importing it only when
+  its interface changed; other programs are not re-checked.
 
-It does not provide completion, rename, semantic highlighting or a
+It does not provide completion, semantic highlighting or a
 syntax grammar. Edits to `kern.mod` and new
 files that are not yet saved in an imported module are seen when saved.
 

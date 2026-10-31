@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/check"
@@ -54,11 +55,16 @@ type module struct {
 	imports []string
 	srcHash string
 	main    bool
-	key     string
 }
 
 // Check checks srcs through the cache at dir (created on demand) and
-// returns the same diagnostics a full check returns.
+// returns the same diagnostics a full check returns. Modules are taken in
+// dependency order: a module whose key (its source, its imports'
+// interface hashes, the configuration and the embedded library) has an
+// entry is served from it, and any other is checked alone against the
+// resolved program and stored, so an edit re-checks the edited module and
+// the dependents whose imports' interfaces changed, not the whole program.
+// When every module hits, nothing is resolved.
 func Check(dir string, srcs []*source.File, cfg Config) ([]diag.Diagnostic, Stats, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, Stats{}, err
@@ -69,163 +75,164 @@ func Check(dir string, srcs []*source.File, cfg Config) ([]diag.Diagnostic, Stat
 		return full(srcs), Stats{Modules: len(mods), Rechecked: names(mods)}, nil
 	}
 	st := Stats{Modules: len(mods)}
-	// keys in dependency order; a module whose imports are not all keyed
-	// (a cycle or a missing import) is a miss
-	keyed := map[string]*entry{}
-	byName := map[string]*module{}
-	for _, m := range mods {
-		byName[m.name] = m
+	order, ok := depOrder(mods)
+	if !ok {
+		// a cycle or an import outside the request: the full check reports
+		// it, and nothing is cached
+		st.Rechecked = names(mods)
+		return full(srcs), st, nil
 	}
-	var order []*module
-	visiting := map[string]bool{}
-	var visit func(m *module) bool
-	visit = func(m *module) bool {
-		if m.key != "" {
-			return true
-		}
-		if visiting[m.name] {
-			return false
-		}
-		visiting[m.name] = true
-		defer delete(visiting, m.name)
-		h := sha256.New()
-		_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%v|", CompilerVersion, diag.SchemaVersion, iface.Version, cfg.Target, cfg.Opt, cfg.Env, m.srcHash, m.main)
-		for _, imp := range m.imports {
-			im := byName[imp]
-			if im == nil || !visit(im) {
-				return false
-			}
-			e, err := load(dir, im.key)
-			if err != nil {
-				return false
-			}
-			keyed[imp] = e
-			_, _ = fmt.Fprintf(h, "%s=%s|", imp, e.Iface)
-		}
-		m.key = hex.EncodeToString(h.Sum(nil))
-		order = append(order, m)
-		return true
-	}
+	// the keys from the stored interface hashes: when every module hits,
+	// the stored diagnostics are the answer
+	stored := map[string]string{}
+	var out []diag.Diagnostic
 	allHit := true
-	for _, m := range mods {
-		if !visit(m) {
+	for _, m := range order {
+		k, ok := m.keyWith(cfg, stored)
+		e, err := load(dir, k)
+		if !ok || err != nil {
 			allHit = false
 			break
 		}
-		if e, err := load(dir, m.key); err == nil {
-			keyed[m.name] = e
-		} else {
-			allHit = false
-		}
+		stored[m.name] = e.Iface
+		out = append(out, e.Diags...)
 	}
 	if allHit {
-		var out []diag.Diagnostic
-		for _, m := range mods {
-			out = append(out, keyed[m.name].Diags...)
-		}
 		st.Hits = len(mods)
-		st.Ifaces = map[string]string{}
-		for n, e := range keyed {
-			st.Ifaces[n] = e.Iface
-		}
+		st.Ifaces = stored
 		diag.Sort(out)
 		if out == nil {
 			out = []diag.Diagnostic{}
 		}
 		return out, st, nil
 	}
-	// a full run; every module's entry is (re)written so that dependents
-	// keyed by the new interface hashes hit next time
 	prog := resolve.Resolve(srcs)
-	ds := prog.Diags
-	if len(ds) > 0 {
+	if ds := prog.Diags; len(ds) > 0 {
 		// a request with resolution errors is not cached: the check phase
 		// did not run, so no per-module result would be complete
 		diag.Sort(ds)
 		st.Rechecked = names(mods)
 		return ds, st, nil
 	}
-	ds = check.Check(prog)
-	diag.Sort(ds)
 	srcBytes := map[string][]byte{}
-	fileMod := map[string]string{}
 	for _, m := range mods {
 		for _, f := range m.files {
 			srcBytes[f.Name] = f.Bytes
-			fileMod[f.Name] = m.name
 		}
 	}
-	perMod := map[string][]diag.Diagnostic{}
-	for _, d := range ds {
-		mn := fileMod[d.File]
-		if mn == "" {
-			mn = mainName(mods)
-		}
-		perMod[mn] = append(perMod[mn], d)
-	}
-	// interface hashes need the resolved modules; keys need imports' hashes,
-	// so modules are stored in dependency order
 	// the interface hash also records whether the module had diagnostics:
 	// a full check does not report dependents of a module that failed to
 	// resolve, so dependents must be re-keyed when that state changes
 	ifaceHash := map[string]string{}
-	for _, m := range mods {
-		if rm := prog.Modules[m.name]; rm != nil {
-			h := sha256.New()
-			h.Write(iface.Interface(rm, srcBytes))
-			_, _ = fmt.Fprintf(h, "\nerrors=%v\n", len(perMod[m.name]) > 0)
-			ifaceHash[m.name] = hex.EncodeToString(h.Sum(nil))
-		}
-	}
-	for _, m := range mods {
-		m.key = ""
-	}
-	var rekey func(m *module) string
-	rekey = func(m *module) string {
-		if m.key != "" {
-			return m.key
-		}
-		h := sha256.New()
-		_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%v|", CompilerVersion, diag.SchemaVersion, iface.Version, cfg.Target, cfg.Opt, cfg.Env, m.srcHash, m.main)
-		for _, imp := range m.imports {
-			im := byName[imp]
-			if im == nil {
-				return "" // unresolvable import: the module is not cached
-			}
-			if visiting[m.name] {
-				return ""
-			}
-			visiting[m.name] = true
-			k := rekey(im)
-			delete(visiting, m.name)
-			if k == "" {
-				return ""
-			}
-			_, _ = fmt.Fprintf(h, "%s=%s|", imp, ifaceHash[imp])
-		}
-		m.key = hex.EncodeToString(h.Sum(nil))
-		return m.key
-	}
-	for _, m := range mods {
-		k := rekey(m)
-		st.Rechecked = append(st.Rechecked, m.name)
-		if k == "" || ifaceHash[m.name] == "" {
+	out = nil
+	for _, m := range order {
+		k, _ := m.keyWith(cfg, ifaceHash)
+		if e, err := load(dir, k); err == nil {
+			st.Hits++
+			ifaceHash[m.name] = e.Iface
+			out = append(out, e.Diags...)
 			continue
 		}
-		mds := perMod[m.name]
+		name := m.name
+		mds := check.CheckModules(prog, func(n string) bool { return n == name })
 		if mds == nil {
 			mds = []diag.Diagnostic{}
 		}
+		rm := prog.Modules[m.name]
+		if rm == nil {
+			return nil, st, fmt.Errorf("incremental: module %s did not resolve", m.name)
+		}
+		h := sha256.New()
+		h.Write(iface.Interface(rm, srcBytes))
+		_, _ = fmt.Fprintf(h, "\nerrors=%v\n", len(mds) > 0)
+		ifaceHash[m.name] = hex.EncodeToString(h.Sum(nil))
 		if err := store(dir, &entry{Key: k, Iface: ifaceHash[m.name], Diags: mds}); err != nil {
 			return nil, st, err
 		}
+		st.Rechecked = append(st.Rechecked, m.name)
+		out = append(out, mds...)
 	}
 	sort.Strings(st.Rechecked)
 	st.Ifaces = ifaceHash
-	if ds == nil {
-		ds = []diag.Diagnostic{}
+	diag.Sort(out)
+	if out == nil {
+		out = []diag.Diagnostic{}
 	}
-	return ds, st, nil
+	return out, st, nil
+}
+
+// libraryHash covers the embedded prelude and std modules, so that a
+// change to them re-keys every entry even when CompilerVersion is not
+// bumped.
+var libraryHash = func() string {
+	h := sha256.New()
+	for _, name := range append([]string{"core"}, resolve.StdModules...) {
+		src, _ := resolve.StdSource(name)
+		_, _ = fmt.Fprintf(h, "%s\x00%d\x00", name, len(src))
+		h.Write(src)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}()
+
+// keyWith is the module's cache key given its imports' interface hashes;
+// false when one of them is not known. Imports of the embedded library are
+// covered by libraryHash.
+func (m *module) keyWith(cfg Config, ifaces map[string]string) (string, bool) {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%s|%v|", CompilerVersion, diag.SchemaVersion, iface.Version, libraryHash, cfg.Target, cfg.Opt, cfg.Env, m.srcHash, m.main)
+	for _, imp := range m.imports {
+		if isLibrary(imp) {
+			continue
+		}
+		ih, ok := ifaces[imp]
+		if !ok {
+			return "", false
+		}
+		_, _ = fmt.Fprintf(h, "%s=%s|", imp, ih)
+	}
+	return hex.EncodeToString(h.Sum(nil)), true
+}
+
+func isLibrary(imp string) bool { return strings.HasPrefix(imp, "std/") }
+
+// depOrder lists the modules with every module after the request modules
+// it imports; false on a cycle or an import that is neither a request
+// module nor a library module.
+func depOrder(mods []*module) ([]*module, bool) {
+	byName := map[string]*module{}
+	for _, m := range mods {
+		byName[m.name] = m
+	}
+	var order []*module
+	state := map[string]int{} // 1 visiting, 2 done
+	var visit func(m *module) bool
+	visit = func(m *module) bool {
+		switch state[m.name] {
+		case 1:
+			return false
+		case 2:
+			return true
+		}
+		state[m.name] = 1
+		for _, imp := range m.imports {
+			if isLibrary(imp) {
+				continue
+			}
+			im := byName[imp]
+			if im == nil || !visit(im) {
+				return false
+			}
+		}
+		state[m.name] = 2
+		order = append(order, m)
+		return true
+	}
+	for _, m := range mods {
+		if !visit(m) {
+			return nil, false
+		}
+	}
+	return order, true
 }
 
 // full is the uncached path.
@@ -286,18 +293,6 @@ func group(srcs []*source.File) ([]*module, []diag.Diagnostic) {
 		out = append(out, m)
 	}
 	return out, pds
-}
-
-func mainName(mods []*module) string {
-	for _, m := range mods {
-		if m.main {
-			return m.name
-		}
-	}
-	if len(mods) > 0 {
-		return mods[len(mods)-1].name
-	}
-	return ""
 }
 
 func names(mods []*module) []string {
