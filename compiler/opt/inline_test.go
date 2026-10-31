@@ -1182,12 +1182,12 @@ func TestInlineKeepsTestRoots(t *testing.T) {
 }
 
 // TestInlineLibrary (specs/inline-library): small library bodies are
-// copied into user functions after the proof pass, cold growth paths and
-// access-returning functions stay calls, and every instruction of a copy
+// copied into user functions after the proof pass, functions that write
+// through a raw pointer stay calls, and every instruction of a copy
 // in user code takes the call site's position, so a trap inside it
 // reports the user-level call.
 func TestInlineLibrary(t *testing.T) {
-	src := "module t\nfunc main() -> i32 {\n    v := Vec[u64].new()\n    v.push(1u64)\n    print_u64(u64(v.len()))\n    expect(v.len() == 2usize)\n    return 0i32\n}\n"
+	src := "module t\nfunc main() -> i32 {\n    v := Vec[u64].new()\n    v.push(1u64)\n    print_u64(u64(v.len()))\n    print_u64(v.get(0usize))\n    expect(v.len() == 2usize)\n    return 0i32\n}\n"
 	build := func(lib bool) *ir.Module {
 		prog := resolve.ResolveFor([]*source.File{{Name: "t.kern", Bytes: []byte(src)}}, true)
 		if ds := check.Check(prog); len(prog.Diags)+len(ds) > 0 {
@@ -1214,30 +1214,38 @@ func TestInlineLibrary(t *testing.T) {
 		return out
 	}
 	before, after := calls(build(false)), calls(build(true))
-	for _, name := range []string{"Vec.new", "Vec.push", "Vec.len", "core.expect"} {
+	for _, name := range []string{"Vec.new", "Vec.len", "Vec.get", "core.expect"} {
 		if !before[name] || after[name] {
 			t.Errorf("%s: called before %v, after %v; want copied", name, before[name], after[name])
 		}
 	}
-	if !after["Vec.grow"] {
-		t.Errorf("the cold growth path must stay a call: %v", after)
+	// a function that writes through a raw pointer stays a call, for
+	// LLVM to inline with its receiver noalias (docs/reports/native-ab.md)
+	if !after["Vec.push"] {
+		t.Errorf("Vec.push must stay a call: %v", after)
 	}
-	// the copied expect's trap is at the expect call
-	at := strings.Index(src, "expect(")
-	end := strings.Index(src[at:], ")\n") + at + 1
-	found := false
+	// every copied trap is at the call it was copied for: expect's, and
+	// Vec.get's bounds trap
+	span := func(call string) [2]int { // the call to the end of its line
+		at := strings.Index(src, call)
+		return [2]int{at, strings.Index(src[at:], ")\n") + at + 1}
+	}
+	get := strings.Index(src, "v.get(")
+	sites := map[[2]int]bool{span("expect("): true, {get, get + len("v.get(0usize)")}: true}
+	seen := map[[2]int]bool{}
 	for _, b := range build(true).Func("t.main").Blocks {
 		for _, in := range b.Instrs {
 			if tr, ok := in.(*ir.Trap); ok {
-				found = true
-				if tr.Pos.Start != at || tr.Pos.End != end {
-					t.Errorf("copied trap at %d-%d, want the call %d-%d", tr.Pos.Start, tr.Pos.End, at, end)
+				p := [2]int{tr.Pos.Start, tr.Pos.End}
+				if !sites[p] {
+					t.Errorf("copied trap at %d-%d, at none of the calls %v", p[0], p[1], sites)
 				}
+				seen[p] = true
 			}
 		}
 	}
-	if !found {
-		t.Errorf("no copied trap in main")
+	if !seen[span("expect(")] {
+		t.Errorf("no copied trap at the expect call: %v", seen)
 	}
 }
 

@@ -38,8 +38,9 @@ func InlineLibrary(mod *ir.Module) {
 // libraryEligible reports whether a call from f to the library function g
 // may be copied: the user inliner's exclusions (out and closure
 // parameters, recursion, release functions), the containers'
-// cold growth paths, and the callee size limit; a returned access only
-// where accessRetOK allows it at the site.
+// cold growth paths, functions that write through a raw pointer
+// (writesRaw), and the callee size limit; a returned access only where
+// accessRetOK allows it at the site.
 func (in *inliner) libraryEligible(f, g *ir.Func) bool {
 	switch {
 	case g == nil || g == f || g.Entry == nil || !g.Library:
@@ -49,6 +50,8 @@ func (in *inliner) libraryEligible(f, g *ir.Func) bool {
 	case in.recursive[g] || ir.ColdLibrary[baseName(g.Name)] || isDestructor(g.Name):
 		return false
 	case in.sizes[g] > MaxCalleeSize:
+		return false
+	case writesRaw(g):
 		return false
 	}
 	for _, p := range g.Params {
@@ -60,6 +63,28 @@ func (in *inliner) libraryEligible(f, g *ir.Func) bool {
 		}
 	}
 	return true
+}
+
+// rawWrites are the intrinsics that write memory through a raw pointer.
+var rawWrites = map[string]bool{"ptr_store": true, "ptr_take": true, "ptr_copy": true, "ptr_store_seq": true,
+	"ptr_store_volatile": true, "ptr_init": true, "ptr_init_ctx": true}
+
+// writesRaw reports a library function that writes through a raw pointer
+// (Vec.push, Vec.pop): left a call, LLVM inlines it with its receiver
+// still noalias, so the element store cannot clobber the container's
+// header, which stays in registers; copied here, that fact is lost and
+// every store reloads the header (vector's push loop: 28% more
+// instructions; docs/reports/native-ab.md). A function that only reads
+// through a raw pointer (Vec.get) gains from the copy.
+func writesRaw(g *ir.Func) bool {
+	for _, b := range g.Blocks {
+		for _, x := range b.Instrs {
+			if c, ok := x.(*ir.Call); ok && rawWrites[c.Intrinsic] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // inlineLibraryInto rewrites f's eligible library call sites in block
