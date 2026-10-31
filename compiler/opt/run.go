@@ -15,6 +15,11 @@ type Options struct {
 	// (the interpreter, native builds, kern test), never for the show-*
 	// commands, whose user-level facts read library calls as calls.
 	InlineLibrary bool
+	// MergeReturns merges ret blocks that differ only in a union tag or a
+	// constant before the inliner runs (specs/merge-returns): like
+	// InlineLibrary, only where the program runs, since the merged block
+	// keeps one source position of the loads and calls it shares.
+	MergeReturns bool
 }
 
 // OptionsFor maps a build configuration's opt level to the passes the
@@ -22,18 +27,26 @@ type Options struct {
 func OptionsFor(optLevel string) Options { return Options{Inline: optLevel == "release"} }
 
 // ExecOptionsFor maps an opt level to the passes of a program that runs:
-// OptionsFor's, and in release the library inliner.
+// OptionsFor's, and in release the return merging and the library inliner.
 func ExecOptionsFor(optLevel string) Options {
-	return Options{Inline: optLevel == "release", InlineLibrary: optLevel == "release"}
+	release := optLevel == "release"
+	return Options{Inline: release, InlineLibrary: release, MergeReturns: release}
 }
 
 // Run applies the passes to a lowered module in the fixed order
-// validate, inline, validate, prove, validate, inline-library, validate
-// (PLAN.md 6.1, specs/inline-library). An error
+// validate, merge-returns, validate, inline, validate, prove, validate,
+// inline-library, validate (PLAN.md 6.1, specs/merge-returns,
+// specs/inline-library). An error
 // names the pass after which the IR failed validation; nothing later runs.
 func Run(mod *ir.Module, o Options) error {
 	if errs := ir.Validate(mod); len(errs) > 0 {
 		return fmt.Errorf("lowering: %w", errs[0])
+	}
+	if o.MergeReturns {
+		MergeReturns(mod)
+		if errs := ir.Validate(mod); len(errs) > 0 {
+			return fmt.Errorf("merge-returns: %w", errs[0])
+		}
 	}
 	if o.Inline {
 		Inline(mod)
