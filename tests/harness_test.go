@@ -816,9 +816,10 @@ func compareTrapRecords(t *testing.T, want, got []byte) {
 	if w.Trap.Kind != "stack" && w.Trap.Span != g.Trap.Span {
 		t.Fatalf("trap span: interpreter %v, native %v", w.Trap.Span, g.Trap.Span)
 	}
-	// a native stack record has no location (ADR-012): the fault handler
-	// knows neither span nor file, so neither is compared
-	// (specs/runtime-trap-file/SPEC.md R7)
+	// a native stack record names the function the guard page was hit in,
+	// the interpreter the one whose activation exceeded its budget, which
+	// can differ (ADR-012, specs/native-trap-loc), so neither span nor
+	// file is compared (specs/runtime-trap-file/SPEC.md R7)
 	if w.Trap.Kind != "stack" && w.Trap.File != g.Trap.File {
 		t.Fatalf("trap file: interpreter %q, native %q", w.Trap.File, g.Trap.File)
 	}

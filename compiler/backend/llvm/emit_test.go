@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -293,5 +294,57 @@ func TestEmitRuntimeTrapLocation(t *testing.T) {
 	// filled from its span and file parameters
 	if !strings.Contains(text, "store ptr %span.f, ptr") || !regexp.MustCompile(`call void @kern_sysalloc_alloc\([^)]*, ptr %a\d+\)`).MatchString(text) {
 		t.Errorf("heap_try_alloc's allocator call must pass its caller's location\n%s", text)
+	}
+}
+
+// Hosted functions carry the location marker the fault handler reads
+// (specs/native-trap-loc/SPEC.md): the kern text section, the magic word
+// and the index of the function's declaration in the table the entry
+// hands the runtime; -1 for a library function. The entry wrapper carries
+// main's index. A freestanding build has neither.
+func TestEmitFunctionMarkers(t *testing.T) {
+	src := "module t\nfunc f(n: u64) -> u64 { return n + 1u64 }\nfunc main() -> i32 {\n    v := Vec[u64].new()\n    v.push(f(1u64))\n    return 0i32\n}\n"
+	lowerSrc := func() *ir.Module {
+		f := &source.File{Name: "t.kern", Bytes: []byte(src)}
+		prog := resolve.Resolve([]*source.File{f})
+		if ds := check.Check(prog); len(prog.Diags)+len(ds) > 0 {
+			t.Fatalf("check failed")
+		}
+		mod, ds := lower.Lower(prog)
+		if len(ds) > 0 {
+			t.Fatalf("lower: %s", ds[0].Message)
+		}
+		return mod
+	}
+	text := emit(t, src)
+	const sec = `section "__TEXT,__kern_text,regular,pure_instructions" prefix { i64, i64 } { i64 2396846615841359179, i64 `
+	fm := regexp.MustCompile(`define internal i64 @"t\.f"\([^)]*\) #0 ` + regexp.QuoteMeta(sec) + `(\d+) \}`).FindStringSubmatch(text)
+	mm := regexp.MustCompile(`define internal i32 @"t\.main"\(\) #0 ` + regexp.QuoteMeta(sec) + `(\d+) \}`).FindStringSubmatch(text)
+	if fm == nil || mm == nil {
+		t.Fatalf("user functions carry no marker\n%s", text)
+	}
+	if !strings.Contains(text, sec+"-1 }") {
+		t.Errorf("no library function carries the marker -1\n%s", text)
+	}
+	if !strings.Contains(text, "define i32 @main(i32 %argc, ptr %argv) "+sec+mm[1]+" }") || !strings.Contains(text, "call void @kern_set_fn_locs(ptr @kern.fn_locs, i64 2)") {
+		t.Errorf("the entry wrapper must carry main's marker and hand over the table\n%s", text)
+	}
+	table := regexp.MustCompile(`@kern\.fn_locs = private constant \[2 x \{ i64, i64, ptr \}\] \[(.*)\]`).FindStringSubmatch(text)
+	if table == nil {
+		t.Fatalf("no location table\n%s", text)
+	}
+	entries := strings.Split(table[1], "}, {")
+	fAt := strings.Index(src, "func f")
+	fEnd := strings.Index(src, "}\n") + 1
+	i, _ := strconv.Atoi(fm[1])
+	if !strings.Contains(entries[i], fmt.Sprintf("i64 %d, i64 %d, ptr @kern.file.", fAt, fEnd)) {
+		t.Errorf("f's entry %q, want its declaration %d-%d", entries[i], fAt, fEnd)
+	}
+	if elf, errs := llvm.Emit(lowerSrc(), "x86_64-unknown-linux-gnu"); len(errs) > 0 || !strings.Contains(elf, `section "kern_text" prefix`) {
+		t.Errorf("an ELF target uses the kern_text section (errs %v)", errs)
+	}
+	free, errs := llvm.EmitWith(lowerSrc(), llvm.Options{Triple: "x86_64-unknown-none", Freestanding: true, StackCheck: true})
+	if len(errs) > 0 || strings.Contains(free, "prefix") || strings.Contains(free, "kern_set_fn_locs") {
+		t.Errorf("a freestanding build carries no marker (errs %v)", errs)
 	}
 }

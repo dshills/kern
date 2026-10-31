@@ -21,6 +21,9 @@ type emitter struct {
 	strs     []string          // string literal globals
 	files    map[string]string // file-name constants for trap records, by file
 	locs     map[string]string // location records of runtime entry points, by span and file operand
+	fnLocs   []string          // the location records of the user functions, indexed by their markers
+	fnLocIdx map[string]int64  // each user function's index in fnLocs
+	tail     strings.Builder   // globals rendered after the functions (the location table)
 	glue     map[string]bool   // emitted drop glue
 	eqs      map[string]bool   // emitted equality glue
 	glueBody strings.Builder

@@ -39,7 +39,7 @@ type Options struct {
 
 // EmitWith renders a module for the given options.
 func EmitWith(mod *ir.Module, opts Options) (string, []error) {
-	e := &emitter{mod: mod, opts: opts, types: map[string]bool{}, glue: map[string]bool{}, runtime: map[string]bool{}, files: map[string]string{}, locs: map[string]string{}}
+	e := &emitter{mod: mod, opts: opts, types: map[string]bool{}, glue: map[string]bool{}, runtime: map[string]bool{}, files: map[string]string{}, locs: map[string]string{}, fnLocIdx: map[string]int64{}}
 	if opts.Sources != nil {
 		e.dbg = newDebugInfo(opts.Sources)
 	}
@@ -83,9 +83,9 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 		// the program's file, which a trap raised by the runtime itself
 		// (a stack check, a mutex misuse) names in its record: the file
 		// declaring main
-		params, setArgs := "", ""
+		params, setArgs := "", e.fnLocTable()
 		if entry.File != "" {
-			setArgs = fmt.Sprintf("  call void @kern_set_file(ptr %s)\n", e.fileSym(entry.File))
+			setArgs += fmt.Sprintf("  call void @kern_set_file(ptr %s)\n", e.fileSym(entry.File))
 			e.declare("kern_set_file", "void (ptr)")
 		}
 		if !opts.Freestanding {
@@ -94,9 +94,9 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 			e.declare("kern_set_args", "void (i32, ptr)")
 		}
 		if ret == "void" {
-			fmt.Fprintf(&e.sb, "define i32 %s(%s) {\nentry:\n%s  call void @kern_start()\n  call %s %s()\n  ret i32 0\n}\n", entrySym, params, setArgs, retOrVoid(ret), fnSym(mod.Entry))
+			fmt.Fprintf(&e.sb, "define i32 %s(%s)%s {\nentry:\n%s  call void @kern_start()\n  call %s %s()\n  ret i32 0\n}\n", entrySym, params, e.entryMarker(mod.Entry), setArgs, retOrVoid(ret), fnSym(mod.Entry))
 		} else {
-			fmt.Fprintf(&e.sb, "define i32 %s(%s) {\nentry:\n%s  call void @kern_start()\n  %%r = call %s %s()\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", entrySym, params, setArgs, ret, fnSym(mod.Entry), widenOp(ret), ret)
+			fmt.Fprintf(&e.sb, "define i32 %s(%s)%s {\nentry:\n%s  call void @kern_start()\n  %%r = call %s %s()\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", entrySym, params, e.entryMarker(mod.Entry), setArgs, ret, fnSym(mod.Entry), widenOp(ret), ret)
 		}
 		e.declare("kern_start", "void ()")
 	}
@@ -109,6 +109,7 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 	out.WriteString("\n")
 	out.WriteString(e.glueBody.String())
 	out.WriteString(e.sb.String())
+	out.WriteString(e.tail.String())
 	if e.dbg != nil {
 		out.WriteString(e.dbg.metadata())
 	}
@@ -157,6 +158,7 @@ func (e *emitter) testMain(mod *ir.Module) {
 	e.declare("kern_start", "void ()")
 	var b strings.Builder
 	b.WriteString("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n")
+	b.WriteString(e.fnLocTable())
 	b.WriteString("  %few = icmp slt i32 %argc, 2\n  br i1 %few, label %usage, label %pick\n")
 	b.WriteString("usage:\n  ret i32 2\n")
 	b.WriteString("pick:\n  %endp = alloca ptr\n  %a1p = getelementptr ptr, ptr %argv, i64 1\n  %a1 = load ptr, ptr %a1p\n")
@@ -174,7 +176,9 @@ func (e *emitter) testMain(mod *ir.Module) {
 		if f != nil && f.File != "" {
 			fmt.Fprintf(&b, "  call void @kern_set_file(ptr %s)\n", e.fileSym(f.File))
 		}
-		fmt.Fprintf(&b, "  call void @kern_set_args(i32 1, ptr %%argv)\n  call void @kern_start()\n  call void %s()\n  ret i32 0\n", fnSym(name))
+		// noinline: a test inlined into the dispatcher would lose its own
+		// location marker (specs/native-trap-loc)
+		fmt.Fprintf(&b, "  call void @kern_set_args(i32 1, ptr %%argv)\n  call void @kern_start()\n  call void %s() noinline\n  ret i32 0\n", fnSym(name))
 	}
 	b.WriteString("}\n")
 	e.sb.WriteString(b.String())
@@ -635,7 +639,74 @@ func (e *emitter) function(f *ir.Func) {
 		// discards the copy (docs/reports/gap-diagnosis.md)
 		linkage = "internal "
 	}
-	fmt.Fprintf(&e.sb, "define %s%s %s(%s)%s%s%s {\nentry:\n%s%s}\n\n", linkage, e.retType(f), e.symOf(f), strings.Join(ps, ", "), attrs, e.attrRef(), dbgSuffix, entry, fe.body.String())
+	fmt.Fprintf(&e.sb, "define %s%s %s(%s)%s%s%s%s {\nentry:\n%s%s}\n\n", linkage, e.retType(f), e.symOf(f), strings.Join(ps, ", "), attrs, e.attrRef(), fe.marker(), dbgSuffix, entry, fe.body.String())
+}
+
+// locMagic opens a function's location marker (specs/native-trap-loc):
+// "KERNLOC!" read as a little-endian word.
+const locMagic = 0x21434f4c4e52454b
+
+// marker places a hosted function in the kern text section with a prefix
+// the runtime's fault handler reads to name the function a native `stack`
+// trap, or a fault in safe code, happened in: the magic word, then the
+// index of the function's location (its declaration's span and file) in
+// the table the entry hands the runtime, or -1 for a library function,
+// whose location is its caller's. A table of function addresses would be
+// a use of each function and keep LLVM from discarding a function it
+// inlined into its one caller, and a pointer in the prefix is a text
+// relocation, which macOS refuses; an index is neither. A freestanding
+// build checks the stack limit in every prologue instead, with the
+// function's location, so it carries no marker.
+func (fe *fnEmit) marker() string {
+	e := fe.e
+	if e.opts.Freestanding {
+		return ""
+	}
+	idx := int64(-1)
+	if !fe.f.Library {
+		idx = int64(len(e.fnLocs))
+		e.fnLocIdx[fe.f.Name] = idx
+		e.fnLocs = append(e.fnLocs, fmt.Sprintf("{ i64, i64, ptr } { i64 %d, i64 %d, ptr %s }", fe.f.Pos.Start, fe.f.Pos.End, fe.fileOperand(fe.f.File)))
+	}
+	return e.markerFor(idx)
+}
+
+func (e *emitter) markerFor(idx int64) string {
+	return fmt.Sprintf(" section \"%s\" prefix { i64, i64 } { i64 %d, i64 %d }", kernTextSection(e.opts.Triple), uint64(locMagic), idx)
+}
+
+// entryMarker marks the hosted entry wrapper with the program's main
+// function's location: LLVM inlines main into it, and a fault there is
+// main's.
+func (e *emitter) entryMarker(entry string) string {
+	if e.opts.Freestanding {
+		return ""
+	}
+	idx, ok := e.fnLocIdx[entry]
+	if !ok {
+		idx = -1
+	}
+	return e.markerFor(idx)
+}
+
+// fnLocTable emits the table of function locations the markers index and
+// the call that hands it to the runtime, for the entry wrapper.
+func (e *emitter) fnLocTable() string {
+	if e.opts.Freestanding {
+		return ""
+	}
+	e.declare("kern_set_fn_locs", "void (ptr, i64)")
+	fmt.Fprintf(&e.tail, "@kern.fn_locs = private constant [%d x { i64, i64, ptr }] [%s]\n", len(e.fnLocs), strings.Join(e.fnLocs, ", "))
+	return fmt.Sprintf("  call void @kern_set_fn_locs(ptr @kern.fn_locs, i64 %d)\n", len(e.fnLocs))
+}
+
+// kernTextSection is the section every hosted kern function is placed in,
+// whose bounds the runtime reads from the linker's symbols for it.
+func kernTextSection(triple string) string {
+	if strings.Contains(triple, "apple") || strings.Contains(triple, "darwin") || strings.Contains(triple, "macos") {
+		return "__TEXT,__kern_text,regular,pure_instructions"
+	}
+	return "kern_text"
 }
 
 func isParam(f *ir.Func, l *ir.Local) bool {

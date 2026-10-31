@@ -51,9 +51,15 @@ buffer and uses no lock, allocation or `stdio` call.
 - `tests/trap/handler_*.kern` cover a conforming handler on an overflow trap and a nested
   trap inside a handler; `tests/trap/stack_big_frame.kern` covers a frame larger than one
   page with stack probes so the guard page cannot be skipped.
-- Stack traps detected natively carry the span `(0, 0)`: the fault handler knows no source
-  location. The interpreter reports the span of the function whose activation exceeded the
-  budget. The differential harness compares trap kinds, and spans only for non-`stack`
-  traps (recorded in `docs/reports/phase-2.md`).
+- Stack traps detected natively carried the span `(0, 0)` until 2026-10-31: the fault
+  handler knew no source location. Since then (`specs/native-trap-loc/SPEC.md`) every
+  hosted kern function carries a marker the handler reads without allocating or faulting,
+  and a native `stack` record, or an `unreachable` one from a fault in safe code, names the
+  declaration of the user function the fault happened in (found through the faulting
+  instruction, the link register and the frame chain), or `(0, 0)` when none is found. The
+  interpreter reports the span of the function whose activation exceeded its budget, which
+  can be a different function (mutual recursion, a library frame, code LLVM inlined), so
+  the differential harness still compares trap kinds, and spans only for non-`stack` traps
+  (recorded in `docs/reports/phase-2.md`).
 - Phase 3 freestanding builds use a compiler-inserted stack-limit check in every prologue,
   so the handler never runs in signal context there; the obligation is kept uniform anyway.

@@ -465,8 +465,10 @@ func Agree(a, b Run) bool {
 		if a.Trap == nil || b.Trap == nil {
 			return a.Trap == b.Trap
 		}
-		// a native stack record has no location (ADR-012): neither its
-		// span nor its file is compared (specs/runtime-trap-file R7)
+		// a native stack record names the function the guard page was hit
+		// in, which can differ from the interpreter's (ADR-012,
+		// specs/native-trap-loc): neither its span nor its file is
+		// compared (specs/runtime-trap-file R7)
 		return a.Trap.Kind == b.Trap.Kind && (a.Trap.Kind == "stack" || a.Trap.File == b.Trap.File && a.Trap.Span == b.Trap.Span)
 	}
 	return true
