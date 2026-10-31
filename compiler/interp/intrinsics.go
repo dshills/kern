@@ -73,6 +73,15 @@ func init() {
 			_, _ = fmt.Fprint(it.out, string(b))
 			return nil
 		},
+		"eprint_str": func(it *Interp, a []Value, _ callCtx) []Value {
+			s := acc(a[0]).Seq
+			b := make([]byte, s.length())
+			for i := range b {
+				b[i] = byte(s.at(i).get().(Int).Bits)
+			}
+			_, _ = it.errOut.Write(b)
+			return nil
+		},
 		"println": func(it *Interp, a []Value, _ callCtx) []Value { _, _ = fmt.Fprintln(it.out); return nil },
 		// std/io (hosted): descriptors are indexes into the shared file
 		// table (0, 1 and 2 are the standard streams, 1 and 2 through the
@@ -219,7 +228,7 @@ func init() {
 		},
 		"Mutex.new": func(it *Interp, a []Value, c callCtx) []Value {
 			it.runtimeAlloc(c.pos)
-			return []Value{&Mutex{Val: a[0]}}
+			return []Value{&Mutex{Val: a[0], lock: make(chan struct{}, 1)}}
 		},
 		"Mutex.lock": func(it *Interp, a []Value, c callCtx) []Value {
 			pos := c.pos
@@ -230,7 +239,7 @@ func init() {
 			if recursive {
 				it.trap("explicit", pos) // recursive acquisition (spec §13 accepted decision)
 			}
-			m.lock.Lock()
+			it.acquire(m)
 			m.state.Lock()
 			m.Locked = true
 			m.owner = it.tid
@@ -242,7 +251,7 @@ func init() {
 			m.state.Lock()
 			m.Locked = false
 			m.state.Unlock()
-			m.lock.Unlock()
+			<-m.lock
 			return nil
 		},
 		"Condvar.new": func(it *Interp, a []Value, c callCtx) []Value {
@@ -277,9 +286,9 @@ func init() {
 			m.state.Lock()
 			m.Locked = false
 			m.state.Unlock()
-			m.lock.Unlock()
+			<-m.lock
 			it.await(gen)
-			m.lock.Lock()
+			it.acquire(m)
 			m.state.Lock()
 			m.Locked = true
 			m.owner = it.tid
@@ -696,6 +705,25 @@ func (it *Interp) consoleWrite(addr uint64, v Value) bool {
 // ConsoleAddr is the freestanding console device: the PL011 UART of the
 // QEMU virt machine (AArch64), emulated by the interpreter.
 const ConsoleAddr = 0x0900_0000
+
+// acquire takes m's lock. A thread waiting for it ends, as at a block
+// boundary, when the program terminates meanwhile (Stop, or a trap or exit
+// on another thread), so a stopped run never stays blocked in a lock
+// (specs/test-runs/SPEC.md R4).
+func (it *Interp) acquire(m *Mutex) {
+	select {
+	case m.lock <- struct{}{}:
+		return
+	default:
+	}
+	select {
+	case m.lock <- struct{}{}:
+	case <-it.sh.fatalCh:
+		if code, ok := it.terminated(); ok {
+			panic(exitCode(code))
+		}
+	}
+}
 
 // atomicMu serializes the interpreter's atomic and reference-count updates.
 var atomicMu sync.Mutex

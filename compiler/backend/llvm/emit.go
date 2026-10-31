@@ -176,9 +176,19 @@ func (e *emitter) testMain(mod *ir.Module) {
 		if f != nil && f.File != "" {
 			fmt.Fprintf(&b, "  call void @kern_set_file(ptr %s)\n", e.fileSym(f.File))
 		}
-		// noinline: a test inlined into the dispatcher would lose its own
-		// location marker (specs/native-trap-loc)
-		fmt.Fprintf(&b, "  call void @kern_set_args(i32 1, ptr %%argv)\n  call void @kern_start()\n  call void %s() noinline\n  ret i32 0\n", fnSym(name))
+		// the file's setup before the test, its teardown after the test
+		// returns (specs/test-runs R2); noinline: a function inlined into
+		// the dispatcher would lose its own location marker
+		// (specs/native-trap-loc)
+		fmt.Fprintf(&b, "  call void @kern_set_args(i32 1, ptr %%argv)\n  call void @kern_start()\n")
+		if i < len(mod.TestSetup) && mod.TestSetup[i] != "" {
+			fmt.Fprintf(&b, "  call void %s() noinline\n", fnSym(mod.TestSetup[i]))
+		}
+		fmt.Fprintf(&b, "  call void %s() noinline\n", fnSym(name))
+		if i < len(mod.TestTeardown) && mod.TestTeardown[i] != "" {
+			fmt.Fprintf(&b, "  call void %s() noinline\n", fnSym(mod.TestTeardown[i]))
+		}
+		b.WriteString("  ret i32 0\n")
 	}
 	b.WriteString("}\n")
 	e.sb.WriteString(b.String())

@@ -153,9 +153,8 @@ const StoppedStatus = -1
 // Stop ends a running program from another goroutine (`kern test`'s
 // timeout, specs/test-command/SPEC.md R8): every thread of it ends at its
 // next basic block as if it had exited with StoppedStatus, and a thread
-// waiting for a join wakes. A thread blocked in a lock or a condition
-// wait does not run another block until it is woken, so it may stay
-// blocked; it no longer uses the CPU.
+// waiting for a join, a lock or a condition variable wakes and ends the
+// same way.
 func (it *Interp) Stop() {
 	it.sh.stop.Store(true)
 	it.fatalExit(exitCode(StoppedStatus))
@@ -257,11 +256,23 @@ func (it *Interp) Run() (status int) { return it.RunEntry(it.mod.Entry) }
 // main: a test function of `kern test` (specs/test-command/SPEC.md R7).
 // Each call starts from fresh globals; an interpreter runs one entry.
 func (it *Interp) RunEntry(name string) (status int) {
+	return it.RunEntries([]string{name})
+}
+
+// RunEntries runs functions one after another as one program, sharing its
+// thread_locals: a test's setup, the test and its teardown (`kern test`,
+// specs/test-runs R2). A trap, an exit or a terminating spawned thread
+// ends the sequence; the status is RunEntry's for the last function run.
+func (it *Interp) RunEntries(names []string) (status int) {
 	it.globals = it.freshGlobals()
-	entry := it.mod.Func(name)
-	if entry == nil {
-		_, _ = fmt.Fprintf(it.errOut, "no entry function\n")
-		return 3
+	var entries []*ir.Func
+	for _, name := range names {
+		entry := it.mod.Func(name)
+		if entry == nil {
+			_, _ = fmt.Fprintf(it.errOut, "no entry function\n")
+			return 3
+		}
+		entries = append(entries, entry)
 	}
 	defer func() {
 		if r := recover(); r != nil {
@@ -279,14 +290,18 @@ func (it *Interp) RunEntry(name string) (status int) {
 			it.halt(status)
 		}
 	}()
-	rets := it.call(entry, nil)
-	if len(rets) == 1 {
-		if n, ok := rets[0].(Int); ok {
-			status = int(signedOf(n))
+	for _, entry := range entries {
+		status = 0
+		rets := it.call(entry, nil)
+		if len(rets) == 1 {
+			if n, ok := rets[0].(Int); ok {
+				status = int(signedOf(n))
+			}
 		}
-	}
-	if code, ok := it.terminated(); ok {
-		status = code // a spawned thread trapped (record already written) or exited
+		if code, ok := it.terminated(); ok {
+			status = code // a spawned thread trapped (record already written) or exited
+			break
+		}
 	}
 	it.halt(status)
 	return status

@@ -173,9 +173,9 @@ type Shared struct {
 type Mutex struct {
 	Val    Value
 	Locked bool
-	owner  uint64     // thread holding the lock (recursive acquisition traps)
-	state  sync.Mutex // guards Locked and owner
-	lock   sync.Mutex // the lock itself
+	owner  uint64        // thread holding the lock (recursive acquisition traps)
+	state  sync.Mutex    // guards Locked and owner
+	lock   chan struct{} // the lock itself: one slot, full while held (acquire, release)
 }
 
 // mutexRef is the slot of a Mutex's value: the ref behind the edit that

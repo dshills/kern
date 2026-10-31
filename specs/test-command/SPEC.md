@@ -55,8 +55,9 @@ harness, runs every test in both engines and both opt levels, reports
 each test's outcome as JSON a tool can act on, and reports any
 disagreement between configurations as a distinct status, since the
 language's pitch is that the interpreter and the native build execute
-one semantics. Non-goals: benchmarks, fuzzing, coverage, test fixtures
-with setup and teardown, parallel execution, freestanding targets.
+one semantics. Non-goals: benchmarks, fuzzing, coverage, freestanding targets. (Setup
+and teardown, parallel execution and messages on `expect` were added by
+`specs/test-runs/SPEC.md`.)
 
 ## 1. Background
 
@@ -137,15 +138,15 @@ decimal integer from 1 to 3600, and any other value fails with
 `CLI_INVALID_FLAGS`);
 at expiry a native process is killed, and an interpreter run is
 stopped: each of its threads ends at its next basic block, and a thread
-blocked in a lock or a condition wait, which runs no block until woken,
-is left blocked and idle after a one-second grace period.
+blocked in a lock, a condition wait or a join wakes and ends
+(`specs/test-runs/SPEC.md` R4).
 
 ## 3. Out of scope
 
 - Changes to §16 or to the grammar.
-- Running tests in parallel, test setup or teardown, benchmarks.
+- Benchmarks. (Running tests in parallel, setup and teardown and
+  messages on `expect` were added by `specs/test-runs/SPEC.md`.)
 - A trap kind of its own for a failed assertion (`explicit` is used).
-- Messages on `expect` (the record's span locates the call).
 - Freestanding targets and `--test-hooks`.
 - The other commands reporting errors in test files: they do not load
   them (§2.1); `kern test` does, and so does `kern check` since
@@ -356,9 +357,8 @@ review.
 
 ## 6. Risks
 
-- **Blocked interpreter runs.** A timed-out interpreter run whose thread
-  is blocked in a lock or a condition wait stays blocked (idle, not
-  using the CPU) until the command exits.
+- **Blocked interpreter runs.** Resolved by `specs/test-runs/SPEC.md`
+  R4: a stopped run's threads blocked in locks wake and end.
 - **Native build time.** Two clang invocations per `kern test` (one per
   opt level) dominate the wall time of small programs; `--engine=interp`
   is the fast path.

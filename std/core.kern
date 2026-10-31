@@ -84,6 +84,43 @@ func trap_kind(kind: TrapKind)
 func expect(cond: bool) {
     if !cond { trap_kind(explicit) }
 }
+// expect_msg is expect with a message: when cond is false it writes the
+// line {"expect":{"message":"..."}} to standard error, the message
+// escaped as a JSON string, and traps explicit as expect does; kern test
+// reports the message with the run (specs/test-runs/SPEC.md R1). Only the
+// first 4096 bytes are written: escaped, they stay within the 64 KiB of
+// standard error kern test keeps.
+func expect_msg(cond: bool, msg: view[]u8) {
+    if cond { return }
+    eprint_str("{\"expect\":{\"message\":\"")
+    var d: [2]u8 = [0u8, 0u8]
+    var n: usize = len(msg)
+    if n > 4096usize { n = 4096usize }
+    var from: usize = 0usize
+    var i: usize = 0usize
+    while i < n {
+        b := msg[i]
+        if b == 34u8 || b == 92u8 || b < 32u8 {
+            eprint_str(msg[from:i])
+            if b == 34u8 {
+                eprint_str("\\\"")
+            } else if b == 92u8 {
+                eprint_str("\\\\")
+            } else {
+                eprint_str("\\u00")
+                d[0usize] = 48u8 + (b >> 4u32) // b < 32: the high digit is 0 or 1
+                d[1usize] = b & 15u8
+                if d[1usize] < 10u8 { d[1usize] = d[1usize] + 48u8 } else { d[1usize] = d[1usize] + 87u8 }
+                eprint_str(d[0usize:2usize])
+            }
+            from = i + 1usize
+        }
+        i = i + 1usize
+    }
+    eprint_str(msg[from:n])
+    eprint_str("\"}}\n")
+    trap_kind(explicit)
+}
 // container_identity issues the next 32-bit identity tag (spec §5.6): a
 // process-global counter starting at 1 in debug builds, 0 in release builds.
 func container_identity() -> u32
@@ -113,6 +150,9 @@ func print_i64(v: i64)
 func print_bool(v: bool)
 func print_str(s: view[]u8)
 func println()
+// eprint_str writes bytes to standard error at once, unbuffered (hosted;
+// the console in the freestanding mode).
+func eprint_str(s: view[]u8)
 // now_ns is a monotonic clock in nanoseconds (hosted; benchmarks).
 func now_ns() -> u64
 

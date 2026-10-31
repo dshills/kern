@@ -13,8 +13,14 @@ func Print(m *Module) string {
 	if m.Entry != "" {
 		fmt.Fprintf(&sb, "entry %s\n", m.Entry)
 	}
-	for _, t := range m.Tests {
+	for i, t := range m.Tests {
 		fmt.Fprintf(&sb, "test %s\n", t)
+		if i < len(m.TestSetup) && m.TestSetup[i] != "" {
+			fmt.Fprintf(&sb, "  setup %s\n", m.TestSetup[i])
+		}
+		if i < len(m.TestTeardown) && m.TestTeardown[i] != "" {
+			fmt.Fprintf(&sb, "  teardown %s\n", m.TestTeardown[i])
+		}
 	}
 	for _, g := range m.Globals {
 		kind := "thread_local"

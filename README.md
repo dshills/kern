@@ -142,14 +142,17 @@ shape without it; files on the command line get 0.3.
 | `run` | Build and execute natively; `--opt=debug\|release`, `--env=hosted\|freestanding`, `--stack-bytes=N`, `--test-hooks` |
 | `build` | Produce an executable or freestanding image; `--debug` emits DWARF line tables |
 | `debug` | Build with debug info and launch lldb with a `kern-own` command that shows ownership state at the current line |
-| `test` | Run the program's tests in the interpreter and natively, in debug and release, and compare the runs; `--opt=`, `--engine=interp\|native`, `--run=<regexp>`, `--timeout=<seconds>`, `--human` |
+| `test` | Run the program's tests in the interpreter and natively, in debug and release, and compare the runs; `--opt=`, `--engine=interp\|native`, `--run=<regexp>`, `--timeout=<seconds>`, `--jobs=<n>`, `--human` |
 | `lsp` | A language server on standard input and output: diagnostics as you type, formatting, the compiler's fixes as quick fixes, and ownership facts on hover; setup for Neovim, Helix and Emacs is in [docs/editors.md](docs/editors.md) |
 
 ### Tests
 
 A test is a `test_` function in a file named `*_test.kern`, in the module it
-tests; `expect(cond)` traps `explicit` when `cond` is false, and a
-`//! expect: trap <kind>` line above a test says it must trap with that kind:
+tests; `expect(cond)` traps `explicit` when `cond` is false (`expect_msg(cond,
+"why")` also reports the message), a `//! expect: trap <kind>` line above a
+test says it must trap with that kind, and a test file's `setup` and
+`teardown` functions run before each of its tests and after each one that
+returns:
 
 ```kern
 // stack/stack_test.kern
@@ -172,7 +175,8 @@ test in four configurations, each run from a fresh program state, and
 writes one JSON response: per test its status (`pass`, `fail`, `mismatch`
 when two configurations disagree, `timeout`, `skipped`) and every run's
 outcome, trap record and output. It exits 0 when every test passes and 1
-otherwise. `kern check` loads the test files too and reports their
+otherwise. Runs proceed in parallel, `--jobs` at a time, and a run that
+exceeds `--timeout` is stopped, threads blocked in locks included. `kern check` loads the test files too and reports their
 errors; the other commands leave `*_test.kern` files out of a module.
 `specs/test-command/SPEC.md` is the full contract.
 

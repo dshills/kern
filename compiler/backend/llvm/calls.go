@@ -502,12 +502,12 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		z := fe.next("t")
 		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[0]))
 		fe.rt("print_bool", "void (i8)", "i8 "+z)
-	case "print_str":
+	case "print_str", "eprint_str":
 		p := fe.next("t")
 		fe.emit("%s = extractvalue { ptr, i64 } %s, 0", p, fe.v(a[0]))
 		l := fe.next("t")
 		fe.emit("%s = extractvalue { ptr, i64 } %s, 1", l, fe.v(a[0]))
-		fe.rt("print_str", "void (ptr, i64)", "ptr "+p+", i64 "+l)
+		fe.rt(c.Intrinsic, "void (ptr, i64)", "ptr "+p+", i64 "+l)
 	case "println":
 		fe.rt("println", "void ()", "")
 	// std/io (hosted): descriptor-level calls into the runtime

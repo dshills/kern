@@ -144,6 +144,11 @@ func roots(mod *ir.Module) map[string]bool {
 	for _, t := range mod.Tests {
 		out[t] = true
 	}
+	for _, t := range append(append([]string(nil), mod.TestSetup...), mod.TestTeardown...) {
+		if t != "" {
+			out[t] = true
+		}
+	}
 	return out
 }
 

@@ -20,8 +20,13 @@ type Module struct {
 	// its own (specs/test-command/SPEC.md R7): lowered as roots, never
 	// marked Inlined, and selected by index in a native build. Empty for
 	// every other command.
-	Tests  []string
-	byName map[string]*Func
+	Tests []string
+	// TestSetup and TestTeardown are, by index of Tests, the setup and
+	// teardown functions of each test's file, or "" (specs/test-runs R2):
+	// roots like the tests, run before the test and after it returns.
+	TestSetup    []string
+	TestTeardown []string
+	byName       map[string]*Func
 }
 
 // Func looks up a function by name.

@@ -32,6 +32,9 @@ type Test struct {
 	File   string    // the test file's display name
 	Span   diag.Span // the declaration's span in File
 	Expect Expect
+	// Setup and Teardown are the functions named setup and teardown that
+	// the test's file declares, or nil (specs/test-runs R2).
+	Setup, Teardown *ast.FuncDecl
 }
 
 // Find returns the test functions of the program's test files, in the
@@ -86,6 +89,25 @@ func FindFiles(files []*ast.File, srcs []*source.File) ([]Test, []diag.Diagnosti
 	var ds []diag.Diagnostic
 	for _, f := range files {
 		src := bytesOf[f.Name]
+		// the file's setup and teardown: run around each of its tests, with
+		// a test function's signature
+		var hooks [2]*ast.FuncDecl
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Name != "setup" && fd.Name != "teardown" {
+				continue
+			}
+			if why := badSignature(fd); why != "" {
+				ds = append(ds, diag.New("TEST_SIGNATURE", f.Name, diag.Span{Start: fd.Start, End: fd.End}, "%s function of a test file %s; it takes no parameters, has no type parameters and no results, and has a body", fd.Name, why))
+				continue
+			}
+			if fd.Name == "setup" {
+				hooks[0] = fd
+			} else {
+				hooks[1] = fd
+			}
+		}
+		first := len(tests)
 		for _, d := range f.Decls {
 			fd, ok := d.(*ast.FuncDecl)
 			if !ok {
@@ -106,6 +128,9 @@ func FindFiles(files []*ast.File, srcs []*source.File) ([]Test, []diag.Diagnosti
 				continue
 			}
 			tests = append(tests, Test{Name: f.Module + "." + fd.Name, Decl: fd, File: f.Name, Span: span, Expect: exp})
+		}
+		for i := first; i < len(tests); i++ {
+			tests[i].Setup, tests[i].Teardown = hooks[0], hooks[1]
 		}
 	}
 	diag.Sort(ds)

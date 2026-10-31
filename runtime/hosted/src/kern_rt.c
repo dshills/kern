@@ -71,6 +71,7 @@ void print_i64(int64_t v) {
 }
 void print_bool(uint8_t v) { if (v) kern_out("true", 4); else kern_out("false", 5); }
 void print_str(const char *p, int64_t n) { kern_out(p, (size_t)n); }
+void eprint_str(const char *p, int64_t n) { kern_write_all(2, p, (size_t)n); }
 void println(void) { kern_out("\n", 1); }
 #ifdef __APPLE__
 #define KERN_CLOCK CLOCK_MONOTONIC_RAW // CLOCK_MONOTONIC has microsecond resolution on macOS

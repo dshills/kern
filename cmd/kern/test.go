@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +20,8 @@ import (
 )
 
 // testCommand implements `kern test [--opt=O] [--engine=E] [--run=RE]
-// [--timeout=S] [--human] [files...]` (specs/test-command/SPEC.md): the
+// [--timeout=S] [--jobs=N] [--human] [files...]` (specs/test-command/SPEC.md,
+// specs/test-runs/SPEC.md): the
 // test functions of the program's test files, run in the interpreter and
 // natively in both opt levels, compared run against run. Exit 0 when every
 // test passes (or is skipped), 1 when one does not, 2 on diagnostics or a
@@ -28,6 +30,7 @@ func testCommand(args []string, stdout, stderr io.Writer) int {
 	optLevel, engine := "", ""
 	human := false
 	timeout := 10 * time.Second
+	jobs := runtime.NumCPU()
 	var filter *regexp.Regexp
 	var named []string
 	for _, a := range args {
@@ -57,6 +60,12 @@ func testCommand(args []string, stdout, stderr io.Writer) int {
 				return fail(stdout, "CLI_INVALID_FLAGS", "--timeout must be a whole number of seconds from 1 to 3600")
 			}
 			timeout = time.Duration(n) * time.Second
+		case k == "--jobs" && hasValue:
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 256 {
+				return fail(stdout, "CLI_INVALID_FLAGS", "--jobs must be a whole number from 1 to 256")
+			}
+			jobs = n
 		case k == "--env" && hasValue:
 			if v != "hosted" {
 				return fail(stdout, "CLI_INVALID_FLAGS", "kern test runs hosted only")
@@ -95,7 +104,7 @@ func testCommand(args []string, stdout, stderr io.Writer) int {
 	if engine == "" && clangErr != nil {
 		skipped = append(skipped, testrun.Skip{Engine: "native", Reason: "clang not found on PATH"})
 	}
-	res, ds, err := testHook(pr.Files, testrun.Options{Configs: configs, Skipped: skipped, Timeout: timeout, Filter: filter})
+	res, ds, err := testHook(pr.Files, testrun.Options{Configs: configs, Skipped: skipped, Timeout: timeout, Filter: filter, Jobs: jobs})
 	if err != nil {
 		var ie *testrun.InternalError
 		if !errors.As(err, &ie) {

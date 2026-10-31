@@ -2,10 +2,13 @@ package testrun
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -404,5 +407,189 @@ func TestStaticDiags(t *testing.T) {
 	broken := map[string]string{"a.kern": files["a.kern"], "a_test.kern": "module t\nfunc test_x( {\n"}
 	if ds := StaticDiags(srcs(broken)); len(ds) != 0 {
 		t.Errorf("a test file that does not parse: %v", ds)
+	}
+}
+
+// A failing expect_msg writes its message, JSON-escaped, before the trap,
+// and every configuration reports it with the run (specs/test-runs R1).
+func TestExpectMessage(t *testing.T) {
+	ss := srcs(map[string]string{
+		"a.kern":      "module t\nfunc main() -> i32 { return 0i32 }\n",
+		"a_test.kern": "module t\n//! expect: trap explicit\nfunc test_msg() { eprint_str(\"no newline\"); expect_msg(1u64 == 2u64, \"said \\\"3\\\"\\n\\ttab\\\\ \\0 é\") }\nfunc test_quiet() { expect_msg(true, \"never\") }\n",
+	})
+	configs := []Config{{"interp", "debug"}, {"interp", "release"}}
+	if native.Available() {
+		configs = AllConfigs
+	}
+	res, ds, err := Execute(ss, Options{Configs: configs, Timeout: 20 * time.Second})
+	if err != nil || len(ds) > 0 {
+		t.Fatalf("ds=%v err=%v", ds, err)
+	}
+	if res.Tests[0].Status != "pass" || res.Tests[1].Status != "pass" {
+		t.Fatalf("statuses: %+v", res.Tests)
+	}
+	want := "said \"3\"\n\ttab\\ \x00 é"
+	for _, r := range res.Tests[0].Runs {
+		if r.Message != want {
+			t.Errorf("%s %s: message %q, want %q", r.Engine, r.Opt, r.Message, want)
+		}
+	}
+	for _, r := range res.Tests[1].Runs {
+		if r.Message != "" {
+			t.Errorf("a passing expect_msg reported %q", r.Message)
+		}
+	}
+}
+
+// A test file's setup runs before each of its tests and its teardown after
+// a test returns, sharing the thread_locals; a trapping test skips the
+// teardown, a trapping setup the test; another file's tests have neither
+// (specs/test-runs R2).
+func TestSetupTeardown(t *testing.T) {
+	ss := srcs(map[string]string{
+		"a.kern": "module t\nthread_local seen: u64 = 0u64\nfunc main() -> i32 { return 0i32 }\n",
+		"a_test.kern": "module t\nfunc setup() { print_str(\"setup \"); seen = 7u64 }\nfunc teardown() { print_str(\" teardown\") }\n" +
+			"func test_sees() { expect(seen == 7u64); print_str(\"test\") }\n" +
+			"//! expect: trap explicit\nfunc test_traps() { print_str(\"test\"); expect(false) }\n",
+		"b_test.kern": "module t\nfunc test_plain() { expect(seen == 0u64); print_str(\"plain\") }\n",
+	})
+	configs := []Config{{"interp", "debug"}}
+	if native.Available() {
+		configs = append(configs, Config{"native", "debug"})
+	}
+	res, ds, err := Execute(ss, Options{Configs: configs, Timeout: 20 * time.Second})
+	if err != nil || len(ds) > 0 {
+		t.Fatalf("ds=%v err=%v", ds, err)
+	}
+	want := map[string]string{"t.test_sees": "setup test teardown", "t.test_traps": "setup test", "t.test_plain": "plain"}
+	for _, tr := range res.Tests {
+		if tr.Status != "pass" {
+			t.Errorf("%s: %s", tr.Name, tr.Status)
+		}
+		for _, r := range tr.Runs {
+			if r.Stdout != want[tr.Name] {
+				t.Errorf("%s %s: stdout %q, want %q", tr.Name, r.Engine, r.Stdout, want[tr.Name])
+			}
+		}
+	}
+	// a trapping setup: the test never runs
+	ss = srcs(map[string]string{
+		"a.kern":      "module t\nfunc main() -> i32 { return 0i32 }\n",
+		"a_test.kern": "module t\nfunc setup() { trap_kind(bounds) }\n//! expect: trap bounds\nfunc test_x() { print_str(\"ran\") }\n",
+	})
+	res, ds, err = Execute(ss, Options{Configs: configs, Timeout: 20 * time.Second})
+	if err != nil || len(ds) > 0 {
+		t.Fatalf("ds=%v err=%v", ds, err)
+	}
+	for _, r := range res.Tests[0].Runs {
+		if r.Outcome != "trap" || r.Stdout != "" {
+			t.Errorf("%s: %+v", r.Engine, r)
+		}
+	}
+}
+
+// setup and teardown take a test function's signature (R2).
+func TestSetupSignature(t *testing.T) {
+	_, ds := find(t, map[string]string{
+		"a.kern":      "module t\nfunc main() -> i32 { return 0i32 }\n",
+		"a_test.kern": "module t\nfunc setup(n: u64) {}\nfunc teardown() -> u64 { return 0u64 }\nfunc test_a() {}\n",
+	})
+	if codesOf(ds) != "TEST_SIGNATURE,TEST_SIGNATURE" {
+		t.Fatalf("diagnostics %v", ds)
+	}
+}
+
+// Runs proceed Jobs at a time and the response is the same as one at a
+// time, apart from the runs' times (specs/test-runs R3).
+func TestParallelRuns(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("module t\n")
+	for i := range 12 {
+		if i%3 == 0 {
+			fmt.Fprintf(&b, "//! expect: trap overflow\nfunc test_%02d() { x := 255u8; print_u64(u64(x + u8(%d))) }\n", i, i+1)
+		} else {
+			fmt.Fprintf(&b, "func test_%02d() { print_u64(%du64) }\n", i, i)
+		}
+	}
+	ss := srcs(map[string]string{"a.kern": "module t\nfunc main() -> i32 { return 0i32 }\n", "a_test.kern": b.String()})
+	configs := []Config{{"interp", "debug"}, {"interp", "release"}}
+	if native.Available() {
+		configs = AllConfigs
+	}
+	strip := func(r *Result) {
+		for i := range r.Tests {
+			for j := range r.Tests[i].Runs {
+				r.Tests[i].Runs[j].Millis = 0
+			}
+		}
+	}
+	one, _, err := Execute(ss, Options{Configs: configs, Timeout: 20 * time.Second, Jobs: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	many, _, err := Execute(ss, Options{Configs: configs, Timeout: 20 * time.Second, Jobs: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	strip(one)
+	strip(many)
+	if !reflect.DeepEqual(one, many) {
+		t.Fatalf("responses differ:\none  %+v\nmany %+v", one, many)
+	}
+	if one.Summary.Pass != 12 {
+		t.Fatalf("summary %+v", one.Summary)
+	}
+}
+
+// A stopped run whose threads are deadlocked in locks ends: a thread
+// blocked in Mutex.lock wakes when the program terminates
+// (specs/test-runs R4).
+func TestInterpStopWakesLocks(t *testing.T) {
+	mod, tests := lowerTests(t, map[string]string{
+		"a.kern": "module t\nfunc main() -> i32 { return 0i32 }\n",
+		"a_test.kern": "module t\n" +
+			"func ab(a: view[Mutex[u64]], b: view[Mutex[u64]], gate: view[Atomic[u64]]) -> u64 {\n" +
+			"    with g := a.lock() {\n        gate.fetch_add(1u64, seq_cst)\n        while gate.load(seq_cst) < 2u64 { yield_now() }\n" +
+			"        with h := b.lock() { return g + h }\n    }\n}\n" +
+			"func run(m1: view[Mutex[u64]], m2: view[Mutex[u64]], gate: view[Atomic[u64]]) -> Result[u64, SpawnErr] {\n" +
+			"    with s := thread.scope() {\n        x := s.spawn(ab, m1, m2, gate)?\n        y := s.spawn(ab, m2, m1, gate)?\n        return Ok(x.get() + y.get())\n    }\n}\n" +
+			"func test_deadlock() {\n    m1 := Mutex[u64].new(1u64)\n    m2 := Mutex[u64].new(2u64)\n    gate := Atomic[u64].new(0u64)\n" +
+			"    match run(m1, m2, gate) {\n        Ok(v) => print_u64(v)\n        Err(e) => {}\n    }\n}\n",
+	}, "debug")
+	before := runtime.NumGoroutine()
+	it := interp.New(mod, tests[0].File, io.Discard, io.Discard)
+	done := make(chan int, 1)
+	go func() { done <- it.RunEntry(tests[0].Name) }()
+	time.Sleep(200 * time.Millisecond)
+	it.Stop()
+	select {
+	case <-done:
+	case <-time.After(stopGrace):
+		t.Fatal("the run did not end after Stop")
+	}
+	// the deadlocked threads end too
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > before {
+		t.Fatalf("%d goroutines left over (%d before)", n, before)
+	}
+}
+
+// A message longer than 4096 bytes is cut there, so that, escaped, it
+// stays in the stderr tail kern test keeps (specs/test-runs R1).
+func TestExpectMessageLong(t *testing.T) {
+	ss := srcs(map[string]string{
+		"a.kern": "module t\nfunc main() -> i32 { return 0i32 }\n",
+		"a_test.kern": "module t\n//! expect: trap explicit\nfunc test_long() {\n    v := Vec[u8].new()\n" +
+			"    for i in 0usize..20000usize { v.push(10u8) }\n    expect_msg(false, v.as_view())\n}\n",
+	})
+	res, ds, err := Execute(ss, Options{Configs: []Config{{"interp", "debug"}}, Timeout: 20 * time.Second})
+	if err != nil || len(ds) > 0 {
+		t.Fatalf("ds=%v err=%v", ds, err)
+	}
+	if got := res.Tests[0].Runs[0].Message; got != strings.Repeat("\n", 4096) {
+		t.Fatalf("message of %d bytes, want 4096 newlines", len(got))
 	}
 }

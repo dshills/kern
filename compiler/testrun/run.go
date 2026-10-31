@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -60,6 +61,9 @@ type Run struct {
 	Outcome         string    `json:"outcome"` // return | trap | exit | crash | timeout
 	Status          int       `json:"status"`
 	Trap            *TrapInfo `json:"trap"`
+	// Message is what a failing expect_msg wrote before its trap
+	// (specs/test-runs R1); absent for any other run.
+	Message         string    `json:"message,omitempty"`
 	Stdout          string    `json:"stdout"`
 	StdoutTruncated bool      `json:"stdout_truncated"`
 	Millis          int64     `json:"millis"`
@@ -101,6 +105,10 @@ type Options struct {
 	Skipped []Skip
 	Timeout time.Duration
 	Filter  *regexp.Regexp // nil: every test
+	// Jobs is how many runs proceed at once (specs/test-runs R3); below 1
+	// is one. The response does not depend on it, apart from the runs'
+	// times.
+	Jobs int
 }
 
 // MaxStdout is how many bytes of a run's output the response carries.
@@ -153,10 +161,11 @@ func Execute(srcs []*source.File, o Options) (*Result, []diag.Diagnostic, error)
 			}
 		}
 		decls := make([]*ast.FuncDecl, len(kept))
+		setups, teardowns := make([]*ast.FuncDecl, len(kept)), make([]*ast.FuncDecl, len(kept))
 		for i, t := range kept {
-			decls[i] = t.Decl
+			decls[i], setups[i], teardowns[i] = t.Decl, t.Setup, t.Teardown
 		}
-		mod, lds := lower.LowerWith(prog, lower.Options{Tests: decls})
+		mod, lds := lower.LowerWith(prog, lower.Options{Tests: decls, Setup: setups, Teardown: teardowns})
 		if len(lds) > 0 {
 			return nil, nil, &InternalError{fmt.Errorf("lowering: %s", lds[0].Message)}
 		}
@@ -182,7 +191,11 @@ func Execute(srcs []*source.File, o Options) (*Result, []diag.Diagnostic, error)
 			_ = os.RemoveAll(dir)
 		}
 	}()
-	for _, c := range o.Configs {
+	// the native executables first, then every run, Jobs at a time; the
+	// runs are listed by configuration then test, as they ran in sequence
+	type job struct{ test, cfg int }
+	var jobs []job
+	for ci, c := range o.Configs {
 		lv := levels[c.Opt]
 		if c.Engine == "native" && len(tests) > 0 && exes[c.Opt] == "" {
 			if dir == "" {
@@ -198,23 +211,45 @@ func Execute(srcs []*source.File, o Options) (*Result, []diag.Diagnostic, error)
 			}
 			exes[c.Opt] = exe
 		}
+		lv.mod.Func("") // build the module's name index before runs share it
 		for i, t := range lv.tests {
 			if c.Opt == "release" && t.Expect.Outcome == "trap" && t.Expect.Kind == "identity" {
 				continue // identity tags exist only in debug builds (R6)
 			}
-			var r Run
-			var err error
-			if c.Engine == "interp" {
-				r, err = runInterp(lv.mod, t, c.Opt, o.Timeout)
-			} else {
-				r, err = runNative(exes[c.Opt], i, o.Timeout)
-			}
-			if err != nil {
-				return nil, nil, &InternalError{fmt.Errorf("%s %s run of %s: %v", c.Engine, c.Opt, t.Name, err)}
-			}
-			r.Engine, r.Opt = c.Engine, c.Opt
-			runs[i] = append(runs[i], r)
+			jobs = append(jobs, job{i, ci})
 		}
+	}
+	done := make([]Run, len(jobs))
+	errs := make([]error, len(jobs))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range max(1, min(o.Jobs, len(jobs))) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				k := int(next.Add(1) - 1)
+				if k >= len(jobs) {
+					return
+				}
+				c := o.Configs[jobs[k].cfg]
+				lv, i := levels[c.Opt], jobs[k].test
+				if c.Engine == "interp" {
+					done[k], errs[k] = runInterp(lv.mod, lv.tests[i], i, c.Opt, o.Timeout)
+				} else {
+					done[k], errs[k] = runNative(exes[c.Opt], i, o.Timeout)
+				}
+				done[k].Engine, done[k].Opt = c.Engine, c.Opt
+			}
+		}()
+	}
+	wg.Wait()
+	for k, j := range jobs {
+		if errs[k] != nil {
+			c := o.Configs[j.cfg]
+			return nil, nil, &InternalError{fmt.Errorf("%s %s run of %s: %v", c.Engine, c.Opt, tests[j.test].Name, errs[k])}
+		}
+		runs[j.test] = append(runs[j.test], done[k])
 	}
 	for i, t := range tests {
 		tr := TestResult{Name: t.Name, Loc: diag.Loc{File: t.File, Span: t.Span}, Expect: t.Expect, Runs: runs[i]}
@@ -324,7 +359,16 @@ func outputOf(b []byte) output {
 // next basic block before the runner leaves it.
 const stopGrace = time.Second
 
-func runInterp(mod *ir.Module, t Test, optLevel string, timeout time.Duration) (Run, error) {
+// runInterp runs test index i of mod: its setup, the test and its
+// teardown as one program (specs/test-runs R2).
+func runInterp(mod *ir.Module, t Test, i int, optLevel string, timeout time.Duration) (Run, error) {
+	names := []string{t.Name}
+	if i < len(mod.TestSetup) && mod.TestSetup[i] != "" {
+		names = append([]string{mod.TestSetup[i]}, names...)
+	}
+	if i < len(mod.TestTeardown) && mod.TestTeardown[i] != "" {
+		names = append(names, mod.TestTeardown[i])
+	}
 	out, errb := newCapture(0), newCapture(MaxStderrTail)
 	it := interp.New(mod, t.File, out, errb)
 	it.SetIdentityTags(optLevel != "release")
@@ -340,7 +384,7 @@ func runInterp(mod *ir.Module, t Test, optLevel string, timeout time.Duration) (
 				ch <- done{panic: r}
 			}
 		}()
-		ch <- done{status: it.RunEntry(t.Name)}
+		ch <- done{status: it.RunEntries(names)}
 	}()
 	select {
 	case d := <-ch:
@@ -354,8 +398,8 @@ func runInterp(mod *ir.Module, t Test, optLevel string, timeout time.Duration) (
 		errb.Close()
 		it.Stop()
 		select {
-		case <-ch: // it reached a block boundary and ended
-		case <-time.After(stopGrace): // blocked in a lock or a wait: left idle
+		case <-ch: // it reached a block boundary, or woke in a lock or a wait, and ended
+		case <-time.After(stopGrace): // inside one long intrinsic: left to finish on its own
 		}
 		return classify(-1, true, false, out.output(), nil, elapsed), nil
 	}
@@ -402,6 +446,9 @@ func classify(status int, timedOut, signaled bool, stdout output, stderr []byte,
 	r := Run{Status: status, out: stdout, Millis: elapsed.Milliseconds()}
 	r.Stdout, r.StdoutTruncated = render(stdout)
 	rec := lastRecord(stderr)
+	if rec != nil {
+		r.Message = lastExpect(stderr)
+	}
 	switch {
 	case timedOut:
 		r.Outcome, r.Status = "timeout", -1
@@ -448,6 +495,30 @@ func lastRecord(stderr []byte) *TrapInfo {
 		}
 	}
 	return found
+}
+
+// lastExpect is the message of the last expect_msg line of stderr, the
+// line {"expect":{"message":"..."}} it writes before trapping
+// (specs/test-runs R1), or "". The record may follow what the test wrote
+// to standard error without a newline, so it is found anywhere in a line.
+func lastExpect(stderr []byte) string {
+	msg := ""
+	for _, line := range bytes.Split(stderr, []byte("\n")) {
+		at := bytes.LastIndex(line, []byte(`{"expect":`))
+		if at < 0 {
+			continue
+		}
+		line = bytes.TrimSpace(line[at:])
+		var rec struct {
+			Expect struct {
+				Message *string `json:"message"`
+			} `json:"expect"`
+		}
+		if json.Unmarshal(line, &rec) == nil && rec.Expect.Message != nil {
+			msg = *rec.Expect.Message
+		}
+	}
+	return msg
 }
 
 // Agree reports whether two runs of one test agree (R9): the outcome, the

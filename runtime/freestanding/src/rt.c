@@ -66,6 +66,7 @@ void print_u64(uint64_t v) { kern_putu(v); }
 void print_i64(int64_t v) { if (v < 0) { kern_putc('-'); kern_putu((uint64_t)0 - (uint64_t)v); } else kern_putu((uint64_t)v); }
 void print_bool(uint8_t v) { kern_puts(v ? "true" : "false"); }
 void print_str(const char *p, int64_t n) { for (int64_t i = 0; i < n; i++) kern_putc(p[i]); }
+void eprint_str(const char *p, int64_t n) { print_str(p, n); }
 void println(void) { kern_putc('\n'); }
 
 // ---- halt protocol ----

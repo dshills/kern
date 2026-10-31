@@ -33,6 +33,10 @@ type Options struct {
 	// whatever module declares them and listed, in this order, as the
 	// module's Tests (specs/test-command/SPEC.md R7).
 	Tests []*ast.FuncDecl
+	// Setup and Teardown are, by index of Tests, the setup and teardown
+	// functions of each test's file or nil, lowered as roots and listed as
+	// the module's TestSetup and TestTeardown (specs/test-runs R2).
+	Setup, Teardown []*ast.FuncDecl
 }
 
 // LowerWith is Lower with extra roots.
@@ -75,16 +79,33 @@ func LowerWith(prog *resolve.Program, o Options) (mod *ir.Module, diags []diag.D
 			}
 		}
 	}
-	var tests []string
-	for _, d := range o.Tests {
+	var tests, setups, teardowns []string
+	root := func(d *ast.FuncDecl) string {
+		if d == nil {
+			return ""
+		}
 		fd := l.info.Funcs[d]
 		if fd == nil {
 			panic(lowerError{msg: "test function " + d.Name + " was not resolved", pos: d.Pos})
 		}
-		tests = append(tests, l.request(fd, nil, ""))
+		return l.request(fd, nil, "")
+	}
+	for i, d := range o.Tests {
+		tests = append(tests, root(d))
+		var su, td *ast.FuncDecl
+		if i < len(o.Setup) {
+			su = o.Setup[i]
+		}
+		if i < len(o.Teardown) {
+			td = o.Teardown[i]
+		}
+		setups, teardowns = append(setups, root(su)), append(teardowns, root(td))
 	}
 	l.drain()
 	l.mod.Tests = tests
+	if len(o.Setup)+len(o.Teardown) > 0 {
+		l.mod.TestSetup, l.mod.TestTeardown = setups, teardowns
+	}
 	if main := l.mod.Func(prog.Main.Name + ".main"); main != nil {
 		l.mod.Entry = main.Name
 	}
