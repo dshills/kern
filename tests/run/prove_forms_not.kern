@@ -46,6 +46,27 @@ func mask_past(r: view[[8]u64], x: usize) -> u64 { return r[(x & 3usize) + 5usiz
 func mask_var(r: view[[8]u64], x: usize, m: usize) -> u64 { return r[x & m] }
 func masked(x: usize) -> usize { return x & 7usize }
 func mask_call(r: view[[8]u64], x: usize) -> u64 { return r[masked(x)] }
+// bounds the pass does not prove (specs/prove-bounds): a remainder that
+// reaches the length, a remainder by the length (a fourth-suite idiom), a
+// loop whose first value is unbounded, a join with an unbounded path, and
+// a mask by the length itself
+func rem_past(r: view[[8]u64], x: usize) -> u64 { return r[x % 9usize] }
+func rem_len(p: view[]u64, x: usize) -> u64 { return p[x % len(p)] }
+func ring_from(r: view[[8]u64], h: usize, n: usize) -> u64 {
+    var s: u64 = 0u64
+    var w: usize = h
+    for k in 0usize..n {
+        s = s + r[w]
+        w = (w + 1usize) & 7usize
+    }
+    return s
+}
+func join_wide(r: view[[8]u64], x: usize, c: bool) -> u64 {
+    var p: usize = 0usize
+    if c { p = x & 3usize } else { p = x }
+    return r[p]
+}
+func len_whole(p: view[]u64, x: usize) -> u64 { return p[x & len(p)] }
 func main() -> i32 {
     xs := [1u64, 2u64, 3u64]
     ys := [10u64, 20u64, 30u64]
@@ -64,6 +85,8 @@ func main() -> i32 {
     mr[3usize] = 30u64
     mr[6usize] = 60u64
     print_u64(mask_len(mr, 7usize) + mask_past(mr, 1usize) + mask_var(mr, 11usize, 7usize) + mask_call(mr, 14usize))
+    println()
+    print_u64(rem_past(mr, 12usize) + rem_len(xs[0usize:3usize], 7usize) + ring_from(mr, 3usize, 4usize) + join_wide(mr, 6usize, false) + join_wide(mr, 7usize, true) + len_whole(xs[0usize:3usize], 4usize))
     println()
     return 0i32
 }

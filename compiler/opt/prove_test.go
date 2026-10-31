@@ -1,10 +1,12 @@
 package opt
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/ir"
@@ -571,5 +573,160 @@ func TestProveMaskFixtures(t *testing.T) {
 		if got := checkLabels(not, "run."+fn); got != "runtime" {
 			t.Errorf("%s: %q, want runtime", fn, got)
 		}
+	}
+}
+
+const boundsSource = `module t
+func rem(a: view[[8]u64], x: usize) -> u64 { return a[x % 8usize] }
+func rem9(a: view[[8]u64], x: usize) -> u64 { return a[x % 9usize] }
+func remoff(a: view[[8]u64], x: usize) -> u64 { return a[(x % 7usize) + 1usize] }
+func remmask(a: view[[8]u64], x: usize) -> u64 { return a[(x % 100usize) & 7usize] }
+func remconv(a: view[[256]u64], x: u64) -> u64 { return a[usize(x % 256u64)] }
+func remlen(xs: view[]u64, i: usize) -> u64 { return xs[i % len(xs)] }
+func bump(v: edit[usize]) { v = v + 1usize }
+func ring(a: view[[8]u64], n: usize) -> u64 {
+    var s: u64 = 0u64
+    var w: usize = 0usize
+    for k in 0usize..n {
+        s = s + a[w]
+        w = (w + 1usize) & 7usize
+    }
+    return s
+}
+func ringwide(a: view[[8]u64], n: usize) -> u64 {
+    var s: u64 = 0u64
+    var w: usize = 0usize
+    for k in 0usize..n {
+        s = s + a[w]
+        w = (w + 1usize) & 15usize
+    }
+    return s
+}
+func ringinit(a: view[[8]u64], n: usize, h: usize) -> u64 {
+    var s: u64 = 0u64
+    var w: usize = h
+    for k in 0usize..n {
+        s = s + a[w]
+        w = (w + 1usize) & 7usize
+    }
+    return s
+}
+func ringcopy(a: view[[8]u64], n: usize) -> u64 {
+    var s: u64 = 0u64
+    var w: usize = 0usize
+    var v: usize = 0usize
+    for k in 0usize..n {
+        s = s + a[v]
+        w = (w + 3usize) % 8usize
+        v = w
+    }
+    return s
+}
+func join(a: view[[8]u64], x: usize, c: bool) -> u64 {
+    var p: usize = 0usize
+    if c { p = x & 3usize } else { p = x % 8usize }
+    return a[p]
+}
+func joinwide(a: view[[8]u64], x: usize, c: bool) -> u64 {
+    var p: usize = 0usize
+    if c { p = x & 3usize } else { p = x }
+    return a[p]
+}
+func edited(a: view[[8]u64], x: usize) -> u64 {
+    var w: usize = x & 7usize
+    bump(w)
+    return a[w]
+}
+func lenmask(xs: view[]u64, i: usize) -> u64 {
+    if len(xs) == 0usize { return 0u64 }
+    m := len(xs) - 1usize
+    return xs[i & m]
+}
+func guardmask(xs: view[]u64, i: usize, m: usize) -> u64 {
+    if m < len(xs) { return xs[i & m] }
+    return 0u64
+}
+func lenwhole(xs: view[]u64, i: usize) -> u64 { return xs[i & len(xs)] }
+func lenoff(xs: view[]u64, i: usize) -> u64 {
+    if len(xs) == 0usize { return 0u64 }
+    return xs[(i & (len(xs) - 1usize)) + 1usize]
+}
+func byte(a: view[[256]u64], b: u8) -> u64 { return a[usize(b)] }
+`
+
+// TestProveBounds: remainders by a literal, bounds a local keeps across
+// joins and loops, and masks by a value below the length are proven; a
+// value's type range and a remainder by a length are not
+// (specs/prove-bounds).
+func TestProveBounds(t *testing.T) {
+	mod := proveWith(t, boundsSource)
+	want := map[string]string{
+		"t.rem":       "constant",
+		"t.rem9":      "runtime", // x % 9 can be 8
+		"t.remoff":    "constant",
+		"t.remmask":   "constant",
+		"t.remconv":   "constant",
+		"t.remlen":    "runtime", // a fourth-suite idiom, kept checked
+		"t.ring":      "constant",
+		"t.ringwide":  "runtime", // the bound 15 reaches past 8
+		"t.ringinit":  "runtime", // the first value is unbounded
+		"t.ringcopy":  "constant",
+		"t.join":      "constant",
+		"t.joinwide":  "runtime", // one path stores an unbounded value
+		"t.edited":    "runtime", // the edit forgets the bound
+		"t.lenmask":   "dominated_by_check",
+		"t.guardmask": "dominated_by_check",
+		"t.lenwhole":  "runtime", // x & len can be len
+		"t.lenoff":    "runtime", // (x & (len - 1)) + 1 can be len
+		"t.byte":      "runtime", // a u8's range is not a bound
+	}
+	for name, exp := range want {
+		if got := checkLabels(mod, name); got != exp {
+			t.Errorf("%s: checks %q, want %q", name, got, exp)
+		}
+	}
+}
+
+// TestProveBoundsFixtures pins the labels of the bounds functions of the
+// two run fixtures, which the harness executes in both engines
+// (specs/prove-bounds).
+func TestProveBoundsFixtures(t *testing.T) {
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join("..", "..", "tests", "run", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	proven := proveWith(t, read("prove_forms.kern"))
+	for fn, want := range map[string]string{"rem_at": "constant", "ring_sum": "constant", "join_pick": "constant", "len_mask": "dominated_by_check", "guard_mask": "dominated_by_check"} {
+		if got := checkLabels(proven, "run."+fn); got != want {
+			t.Errorf("%s: %q, want %s", fn, got, want)
+		}
+	}
+	not := proveWith(t, read("prove_forms_not.kern"))
+	for _, fn := range []string{"rem_past", "rem_len", "ring_from", "join_wide", "len_whole"} {
+		if got := checkLabels(not, "run."+fn); got != "runtime" {
+			t.Errorf("%s: %q, want runtime", fn, got)
+		}
+	}
+}
+
+// TestProveBoundsShared: a chain of ands of a value with itself is
+// searched once per value, not once per path (specs/prove-bounds).
+func TestProveBoundsShared(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("module t\nfunc chain(a: view[[8]u64], x0: usize) -> u64 {\n")
+	for k := 1; k <= 60; k++ {
+		fmt.Fprintf(&b, "    x%d := x%d & x%d\n", k, k-1, k-1)
+	}
+	b.WriteString("    return a[x60]\n}\n")
+	start := time.Now()
+	mod := proveWith(t, b.String())
+	if got := checkLabels(mod, "t.chain"); got != "runtime" {
+		t.Errorf("chain: %q, want runtime", got)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("the bound search took %v", d)
 	}
 }

@@ -2,6 +2,7 @@ package opt
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/resolve"
@@ -17,7 +18,9 @@ import (
 //     an earlier check or a branch condition on the same length that every
 //     path to the check passes through.
 //   - constant: a literal index, or literal slice bounds, into an array
-//     whose length its type gives.
+//     whose length its type gives; or an index bounded by a constant below
+//     that length (a mask, a remainder by a literal, a local every store
+//     to which was so bounded: specs/prove-masks, specs/prove-bounds).
 //
 // The pass is a forward must-analysis: the facts at a block are those that
 // hold on every path to it, the intersection of its predecessors' facts
@@ -63,7 +66,7 @@ func prove(f *ir.Func) {
 	if f.Entry == nil {
 		return
 	}
-	p := &prover{f: f, def: map[*ir.Value]ir.Instr{}, gequiv: map[*ir.Value]*ir.Value{}, edits: map[*ir.Local]bool{}, accessed: map[*ir.Local]bool{}, alias: map[*ir.Value][]*ir.Value{}, clen: map[*ir.Value]uint64{}, single: map[*ir.Local]*ir.Value{}, alens: map[string]*ir.Value{}, reborrow: map[*ir.Value]ir.Place{}, closureCaps: map[*ir.Value][]*ir.Value{}, constLens: map[uint64]*ir.Value{}}
+	p := &prover{f: f, def: map[*ir.Value]ir.Instr{}, gequiv: map[*ir.Value]*ir.Value{}, edits: map[*ir.Local]bool{}, accessed: map[*ir.Local]bool{}, alias: map[*ir.Value][]*ir.Value{}, clen: map[*ir.Value]uint64{}, single: map[*ir.Local]*ir.Value{}, alens: map[string]*ir.Value{}, reborrow: map[*ir.Value]ir.Place{}, closureCaps: map[*ir.Value][]*ir.Value{}, constLens: map[uint64]*ir.Value{}, ubVals: map[uint64]*ir.Value{}, ubOf: map[*ir.Value]uint64{}, loadUb: map[*ir.Value]uint64{}}
 	stores := map[*ir.Local]int{}
 	unstable := map[*ir.Local]bool{}
 	for _, b := range f.Blocks {
@@ -171,7 +174,7 @@ func prove(f *ir.Func) {
 				if st == nil {
 					st = e
 				} else {
-					st = meet(st, e)
+					st = meet(st, e, p)
 				}
 			}
 		}
@@ -199,9 +202,7 @@ func prove(f *ir.Func) {
 		out := map[*ir.Block]*facts{}
 		for _, b := range rpo {
 			st := entry(b, out, nil, false)
-			for _, i := range b.Instrs {
-				p.instr(st, i, true)
-			}
+			p.block(st, b, true)
 			out[b] = st
 		}
 		return
@@ -218,9 +219,7 @@ func prove(f *ir.Func) {
 				}
 				headerState[b] = snap
 			}
-			for _, i := range b.Instrs {
-				p.instr(st, i, false)
-			}
+			p.block(st, b, false)
 			out[b] = st
 		}
 		prev = out
@@ -237,9 +236,7 @@ func prove(f *ir.Func) {
 	out := map[*ir.Block]*facts{}
 	for _, b := range rpo {
 		st := entry(b, out, prev, pessimistic)
-		for _, i := range b.Instrs {
-			p.instr(st, i, true)
-		}
+		p.block(st, b, true)
 		out[b] = st
 	}
 }
@@ -259,6 +256,30 @@ type prover struct {
 	// that receives the closure may write through them
 	closureCaps map[*ir.Value][]*ir.Value
 	constLens   map[uint64]*ir.Value // one synthetic length value per array length (never in the IR)
+	// upper bounds kept on places (specs/prove-bounds): a place's bound is
+	// stored in the locals map under its key prefixed by ubPrefix, as the
+	// synthetic value of that constant, so that it is forgotten, flattened
+	// and compared with what the place holds; the meet keeps the larger
+	ubVals map[uint64]*ir.Value
+	ubOf   map[*ir.Value]uint64
+	// loadUb is the bound of a load's value: the bound its place held at
+	// the load in the latest visit of the load (a value is defined once, so
+	// its uses, later in the same pass, see the bound of that visit)
+	loadUb map[*ir.Value]uint64
+}
+
+// ubPrefix marks a locals key that holds a place's upper bound rather
+// than its value.
+const ubPrefix = "^"
+
+// ubVal is the synthetic value naming the bound c.
+func (p *prover) ubVal(c uint64) *ir.Value {
+	if v, ok := p.ubVals[c]; ok {
+		return v
+	}
+	v := &ir.Value{ID: -1_000_000 - len(p.ubVals), Type: &resolve.Prim{Name: "u64"}}
+	p.ubVals[c], p.ubOf[v] = v, c
+	return v
 }
 
 // ltKey is a bound fact's key: the index base (nil for a literal) and the
@@ -703,7 +724,7 @@ func ancestor(a, b *facts) *facts {
 // have them in one class. The result is a child of the chains' common
 // ancestor holding only what the two paths changed since it; with no
 // common ancestor it is a whole layer.
-func meet(a, b *facts) *facts {
+func meet(a, b *facts, ub *prover) *facts {
 	l := ancestor(a, b)
 	c := newFacts()
 	if l != nil {
@@ -831,8 +852,19 @@ func meet(a, b *facts) *facts {
 		ma, mb := paths(a, r, localsOf), paths(b, r, localsOf)
 		c.noLoc[r] = true
 		for path, v := range ma {
-			if w, ok := mb[path]; ok && v == w {
+			w, ok := mb[path]
+			if !ok {
+				continue
+			}
+			if v == w {
 				c.setLocal(r, path, v)
+			} else if ub != nil && strings.HasPrefix(path, ubPrefix) {
+				// a bound on either path: the larger holds on both
+				x, okx := ub.ubOf[v]
+				y, oky := ub.ubOf[w]
+				if okx && oky {
+					c.setLocal(r, path, ub.ubVal(max(x, y)))
+				}
 			}
 		}
 	}
@@ -924,7 +956,18 @@ func (p *prover) forgetReached(s *facts, a *ir.Value) {
 	}
 }
 
-func (p *prover) instr(s *facts, in ir.Instr, mark bool) {
+// block applies a block's instructions to its state.
+func (p *prover) block(s *facts, b *ir.Block, mark bool) {
+	var prev ir.Instr
+	for _, i := range b.Instrs {
+		p.instr(s, i, prev, mark)
+		prev = i
+	}
+}
+
+// instr applies one instruction; prev is the one before it in the block,
+// or nil.
+func (p *prover) instr(s *facts, in, prev ir.Instr, mark bool) {
 	switch i := in.(type) {
 	case *ir.Load:
 		if i.Place.Local != nil && len(i.Place.Path) == 0 {
@@ -934,6 +977,11 @@ func (p *prover) instr(s *facts, in ir.Instr, mark bool) {
 			}
 		}
 		if key, root := p.placeKey(i.Place); root != nil {
+			if b, ok := s.getLocal(root, ubPrefix+key); ok {
+				p.loadUb[i.Dst] = p.ubOf[b]
+			} else {
+				delete(p.loadUb, i.Dst)
+			}
 			if v, known := s.getLocal(root, key); known {
 				s.putEquiv(i.Dst, v)
 			} else {
@@ -950,6 +998,9 @@ func (p *prover) instr(s *facts, in ir.Instr, mark bool) {
 		// store to the local itself (or a field) replaces what it holds
 		s.invalidate(root, len(i.Place.Path) > 0 && i.Place.Path[len(i.Place.Path)-1].Kind == ir.PathIndex)
 		s.setLocal(root, key, p.canon(s, i.Src))
+		if c, ok := p.upper(s, i.Src); ok {
+			s.setLocal(root, ubPrefix+key, p.ubVal(c))
+		}
 	case *ir.Move:
 		if _, root := p.placeKey(i.Src); root != nil {
 			s.invalidate(root, false)
@@ -963,8 +1014,17 @@ func (p *prover) instr(s *facts, in ir.Instr, mark bool) {
 		}
 		p.forgetReached(s, i.Place.Access)
 	case *ir.Init:
-		if _, root := p.placeKey(i.Place); root != nil {
+		if key, root := p.placeKey(i.Place); root != nil {
+			// the bound of the store just made survives its init marker: a
+			// bound names a constant, never a value, so it does not
+			// unsettle the solver as a remembered value would
+			b, keep := s.getLocal(root, ubPrefix+key)
+			st, ok := prev.(*ir.Store)
+			keep = keep && ok && st.Place.Local == root && p.pathKey(st.Place.Path) == p.pathKey(i.Place.Path)
 			s.invalidate(root, false)
+			if keep {
+				s.setLocal(root, ubPrefix+key, b)
+			}
 			return
 		}
 		p.forgetReached(s, i.Place.Access)
@@ -1063,12 +1123,12 @@ func (p *prover) indexCheck(s *facts, i *ir.CheckBounds, mark bool) {
 				i.Prov = ir.Provenance{Label: "proven", ProvenBy: "constant"}
 			}
 		}
-		// a masked index (specs/prove-masks): at most the mask plus a
-		// positive offset, below a known length (constant) or a literal
-		// a guard put below the length (dominated_by_check); tried before
-		// the general guard rule so that a masked index under a guard is
-		// labelled constant
-		if c, masked := p.maskBound(s, base); i.Prov.Label != "proven" && masked {
+		// a bounded index (specs/prove-masks, specs/prove-bounds): at most
+		// a constant plus a positive offset, below a known length
+		// (constant) or a literal a guard put below the length
+		// (dominated_by_check); tried before the general guard rule so
+		// that a bounded index under a guard is labelled constant
+		if c, bounded := p.upper(s, base); i.Prov.Label != "proven" && bounded {
 			m := c
 			if off > 0 {
 				m += uint64(off) // c <= 2^62 and off <= 2^62: no overflow
@@ -1084,35 +1144,120 @@ func (p *prover) indexCheck(s *facts, i *ir.CheckBounds, mark bool) {
 				i.Prov = ir.Provenance{Label: "proven", ProvenBy: "dominated_by_check"}
 			}
 		}
+		if i.Prov.Label != "proven" && p.maskedBelow(s, base, off, ln) {
+			i.Prov = ir.Provenance{Label: "proven", ProvenBy: "dominated_by_check"}
+		}
 	}
 	s.addLt(base, off, ln) // past the check (proven or passed), the index is in range
 }
 
-// maskBound reports that v is at most a constant: v is an unsigned
-// bitwise and with a constant operand (the constant bounds it), or a
-// conversion to an unsigned type of such a value (a conversion that passes
-// its range check keeps the value, and a truncation only lowers it).
-func (p *prover) maskBound(s *facts, v *ir.Value) (uint64, bool) {
-	if v == nil {
+// upper is a constant v is known not to exceed (specs/prove-masks,
+// specs/prove-bounds), on unsigned values:
+//   - a literal is its own bound;
+//   - a bitwise and is at most either operand's bound;
+//   - a remainder by a literal c >= 1 is at most c - 1 (by zero it traps);
+//   - a conversion to an unsigned type keeps its operand's bound (one that
+//     passes its range check keeps the value, a truncation only lowers it);
+//   - a load is at most the bound its place held: every value stored to
+//     the place on every path to the load had a bound, the larger kept.
+//
+// A value's range from its type (a u8's 255) is not a bound: the fourth
+// agent suite counts on byte-indexed tables staying checked.
+func (p *prover) upper(s *facts, v *ir.Value) (uint64, bool) {
+	return p.upperMemo(s, v, map[*ir.Value]ubResult{}, 0)
+}
+
+// ubResult is a memoized bound: an operand shared by several operations
+// (x & x) is searched once, so the search is linear in the values it
+// reaches.
+type ubResult struct {
+	c  uint64
+	ok bool
+}
+
+func (p *prover) upperMemo(s *facts, v *ir.Value, memo map[*ir.Value]ubResult, depth int) (uint64, bool) {
+	if v == nil || depth > 32 {
 		return 0, false
 	}
-	switch d := p.def[p.canon(s, v)].(type) {
+	v = p.canon(s, v)
+	if r, ok := memo[v]; ok {
+		return r.c, r.ok
+	}
+	c, ok := p.upperOf(s, v, memo, depth)
+	memo[v] = ubResult{c, ok}
+	return c, ok
+}
+
+func (p *prover) upperOf(s *facts, v *ir.Value, memo map[*ir.Value]ubResult, depth int) (uint64, bool) {
+	if c, ok := p.constant(v); ok {
+		return c, true
+	}
+	if c, ok := p.loadUb[v]; ok {
+		return c, true
+	}
+	switch d := p.def[v].(type) {
 	case *ir.Binary:
-		if d.Op != "&" || !unsigned(d.Dst.Type) {
+		if !unsigned(d.Dst.Type) {
 			return 0, false
 		}
-		if c, ok := p.constant(p.canon(s, d.R)); ok {
-			return c, true
-		}
-		if c, ok := p.constant(p.canon(s, d.L)); ok {
-			return c, true
+		switch d.Op {
+		case "&":
+			a, oka := p.upperMemo(s, d.L, memo, depth+1)
+			b, okb := p.upperMemo(s, d.R, memo, depth+1)
+			switch {
+			case oka && okb:
+				return min(a, b), true
+			case oka:
+				return a, true
+			case okb:
+				return b, true
+			}
+		case "%":
+			if c, ok := p.constant(p.canon(s, d.R)); ok && c >= 1 {
+				if a, ok := p.upperMemo(s, d.L, memo, depth+1); ok && a < c-1 {
+					return a, true
+				}
+				return c - 1, true
+			}
 		}
 	case *ir.Conv:
 		if unsigned(d.Dst.Type) && unsigned(d.X.Type) {
-			return p.maskBound(s, d.X)
+			return p.upperMemo(s, d.X, memo, depth+1)
 		}
 	}
 	return 0, false
+}
+
+// maskedBelow reports that base + off is below ln because base is a
+// bitwise and with an operand m = mb + mo below ln by more than off
+// (specs/prove-bounds): a fact mb + k < ln with k >= mo + off, or mb a
+// member of ln's class with mo + off < 0 (m = len - 1 was computed with a
+// checked subtraction, so the length is at least one and m below it).
+func (p *prover) maskedBelow(s *facts, base *ir.Value, off int64, ln *ir.Value) bool {
+	if base == nil {
+		return false
+	}
+	d, ok := p.def[p.canon(s, base)].(*ir.Binary)
+	if !ok || d.Op != "&" || !unsigned(d.Dst.Type) {
+		return false
+	}
+	for _, m := range []*ir.Value{d.L, d.R} {
+		mb, mo := p.index(s, m)
+		if mb == nil {
+			continue // a literal: upper's rule
+		}
+		need := mo + off
+		if (off >= 0 && need < mo) || (off < 0 && need > mo) {
+			continue // overflow: no proof
+		}
+		if k, ok := s.bound(mb, ln); ok && k >= need {
+			return true
+		}
+		if need < 0 && s.find(p.lenKey(s, mb)) == s.find(ln) {
+			return true
+		}
+	}
+	return false
 }
 
 // sliceCheck proves a slice check (spec F9): the high bound in range (the

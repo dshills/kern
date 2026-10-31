@@ -233,6 +233,46 @@ func mslice(p: view[]u64, x: usize) -> u64 {
     if len(p) >= 4usize { return p[x & 3usize] }
     return p[x & 7usize]
 }
+func brem(x: usize, which: usize) -> u64 {
+    var a: [8]u64 = zero()
+    a[1usize] = 2u64
+    a[7usize] = 5u64
+    if which == 0usize { return a[x % 8usize] }
+    if which == 1usize {
+        var s: u64 = 0u64
+        for k in 0usize..x { s = wrapping_add(s, a[k % 9usize]) }
+        return s
+    }
+    return a[(x % 7usize) + 1usize]
+}
+func bloop(n: usize, step: usize, wide: bool) -> u64 {
+    var a: [8]u64 = zero()
+    a[5usize] = 3u64
+    var s: u64 = 0u64
+    var w: usize = 0usize
+    for k in 0usize..n {
+        s = wrapping_add(s, a[w])
+        if wide { w = (w + step) & 15usize } else { w = (w + step) & 7usize }
+    }
+    return s
+}
+func bjoin(x: usize, c: usize) -> u64 {
+    var a: [8]u64 = zero()
+    a[6usize] = 4u64
+    var p: usize = 0usize
+    if c == 0usize { p = x & 3usize } else if c == 1usize { p = x % 8usize } else { p = x }
+    return a[p]
+}
+func blen(p: view[]u64, x: usize, m: usize) -> u64 {
+    if len(p) == 0usize { return 1u64 }
+    var s: u64 = p[x & (len(p) - 1usize)]
+    if m < len(p) { s = wrapping_add(s, p[x & m]) }
+    if m + 1usize < len(p) { s = wrapping_add(s, p[(x & m) + 1usize]) }
+    if m < len(p) {
+        for k in 0usize..x { s = wrapping_add(s, p[(k & m) + 1usize]) }
+    }
+    return wrapping_add(s, p[x & len(p)])
+}
 func main() -> i32 {
     v := Vec[u64].new()
     q := Vec[u64].new()
@@ -248,7 +288,19 @@ func main() -> i32 {
 	stmts := 2 + r.Intn(6)
 	for k := 0; k < stmts; k++ {
 		idx := func() int { return r.Intn(live + 2) } // 0..live+1: past the end about a third of the time
-		switch r.Intn(29) {
+		switch r.Intn(33) {
+		case 29:
+			// x % 9 reaches the length and must stay checked
+			fmt.Fprintf(&b, "    print_u64(brem(%dusize, %dusize))\n", r.Intn(40), r.Intn(3))
+		case 30:
+			// a wide loop mask reaches past the length and must stay checked
+			fmt.Fprintf(&b, "    print_u64(bloop(%dusize, %dusize, %v))\n", r.Intn(20), r.Intn(4), r.Intn(2) == 0)
+		case 31:
+			// the unbounded path must stay checked
+			fmt.Fprintf(&b, "    print_u64(bjoin(%dusize, %dusize))\n", r.Intn(40), r.Intn(3))
+		case 32:
+			// x & len can be len and must stay checked
+			fmt.Fprintf(&b, "    with d := v.as_view() { print_u64(blen(d, %dusize, %dusize)) }\n", r.Intn(16), r.Intn(live+2))
 		case 26:
 			fmt.Fprintf(&b, "    print_u64(marr(%dusize, %du64))\n", r.Intn(100), r.Intn(100))
 		case 27:
