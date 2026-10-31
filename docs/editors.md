@@ -52,6 +52,14 @@ error. The contract is `specs/language-server/SPEC.md`.
   its exported declarations. Elsewhere, the locals in scope at the
   cursor, the module's and the prelude's declarations, the imported
   modules and the keywords. Typing `.` triggers it.
+- **Outline.** The file's declarations as document symbols: functions,
+  structs with their fields, unions with their variants, interfaces and
+  `impl` blocks with their methods, constants and `thread_local`s, each
+  with its type.
+- **Signature help.** Inside a call's argument list, the function's
+  signature with the current argument marked (a method's `self` left
+  out), also while the call is still unclosed. Typing `(` or `,`
+  triggers it.
 
 It does not provide semantic highlighting or a syntax grammar. Edits to `kern.mod` and new
 files that are not yet saved in an imported module are seen when saved.

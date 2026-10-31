@@ -42,7 +42,7 @@ func TestInitialize(t *testing.T) {
 			t.Errorf("codeActionProvider without literal support %v", caps["codeActionProvider"])
 		}
 		cl2.stop()
-		if info := res["serverInfo"].(map[string]any); info["name"] != "kern" || info["version"] != diag.SchemaVersion || len(caps) != 9 || fmt.Sprint(caps["completionProvider"]) != "map[triggerCharacters:[.]]" || caps["definitionProvider"] != true || caps["referencesProvider"] != true || fmt.Sprint(caps["renameProvider"]) != "map[prepareProvider:true]" {
+		if info := res["serverInfo"].(map[string]any); info["name"] != "kern" || info["version"] != diag.SchemaVersion || len(caps) != 11 || caps["documentSymbolProvider"] != true || fmt.Sprint(caps["signatureHelpProvider"]) != "map[triggerCharacters:[( ,]]" || fmt.Sprint(caps["completionProvider"]) != "map[triggerCharacters:[.]]" || caps["definitionProvider"] != true || caps["referencesProvider"] != true || fmt.Sprint(caps["renameProvider"]) != "map[prepareProvider:true]" {
 			t.Errorf("serverInfo %v, %d capabilities", info, len(caps))
 		}
 		if s := cl.stop(); s != 0 {

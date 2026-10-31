@@ -358,6 +358,18 @@ func (s *Server) request(method string, params json.RawMessage) (result any, rer
 			return nil, invalidParams(err)
 		}
 		return s.rename(p)
+	case "textDocument/documentSymbol":
+		var p documentSymbolParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.documentSymbol(p)
+	case "textDocument/signatureHelp":
+		var p textDocumentPositionParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.signatureHelp(p)
 	}
 	return nil, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + method}
 }
@@ -402,6 +414,8 @@ func (s *Server) initialize(params json.RawMessage) (any, *rpcError) {
 			"referencesProvider":         true,
 			"renameProvider":             map[string]any{"prepareProvider": true},
 			"completionProvider":         map[string]any{"triggerCharacters": []string{"."}},
+			"documentSymbolProvider":     true,
+			"signatureHelpProvider":      map[string]any{"triggerCharacters": []string{"(", ","}},
 		},
 		"serverInfo": map[string]any{"name": "kern", "version": diag.SchemaVersion},
 	}, nil

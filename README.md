@@ -145,7 +145,7 @@ shape without it; files on the command line get 0.3.
 | `build` | Produce an executable or freestanding image; `--debug` emits DWARF line tables |
 | `debug` | Build with debug info and launch lldb with a `kern-own` command that shows ownership state at the current line |
 | `test` | Run the program's tests in the interpreter and natively, in debug and release, and compare the runs; `--opt=`, `--engine=interp\|native`, `--run=<regexp>`, `--timeout=<seconds>`, `--jobs=<n>`, `--human` |
-| `lsp` | A language server on standard input and output: diagnostics as you type, formatting, the compiler's fixes as quick fixes, ownership facts on hover, go to definition, find references, rename and completion; setup for Neovim, Helix and Emacs is in [docs/editors.md](docs/editors.md) |
+| `lsp` | A language server on standard input and output: diagnostics as you type, formatting, the compiler's fixes as quick fixes, ownership facts on hover, go to definition, find references, rename, completion, an outline and signature help; setup for Neovim, Helix and Emacs is in [docs/editors.md](docs/editors.md) |
 
 ### Tests
 
