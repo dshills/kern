@@ -607,6 +607,12 @@ func init() {
 		"ptr_edit2": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}, &Access{Ref: rawRef{it: it, addr: u64(a[1]), t: c.targ(0)}, Edit: true}}
 		},
+		"ptr_view2": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}}, &Access{Ref: rawRef{it: it, addr: u64(a[1]), t: c.targ(1)}}}
+		},
+		"ptr_view_edit": func(it *Interp, a []Value, c callCtx) []Value {
+			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}}, &Access{Ref: rawRef{it: it, addr: u64(a[1]), t: c.targ(1)}, Edit: true}}
+		},
 		"size_of": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{mkInt("usize", uint64(layout.Of(c.targ(0)).Size))}
 		},

@@ -1,0 +1,12 @@
+//! phase: 6
+//! expect: accept
+//! twin: for_cursor_mutate
+module m
+import "std/map"
+func main() -> i32 {
+    t := map.Map[u64, u64].new()
+    u := map.Map[u64, u64].new()
+    t.insert(1u64, 2u64)
+    for k, v in t { u.insert(k + 10u64, v) }
+    return 0i32
+}

@@ -157,6 +157,43 @@ impl Map[K, V] {
         }
     }
 
+    // The cursor protocol (spec/types.md §7): `for k, v in m` visits every
+    // entry in slot order, the order of each; a position is a slot.
+    func cursor_first(view self) -> usize { return self.live_from(0usize) }
+    func cursor_next(view self, at: usize) -> usize { return self.live_from(at + 1usize) }
+    func cursor_end(view self) -> usize { return self.cap }
+    // cursor_entry and cursor_entry_mut open the key and the value of the
+    // entry at a live position at once: elements of two distinct vectors,
+    // so disjoint, at the payload offset of their Some (some_offset).
+    contract { invariant "the position is checked live, so both slots hold Some; keys and vals are distinct vectors, so the accesses are disjoint" }
+    func cursor_entry(view self, at: usize) -> (view[K], view[V]) {
+        if self.states.get(at) != 2u8 { trap() }
+        unsafe {
+            k := ptr_cast[K, u8](ptr_offset(ptr_cast[u8, Option[K]](self.keys.ptr_at(at)), truncate[isize](self.some_offset(align_of[K]()))))
+            v := ptr_cast[V, u8](ptr_offset(ptr_cast[u8, Option[V]](self.vals.ptr_at(at)), truncate[isize](self.some_offset(align_of[V]()))))
+            return ptr_view2(k, v)
+        }
+    }
+    contract { invariant "the position is checked live, so both slots hold Some; keys and vals are distinct vectors, so the accesses are disjoint" }
+    func cursor_entry_mut(edit self, at: usize) -> (view[K], edit[V]) {
+        if self.states.get(at) != 2u8 { trap() }
+        unsafe {
+            k := ptr_cast[K, u8](ptr_offset(ptr_cast[u8, Option[K]](self.keys.ptr_at(at)), truncate[isize](self.some_offset(align_of[K]()))))
+            v := ptr_cast[V, u8](ptr_offset(ptr_cast[u8, Option[V]](self.vals.ptr_at(at)), truncate[isize](self.some_offset(align_of[V]()))))
+            return ptr_view_edit(k, v)
+        }
+    }
+    // some_offset is where Some's payload sits in an Option whose payload
+    // has alignment a (spec §4.1): after the one-byte tag (two variants),
+    // rounded up to a.
+    func some_offset(view self, a: usize) -> usize { return (1usize + a - 1usize) / a * a }
+    // live_from is the first live slot at or after from, or the capacity.
+    func live_from(view self, from: usize) -> usize {
+        i := from
+        while i < self.cap && self.states.get(i) != 2u8 { i = i + 1usize }
+        return i
+    }
+
     // each calls f with every entry's key and value, in slot order: the
     // same for two maps built by the same inserts and removals. f cannot
     // reach the map itself (its access would conflict with this call's).

@@ -1,0 +1,137 @@
+//! phase: 6
+//! expect: output
+// The cursor protocol (spec/types.md §7): `for k, v in m` over a std/map
+// Map with Copy keys and values (copies), with String keys (views), with
+// String values edited in place (cursor_entry_mut), with break, continue
+// and return, over an empty map and one with tombstones, over a map
+// reached through a projection, nested in another; and `for x in c` over a type of
+// the program's own with cursor_get and cursor_get_mut.
+module t
+import "std/map"
+import "std/str"
+func say(s: view[]u8) { print_str(s); println() }
+
+// Bag holds optional names; its cursor visits the present ones.
+struct Bag { items: Vec[Option[str.String]] }
+impl Bag {
+    func cursor_first(view self) -> usize { return self.skip(0usize) }
+    func cursor_next(view self, at: usize) -> usize { return self.skip(at + 1usize) }
+    func cursor_end(view self) -> usize { return self.items.len() }
+    func skip(view self, from: usize) -> usize {
+        i := from
+        while i < self.items.len() {
+            with x := self.items.get(i) {
+                match x {
+                    Some(s) => { return i }
+                    None => { }
+                }
+            }
+            i = i + 1usize
+        }
+        return i
+    }
+    func cursor_get(view self, at: usize) -> view[str.String] {
+        match self.items.get(at) {
+            Some(s) => return s
+            None => trap()
+        }
+    }
+    func cursor_get_mut(edit self, at: usize) -> edit[str.String] {
+        match self.items.at(at) {
+            Some(s) => return s
+            None => trap()
+        }
+    }
+}
+
+struct Holder { m: map.Map[u64, u64] }
+impl Holder {
+    func table(view self) -> view[map.Map[u64, u64]] { return self.m }
+}
+
+// first_over returns the first key (in slot order) whose value exceeds lim.
+func first_over(m: view[map.Map[u64, u64]], lim: u64) -> u64 {
+    for k, v in m {
+        if v > lim { return k }
+    }
+    return 0u64
+}
+
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    var i: u64 = 1u64
+    while i <= 6u64 {
+        m.insert(i, i * 10u64)
+        i = i + 1u64
+    }
+    var sum: u64 = 0u64
+    var count: u64 = 0u64
+    for k, v in m { sum = sum + k * v; count = count + 1u64 }
+    print_u64(count); print_str(" "); print_u64(sum); println()
+    // continue and break
+    var odd: u64 = 0u64
+    for k, v in m {
+        if k % 2u64 == 0u64 { continue }
+        odd = odd + v
+    }
+    print_u64(odd); println()
+    var seen: u64 = 0u64
+    for k, v in m {
+        seen = seen + 1u64
+        if seen == 3u64 { break }
+    }
+    print_u64(seen); println()
+    print_u64(first_over(m, 45u64)); println()
+    // tombstones are skipped
+    r2 := m.remove(2u64)
+    r5 := m.remove(5u64)
+    sum = 0u64
+    for k, v in m { sum = sum + k }
+    print_u64(sum); println()
+    // empty map
+    e := map.Map[u64, u64].new()
+    for k, v in e { say("never") }
+    // String keys are views
+    names := map.Map[str.String, u64].new()
+    names.insert(str.String.from("ada"), 3u64)
+    names.insert(str.String.from("bob"), 4u64)
+    var letters: u64 = 0u64
+    for k, v in names { letters = letters + u64(k.len()) * v }
+    print_u64(letters); println()
+    // String values edited in place
+    tags := map.Map[u64, str.String].new()
+    tags.insert(1u64, str.String.from("x"))
+    tags.insert(2u64, str.String.from("y"))
+    for k, v in tags { v.push_str("!") }
+    for k, v in tags {
+        print_u64(k); print_str("="); print_str(v.as_view()); println()
+    }
+    // one-byte keys and values: Some's payload right after the tag
+    small := map.Map[u8, u8].new()
+    small.insert(3u8, 200u8)
+    small.insert(4u8, 100u8)
+    var bytes: u64 = 0u64
+    for k, v in small { bytes = bytes + u64(k) * u64(v) }
+    print_u64(bytes); println()
+    words := map.Map[u8, str.String].new()
+    words.insert(9u8, str.String.from("n"))
+    for k, v in words { v.push(48u8 + k) }
+    for k, v in words { print_u64(u64(k)); say(v.as_view()) }
+    // through a projection, nested
+    h := Holder { m: map.Map[u64, u64].new() }
+    h.m.insert(7u64, 1u64)
+    h.m.insert(8u64, 2u64)
+    var pairs: u64 = 0u64
+    for a, x in h.table() {
+        for b, y in m { pairs = pairs + a * b * x * y }
+    }
+    print_u64(pairs); println()
+    // a type of the program's own, read and edited
+    bag := Bag { items: Vec[Option[str.String]].new() }
+    bag.items.push(Some(str.String.from("one")))
+    bag.items.push(None)
+    bag.items.push(Some(str.String.from("three")))
+    for s in bag { s.push_str("+") }
+    for s in bag { say(s.as_view()) }
+    return 0i32
+}

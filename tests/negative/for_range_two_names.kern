@@ -1,0 +1,9 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: for_range_two_names_ok
+// A range is not a type with the cursor protocol: one name only.
+module m
+func main() -> i32 {
+    var s: u64 = 0u64
+    for i, j in 0u64..3u64 { s = s + i }
+    return 0i32
+}

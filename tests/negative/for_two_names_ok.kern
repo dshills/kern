@@ -1,0 +1,10 @@
+//! phase: 6
+//! expect: accept
+//! twin: for_two_names
+module m
+func main() -> i32 {
+    xs := [1u64, 2u64, 3u64]
+    var s: u64 = 0u64
+    for x in xs { s = s + x }
+    return 0i32
+}

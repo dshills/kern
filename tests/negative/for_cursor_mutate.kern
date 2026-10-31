@@ -1,0 +1,13 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: for_cursor_mutate_ok
+// The map a cursor for visits is bound for the body: inserting into it
+// there conflicts (spec/types.md §7), as changing a sequence a for visits
+// does.
+module m
+import "std/map"
+func main() -> i32 {
+    t := map.Map[u64, u64].new()
+    t.insert(1u64, 2u64)
+    for k, v in t { t.insert(k + 10u64, v) }
+    return 0i32
+}

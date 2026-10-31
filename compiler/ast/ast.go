@@ -275,14 +275,27 @@ type Match struct {
 	Arms    []*Arm
 }
 
-// For is `for x in iter { }`.
+// For is `for x in iter { }`, or `for k, v in iter { }` over a type with
+// the cursor protocol (spec/types.md §7).
 type For struct {
 	Pos
-	Var    string
-	VarPos Pos
-	Iter   Expr
-	Body   *Block
+	Var     string
+	VarPos  Pos
+	Var2    string // the second name, or ""
+	Var2Pos Pos
+	Iter    Expr
+	Body    *Block
+	// cursor is the loop the resolver desugared a cursor-protocol for
+	// into, which the checker and the lowering run instead; unexported so
+	// that tree walks see only the source's nodes.
+	cursor *Block
 }
+
+// Cursor is the desugared loop of a cursor-protocol for, or nil.
+func (f *For) Cursor() *Block { return f.cursor }
+
+// SetCursor records the desugared loop of a cursor-protocol for.
+func (f *For) SetCursor(b *Block) { f.cursor = b }
 
 // While is `while cond { }`.
 type While struct {

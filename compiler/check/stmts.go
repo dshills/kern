@@ -432,6 +432,9 @@ func (f *fn) outArgOf(e ast.Expr) *resolve.Symbol {
 }
 
 func (f *fn) forStmt(st *flow, s *ast.For) *flow {
+	if b := s.Cursor(); b != nil {
+		return f.block(st, b) // a cursor-protocol for, desugared by the resolver
+	}
 	var r *result
 	if _, isRange := s.Iter.(*ast.RangeExpr); isRange {
 		rg := s.Iter.(*ast.RangeExpr)

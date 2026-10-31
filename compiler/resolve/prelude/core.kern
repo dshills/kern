@@ -46,12 +46,16 @@ func ptr_copy[T](dst: RawPtr[T], src: RawPtr[T], n: usize)
 // for the access's whole lifetime. A function that returns such an access
 // must contain unsafe and carry a contract stating that obligation (rule
 // 6.4); the containers below are the library's uses. ptr_edit2 opens two
-// edits at once (the caller has checked that a and b are disjoint).
+// edits at once (the caller has checked that a and b are disjoint), and
+// ptr_view2 and ptr_view_edit two accesses of possibly different types
+// (std/map's cursor_entry: a key and a value in distinct vectors).
 func ptr_view[T](p: RawPtr[T]) -> view[T]
 func ptr_edit[T](p: RawPtr[T]) -> edit[T]
 func ptr_view_seq[T](p: RawPtr[T], n: usize) -> view[]T
 func ptr_edit_seq[T](p: RawPtr[T], n: usize) -> edit[]T
 func ptr_edit2[T](a: RawPtr[T], b: RawPtr[T]) -> (edit[T], edit[T])
+func ptr_view2[A, B](a: RawPtr[A], b: RawPtr[B]) -> (view[A], view[B])
+func ptr_view_edit[A, B](a: RawPtr[A], b: RawPtr[B]) -> (view[A], edit[B])
 // ptr_init calls init with the raw storage at p as its out parameter
 // (spec §5.2: out storage may be "a fresh slot provided by a container"),
 // and returns its result: on Ok the storage holds an initialized T; on
@@ -514,6 +518,13 @@ impl Vec[T] {
     func get(view self, i: usize) -> view[T] {
         if i >= self.size { trap_kind(bounds) }
         unsafe { return ptr_view(ptr_offset(self.data, truncate[isize](i))) }
+    }
+    // ptr_at is the address of element i (bounds-checked); reading or
+    // writing through it is unsafe, as for every raw pointer.
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func ptr_at(view self, i: usize) -> RawPtr[T] {
+        if i >= self.size { trap_kind(bounds) }
+        unsafe { return ptr_offset(self.data, truncate[isize](i)) }
     }
     contract { requires "data addresses cap elements of which the first size are live" }
     func at(edit self, i: usize) -> edit[T] {

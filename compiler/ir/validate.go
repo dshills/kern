@@ -56,6 +56,10 @@ type openAccess struct {
 	path   []PathElem
 	param  bool   // an access parameter, open for the whole function
 	parent *Value // the access this one was reborrowed from, if any
+	// group is the call whose tuple of accesses this one is part of, or
+	// nil: the accesses of one call are disjoint from each other (spec
+	// §5.4, multi-access bindings), not from anything else
+	group *Call
 }
 
 func (s *vstate) clone() *vstate {
@@ -322,6 +326,12 @@ func (v *validator) transfer(b *Block, st *vstate) *vstate {
 			}
 			delete(st.open, i.Access)
 		case *Call:
+			multi := 0
+			for _, d := range i.Dsts {
+				if _, isAcc := d.Type.(*resolve.Access); isAcc {
+					multi++
+				}
+			}
 			for _, d := range i.Dsts {
 				if _, isAcc := d.Type.(*resolve.Access); isAcc {
 					// a returned projection: rooted at the single access
@@ -339,7 +349,11 @@ func (v *validator) transfer(b *Block, st *vstate) *vstate {
 							break
 						}
 					}
-					st.open[d] = openAccess{edit: d.Type.(*resolve.Access).Edit, root: root, path: path, parent: parent}
+					oa := openAccess{edit: d.Type.(*resolve.Access).Edit, root: root, path: path, parent: parent}
+					if multi > 1 {
+						oa.group = i // disjoint from its siblings only
+					}
+					st.open[d] = oa
 				}
 			}
 			if fn := v.calleeExtern(i); fn && st.unsafe == 0 {
@@ -439,9 +453,46 @@ func (v *validator) checkNoConflict(b *Block, st *vstate, p Place, edit bool, sk
 			if p.Access != nil && v.isAncestor(st, val, p.Access) {
 				continue
 			}
+			// nor is an access of the same tuple as one of its ancestors
+			if p.Access != nil && v.siblingOf(st, val, p.Access) {
+				continue
+			}
 			v.errorf("%s: access to %s conflicts with open access %s", blockName(b), PlaceString(p), v2(val))
 		}
 	}
+}
+
+// siblingOf reports whether val and a descend from two different
+// accesses of one call's tuple (each, or an access it was reborrowed
+// from, is a member), which are disjoint.
+func (v *validator) siblingOf(st *vstate, val, a *Value) bool {
+	members := map[*Call]*Value{} // val's chain: the member it descends from, per tuple
+	for x, n := val, 0; x != nil && n < 64; n++ {
+		oa, ok := st.open[x]
+		if !ok {
+			break
+		}
+		if oa.group != nil {
+			if _, seen := members[oa.group]; !seen {
+				members[oa.group] = x
+			}
+		}
+		x = oa.parent
+	}
+	if len(members) == 0 {
+		return false
+	}
+	for x, n := a, 0; x != nil && n < 64; n++ {
+		oa, ok := st.open[x]
+		if !ok {
+			return false
+		}
+		if m, ok := members[oa.group]; ok && oa.group != nil && m != x {
+			return true
+		}
+		x = oa.parent
+	}
+	return false
 }
 
 func (v *validator) overlap(a, b []PathElem) bool {

@@ -431,6 +431,10 @@ func (c *fnCtx) match(sc *scope, s *ast.Match) {
 func (c *fnCtx) forStmt(sc *scope, s *ast.For) {
 	inner := sc.child()
 	if rg, ok := s.Iter.(*ast.RangeExpr); ok {
+		if s.Var2 != "" {
+			c.errorf("TYPE_MISMATCH", s.Var2Pos, "a for with two names iterates a type with the cursor protocol (cursor_first, cursor_next, cursor_end, cursor_entry), and a range has none")
+			c.declare(inner, &s.Var2Pos, s.Var2, SymLocal, &Bad{}, ast.ConvValue, s.Var2Pos)
+		}
 		lt := c.expr(sc, rg.Lo, nil)
 		if !IsInteger(lt) {
 			lt = &Prim{Name: "usize"}
@@ -443,6 +447,13 @@ func (c *fnCtx) forStmt(sc *scope, s *ast.For) {
 		return
 	}
 	t := c.expr(sc, s.Iter, nil)
+	if c.cursorFor(sc, s, t) {
+		return
+	}
+	if s.Var2 != "" {
+		c.errorf("TYPE_MISMATCH", s.Var2Pos, "a for with two names iterates a type with the cursor protocol (cursor_first, cursor_next, cursor_end, cursor_entry), and %s has none", typeString(t))
+		c.declare(inner, &s.Var2Pos, s.Var2, SymLocal, &Bad{}, ast.ConvValue, s.Var2Pos)
+	}
 	var elem Type
 	edit := false
 	switch it := t.(type) {
@@ -477,6 +488,136 @@ func (c *fnCtx) forStmt(sc *scope, s *ast.For) {
 		c.declare(inner, s, s.Var, SymAccess, elem, conv, s.VarPos)
 	}
 	c.block(inner, s.Body)
+}
+
+// cursorFor desugars a for over a type with the cursor protocol
+// (spec/types.md §7) into a while loop over positions, and resolves that
+// loop, which the checker and the lowering then run in the for's place:
+//
+//	var #at: usize = it.cursor_first()
+//	while #at < it.cursor_end() {
+//	    #cur := #at
+//	    #at = it.cursor_next(#cur)
+//	    with x := it.cursor_get(#cur) { body }        // one name
+//	    with k, v := it.cursor_entry(#cur) { body }   // two names
+//	}
+//
+// The position advances before the body, so continue needs no step block.
+// The getter is the _mut one (cursor_get_mut, cursor_entry_mut) when the
+// iterated place is mutable and the element (the value, for two names) is
+// not Copy. A Copy element is bound as a copy, as a for over a sequence
+// binds it. Two names come from one call, a tuple of accesses, because
+// while a binding is live its root may be accessed only through it
+// (spec §5.4). An iterated expression that is not a place is bound once
+// with `with #it := ...`: anything but a name or a field path, which the
+// loop may evaluate again (a call is evaluated once, and so is an index,
+// which the body may change). It reports false, doing nothing, for a type
+// without the protocol.
+func (c *fnCtx) cursorFor(sc *scope, s *ast.For, t Type) bool {
+	nt, ok := valueOf(t).(*Named)
+	if !ok {
+		return false
+	}
+	method := func(name string) *FuncDecl { return nt.Decl.Methods[name] }
+	if method("cursor_first") == nil || method("cursor_next") == nil || method("cursor_end") == nil {
+		return false
+	}
+	getter, want := "cursor_get", 1
+	if s.Var2 != "" {
+		getter, want = "cursor_entry", 2
+	}
+	fail := func(format string, args ...any) bool {
+		c.errorf("TYPE_MISMATCH", s.Iter.Span(), format, args...)
+		inner := sc.child()
+		c.declare(inner, s, s.Var, SymLocal, &Bad{}, ast.ConvValue, s.VarPos)
+		if s.Var2 != "" {
+			c.declare(inner, &s.Var2Pos, s.Var2, SymLocal, &Bad{}, ast.ConvValue, s.Var2Pos)
+		}
+		c.block(inner, s.Body)
+		return true
+	}
+	if method(getter) == nil {
+		return fail("%s has the cursor protocol but no %s, which a for with %d name(s) needs", typeString(t), getter, want)
+	}
+	subst := map[string]Type{}
+	for i, tp := range nt.Decl.TypeParams {
+		if i < len(nt.Args) {
+			subst[tp.Name] = nt.Args[i]
+		}
+	}
+	var elems []Type
+	for _, r := range method(getter).Ret {
+		a, isAcc := Subst(r, subst).(*Access)
+		if !isAcc {
+			elems = nil
+			break
+		}
+		elems = append(elems, accessElem(a))
+	}
+	if len(elems) != want {
+		return fail("%s.%s must return %d access(es)", typeString(t), getter, want)
+	}
+	mutable := c.placeIsMutable(sc, s.Iter)
+	if a, isAcc := t.(*Access); isAcc {
+		mutable = a.Edit
+	}
+	if mutable && !IsCopy(elems[want-1]) && method(getter+"_mut") != nil {
+		getter += "_mut"
+	}
+	ip, sp := s.Iter.Span(), s.Pos
+	it := s.Iter
+	wrap := !fieldPath(s.Iter)
+	if wrap {
+		it = &ast.Ident{Pos: ip, Name: "#it"}
+	}
+	id := func(name string) *ast.Ident { return &ast.Ident{Pos: sp, Name: name} }
+	call := func(name string, args ...ast.Expr) *ast.CallExpr {
+		x := &ast.CallExpr{Pos: ip, Fn: &ast.FieldExpr{Pos: ip, X: it, Name: name}}
+		for _, a := range args {
+			x.Args = append(x.Args, &ast.Arg{Pos: ip, X: a})
+		}
+		return x
+	}
+	names := []string{s.Var, s.Var2}[:want]
+	poses := []ast.Pos{s.VarPos, s.Var2Pos}[:want]
+	var copies []ast.Stmt
+	withNames := make([]string, want)
+	for i := range names {
+		withNames[i] = names[i]
+		if IsCopy(elems[i]) {
+			// a Copy element is bound as a copy of the getter's access
+			withNames[i] = "#e" + string(rune('0'+i))
+			copies = append(copies, &ast.ShortDecl{Pos: poses[i], Name: names[i], Value: &ast.Ident{Pos: poses[i], Name: withNames[i]}})
+		}
+	}
+	loop := &ast.Block{Pos: sp, Stmts: []ast.Stmt{
+		&ast.ShortDecl{Pos: sp, Name: "#cur", Value: id("#at")},
+		&ast.Assign{Pos: sp, Target: id("#at"), Value: call("cursor_next", id("#cur"))},
+		&ast.With{Pos: sp, Names: withNames, NamePos: poses, Subject: call(getter, id("#cur")), Body: &ast.Block{Pos: s.Body.Pos, Stmts: append(copies, s.Body)}},
+	}}
+	blk := &ast.Block{Pos: sp, Stmts: []ast.Stmt{
+		&ast.VarDecl{Pos: sp, Name: "#at", Type: &ast.PrimType{Pos: sp, Name: "usize"}, Init: call("cursor_first")},
+		&ast.While{Pos: sp, Cond: &ast.Binary{Pos: sp, Op: "<", L: id("#at"), R: call("cursor_end")}, Body: loop},
+	}}
+	if wrap {
+		blk = &ast.Block{Pos: sp, Stmts: []ast.Stmt{&ast.With{Pos: sp, Names: []string{"#it"}, NamePos: []ast.Pos{ip}, Subject: s.Iter, Body: blk}}}
+	}
+	s.SetCursor(blk)
+	c.block(sc, blk)
+	return true
+}
+
+// fieldPath reports a name or a path of field accesses from a name.
+func fieldPath(e ast.Expr) bool {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return true
+	case *ast.FieldExpr:
+		return fieldPath(x.X)
+	case *ast.Paren:
+		return fieldPath(x.X)
+	}
+	return false
 }
 
 // placeIsMutable reports whether a place is reachable for writing: rooted in

@@ -1,0 +1,17 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: for_cursor_no_entry_ok
+// A type with cursor_get and no cursor_entry iterates with one name only.
+module m
+struct Count { n: usize; cell: u64 }
+impl Count {
+    func cursor_first(view self) -> usize { return 0usize }
+    func cursor_next(view self, at: usize) -> usize { return at + 1usize }
+    func cursor_end(view self) -> usize { return self.n }
+    func cursor_get(view self, at: usize) -> view[u64] { return self.cell }
+}
+func main() -> i32 {
+    c := Count { n: 3usize, cell: 5u64 }
+    var s: u64 = 0u64
+    for i, x in c { s = s + x }
+    return 0i32
+}

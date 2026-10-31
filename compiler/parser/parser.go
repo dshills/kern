@@ -733,10 +733,18 @@ func (p *parser) parseStmt() ast.Stmt {
 	case lexer.KwFor:
 		p.next()
 		v := p.expect(lexer.Ident)
+		var v2 lexer.Token
+		if p.accept(lexer.Comma) {
+			v2 = p.expect(lexer.Ident)
+		}
 		p.expect(lexer.KwIn)
 		iter := p.parseExprNoLit()
 		body := p.parseBlock()
-		return &ast.For{Pos: span(tokPos(t), body.Pos), Var: v.Text, VarPos: tokPos(v), Iter: iter, Body: body}
+		f := &ast.For{Pos: span(tokPos(t), body.Pos), Var: v.Text, VarPos: tokPos(v), Iter: iter, Body: body}
+		if v2.Text != "" {
+			f.Var2, f.Var2Pos = v2.Text, tokPos(v2)
+		}
+		return f
 	case lexer.KwWhile:
 		p.next()
 		c := p.parseExprNoLit()

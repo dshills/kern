@@ -764,7 +764,7 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		s1 := fe.next("t")
 		fe.emit("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", s1, fe.v(a[0]))
 		fe.emit("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", fe.v(dst()), s1, fe.v(a[1]))
-	case "ptr_edit2":
+	case "ptr_edit2", "ptr_view2", "ptr_view_edit":
 		fe.vals[c.Dsts[0]] = fe.v(a[0])
 		fe.vals[c.Dsts[1]] = fe.v(a[1])
 	case "size_of":

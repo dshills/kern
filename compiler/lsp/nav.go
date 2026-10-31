@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/diag"
@@ -155,7 +156,9 @@ func buildNav(prog *resolve.Program, text map[string][]byte) *navIndex {
 	info := prog.Info
 	// declarations of locals, parameters and bindings
 	for _, sym := range info.Decls {
-		if sym == nil || sym.File == "" || text[sym.File] == nil {
+		// a name starting with # is one the resolver made (a cursor for's
+		// position), which the source does not spell
+		if sym == nil || sym.File == "" || text[sym.File] == nil || strings.HasPrefix(sym.Name, "#") {
 			continue
 		}
 		switch sym.Kind {

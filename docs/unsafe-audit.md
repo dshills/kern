@@ -27,12 +27,12 @@ to the prelude (`NAME_PRIVATE`), so the invariants named in the contracts
 cannot be broken from safe user code.
 
 Returning an access opened on raw memory (`ptr_view`, `ptr_edit`,
-`ptr_view_seq`, `ptr_edit_seq`, `ptr_edit2`) is permitted only from inside
+`ptr_view_seq`, `ptr_edit_seq`, `ptr_edit2`, `ptr_view2`, `ptr_view_edit`) is permitted only from inside
 `unsafe` and is covered by the function's contract in place of the elision
 rule (Rule 6.6); the resolver classifies these intrinsics as unsafe
 operations like every `ptr_*` function.
 
-38 functions, 40 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
+39 functions, 41 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
 pool and arena elements with destructors, `Box.into`, `copy` of a vector,
 `pop`, `clear`), `tests/run/vec_resize.kern`, `tests/run/vec_extend.kern`, `tests/run/pool_handles.kern`, `tests/run/hello.kern`, the
 examples and the container benchmarks; the failure paths are the trap
@@ -61,6 +61,7 @@ executions of every fixture compare the containers' behaviour directly.
 | `Vec.resize` | 3 | `heap_alloc_zeroed`, `ptr_cast`, `ptr_load`, `ptr_offset`, `ptr_store`, `ptr_take` | requires "data addresses cap elements of which the first size are live; an all-zero copy of x owns nothing" |
 | `Vec.extend` | 1 | `ptr_offset`, `ptr_store_seq` | requires "data addresses cap elements of which the first size are live; src does not overlap the spare capacity" |
 | `Vec.get` | 1 | `ptr_offset`, `ptr_view` | requires "data addresses cap elements of which the first size are live" |
+| `Vec.ptr_at` | 1 | `ptr_offset` | requires "data addresses cap elements of which the first size are live" (bounds-checked; the pointer is used only inside `unsafe`) |
 | `Vec.at` | 1 | `ptr_edit`, `ptr_offset` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.as_view` | 1 | `ptr_view_seq` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.as_edit` | 1 | `ptr_edit_seq` | requires "data addresses cap elements of which the first size are live" |
@@ -91,6 +92,21 @@ are met by the C runtime (`runtime/hosted/src/kern_rt.c`) and the interpreter:
 | `unsafe assert Interior for Atomic` | every `Atomic` operation through a `view` is an atomic read-modify-write with the stated ordering (an LLVM atomic instruction on the inline cell natively, `atomicMu` in the interpreter) | `tests/concurrency/atomic_counter.kern` (two threads, 10,000 `fetch_add`), the litmus fixtures under `tests/concurrency/litmus/` |
 | `unsafe assert Interior for Mutex` | `lock` is runtime-exclusive escalation (Rule 5.3.6): one holder at a time, recursive acquisition traps `explicit` (natively the runtime's own parking lock, whose owner word only the holder writes and which a thread finding its own id in traps before any wait, `docs/reports/perf-gaps.md`; the owner thread identifier in the interpreter) | `tests/concurrency/mutex_counter.kern`, `tests/concurrency/mutex_parked.kern`, `tests/trap/mutex_recursive.kern`, `tests/native_test.go` (`TestNativeStackTrapUnderMutexWithHandler`) |
 | `unsafe assert Interior for Shared` | clones and drops update the count atomically (compare-exchange loop natively); overflow traps `overflow` | `tests/trap/overflow.kern` family (`testing.seed_shared_count`), `tests/concurrency/shared_handoff.kern` |
+
+`std/map` (`std/map.kern`) has two unsafe blocks, both for the cursor
+protocol's two-name `for` (spec/types.md §7):
+
+| Function | Blocks | Raw operations | Contract |
+|---|---|---|---|
+| `Map.cursor_entry` | 1 | `ptr_cast`, `ptr_offset`, `ptr_view2`, `align_of` | invariant "the position is checked live, so both slots hold Some; keys and vals are distinct vectors, so the accesses are disjoint" |
+| `Map.cursor_entry_mut` | 1 | `ptr_cast`, `ptr_offset`, `ptr_view_edit`, `align_of` | the same invariant |
+
+Each reads its slots through `Vec.ptr_at` (bounds-checked) at the payload
+offset of `Some`, which is `align_of` of the payload by the §4.1 union
+layout (the tag at offset 0, the payload at its alignment); `Option[T]`
+has no other variant with a payload, so the payload alignment is `T`'s.
+Exercised by `tests/run/for_cursor.kern` (Copy and `String` keys and
+values, an edit of each value, tombstones, an empty map) in both engines.
 
 ## Benchmarks (`bench/kern/`)
 

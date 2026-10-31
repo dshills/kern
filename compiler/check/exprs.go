@@ -710,13 +710,14 @@ func (f *fn) checkAtomicOrdering(x *ast.CallExpr, info *resolve.CallInfo) {
 }
 
 // isRawAccessOp reports the prelude intrinsics that open an access on raw
-// memory (ptr_view, ptr_edit, ptr_view_seq, ptr_edit_seq, ptr_edit2).
+// memory (ptr_view, ptr_edit, ptr_view_seq, ptr_edit_seq, ptr_edit2,
+// ptr_view2, ptr_view_edit).
 func isRawAccessOp(fd *resolve.FuncDecl) bool {
 	if fd == nil || fd.Module != "core" || fd.Receiver != nil {
 		return false
 	}
 	switch fd.Name {
-	case "ptr_view", "ptr_edit", "ptr_view_seq", "ptr_edit_seq", "ptr_edit2":
+	case "ptr_view", "ptr_edit", "ptr_view_seq", "ptr_edit_seq", "ptr_edit2", "ptr_view2", "ptr_view_edit":
 		return true
 	}
 	return false

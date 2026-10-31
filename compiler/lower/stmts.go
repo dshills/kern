@@ -339,6 +339,10 @@ func (fl *fnLower) outArgOf(e ast.Expr) *resolve.Symbol {
 }
 
 func (fl *fnLower) forStmt(s *ast.For) {
+	if b := s.Cursor(); b != nil {
+		fl.block(b) // a cursor-protocol for, desugared by the resolver
+		return
+	}
 	sym := fl.l.info.Decls[s]
 	if rg, ok := s.Iter.(*ast.RangeExpr); ok {
 		t := fl.typeOf(rg)

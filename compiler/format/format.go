@@ -695,6 +695,10 @@ func (p *printer) stmt(s ast.Stmt) {
 	case *ast.For:
 		p.w("for ")
 		p.w(s.Var)
+		if s.Var2 != "" {
+			p.w(", ")
+			p.w(s.Var2)
+		}
 		p.w(" in ")
 		p.expr(s.Iter)
 		p.w(" ")
