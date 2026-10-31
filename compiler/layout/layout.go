@@ -197,20 +197,35 @@ func packedOf(fields []resolve.Type) Info {
 }
 
 // VariantLayout returns the field offsets of a union variant's payload,
-// relative to the union's start.
+// relative to the union's start. The slice is shared: callers only read it.
 func VariantLayout(n *resolve.Named, v *resolve.VariantDecl) []int {
+	key := variantKey{memoKey{decl: n.Decl, args: n.String()}, v}
+	if offs, ok := variantMemo.Load(key); ok {
+		return offs.([]int)
+	}
 	args := typeArgs(n)
 	var fields []resolve.Type
 	for _, f := range v.Fields {
 		fields = append(fields, resolve.Subst(f.Type, args))
 	}
 	vi := structOf(fields)
-	base := named(n).Payload
+	base := Of(n).Payload
 	out := make([]int, len(vi.Fields))
 	for i, o := range vi.Fields {
 		out[i] = base + o
 	}
+	variantMemo.Store(key, out)
 	return out
+}
+
+// variantMemo caches VariantLayout by the union's identity and
+// instantiation (as memo does) and the variant: the interpreter asks for a
+// variant's offsets at every read of a payload.
+var variantMemo sync.Map
+
+type variantKey struct {
+	memoKey
+	v *resolve.VariantDecl
 }
 
 func alignUp(n, a int) int {

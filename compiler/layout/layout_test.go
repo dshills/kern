@@ -77,3 +77,26 @@ func TestHandleLayoutByMode(t *testing.T) {
 		}
 	}
 }
+
+// VariantLayout's memo tells instantiations apart: Option[u8] and
+// Option[u64] place their Some payload at different offsets, asked in
+// either order and again.
+func TestVariantLayoutInstantiations(t *testing.T) {
+	prog := resolve.Resolve([]*source.File{{Name: "v.kern", Bytes: []byte("module v\n")}})
+	if len(prog.Diags) > 0 {
+		t.Fatal(prog.Diags[0].Message)
+	}
+	opt := prog.Core.Types["Option"]
+	some := opt.Variants[0]
+	if some.Name != "Some" {
+		t.Fatalf("Option's first variant is %s", some.Name)
+	}
+	of := func(prim string) []int {
+		return VariantLayout(&resolve.Named{Decl: opt, Args: []resolve.Type{&resolve.Prim{Name: prim}}}, some)
+	}
+	for range 2 {
+		if b, w := of("u8"), of("u64"); len(b) != 1 || len(w) != 1 || b[0] != 1 || w[0] != 8 {
+			t.Fatalf("Some offsets: Option[u8] %v, Option[u64] %v; want [1] and [8]", b, w)
+		}
+	}
+}

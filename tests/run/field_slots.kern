@@ -1,0 +1,40 @@
+//! phase: 3
+//! expect: output
+// Writes through a struct field and a union payload field, before and
+// after the whole value is replaced, read back through the same places:
+// the interpreter resolves such a field to the field's own slot, which
+// must follow the value now in the variable. A scalar constant stored
+// repeatedly stays the value it names.
+module t
+struct Pair { a: u64; b: u64 }
+union Shape { Dot(u64); Box(w: u64, h: u64) }
+func area(s: Shape) -> u64 {
+    match s {
+        Dot(r) => return r
+        Box(w, h) => return w * h
+    }
+}
+func main() -> i32 {
+    var p: Pair = Pair { a: 1u64, b: 2u64 }
+    p.a = 5u64
+    print_u64(p.a); print_str(" "); print_u64(p.b); println()
+    p = Pair { a: 7u64, b: 8u64 }
+    p.b = 9u64
+    print_u64(p.a); print_str(" "); print_u64(p.b); println()
+    var s: Shape = Box(2u64, 3u64)
+    print_u64(area(s)); println()
+    s = Dot(4u64)
+    print_u64(area(s)); println()
+    s = Box(5u64, 6u64)
+    print_u64(area(s)); println()
+    var total: u64 = 0u64
+    var i: u64 = 0u64
+    while i < 3u64 {
+        var q: Pair = Pair { a: 10u64, b: 0u64 }
+        q.b = q.b + i
+        total = total + q.a + q.b
+        i = i + 1u64
+    }
+    print_u64(total); println()
+    return 0i32
+}

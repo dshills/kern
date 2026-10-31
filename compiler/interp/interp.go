@@ -70,6 +70,8 @@ type sharedState struct {
 	fatalCh       chan struct{}
 	// stop is set by Stop: every thread ends at its next basic block
 	stop atomic.Bool
+	// funcs holds each called function's funcInfo
+	funcs sync.Map
 }
 
 // lockedWriter serializes output from several threads.
@@ -411,6 +413,33 @@ type frame struct {
 	// copied from a callee in another file reports that file
 	// (specs/cross-file-inlining/SPEC.md R6).
 	block *ir.Block
+	info  *funcInfo
+}
+
+// funcInfo is what a call needs that depends on the function alone,
+// computed at its first call: its frame size and the values of its scalar
+// constants, which are immutable and so shared by every activation (a
+// constant then costs no allocation).
+type funcInfo struct {
+	frame  int
+	consts []Value // by value ID; nil where the value is no scalar constant
+}
+
+// info is f's funcInfo.
+func (it *Interp) info(f *ir.Func) *funcInfo {
+	if fi, ok := it.sh.funcs.Load(f); ok {
+		return fi.(*funcInfo)
+	}
+	fi := &funcInfo{frame: frameSize(f), consts: make([]Value, f.NumValues)}
+	for _, b := range f.Blocks {
+		for _, in := range b.Instrs {
+			if c, ok := in.(*ir.Const); ok && c.Bytes == nil && c.Dst.ID < len(fi.consts) {
+				fi.consts[c.Dst.ID] = it.constValue(c)
+			}
+		}
+	}
+	it.sh.funcs.Store(f, fi)
+	return fi
 }
 
 // at returns the position a trap at pos reports from this frame.
@@ -460,8 +489,9 @@ func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
 		}
 		panic(fmt.Sprintf("interp: no intrinsic for %s", f.Name))
 	}
-	frameBytes := frameSize(f)
-	fr := &frame{f: f, file: f.File}
+	fi := it.info(f)
+	frameBytes := fi.frame
+	fr := &frame{f: f, file: f.File, info: fi}
 	prev := it.cur
 	it.cur = fr
 	defer func() { it.cur = prev }()
@@ -586,16 +616,17 @@ func (it *Interp) resolve(fr *frame, p ir.Place) (ref, *seqRef) {
 			if rr, ok := cur.(rawRef); ok {
 				cur = rr.field(e.Field)
 			} else {
-				s := cur.get().(*Struct)
-				cur = idxRef{elems: func() []Value { return s.Fields }, i: e.Field}
+				// a struct's fields are fixed once it is built, so the
+				// slot is the field itself (no closure, no allocation)
+				cur = slotRef{&cur.get().(*Struct).Fields[e.Field]}
 			}
 			seq = nil
 		case ir.PathVariant:
 			if rr, ok := cur.(rawRef); ok {
 				cur = rr.variantField(e.Tag, e.Field)
 			} else {
-				u := cur.get().(*Union)
-				cur = idxRef{elems: func() []Value { return u.Fields }, i: e.Field}
+				// as a struct's: another variant is another *Union
+				cur = slotRef{&cur.get().(*Union).Fields[e.Field]}
 			}
 			seq = nil
 		case ir.PathIndex:
@@ -634,7 +665,11 @@ func (it *Interp) length(fr *frame, p ir.Place) int {
 func (it *Interp) exec(fr *frame, in ir.Instr) {
 	switch i := in.(type) {
 	case *ir.Const:
-		fr.vals[i.Dst.ID] = it.constValue(i)
+		if v := fr.info.consts[i.Dst.ID]; v != nil {
+			fr.vals[i.Dst.ID] = v
+		} else {
+			fr.vals[i.Dst.ID] = it.constValue(i)
+		}
 	case *ir.Load:
 		r, seq := it.resolve(fr, i.Place)
 		if seq != nil {
