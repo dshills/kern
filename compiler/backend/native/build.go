@@ -4,12 +4,15 @@
 package native
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/dshills/kern/compiler/backend/llvm"
@@ -180,22 +183,42 @@ func BuildModule(mod *ir.Module, srcs []*source.File, out string, opts Options) 
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	ll := filepath.Join(dir, "prog.ll")
-	rt := filepath.Join(dir, "kern_rt.c")
 	if err := os.WriteFile(ll, []byte(text), 0o644); err != nil {
-		return err
-	}
-	if err := os.WriteFile(rt, []byte(hosted.Source), 0o644); err != nil {
 		return err
 	}
 	level := "-O1"
 	if opts.Opt == "release" {
 		level = "-O2"
 	}
-	// frame pointers in the runtime too: the fault handler walks the chain
-	// through it (specs/native-trap-loc)
+	// the runtime's own flags, everything its object depends on; frame
+	// pointers in it too: the fault handler walks the chain through it
+	// (specs/native-trap-loc)
+	rtFlags := []string{level, "-ffp-model=strict", "-fno-omit-frame-pointer"}
+	if opts.Opt == "release" {
+		rtFlags = append(rtFlags, "-DKERN_RELEASE") // identity tags off (PLAN.md 2.2)
+	}
+	if opts.TestHooks {
+		rtFlags = append(rtFlags, "-DKERN_TEST_HOOKS")
+	}
+	if opts.TSan {
+		rtFlags = append(rtFlags, "-fsanitize=thread", "-g")
+	}
+	if opts.Debug {
+		rtFlags = append(rtFlags, "-g", "-O0")
+	}
+	if triple != HostTriple() {
+		rtFlags = append(rtFlags, "-target", triple)
+	}
+	rt := runtimeObject(clang, rtFlags)
+	if rt == "" {
+		rt = filepath.Join(dir, "kern_rt.c")
+		if err := os.WriteFile(rt, []byte(hosted.Source), 0o644); err != nil {
+			return err
+		}
+	}
 	args := []string{level, "-Wno-override-module", "-ffp-model=strict", "-fno-omit-frame-pointer", "-o", out, ll, rt}
 	if opts.Opt == "release" {
-		args = append(args, "-DKERN_RELEASE") // identity tags off (PLAN.md 2.2)
+		args = append(args, "-DKERN_RELEASE")
 	}
 	if opts.TestHooks {
 		args = append(args, "-DKERN_TEST_HOOKS")
@@ -222,6 +245,214 @@ func BuildModule(mod *ir.Module, srcs []*source.File, out string, opts Options) 
 		return fmt.Errorf("clang failed: %v: %s", err, msg)
 	}
 	return nil
+}
+
+// runtimeObject is the hosted runtime compiled with flags: from the
+// user's cache directory, compiled into it on a miss, or "" when no cache
+// is usable (KERN_NO_RUNTIME_CACHE set, no cache directory, a failed
+// compile), and the caller compiles the source with the program. The
+// runtime is half of what clang does for a small program, and it changes
+// only with the compiler.
+//
+// The key covers the source, the flags, the clang binary (its resolved
+// path, size and modification time) and the working directory, which
+// the compile runs in as the program's does. Under the key a manifest
+// names the object and records:
+//   - the fingerprint of the compile: the preprocessed source and the
+//     driver's account of the job (`clang -E -v`: its version, the
+//     configuration files it loaded, the -cc1 command with every option
+//     they expand to). Every build takes the fingerprint again, one
+//     preprocessing run, and compiles afresh when it changed. So a
+//     header edited, created where it would shadow another or probed by
+//     __has_include, another SDK or environment, a configuration file
+//     created or edited, all compile afresh.
+//   - the size and modification time of the compiler executable behind
+//     any shim and of the configuration files, which a compiler upgraded
+//     in place changes when the fingerprint does not.
+//
+// The fingerprint and the compile name a copy of the source kept under
+// the key, so their paths do not vary between builds. Objects are named
+// by their content and never rewritten, and the manifest is published by
+// one rename, so a concurrent build sees either the old entry or the new
+// one, whole.
+func runtimeObject(clang string, flags []string) string {
+	if os.Getenv("KERN_NO_RUNTIME_CACHE") != "" {
+		return ""
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	bin, err := filepath.EvalSymlinks(clang)
+	if err != nil {
+		return ""
+	}
+	fi, err := os.Stat(bin)
+	if err != nil {
+		return ""
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "%s\x00%d\x00%d\x00wd=%s\x00", bin, fi.Size(), fi.ModTime().UnixNano(), wd) // a hash never fails a write
+	for _, f := range flags {
+		_, _ = fmt.Fprintf(h, "%s\x00", f)
+	}
+	h.Write([]byte(hosted.Source))
+	dir := filepath.Join(base, "kern", "runtime")
+	key := fmt.Sprintf("%x", h.Sum(nil)[:16])
+	manifest, src := filepath.Join(dir, key+".deps"), filepath.Join(dir, key+".c")
+	fingerprint := func() (string, string, bool) {
+		cmd := exec.Command(clang, append(append([]string{}, flags...), "-E", "-v", "-o", "-", src)...)
+		var out, job bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &out, &job
+		if err := cmd.Run(); err != nil {
+			return "", "", false
+		}
+		f := sha256.New()
+		f.Write(out.Bytes())
+		f.Write([]byte{0})
+		f.Write(job.Bytes())
+		return fmt.Sprintf("%x", f.Sum(nil)), job.String(), true
+	}
+	if obj, want, ok := cachedObject(dir, manifest); ok {
+		if got, _, ok := fingerprint(); ok && got == want {
+			return obj
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	tmp, err := os.MkdirTemp(dir, "build-")
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	// the source copy under the key: written whole, then renamed into place
+	ts := filepath.Join(tmp, "kern_rt.c")
+	if err := os.WriteFile(ts, []byte(hosted.Source), 0o644); err != nil {
+		return ""
+	}
+	if err := os.Rename(ts, src); err != nil {
+		return ""
+	}
+	// fingerprint first: a change after it shows at the next build
+	fp, job, ok := fingerprint()
+	if !ok {
+		return ""
+	}
+	driver := driverFiles(job)
+	if len(driver) == 0 {
+		return "" // the compiler that would run is unknown
+	}
+	o := filepath.Join(tmp, "kern_rt.o")
+	if err := exec.Command(clang, append(append([]string{}, flags...), "-c", "-o", o, src)...).Run(); err != nil {
+		return ""
+	}
+	code, err := os.ReadFile(o)
+	if err != nil {
+		return ""
+	}
+	name := fmt.Sprintf("%s-%x.o", key, sha256.Sum256(code))
+	var m strings.Builder
+	fmt.Fprintf(&m, "%s\n%s\n", name, fp)
+	for _, path := range driver {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(wd, path)
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			return ""
+		}
+		fmt.Fprintf(&m, "%d %d %s\n", fi.Size(), fi.ModTime().UnixNano(), path)
+	}
+	mt := filepath.Join(tmp, "kern_rt.deps")
+	if err := os.WriteFile(mt, []byte(m.String()), 0o644); err != nil {
+		return ""
+	}
+	obj := filepath.Join(dir, name)
+	if err := os.Rename(o, obj); err != nil {
+		return ""
+	}
+	if err := os.Rename(mt, manifest); err != nil {
+		return ""
+	}
+	return obj
+}
+
+// cachedObject is the object a manifest names and the fingerprint it
+// records, when the object exists and every file the manifest lists is
+// unchanged.
+func cachedObject(dir, manifest string) (string, string, bool) {
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		return "", "", false
+	}
+	name, rest, ok := strings.Cut(string(data), "\n")
+	if !ok || name == "" || strings.ContainsRune(name, filepath.Separator) {
+		return "", "", false
+	}
+	fp, files, ok := strings.Cut(rest, "\n")
+	if !ok || fp == "" {
+		return "", "", false
+	}
+	obj := filepath.Join(dir, name)
+	if _, err := os.Stat(obj); err != nil || !filesUnchanged(files) {
+		return "", "", false
+	}
+	return obj, fp, true
+}
+
+// driverFiles are the files a driver's account of its job (`clang -v` or
+// `-###`) shows the compile depends on beyond the source and headers:
+// each configuration file it loaded, and the executable of the -cc1 job,
+// the compiler that runs behind any shim. Empty when no -cc1 job is
+// listed.
+func driverFiles(job string) []string {
+	var files []string
+	cc1 := false
+	for _, line := range strings.Split(job, "\n") {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "Configuration file: "); ok {
+			files = append(files, rest)
+		} else if strings.HasPrefix(line, `"`) && (strings.Contains(line, `" -cc1 `) || strings.Contains(line, `" "-cc1" `)) {
+			if end := strings.Index(line[1:], `"`); end > 0 {
+				files = append(files, line[1:1+end])
+				cc1 = true
+			}
+		}
+	}
+	if !cc1 {
+		return nil
+	}
+	return files
+}
+
+// filesUnchanged reports whether every file of a manifest's lines ("size
+// mtime path") still has the recorded size and modification time; a
+// malformed line is a change.
+func filesUnchanged(lines string) bool {
+	for _, line := range strings.Split(strings.TrimSuffix(lines, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 3)
+		if len(parts) != 3 {
+			return false
+		}
+		size, err1 := strconv.ParseInt(parts[0], 10, 64)
+		mtime, err2 := strconv.ParseInt(parts[1], 10, 64)
+		if err1 != nil || err2 != nil {
+			return false
+		}
+		fi, err := os.Stat(parts[2])
+		if err != nil || fi.Size() != size || fi.ModTime().UnixNano() != mtime {
+			return false
+		}
+	}
+	return true
 }
 
 // EmitAsm compiles srcs to target assembly text (the emit-asm command).
