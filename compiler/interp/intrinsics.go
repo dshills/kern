@@ -442,12 +442,18 @@ func init() {
 		},
 		"thread.spawn": func(it *Interp, a []Value, c callCtx) []Value {
 			it.runtimeAlloc(c.pos)
+			if it.takeFailNextSpawn() {
+				return spawnErrValue() // the kern side destroys the own arguments
+			}
 			t := &Thread{done: make(chan struct{})}
 			it.spawned(a[0].(FuncVal).Name, a[1:], func(v Value, tr *Trap) { t.Result, t.trap, t.Done = v, tr, true; close(t.done) })
 			return []Value{&Union{Tag: 0, Fields: []Value{t}}}
 		},
 		"scope.spawn": func(it *Interp, a []Value, c callCtx) []Value {
 			it.runtimeAlloc(c.pos)
+			if it.takeFailNextSpawn() {
+				return spawnErrValue()
+			}
 			sc := acc(a[1]).Ref.get().(*Scope)
 			j := &Join{done: make(chan struct{})}
 			sc.Joins = append(sc.Joins, j)
@@ -684,6 +690,15 @@ func init() {
 			if !it.TestHooks {
 				it.trap("explicit", c.pos)
 			}
+			return nil
+		},
+		"testing.fail_next_spawn": func(it *Interp, a []Value, c callCtx) []Value {
+			if !it.TestHooks {
+				it.trap("explicit", c.pos)
+			}
+			it.sh.mu.Lock()
+			it.sh.failNextSpawn = true
+			it.sh.mu.Unlock()
 			return nil
 		},
 		"testing.fail_next_alloc": func(it *Interp, a []Value, c callCtx) []Value {

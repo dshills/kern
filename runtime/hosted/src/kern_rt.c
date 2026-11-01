@@ -1158,7 +1158,16 @@ static void *kern_thread_run(void *arg) {
     free(s);
     return NULL;
 }
+// kern_fail_spawn is armed by testing.fail_next_spawn: the next spawn
+// fails as a failed pthread_create would, before any thread exists.
+static _Atomic int kern_fail_spawn = 0;
+#ifdef KERN_TEST_HOOKS
+void kern_test_fail_next_spawn(void) { atomic_store(&kern_fail_spawn, 1); }
+#endif
+// On failure the packed arguments are freed as bytes only: the kern side
+// destroys the owned ones it kept (Rule 5.5.3), since no thread took them.
 static kern_thread *kern_spawn_common(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, int *ok, const kern_loc *at) {
+    if (atomic_load(&kern_fail_spawn) && atomic_exchange(&kern_fail_spawn, 0)) { *ok = 0; return NULL; }
     kern_thread *t = kern_alloc(sizeof *t, at);
     t->block = kern_alloc((size_t)size, at);
     memcpy(t->block, pack, (size_t)size);

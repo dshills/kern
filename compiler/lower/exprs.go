@@ -1005,6 +1005,10 @@ func (fl *fnLower) spawn(x *ast.CallExpr, info *resolve.CallInfo, t resolve.Type
 		args = append(args, recvAcc)
 	}
 	var spawned []*ir.Value
+	// owned arguments with a destructor, kept in temporaries so that a
+	// failed spawn can destroy them (Rule 5.5.3: on Err, own arguments have
+	// been destroyed); on success the new thread owns them
+	var owned []*ir.Local
 	for i, a := range x.Args[1:] {
 		if i+1 >= len(info.Params) {
 			break
@@ -1023,11 +1027,38 @@ func (fl *fnLower) spawn(x *ast.CallExpr, info *resolve.CallInfo, t resolve.Type
 			args = append(args, acc)
 			spawned = append(spawned, acc)
 		default:
-			args = append(args, fl.value(a.X, fl.ty(p.Type)))
+			pt := fl.ty(p.Type)
+			av := fl.value(a.X, pt)
+			args = append(args, av)
+			if !resolve.IsCopy(pt) && !isClosure(pt) {
+				tmp := fl.newTemp(pt)
+				fl.emit(&ir.Store{Place: ir.Place{Local: tmp}, Src: av})
+				fl.emit(&ir.Init{Place: ir.Place{Local: tmp}})
+				owned = append(owned, tmp)
+			}
 		}
 	}
 	v := fl.newValue(t)
 	fl.emit(&ir.Call{Dsts: []*ir.Value{v}, Intrinsic: info.Intrinsic, Args: args, Pos: x.Pos})
+	if len(owned) > 0 {
+		// Result[_, SpawnErr]: tag 1 is Err, and no thread exists
+		res := fl.newTemp(t)
+		fl.emit(&ir.Store{Place: ir.Place{Local: res}, Src: v})
+		fl.emit(&ir.Init{Place: ir.Place{Local: res}})
+		tag := fl.newValue(&resolve.Prim{Name: "u32"})
+		fl.emit(&ir.Tag{Dst: tag, Place: ir.Place{Local: res}})
+		failed := fl.newBlock("spawn.failed")
+		join := fl.newBlock("spawn.join")
+		fl.terminate(&ir.Switch{Tag: tag, Cases: map[int]*ir.Block{0: join, 1: failed}, Default: join})
+		fl.cur = failed
+		for _, tmp := range owned {
+			fl.emitDrop(ir.Place{Local: tmp}, tmp.Type, x.Pos)
+		}
+		fl.terminate(&ir.Br{Target: join})
+		fl.cur = join
+		v = fl.newValue(t)
+		fl.emit(&ir.Move{Dst: v, Src: ir.Place{Local: res}})
+	}
 	if recvAcc != nil && info.Intrinsic == "scope.spawn" {
 		fl.emit(&ir.AccessEnd{Access: recvAcc})
 	}

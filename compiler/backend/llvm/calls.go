@@ -943,6 +943,8 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.rt("kern_test_shared_seed_count", "void (ptr, i64)", "ptr "+fe.handle(a[0])+", i64 "+fe.v(a[1]))
 	case "testing.fail_next_alloc":
 		fe.rt("kern_test_fail_next_alloc", "void ()", "")
+	case "testing.fail_next_spawn":
+		fe.rt("kern_test_fail_next_spawn", "void ()", "")
 	default:
 		fe.fail("intrinsic %s is not supported natively", c.Intrinsic)
 	}

@@ -1,0 +1,6 @@
+destroyed 1
+thread 1 failed
+destroyed 2
+thread 2 failed
+destroyed 3
+thread 3 returned 3

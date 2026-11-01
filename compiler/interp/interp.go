@@ -70,6 +70,7 @@ type sharedState struct {
 	handler       *FuncVal
 	nextIdent     uint32
 	failNextAlloc bool
+	failNextSpawn bool // testing.fail_next_spawn
 	nextTid       uint64
 	fatal         atomic.Pointer[Trap]  // the first trap on a spawned thread: the program terminates
 	exit          atomic.Pointer[int32] // an exit requested on a spawned thread
@@ -136,6 +137,20 @@ func (it *Interp) takeFailNextAlloc() bool {
 	f := it.sh.failNextAlloc
 	it.sh.failNextAlloc = false
 	return f
+}
+
+// takeFailNextSpawn consumes testing.fail_next_spawn's flag.
+func (it *Interp) takeFailNextSpawn() bool {
+	it.sh.mu.Lock()
+	defer it.sh.mu.Unlock()
+	f := it.sh.failNextSpawn
+	it.sh.failNextSpawn = false
+	return f
+}
+
+// spawnErrValue is a spawn's Err(SpawnErr.ResourceExhausted).
+func spawnErrValue() []Value {
+	return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}}
 }
 
 // fatalTrap records the first trap on a spawned thread, after its record

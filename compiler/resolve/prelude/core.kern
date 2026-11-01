@@ -172,6 +172,9 @@ impl testing {
     func seed_shared_count[T](s: view[Shared[T]], count: u64)
     // the next allocation by a convenience constructor fails (oom trap)
     func fail_next_alloc()
+    // the next thread.spawn or Scope.spawn fails with ResourceExhausted
+    // before any thread exists, so that its own arguments are destroyed
+    func fail_next_spawn()
 }
 
 union Option[T] { Some(T); None }

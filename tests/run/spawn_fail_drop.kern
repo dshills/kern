@@ -1,0 +1,43 @@
+//! phase: 2
+//! expect: output spawn_fail_drop
+//! test-hooks: true
+// A spawn that fails destroys its own arguments (Rule 5.5.3): no thread
+// took them. testing.fail_next_spawn makes the next spawn fail with
+// ResourceExhausted before any thread exists, for thread.spawn and for
+// Scope.spawn; each owned Noisy is destroyed exactly once, at the failed
+// spawn. A spawn that succeeds hands its argument to the thread, which
+// destroys it, once, when it ends.
+module run
+struct Noisy nocopy { n: u64 }
+impl Noisy {
+    destructor(edit self) { print_str("destroyed "); print_u64(self.n); println() }
+}
+func keep(x: own Noisy) -> u64 { return x.n }
+func detached() -> u64 {
+    testing.fail_next_spawn()
+    r := thread.spawn(keep, Noisy { n: 1u64 })
+    match r {
+        Ok(t) => { print_str("thread 1 started"); println() }
+        Err(e) => { print_str("thread 1 failed"); println() }
+    }
+    return 0u64
+}
+func scoped() -> Result[u64, SpawnErr] {
+    with s := thread.scope() {
+        testing.fail_next_spawn()
+        r := s.spawn(keep, Noisy { n: 2u64 })
+        match r {
+            Ok(j) => { print_str("thread 2 started"); println() }
+            Err(e) => { print_str("thread 2 failed"); println() }
+        }
+        j3 := s.spawn(keep, Noisy { n: 3u64 })?
+        got := j3.get() // the thread has ended, and destroyed its Noisy
+        print_str("thread 3 returned "); print_u64(got); println()
+        return Ok(0u64)
+    }
+}
+func main() -> i32 {
+    d := detached()
+    r := scoped()
+    return 0i32
+}
