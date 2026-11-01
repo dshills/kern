@@ -397,6 +397,7 @@ func runInterp(mod *ir.Module, t Test, i int, optLevel string, timeout time.Dura
 		out.Close()
 		errb.Close()
 		it.Stop()
+		it.KillChildren() // the run's children do not outlive it (specs/test-timeout-children)
 		select {
 		case <-ch: // it reached a block boundary, or woke in a lock or a wait, and ended
 		case <-time.After(stopGrace): // inside one long intrinsic: left to finish on its own
@@ -413,6 +414,11 @@ func runNative(exe string, index int, timeout time.Duration) (Run, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, strconv.Itoa(index))
+	// the test runs in a process group of its own, which its children
+	// inherit, and a timeout kills the whole group
+	// (specs/test-timeout-children)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	out, errb := newCapture(0), newCapture(MaxStderrTail)
 	cmd.Stdout, cmd.Stderr = out, errb
 	cmd.WaitDelay = time.Second

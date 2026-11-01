@@ -153,7 +153,9 @@ the spec where it applies:
 ## Not done
 
 - **`kern test --timeout`** stops a test without killing its children
-  (R8): they keep running.
+  (R8): they keep running. *(Resolved 2026-11-01,
+  `specs/test-timeout-children`: a timed-out run's children are killed in
+  both engines.)*
 - **The interpreter child's signal mask** is the mask `kern` was started
   with, not an empty one, when whatever started `kern` blocked signals.
 - **x86-64 Linux** is covered only by CI after a push; the Linux gate runs

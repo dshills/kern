@@ -64,6 +64,7 @@ type sharedState struct {
 	args          []string             // the program's arguments (std/io args)
 	files         map[int64]*os.File   // open files by descriptor (std/io)
 	procs         map[int64]*procEntry // started children by handle (std/process)
+	procsKilled   bool                 // KillChildren ran: a child registered later is killed at once
 	procFaults    [3]atomic.Int32      // the std/process fault hook's slots, by pipe kind
 	nextProc      int64
 	mu            sync.Mutex

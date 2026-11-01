@@ -29,6 +29,7 @@ import (
 // procEntry is one started child.
 type procEntry struct {
 	pid       int
+	reaped    bool         // its status was collected: the pid may be reused, so never signal it
 	fwd       []*forwarder // inherited streams copied into captured writers
 	flushOnce sync.Once
 }
@@ -356,7 +357,13 @@ func procSpawn(it *Interp, a []Value, _ callCtx) []Value {
 	}
 	it.sh.nextProc++
 	h := it.sh.nextProc
-	it.sh.procs[h] = &procEntry{pid: pid, fwd: fwd}
+	e := &procEntry{pid: pid, fwd: fwd}
+	it.sh.procs[h] = e
+	if it.sh.procsKilled {
+		// the run timed out while this child was being started
+		// (specs/test-timeout-children §2): it does not outlive the run
+		killAndReap(e)
+	}
 	it.sh.mu.Unlock()
 	return i64Val(h)
 }
@@ -423,6 +430,9 @@ func procWait(it *Interp, a []Value, _ callCtx) []Value {
 	if r == 0 {
 		return i32Val(0)
 	}
+	it.sh.mu.Lock()
+	p.reaped = true
+	it.sh.mu.Unlock()
 	kind, val := 0, ws.ExitStatus()
 	if ws.Signaled() {
 		kind, val = 1, int(ws.Signal())
@@ -717,4 +727,38 @@ func (f *forwarder) flushNow() {
 	case <-f.flushCh:
 	case <-f.doneCh:
 	}
+}
+
+// KillChildren sends SIGKILL to every child the run started and has not
+// reaped, and to any it registers from now on, and collects their
+// statuses in the background (a timed-out kern test,
+// specs/test-timeout-children). A reaped child's pid may belong to another
+// process by now, so it is never signalled; a failure to signal (ESRCH: it
+// is already gone) is ignored.
+func (it *Interp) KillChildren() {
+	it.sh.mu.Lock()
+	defer it.sh.mu.Unlock()
+	it.sh.procsKilled = true
+	for _, e := range it.sh.procs {
+		if !e.reaped {
+			killAndReap(e)
+		}
+	}
+}
+
+// killAndReap signals one child and collects its status on a goroutine; the
+// caller holds it.sh.mu. If the abandoned run's own wait collects it
+// first, this collection fails with ECHILD, harmlessly.
+func killAndReap(e *procEntry) {
+	_ = syscall.Kill(e.pid, syscall.SIGKILL)
+	e.reaped = true
+	pid := e.pid
+	go func() {
+		var ws syscall.WaitStatus
+		for {
+			if _, err := syscall.Wait4(pid, &ws, 0, nil); !errors.Is(err, syscall.EINTR) {
+				return
+			}
+		}
+	}()
 }

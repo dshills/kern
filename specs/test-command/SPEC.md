@@ -136,8 +136,10 @@ within a configuration test by test in the order of §2.2. A run is
 limited to a timeout (default 10 seconds; `--timeout=<seconds>` takes a
 decimal integer from 1 to 3600, and any other value fails with
 `CLI_INVALID_FLAGS`);
-at expiry a native process is killed, and an interpreter run is
-stopped: each of its threads ends at its next basic block, and a thread
+at expiry a native process is killed (with its process group, so its
+children and their descendants too; *amended 2026-11-01,
+`specs/test-timeout-children`*), and an interpreter run is stopped
+(and every child it started and has not reaped is killed): each of its threads ends at its next basic block, and a thread
 blocked in a lock, a condition wait or a join wakes and ends
 (`specs/test-runs/SPEC.md` R4).
 
