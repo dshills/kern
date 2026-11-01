@@ -52,3 +52,12 @@ starting point and must continue to pass the differential harness.
 
 - No `kern`-in-`kern` build target in Phase 5; packaging ships the Go binary.
 - The standard-library items named above are the first work of a self-hosting phase. *(2026-10-28: non-escaping closures now exist, ADR-010 as amended; `std/str`, `std/map` and `std/io` exist, `docs/reports/std-library.md`; JSON and process control remain.)* *(2026-11-01: `std/json` exists since 2026-10-31, `docs/reports/std-files.md`, and `std/process` now provides process control, `docs/reports/std-process.md`, so every library prerequisite named above is met; the decision to stay in Go through v1.0 is unchanged.)*
+
+## Note (2026-11-01): the parser stage
+
+`examples/selfhost_parser/` is a kern parser written in kern (`specs/selfhost-parser/SPEC.md`,
+`docs/reports/selfhost-parser.md`): a lexer, a recursive-descent parser and a tree dumper,
+about 2,400 lines in a two-module project. `tests/selfhost_parser_test.go` compares its tree
+with the Go parser's (`ast.Dump`) over the whole corpus, 490 files, and they agree on every one;
+spans and diagnostics are the next stage. The decision above is unchanged: the compiler stays in
+Go through v1.0.

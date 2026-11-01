@@ -1,0 +1,396 @@
+// Types and statements of the kern parser (compiler/parser parseType ..
+// parseIf).
+module syntax
+
+impl P {
+    // functype kids: params, ret; F_VIEW marks a closure type
+    func parse_fparams(edit self, ft: usize) {
+        ps := self.list()
+        self.add(ft, ps)
+        l := self.expect(LPAREN)
+        self.nest = self.nest + 1u32
+        while self.more(RPAREN) {
+            p := self.mk(N_PARAM, 0usize, 0usize)
+            self.parse_param_type(p)
+            self.add(ps, p)
+            if !self.accept(COMMA) { break }
+        }
+        self.nest = self.nest - 1u32
+        r := self.expect(RPAREN)
+        ret := self.parse_ret()
+        self.add(ft, ret)
+    }
+
+    func parse_type(edit self) -> usize {
+        t := self.cur()
+        if self.failed { return 0usize }
+        if t.k == IDENT && self.tis(t, "closure") && self.peek(1usize) == LPAREN {
+            u := self.next()
+            ft := self.mk(N_FUNCTYPE, 0usize, 0usize)
+            self.flag(ft, F_VIEW)
+            self.parse_fparams(ft)
+            return ft
+        }
+        if t.k == LBRACK {
+            u := self.next()
+            self.nest = self.nest + 1u32
+            if self.at(RBRACK) {
+                self.nest = self.nest - 1u32
+                v := self.next()
+                elem := self.parse_type()
+                s := self.mk(N_SLICE, 0usize, 0usize)
+                self.add(s, elem)
+                return s
+            }
+            n := self.expect(INT)
+            self.nest = self.nest - 1u32
+            r := self.expect(RBRACK)
+            elem := self.parse_type()
+            a := self.mk(N_ARRAY, 0usize, 0usize)
+            self.add(a, elem)
+            // Atoi of the text without underscores: decimal digits only,
+            // within i64
+            var ln: u64 = 0u64
+            ok := n.e > n.s
+            i := n.s
+            while i < n.e && ok {
+                var c: u8 = 0u8
+                with b := self.src.get(i) { c = b }
+                if c != 95u8 {
+                    if c < 48u8 || c > 57u8 {
+                        ok = false
+                    } else {
+                        match checked_mul(ln, 10u64) {
+                            Some(m) => {
+                                match checked_add(m, u64(c - 48u8)) {
+                                    Some(s) => ln = s
+                                    None => ok = false
+                                }
+                            }
+                            None => ok = false
+                        }
+                    }
+                }
+                i = i + 1usize
+            }
+            if !ok || ln > 9223372036854775807u64 { self.fail() }
+            self.setv(a, ln)
+            return a
+        }
+        if t.k == KW_VIEW || t.k == KW_EDIT {
+            u := self.next()
+            a := self.mk(N_ACCESS, 0usize, 0usize)
+            if t.k == KW_EDIT { self.flag(a, F_EDIT) }
+            l := self.expect(LBRACK)
+            self.nest = self.nest + 1u32
+            if self.at(RBRACK) {
+                self.nest = self.nest - 1u32
+                v := self.next()
+                self.flag(a, F_SEQ)
+                elem := self.parse_type()
+                self.add(a, elem)
+            } else {
+                elem := self.parse_type()
+                self.add(a, elem)
+                self.nest = self.nest - 1u32
+                r := self.expect(RBRACK)
+            }
+            return a
+        }
+        if t.k == KW_FUNC {
+            u := self.next()
+            ft := self.mk(N_FUNCTYPE, 0usize, 0usize)
+            self.parse_fparams(ft)
+            return ft
+        }
+        if t.k == LPAREN {
+            u := self.next()
+            e := self.expect(RPAREN)
+            return self.mk(N_UNIT, 0usize, 0usize)
+        }
+        if t.k == IDENT {
+            if self.is_prim(t.s, t.e) {
+                u := self.next()
+                return self.mk(N_PRIM, t.s, t.e)
+            }
+            if self.tis(t, "RawPtr") {
+                u := self.next()
+                l := self.expect(LBRACK)
+                self.nest = self.nest + 1u32
+                elem := self.parse_type()
+                self.nest = self.nest - 1u32
+                r := self.expect(RBRACK)
+                rp := self.mk(N_RAWPTR, 0usize, 0usize)
+                self.add(rp, elem)
+                return rp
+            }
+            return self.parse_tname()
+        }
+        self.fail()
+        return 0usize
+    }
+
+    // tname: name in s..e, pkg in s2..e2 (empty for none), kid args
+    func parse_tname(edit self) -> usize {
+        n := self.expect(IDENT)
+        tn := self.mk(N_TNAME, n.s, n.e)
+        args := self.list()
+        self.add(tn, args)
+        if self.at(DOT) && self.peek(1usize) == IDENT {
+            u := self.next()
+            m := self.next()
+            self.set2(tn, n.s, n.e)
+            self.set1(tn, m.s, m.e)
+        }
+        if self.at(LBRACK) {
+            u := self.next()
+            self.nest = self.nest + 1u32
+            while true {
+                ty := self.parse_type()
+                self.add(args, ty)
+                if !self.accept(COMMA) { break }
+            }
+            self.nest = self.nest - 1u32
+            r := self.expect(RBRACK)
+        }
+        return tn
+    }
+
+    // ---- statements ----
+
+    func parse_block(edit self) -> usize {
+        t := self.expect(LBRACE)
+        b := self.mk(N_BLOCK, 0usize, 0usize)
+        ss := self.list()
+        self.add(b, ss)
+        saved := self.nest
+        self.nest = 0u32
+        self.skip_nl()
+        while self.more(RBRACE) {
+            if self.at(EOF) {
+                self.fail()
+                break
+            }
+            s := self.parse_stmt()
+            self.add(ss, s)
+            self.skip_nl()
+        }
+        r := self.expect(RBRACE)
+        self.nest = saved
+        return b
+    }
+
+    func parse_stmt(edit self) -> usize {
+        t := self.cur()
+        if self.failed { return 0usize }
+        k := t.k
+        if k == KW_VAR {
+            u := self.next()
+            n := self.expect(IDENT)
+            c := self.expect(COLON)
+            ty := self.parse_type()
+            d := self.mk(N_VAR, n.s, n.e)
+            self.add(d, ty)
+            var init: usize = 0usize
+            if self.accept(ASSIGN) { init = self.parse_expr() }
+            self.add(d, init)
+            self.stmt_end()
+            return d
+        }
+        if k == KW_WITH { return self.parse_with() }
+        if k == KW_MATCH { return self.parse_match() }
+        if k == KW_FOR {
+            u := self.next()
+            v := self.expect(IDENT)
+            f := self.mk(N_FOR, v.s, v.e)
+            if self.accept(COMMA) {
+                v2 := self.expect(IDENT)
+                self.set2(f, v2.s, v2.e)
+            }
+            i := self.expect(KW_IN)
+            iter := self.parse_expr_nolit()
+            body := self.parse_block()
+            self.add(f, iter)
+            self.add(f, body)
+            return f
+        }
+        if k == KW_WHILE {
+            u := self.next()
+            c := self.parse_expr_nolit()
+            body := self.parse_block()
+            w := self.mk(N_WHILE, 0usize, 0usize)
+            self.add(w, c)
+            self.add(w, body)
+            return w
+        }
+        if k == KW_IF { return self.parse_if() }
+        if k == KW_RETURN {
+            u := self.next()
+            r := self.mk(N_RETURN, 0usize, 0usize)
+            var v: usize = 0usize
+            if !self.at(NL) && !self.at(SEMI) && !self.at(RBRACE) { v = self.parse_expr() }
+            self.add(r, v)
+            self.stmt_end()
+            return r
+        }
+        if k == KW_BREAK || k == KW_CONTINUE {
+            u := self.next()
+            self.stmt_end()
+            if k == KW_BREAK { return self.mk(N_BREAK, 0usize, 0usize) }
+            return self.mk(N_CONTINUE, 0usize, 0usize)
+        }
+        if k == KW_UNSAFE {
+            u := self.next()
+            body := self.parse_block()
+            s := self.mk(N_UNSAFE, 0usize, 0usize)
+            self.add(s, body)
+            return s
+        }
+        if k == LBRACE { return self.parse_block() }
+        if k == IDENT && self.peek(1usize) == COLONEQ {
+            u := self.next()
+            v := self.next()
+            x := self.parse_expr()
+            self.stmt_end()
+            d := self.mk(N_SHORT, t.s, t.e)
+            self.add(d, x)
+            return d
+        }
+        e := self.parse_expr()
+        if self.accept(ASSIGN) {
+            v := self.parse_expr()
+            self.stmt_end()
+            a := self.mk(N_ASSIGN, 0usize, 0usize)
+            self.add(a, e)
+            self.add(a, v)
+            return a
+        }
+        self.stmt_end()
+        s := self.mk(N_EXPR, 0usize, 0usize)
+        self.add(s, e)
+        return s
+    }
+
+    // with kids: names (N_NAME list), subject, body
+    func parse_with(edit self) -> usize {
+        t := self.expect(KW_WITH)
+        w := self.mk(N_WITH, 0usize, 0usize)
+        names := self.list()
+        while true {
+            n := self.expect(IDENT)
+            nm := self.mk(N_NAME, n.s, n.e)
+            self.add(names, nm)
+            if !self.accept(COMMA) { break }
+        }
+        c := self.expect(COLONEQ)
+        subj := self.parse_expr_nolit()
+        body := self.parse_block()
+        self.add(w, names)
+        self.add(w, subj)
+        self.add(w, body)
+        return w
+    }
+
+    // match kids: subject, arms; F_VIEW marks `match move`
+    func parse_match(edit self) -> usize {
+        t := self.expect(KW_MATCH)
+        m := self.mk(N_MATCH, 0usize, 0usize)
+        var subj: usize = 0usize
+        if self.at(KW_MOVE) {
+            u := self.next()
+            n := self.expect(IDENT)
+            self.flag(m, F_VIEW)
+            subj = self.mk(N_IDENT, n.s, n.e)
+        } else {
+            subj = self.parse_expr_nolit()
+        }
+        arms := self.list()
+        self.add(m, subj)
+        self.add(m, arms)
+        b := self.expect(LBRACE)
+        self.skip_nl()
+        while self.more(RBRACE) {
+            a := self.parse_arm()
+            self.add(arms, a)
+            self.skip_nl()
+        }
+        e := self.expect(RBRACE)
+        return m
+    }
+
+    // arm: variant in s..e (empty for a wildcard), F_VIEW for `_`, kids
+    // qualifier (or nil), binds (N_NAME list), body
+    func parse_arm(edit self) -> usize {
+        a := self.mk(N_ARM, 0usize, 0usize)
+        var qual: usize = 0usize
+        binds := self.list()
+        if self.accept(UNDERSCORE) {
+            self.flag(a, F_VIEW)
+        } else {
+            n := self.expect(IDENT)
+            vs := n.s
+            ve := n.e
+            while self.at(DOT) {
+                u := self.next()
+                m := self.expect(IDENT)
+                if qual == 0usize {
+                    qual = self.mk(N_TNAME, n.s, n.e)
+                    l := self.list()
+                    self.add(qual, l)
+                } else {
+                    // Qual.Pkg, Qual.Name = Qual.Name, Variant
+                    qs := self.ns(qual)
+                    qe := self.ne(qual)
+                    self.set2(qual, qs, qe)
+                    self.set1(qual, vs, ve)
+                }
+                vs = m.s
+                ve = m.e
+            }
+            self.set1(a, vs, ve)
+            if self.at(LPAREN) {
+                u := self.next()
+                self.nest = self.nest + 1u32
+                while self.more(RPAREN) {
+                    b := self.expect(IDENT)
+                    bn := self.mk(N_NAME, b.s, b.e)
+                    self.add(binds, bn)
+                    if !self.accept(COMMA) { break }
+                }
+                self.nest = self.nest - 1u32
+                r := self.expect(RPAREN)
+            }
+        }
+        f := self.expect(FATARROW)
+        self.add(a, qual)
+        self.add(a, binds)
+        if self.at(LBRACE) {
+            body := self.parse_block()
+            self.add(a, body)
+            self.stmt_end()
+            return a
+        }
+        s := self.parse_stmt()
+        body := self.mk(N_BLOCK, 0usize, 0usize)
+        ss := self.list()
+        self.add(ss, s)
+        self.add(body, ss)
+        self.add(a, body)
+        return a
+    }
+
+    func parse_if(edit self) -> usize {
+        t := self.expect(KW_IF)
+        s := self.mk(N_IF, 0usize, 0usize)
+        c := self.parse_expr_nolit()
+        th := self.parse_block()
+        var el: usize = 0usize
+        if self.accept(KW_ELSE) {
+            if self.at(KW_IF) { el = self.parse_if() } else { el = self.parse_block() }
+        }
+        self.add(s, c)
+        self.add(s, th)
+        self.add(s, el)
+        return s
+    }
+}

@@ -1,0 +1,87 @@
+// The parse tree (specs/selfhost-parser): one Vec of nodes, children by
+// index, index 0 the nil node. A node holds its kind, up to two source
+// ranges (a name and a second name, or a token's text), an integer, flag
+// bits and its children in fixed slots; a list is a node of kind N_LIST
+// whose children are its elements.
+module syntax
+
+const N_NIL: u32 = 0u32
+const N_LIST: u32 = 1u32
+const N_NAME: u32 = 2u32
+const N_STRV: u32 = 3u32
+const N_FILE: u32 = 10u32
+const N_IMPORT: u32 = 11u32
+const N_TP: u32 = 12u32
+const N_FIELD: u32 = 13u32
+const N_STRUCT: u32 = 14u32
+const N_VARIANT: u32 = 15u32
+const N_UNION: u32 = 16u32
+const N_INTERFACE: u32 = 17u32
+const N_IMPL: u32 = 18u32
+const N_DESTRUCTOR: u32 = 19u32
+const N_PARAM: u32 = 20u32
+const N_CONTRACT: u32 = 21u32
+const N_FUNC: u32 = 22u32
+const N_CONST: u32 = 23u32
+const N_GLOBAL: u32 = 24u32
+const N_ASSERT: u32 = 25u32
+const N_PRIM: u32 = 30u32
+const N_TNAME: u32 = 31u32
+const N_ARRAY: u32 = 32u32
+const N_SLICE: u32 = 33u32
+const N_ACCESS: u32 = 34u32
+const N_RAWPTR: u32 = 35u32
+const N_FUNCTYPE: u32 = 36u32
+const N_UNIT: u32 = 37u32
+const N_BLOCK: u32 = 40u32
+const N_VAR: u32 = 41u32
+const N_SHORT: u32 = 42u32
+const N_ASSIGN: u32 = 43u32
+const N_WITH: u32 = 44u32
+const N_ARM: u32 = 45u32
+const N_MATCH: u32 = 46u32
+const N_FOR: u32 = 47u32
+const N_WHILE: u32 = 48u32
+const N_IF: u32 = 49u32
+const N_RETURN: u32 = 50u32
+const N_BREAK: u32 = 51u32
+const N_CONTINUE: u32 = 52u32
+const N_UNSAFE: u32 = 53u32
+const N_EXPR: u32 = 54u32
+const N_INT: u32 = 60u32
+const N_FLOAT: u32 = 61u32
+const N_STRING: u32 = 62u32
+const N_BOOL: u32 = 63u32
+const N_IDENT: u32 = 64u32
+const N_FIELDX: u32 = 65u32
+const N_INDEX: u32 = 66u32
+const N_TYPEARG: u32 = 67u32
+const N_SLICEX: u32 = 68u32
+const N_ARG: u32 = 69u32
+const N_CALL: u32 = 70u32
+const N_BINARY: u32 = 71u32
+const N_UNARY: u32 = 72u32
+const N_TRY: u32 = 73u32
+const N_MOVE: u32 = 74u32
+const N_CLOSURE: u32 = 75u32
+const N_COPY: u32 = 76u32
+const N_TAKE: u32 = 77u32
+const N_REPLACE: u32 = 78u32
+const N_DROP: u32 = 79u32
+const N_TRAP: u32 = 80u32
+const N_CONV: u32 = 81u32
+const N_FINIT: u32 = 82u32
+const N_STRUCTLIT: u32 = 83u32
+const N_ARRAYLIT: u32 = 84u32
+const N_RANGE: u32 = 85u32
+const N_UNITLIT: u32 = 86u32
+const N_PAREN: u32 = 87u32
+
+// Node flag bits, by kind.
+const F_VIEW: u32 = 1u32
+const F_NOCOPY: u32 = 2u32
+const F_PACKED: u32 = 4u32
+const F_EDIT: u32 = 1u32
+const F_SEQ: u32 = 2u32
+
+struct Node nocopy { k: u32; s: usize; e: usize; s2: usize; e2: usize; v: u64; f: u32; kids: Vec[usize] }

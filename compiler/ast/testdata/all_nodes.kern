@@ -1,0 +1,53 @@
+module sample
+import "std/str"
+import "lib/util"
+
+struct P[T: Copy + Send] nocopy { x: u64; y: [4]T }
+view struct V { a: view[u64] }
+struct Q packed { b: u8 }
+union U[T] { A; B(u64, T); C(n: u64, m: view[]u8) }
+interface I { func f(view self) -> u64 }
+impl[T] I for P[T] {
+    func f(view self) -> u64 { return self.x }
+    destructor(edit self) { }
+}
+impl P[u64] {
+    contract { invariant "i"; requires "r\n"; ensures "e" }
+    func g[E](own self, o: out u64, h: func(view[u64]) -> u64, c: closure(own u64) -> (view[u64], edit[u64])) -> u64 where E: Copy release done { return 0u64 }
+}
+extern "C" func ext(a: RawPtr[u8]) -> ()
+extern "C" func exported(a: u64) -> u64 { return a }
+const K: u64 = -5i64 + 3
+thread_local T: u32 = 7u32
+unsafe assert Send for P
+func main() -> i32 {
+    var v: []u8
+    var w: edit[]u8 = x
+    a := 1_000u64 * 2.5f32 / 3 % 4 & 5 << 6 >> 7 - 8 | 9 ^ 10
+    b := !c && d || e == f && g != h && i < j && k <= l && m > n && o >= p
+    a = (1)
+    with s, t := u.at(0usize) { break }
+    match move r {
+        Ok(x) => { continue }
+        lib.U.A => return
+        U.B(p, q) => x = 1
+        _ => { }
+    }
+    match s.t { A => { } }
+    for i in 0usize..10usize { }
+    for k, v in m { }
+    while true { if false { } else if x { } else { } }
+    unsafe { y := copy(z) }
+    r := take(s.f) + replace(s.g, 2) + move z
+    drop(q)
+    trap()
+    n := u32(m) + truncate[u8](m)
+    lit := P { x: 1u64, y: [1, 2, 3] }
+    q := lib.Point { x: 1 }
+    g := Pair[u64, view[]u8] { a: 1 }
+    e := f(out x, 2)?.h[1, 2][3:][:4][5:6]
+    k := |a, b: own u64| a + b
+    j := || { return () }
+    m := f[[]u8, view[u64], func() -> u64, ()]("s\t\"\\\0")
+    return -3
+}

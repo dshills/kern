@@ -1,0 +1,328 @@
+// The kern lexer, ported from compiler/lexer (specs/selfhost-parser): the
+// same tokens and the same newline rule (a newline token only where a
+// statement may end), for files whose identifiers are ASCII. A byte at or
+// above 0x80 outside a string or a comment is an error here, where the Go
+// lexer accepts a non-ASCII letter.
+module syntax
+
+// Token kinds.
+const EOF: u32 = 0u32
+const NL: u32 = 1u32
+const IDENT: u32 = 2u32
+const INT: u32 = 3u32
+const FLOAT: u32 = 4u32
+const STR: u32 = 5u32
+const KW_MODULE: u32 = 10u32
+const KW_IMPORT: u32 = 11u32
+const KW_STRUCT: u32 = 12u32
+const KW_UNION: u32 = 13u32
+const KW_INTERFACE: u32 = 14u32
+const KW_IMPL: u32 = 15u32
+const KW_FOR: u32 = 16u32
+const KW_FUNC: u32 = 17u32
+const KW_EXTERN: u32 = 18u32
+const KW_CONST: u32 = 19u32
+const KW_DESTRUCTOR: u32 = 20u32
+const KW_CONTRACT: u32 = 21u32
+const KW_INVARIANT: u32 = 22u32
+const KW_REQUIRES: u32 = 23u32
+const KW_ENSURES: u32 = 24u32
+const KW_VIEW: u32 = 25u32
+const KW_EDIT: u32 = 26u32
+const KW_OWN: u32 = 27u32
+const KW_OUT: u32 = 28u32
+const KW_SELF: u32 = 29u32
+const KW_VAR: u32 = 30u32
+const KW_WITH: u32 = 31u32
+const KW_MATCH: u32 = 32u32
+const KW_WHILE: u32 = 33u32
+const KW_IF: u32 = 34u32
+const KW_ELSE: u32 = 35u32
+const KW_RETURN: u32 = 36u32
+const KW_BREAK: u32 = 37u32
+const KW_CONTINUE: u32 = 38u32
+const KW_UNSAFE: u32 = 39u32
+const KW_ASSERT: u32 = 40u32
+const KW_IN: u32 = 41u32
+const KW_MOVE: u32 = 42u32
+const KW_COPY: u32 = 43u32
+const KW_TAKE: u32 = 44u32
+const KW_REPLACE: u32 = 45u32
+const KW_DROP: u32 = 46u32
+const KW_TRUNCATE: u32 = 47u32
+const KW_TRUE: u32 = 48u32
+const KW_FALSE: u32 = 49u32
+const KW_NOCOPY: u32 = 50u32
+const KW_THREAD_LOCAL: u32 = 51u32
+const UNDERSCORE: u32 = 52u32
+const LPAREN: u32 = 60u32
+const RPAREN: u32 = 61u32
+const LBRACK: u32 = 62u32
+const RBRACK: u32 = 63u32
+const LBRACE: u32 = 64u32
+const RBRACE: u32 = 65u32
+const COMMA: u32 = 66u32
+const DOT: u32 = 67u32
+const DOTDOT: u32 = 68u32
+const COLON: u32 = 69u32
+const COLONEQ: u32 = 70u32
+const SEMI: u32 = 71u32
+const ARROW: u32 = 72u32
+const FATARROW: u32 = 73u32
+const ASSIGN: u32 = 74u32
+const EQ: u32 = 75u32
+const NE: u32 = 76u32
+const LT: u32 = 77u32
+const LE: u32 = 78u32
+const GT: u32 = 79u32
+const GE: u32 = 80u32
+const PLUS: u32 = 81u32
+const MINUS: u32 = 82u32
+const STAR: u32 = 83u32
+const SLASH: u32 = 84u32
+const PERCENT: u32 = 85u32
+const AMP: u32 = 86u32
+const PIPE: u32 = 87u32
+const CARET: u32 = 88u32
+const SHL: u32 = 89u32
+const SHR: u32 = 90u32
+const ANDAND: u32 = 91u32
+const OROR: u32 = 92u32
+const BANG: u32 = 93u32
+const QUESTION: u32 = 94u32
+
+// Tok is one token: its kind and its byte range in the source.
+struct Tok { k: u32; s: usize; e: usize }
+
+func is_digit(c: u8) -> bool { return c >= 48u8 && c <= 57u8 }
+func is_letter(c: u8) -> bool { return (c >= 97u8 && c <= 122u8) || (c >= 65u8 && c <= 90u8) }
+func is_word(c: u8) -> bool { return c == 95u8 || is_digit(c) || is_letter(c) }
+
+// same reports whether src[a:b] spells w.
+func same(src: view[]u8, a: usize, b: usize, w: view[]u8) -> bool {
+    if b - a != len(w) { return false }
+    i := 0usize
+    while i < len(w) {
+        if src[a + i] != w[i] { return false }
+        i = i + 1usize
+    }
+    return true
+}
+
+// keyword is the kind of the word src[a:b]: a keyword's, or IDENT.
+func keyword(src: view[]u8, a: usize, b: usize) -> u32 {
+    if same(src, a, b, "module") { return KW_MODULE }
+    if same(src, a, b, "import") { return KW_IMPORT }
+    if same(src, a, b, "struct") { return KW_STRUCT }
+    if same(src, a, b, "union") { return KW_UNION }
+    if same(src, a, b, "interface") { return KW_INTERFACE }
+    if same(src, a, b, "impl") { return KW_IMPL }
+    if same(src, a, b, "for") { return KW_FOR }
+    if same(src, a, b, "func") { return KW_FUNC }
+    if same(src, a, b, "extern") { return KW_EXTERN }
+    if same(src, a, b, "const") { return KW_CONST }
+    if same(src, a, b, "destructor") { return KW_DESTRUCTOR }
+    if same(src, a, b, "contract") { return KW_CONTRACT }
+    if same(src, a, b, "invariant") { return KW_INVARIANT }
+    if same(src, a, b, "requires") { return KW_REQUIRES }
+    if same(src, a, b, "ensures") { return KW_ENSURES }
+    if same(src, a, b, "view") { return KW_VIEW }
+    if same(src, a, b, "edit") { return KW_EDIT }
+    if same(src, a, b, "own") { return KW_OWN }
+    if same(src, a, b, "out") { return KW_OUT }
+    if same(src, a, b, "self") { return KW_SELF }
+    if same(src, a, b, "var") { return KW_VAR }
+    if same(src, a, b, "with") { return KW_WITH }
+    if same(src, a, b, "match") { return KW_MATCH }
+    if same(src, a, b, "while") { return KW_WHILE }
+    if same(src, a, b, "if") { return KW_IF }
+    if same(src, a, b, "else") { return KW_ELSE }
+    if same(src, a, b, "return") { return KW_RETURN }
+    if same(src, a, b, "break") { return KW_BREAK }
+    if same(src, a, b, "continue") { return KW_CONTINUE }
+    if same(src, a, b, "unsafe") { return KW_UNSAFE }
+    if same(src, a, b, "assert") { return KW_ASSERT }
+    if same(src, a, b, "in") { return KW_IN }
+    if same(src, a, b, "move") { return KW_MOVE }
+    if same(src, a, b, "copy") { return KW_COPY }
+    if same(src, a, b, "take") { return KW_TAKE }
+    if same(src, a, b, "replace") { return KW_REPLACE }
+    if same(src, a, b, "drop") { return KW_DROP }
+    if same(src, a, b, "truncate") { return KW_TRUNCATE }
+    if same(src, a, b, "true") { return KW_TRUE }
+    if same(src, a, b, "false") { return KW_FALSE }
+    if same(src, a, b, "nocopy") { return KW_NOCOPY }
+    if same(src, a, b, "thread_local") { return KW_THREAD_LOCAL }
+    if same(src, a, b, "_") { return UNDERSCORE }
+    return IDENT
+}
+
+// allows_nl reports whether a newline after the last token ends a
+// statement (the Go lexer's lastAllowsNewline).
+func allows_nl(toks: view[Vec[Tok]]) -> bool {
+    n := toks.len()
+    if n == 0usize { return false }
+    var k: u32 = 0u32
+    with t := toks.get(n - 1usize) { k = t.k }
+    return k == IDENT || k == INT || k == FLOAT || k == STR || k == RPAREN || k == RBRACK || k == RBRACE || k == QUESTION || k == KW_RETURN || k == KW_BREAK || k == KW_CONTINUE || k == KW_TRUE || k == KW_FALSE || k == KW_SELF || k == UNDERSCORE
+}
+
+func emit(toks: edit[Vec[Tok]], k: u32, s: usize, e: usize) { toks.push(Tok { k: k, s: s, e: e }) }
+
+// suffix_at is the length of the primitive suffix the Go lexer takes at
+// src[i:], in its order, or 0 (a suffix followed by a word byte is not one).
+func suffix_at(src: view[]u8, i: usize) -> usize {
+    n := len(src)
+    k := 0usize
+    while k < 12usize {
+        var w: [5]u8 = zero()
+        wl := suffix_word(k, w)
+        if i + wl <= n {
+            j := 0usize
+            while j < wl && src[i + j] == w[j] { j = j + 1usize }
+            if j == wl {
+                after := i + wl
+                if !(after < n && is_word(src[after])) { return wl }
+            }
+        }
+        k = k + 1usize
+    }
+    return 0usize
+}
+
+// suffix_word writes the k-th primitive suffix of the Go lexer's list
+// (isize usize i8 i16 i32 i64 u8 u16 u32 u64 f32 f64) and returns its length.
+func suffix_word(k: usize, w: edit[[5]u8]) -> usize {
+    if k == 0usize { w[0usize] = 105u8; w[1usize] = 115u8; w[2usize] = 105u8; w[3usize] = 122u8; w[4usize] = 101u8; return 5usize }
+    if k == 1usize { w[0usize] = 117u8; w[1usize] = 115u8; w[2usize] = 105u8; w[3usize] = 122u8; w[4usize] = 101u8; return 5usize }
+    var c: u8 = 105u8
+    if k >= 6usize && k <= 9usize { c = 117u8 }
+    if k >= 10usize { c = 102u8 }
+    w[0usize] = c
+    m := (k - 2usize) % 4usize
+    if k >= 10usize { m = k - 10usize + 2usize }
+    if m == 0usize { w[1usize] = 56u8; return 2usize }
+    if m == 1usize { w[1usize] = 49u8; w[2usize] = 54u8; return 3usize }
+    if m == 2usize { w[1usize] = 51u8; w[2usize] = 50u8; return 3usize }
+    w[1usize] = 54u8; w[2usize] = 52u8
+    return 3usize
+}
+
+// two is the kind of a two-byte punctuation at a, b, or 0.
+func two(a: u8, b: u8) -> u32 {
+    if a == 46u8 && b == 46u8 { return DOTDOT }
+    if a == 58u8 && b == 61u8 { return COLONEQ }
+    if a == 45u8 && b == 62u8 { return ARROW }
+    if a == 61u8 && b == 62u8 { return FATARROW }
+    if a == 61u8 && b == 61u8 { return EQ }
+    if a == 33u8 && b == 61u8 { return NE }
+    if a == 60u8 && b == 61u8 { return LE }
+    if a == 62u8 && b == 61u8 { return GE }
+    if a == 60u8 && b == 60u8 { return SHL }
+    if a == 62u8 && b == 62u8 { return SHR }
+    if a == 38u8 && b == 38u8 { return ANDAND }
+    if a == 124u8 && b == 124u8 { return OROR }
+    return 0u32
+}
+
+// one is the kind of a one-byte punctuation, or 0.
+func one(c: u8) -> u32 {
+    if c == 40u8 { return LPAREN }
+    if c == 41u8 { return RPAREN }
+    if c == 91u8 { return LBRACK }
+    if c == 93u8 { return RBRACK }
+    if c == 123u8 { return LBRACE }
+    if c == 125u8 { return RBRACE }
+    if c == 44u8 { return COMMA }
+    if c == 46u8 { return DOT }
+    if c == 58u8 { return COLON }
+    if c == 59u8 { return SEMI }
+    if c == 61u8 { return ASSIGN }
+    if c == 60u8 { return LT }
+    if c == 62u8 { return GT }
+    if c == 43u8 { return PLUS }
+    if c == 45u8 { return MINUS }
+    if c == 42u8 { return STAR }
+    if c == 47u8 { return SLASH }
+    if c == 37u8 { return PERCENT }
+    if c == 38u8 { return AMP }
+    if c == 124u8 { return PIPE }
+    if c == 94u8 { return CARET }
+    if c == 33u8 { return BANG }
+    if c == 63u8 { return QUESTION }
+    return 0u32
+}
+
+// lex tokenizes src into toks and reports whether it had no error.
+func lex(src: view[]u8, toks: edit[Vec[Tok]]) -> bool {
+    n := len(src)
+    pos := 0usize
+    while pos < n {
+        c := src[pos]
+        if c == 10u8 {
+            if allows_nl(toks) { emit(toks, NL, pos, pos + 1usize) }
+            pos = pos + 1usize
+        } else if c == 32u8 || c == 9u8 || c == 13u8 {
+            pos = pos + 1usize
+        } else if c == 47u8 && pos + 1usize < n && src[pos + 1usize] == 47u8 {
+            while pos < n && src[pos] != 10u8 { pos = pos + 1usize }
+        } else if c == 34u8 {
+            start := pos
+            pos = pos + 1usize
+            closed := false
+            while pos < n && !closed {
+                d := src[pos]
+                if d == 34u8 {
+                    pos = pos + 1usize
+                    closed = true
+                } else if d == 92u8 {
+                    if pos + 1usize >= n {
+                        pos = pos + 1usize
+                    } else {
+                        e := src[pos + 1usize]
+                        if e != 110u8 && e != 116u8 && e != 34u8 && e != 92u8 && e != 48u8 { return false }
+                        pos = pos + 2usize
+                    }
+                } else if d == 10u8 {
+                    return false
+                } else {
+                    pos = pos + 1usize
+                }
+            }
+            if !closed { return false }
+            emit(toks, STR, start, pos)
+        } else if is_digit(c) {
+            start := pos
+            is_float := false
+            while pos < n && (is_digit(src[pos]) || src[pos] == 95u8) { pos = pos + 1usize }
+            if pos + 1usize < n && src[pos] == 46u8 && is_digit(src[pos + 1usize]) {
+                is_float = true
+                pos = pos + 1usize
+                while pos < n && is_digit(src[pos]) { pos = pos + 1usize }
+            }
+            pos = pos + suffix_at(src, pos)
+            if is_float { emit(toks, FLOAT, start, pos) } else { emit(toks, INT, start, pos) }
+        } else if c == 95u8 || is_letter(c) {
+            start := pos
+            while pos < n && is_word(src[pos]) { pos = pos + 1usize }
+            if pos < n && src[pos] >= 128u8 { return false }
+            emit(toks, keyword(src, start, pos), start, pos)
+        } else {
+            if pos + 1usize < n {
+                k := two(c, src[pos + 1usize])
+                if k != 0u32 {
+                    emit(toks, k, pos, pos + 2usize)
+                    pos = pos + 2usize
+                    continue
+                }
+            }
+            k := one(c)
+            if k == 0u32 { return false }
+            emit(toks, k, pos, pos + 1usize)
+            pos = pos + 1usize
+        }
+    }
+    if allows_nl(toks) { emit(toks, NL, pos, pos) }
+    emit(toks, EOF, pos, pos)
+    return true
+}
