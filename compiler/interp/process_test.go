@@ -463,7 +463,7 @@ func TestProcInheritPollablePipe(t *testing.T) {
 	}
 	defer func() { _ = r.Close() }()
 	defer func() { _ = w.Close() }() // a second Close after the one below only errors
-	got := make(chan string, 1) // the reader can finish even when the test fails early
+	got := make(chan string, 1)      // the reader can finish even when the test fails early
 	go func() { b, _ := io.ReadAll(r); got <- string(b) }()
 	src := procPrelude + `func main() -> i32 {
     c := process.Command.new("printf")
@@ -519,13 +519,21 @@ func TestProcSweep(t *testing.T) {
 // start. They run here in the test process, so their children are this
 // process's own; none may be left unreaped.
 func TestProcNoZombies(t *testing.T) {
-	for _, name := range []string{"std_process_run", "std_process_env", "std_process_raw", "std_process_pipes"} {
+	names := []string{"std_process_run", "std_process_env", "std_process_raw", "std_process_pipes",
+		"std_process_output", "std_process_output_faults", "std_process_threads"}
+	for _, name := range names {
 		src, err := os.ReadFile(filepath.Join("..", "..", "tests", "run", name+".kern"))
 		if err != nil {
 			t.Fatal(err)
 		}
+		mod, msg := lowerFor([]*source.File{{Name: name + ".kern", Bytes: src}}, "debug")
+		if mod == nil {
+			t.Fatalf("%s: %s", name, msg)
+		}
 		var out syncBuffer
-		if status := runProc(t, string(src), &out, os.Stderr); status != 0 {
+		it := New(mod, name+".kern", &out, os.Stderr)
+		it.TestHooks = bytes.Contains(src, []byte("//! test-hooks: true"))
+		if status := it.Run(); status != 0 {
 			t.Fatalf("%s: status %d", name, status)
 		}
 	}

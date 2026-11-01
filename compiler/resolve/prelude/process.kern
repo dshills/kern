@@ -104,6 +104,18 @@ func proc_close(fd: i32) -> i32
 func proc_read(fd: i32, buf: edit[]u8) -> i64
 func proc_write(fd: i32, data: view[]u8) -> i64
 func proc_errno(which: u8) -> i32
+// The fault hook (tests only): proc_fault_arm sets slot kind (a Pipe's
+// kind) to an errno, which the next pipe operation of that kind takes
+// with proc_fault_take and returns instead of making its call. Arming
+// exists only under --test-hooks (the interpreter traps, a native build
+// fails to link); taking is always there and costs one atomic exchange.
+func proc_fault_arm(kind: u8, code: i32)
+func proc_fault_take(kind: u8) -> i32
+
+// fail_next_io makes the next pipe operation of kind (0 a write to a
+// child's stdin, 1 a read of its stdout, 2 of its stderr), on any pipe,
+// fail with errno code; for tests, under --test-hooks.
+func fail_next_io(kind: u8, code: i32) { proc_fault_arm(kind, code) }
 
 // errno_err is the IoErr of the host's errno number which (0 EINVAL, 1
 // ENAMETOOLONG; proc_errno), so that no errno number is written here.
@@ -345,6 +357,49 @@ impl Command {
         return Ok(Child { h: h, fds: fds, reaped: false, st: [0i32, 0i32] })
     }
 
+    // output runs the child with all three streams piped, whatever the
+    // settings: it writes input to the child's stdin and closes it, and
+    // reads stdout and stderr to their ends, all at once (the readers on
+    // scoped threads), so that no size of either can deadlock it; then it
+    // waits. An EPIPE while writing input (the child stopped reading) is
+    // not an error. A failure stops nothing else: each operation runs to
+    // its end and closes its own pipe end. When any failed, the error is
+    // the first failed one of writing, reading stdout, reading stderr and
+    // waiting (first_err), whatever order they failed in (R7).
+    func output(view self, input: view[]u8) -> Result[Output, io.IoErr] {
+        c := self.spawn_modes([2u8, 2u8, 2u8])?
+        w := c.take_stdin()?
+        o := c.take_stdout()?
+        e := c.take_stderr()?
+        with g := gather(w, o, e, input) {
+            match g {
+                Ok(got) => {
+                    st := c.wait()
+                    var waited: Option[io.IoErr] = None
+                    match st {
+                        Ok(s) => { }
+                        Err(x) => waited = Some(x)
+                    }
+                    first := first_err(got.wrote, err_in(got.read_out), err_in(got.read_err), waited)
+                    match first {
+                        Some(x) => return Err(x)
+                        None => { }
+                    }
+                    so := replace(got.read_out, Ok(Vec[u8].new()))
+                    se := replace(got.read_err, Ok(Vec[u8].new()))
+                    return Ok(Output { status: st?, stdout: so?, stderr: se? })
+                }
+                Err(x) => {
+                    // a reader thread could not start: gather closed stdin
+                    // before the scope joined, so the child can end
+                    st := c.wait()
+                    return Err(errno_err(5u8))
+                }
+            }
+        }
+        return Err(errno_err(5u8))
+    }
+
     // status runs the child to its end with the stream settings, a Piped
     // stream treated as Null, and returns how it ended.
     func status(view self) -> Result[ExitStatus, io.IoErr] {
@@ -452,6 +507,8 @@ impl Pipe {
     // file (the child closed its end) or for an empty buf.
     func read(edit self, buf: edit[]u8) -> Result[usize, io.IoErr] {
         if self.kind == 0u8 { return Err(errno_err(2u8)) }
+        f := proc_fault_take(self.kind)
+        if f != 0i32 { return Err(io.err_of(f)) }
         n := proc_read(self.fd, buf)
         if n < 0i64 { return Err(neg_err(n)) }
         return Ok(usize(n))
@@ -463,6 +520,8 @@ impl Pipe {
         data := Vec[u8].new()
         var buf: [4096]u8 = zero()
         while true {
+            f := proc_fault_take(self.kind)
+            if f != 0i32 { return Err(io.err_of(f)) }
             n := proc_read(self.fd, buf)
             if n < 0i64 { return Err(neg_err(n)) }
             if n == 0i64 { break }
@@ -477,6 +536,8 @@ impl Pipe {
         if self.kind != 0u8 { return Err(errno_err(2u8)) }
         var off: usize = 0usize
         while off < len(data) {
+            f := proc_fault_take(self.kind)
+            if f != 0i32 { return Err(io.err_of(f)) }
             n := proc_write(self.fd, data[off : len(data)])
             if n < 0i64 { return Err(neg_err(n)) }
             off = off + usize(n)
@@ -490,4 +551,97 @@ impl Pipe {
             self.fd = -1i32
         }
     }
+}
+
+// Gathered is what output's three pipe operations produced: the write's
+// failure, if any, and each stream's bytes or failure.
+struct Gathered { wrote: Option[io.IoErr]; read_out: Result[Vec[u8], io.IoErr]; read_err: Result[Vec[u8], io.IoErr] }
+
+// gather runs output's three pipe operations at once: the two readers on
+// scoped threads, the write on the calling thread. Each operation owns its
+// pipe end and closes it when it ends. A reader that cannot start is
+// seen before anything waits for it: gather then closes stdin itself, so
+// that the scope's join of a reader that did start cannot wait for a
+// child that waits for end of file (R7).
+func gather(w: own Pipe, o: own Pipe, e: own Pipe, input: view[]u8) -> Result[Gathered, SpawnErr] {
+    with s := thread.scope() {
+        r1 := s.spawn(read_end, o)
+        var failed: bool = false
+        match r1 {
+            Ok(t) => { }
+            Err(x) => failed = true
+        }
+        if failed {
+            drop(w)
+            return Err(ResourceExhausted)
+        }
+        r2 := s.spawn(read_end, e)
+        match r2 {
+            Ok(t) => { }
+            Err(x) => failed = true
+        }
+        if failed {
+            drop(w)
+            return Err(ResourceExhausted)
+        }
+        wrote := write_end(w, input)
+        jo := r1?
+        je := r2?
+        return Ok(Gathered { wrote: wrote, read_out: jo.get(), read_err: je.get() })
+    }
+}
+
+// read_end reads a pipe end to its end of file, then closes it.
+func read_end(p: own Pipe) -> Result[Vec[u8], io.IoErr] { return p.read_all() }
+
+// write_end writes data to a stdin pipe end, then closes it. An EPIPE
+// (the child stopped reading) is not a failure.
+func write_end(p: own Pipe, data: view[]u8) -> Option[io.IoErr] {
+    r := p.write_all(data)
+    match r {
+        Ok(u) => return None
+        Err(e) => {
+            if is_epipe(e) { return None }
+            return Some(e)
+        }
+    }
+    return None
+}
+
+// is_epipe reports whether e is the host's EPIPE.
+func is_epipe(e: view[io.IoErr]) -> bool {
+    match e {
+        Other(c) => return c == proc_errno(3u8)
+        NotFound => return false
+        Permission => return false
+        Exists => return false
+    }
+    return false
+}
+
+// err_in is the failure a stream's result holds, if any.
+func err_in(r: view[Result[Vec[u8], io.IoErr]]) -> Option[io.IoErr] {
+    match r {
+        Ok(v) => return None
+        Err(e) => return Some(e)
+    }
+    return None
+}
+
+// first_err is the first failure in R7's order: writing input, reading
+// stdout, reading stderr, waiting.
+func first_err(wrote: Option[io.IoErr], on_out: Option[io.IoErr], on_err: Option[io.IoErr], waited: Option[io.IoErr]) -> Option[io.IoErr] {
+    match wrote {
+        Some(e) => return Some(e)
+        None => { }
+    }
+    match on_out {
+        Some(e) => return Some(e)
+        None => { }
+    }
+    match on_err {
+        Some(e) => return Some(e)
+        None => { }
+    }
+    return waited
 }

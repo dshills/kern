@@ -54,6 +54,8 @@ func init() {
 		"proc_read":            procRead,
 		"proc_write":           procWrite,
 		"proc_errno":           procErrno,
+		"proc_fault_arm":       procFaultArm,
+		"proc_fault_take":      procFaultTake,
 	} {
 		intrinsics[k] = v
 	}
@@ -545,12 +547,32 @@ func procClose(it *Interp, a []Value, _ callCtx) []Value {
 }
 
 func procErrno(it *Interp, a []Value, _ callCtx) []Value {
-	codes := []syscall.Errno{syscall.EINVAL, syscall.ENAMETOOLONG, syscall.EBADF, syscall.EPIPE, syscall.EIO}
-	w := int(u64(a[0]))
-	if w >= len(codes) {
-		w = len(codes) - 1
+	codes := map[uint64]syscall.Errno{0: syscall.EINVAL, 1: syscall.ENAMETOOLONG, 2: syscall.EBADF, 3: syscall.EPIPE, 5: syscall.EAGAIN}
+	if c, ok := codes[u64(a[0])]; ok {
+		return i32Val(int32(c))
 	}
-	return i32Val(int32(codes[w]))
+	return i32Val(int32(syscall.EIO))
+}
+
+// procFaultArm arms the fault hook's slot for a pipe kind; it exists only
+// under --test-hooks, as the native runtime's does.
+func procFaultArm(it *Interp, a []Value, c callCtx) []Value {
+	if !it.TestHooks {
+		it.trap("explicit", c.pos)
+	}
+	if k := u64(a[0]); k <= 2 {
+		it.sh.procFaults[k].Store(int32(signedOf(a[1].(Int))))
+	}
+	return nil
+}
+
+// procFaultTake takes and clears the slot for a pipe kind: 0 when unarmed.
+func procFaultTake(it *Interp, a []Value, _ callCtx) []Value {
+	k := u64(a[0])
+	if k > 2 || it.sh.procFaults[k].Load() == 0 {
+		return i32Val(0)
+	}
+	return i32Val(it.sh.procFaults[k].Swap(0))
 }
 
 // forwarder copies a child's inherited stream into a captured writer. It

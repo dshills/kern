@@ -1,0 +1,66 @@
+//! phase: 6
+//! expect: output
+// std/process output (specs/std-process R7, §4 item 3). The child writes
+// 1 MiB to stderr before it reads any of its 1 MiB of input, then copies
+// the input to stdout: an output that wrote all input before reading
+// would deadlock. The byte counts and a checksum of stdout (equal to the
+// input's) are printed. Then a child that reads nothing is given 1 MiB:
+// the EPIPE that writing it meets is not an error.
+module t
+import "std/io"
+import "std/process"
+func say(s: view[]u8) { print_str(s); println() }
+func sum(b: view[]u8) -> u64 {
+    var t: u64 = 0u64
+    var i: usize = 0usize
+    while i < len(b) {
+        t = t + u64(b[i]) * u64(i % 7usize + 1usize)
+        i = i + 1usize
+    }
+    return t
+}
+func status_name(s: view[process.ExitStatus]) {
+    match s {
+        Exited(code) => { print_str("exited "); print_i64(i64(code)); println() }
+        Signaled(g) => { print_str("signaled "); print_i64(i64(g)); println() }
+    }
+}
+func run() -> Result[(), io.IoErr] {
+    data := Vec[u8].new()
+    var i: usize = 0usize
+    while i < 1048576usize {
+        data.push(truncate[u8](i % 251usize))
+        i = i + 1usize
+    }
+    c := process.Command.new("sh")
+    c.arg("-c")
+    c.arg("head -c 1048576 /dev/zero >&2; cat")
+    // the stream settings are ignored: output pipes all three
+    c.stdout(process.Stdio.Null)
+    var want: u64 = 0u64
+    with d := data.as_view() { want = sum(d) }
+    with d := data.as_view() {
+        o := c.output(d)?
+        print_str("stdout "); print_u64(u64(o.stdout.len())); println()
+        print_str("stderr "); print_u64(u64(o.stderr.len())); println()
+        var got: u64 = 0u64
+        with b := o.stdout.as_view() { got = sum(b) }
+        if got == want { say("stdout is the input") } else { say("stdout differs") }
+        status_name(o.status)
+    }
+    t := process.Command.new("true")
+    with d := data.as_view() {
+        o := t.output(d)?
+        print_str("true: stdout "); print_u64(u64(o.stdout.len())); print_str(", ")
+        status_name(o.status)
+    }
+    return Ok(())
+}
+func main() -> i32 {
+    r := run()
+    match r {
+        Ok(u) => { }
+        Err(e) => say("output failed")
+    }
+    return 0i32
+}

@@ -1,0 +1,35 @@
+//! phase: 6
+//! expect: output
+// std/process output's error choice (specs/std-process R7): first_err
+// picks the first failure of writing input, reading stdout, reading
+// stderr and waiting, whatever order they happened in. Every combination
+// of present and absent errors in the four positions, the errors told
+// apart by their codes 1 to 4; "none" when nothing failed.
+module t
+import "std/io"
+import "std/process"
+func at(mask: u32, bit: u32, code: i32) -> Option[io.IoErr] {
+    if (mask >> bit) & 1u32 == 1u32 { return Some(io.IoErr.Other(code)) }
+    return None
+}
+func main() -> i32 {
+    var mask: u32 = 0u32
+    while mask < 16u32 {
+        r := process.first_err(at(mask, 0u32, 1i32), at(mask, 1u32, 2i32), at(mask, 2u32, 3i32), at(mask, 3u32, 4i32))
+        print_u64(u64(mask)); print_str(": ")
+        match r {
+            Some(e) => {
+                match e {
+                    Other(c) => print_i64(i64(c))
+                    NotFound => print_str("?")
+                    Permission => print_str("?")
+                    Exists => print_str("?")
+                }
+            }
+            None => print_str("none")
+        }
+        println()
+        mask = mask + 1u32
+    }
+    return 0i32
+}

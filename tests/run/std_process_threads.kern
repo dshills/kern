@@ -1,0 +1,182 @@
+//! phase: 6
+//! expect: output
+// std/process from several threads at once (specs/std-process R4, R6, R7,
+// §4 item 5). Before anything else, one `ls /dev/fd` child's listing is
+// the baseline (what ls itself opens differs by system). Then the program
+// opens a file and starts a holder child (cat) whose two pipes it keeps
+// open on the main thread until every thread has joined. Meanwhile four
+// threads, each handed an owned Command, start 25 `ls /dev/fd` children
+// each, read each listing on that thread and compare it with the
+// baseline, so that any descriptor the program holds reaching a child is
+// caught; a fifth thread runs output ten times and a sixth status ten
+// times; a seventh is handed an owned Child (a short-lived true) and
+// waits for it.
+module t
+import "std/io"
+import "std/process"
+func say(s: view[]u8) { print_str(s); println() }
+func ls() -> process.Command {
+    c := process.Command.new("ls")
+    c.arg("/dev/fd")
+    c.stdout(process.Stdio.Piped)
+    return c
+}
+func listing(c: view[process.Command]) -> Result[Vec[u8], io.IoErr] {
+    ch := c.spawn()?
+    r := ch.take_stdout()?
+    data := r.read_all()?
+    drop(r)
+    st := ch.wait()?
+    // a failed ls is a failure, never an empty listing that matches
+    if !st.success() { return Err(io.IoErr.Other(1i32)) }
+    return Ok(data)
+}
+func same(a: view[]u8, b: view[]u8) -> bool {
+    if len(a) != len(b) { return false }
+    var i: usize = 0usize
+    while i < len(a) {
+        if a[i] != b[i] { return false }
+        i = i + 1usize
+    }
+    return true
+}
+// lister starts 25 ls children and counts the listings equal to base.
+func lister(c: own process.Command, base: view[]u8) -> u64 {
+    var good: u64 = 0u64
+    var i: u64 = 0u64
+    while i < 25u64 {
+        with r := listing(c) {
+            match r {
+                Ok(data) => { with d := data.as_view() { if same(d, base) { good = good + 1u64 } } }
+                Err(e) => { }
+            }
+        }
+        i = i + 1u64
+    }
+    return good
+}
+func one_output(i: u64) -> Result[bool, io.IoErr] {
+    c := process.Command.new("sh")
+    c.arg("-c")
+    c.arg("cat; printf e >&2")
+    input := Vec[u8].new()
+    input.extend("in")
+    input.push(truncate[u8](48u64 + i))
+    var ok: bool = false
+    with d := input.as_view() {
+        o := c.output(d)?
+        with so := o.stdout.as_view() {
+            with se := o.stderr.as_view() { ok = same(so, d) && same(se, "e") && o.status.success() }
+        }
+    }
+    return Ok(ok)
+}
+// outputter runs output ten times with inputs in0 to in9.
+func outputter(n: u64) -> u64 {
+    var good: u64 = 0u64
+    var i: u64 = 0u64
+    while i < n {
+        r := one_output(i)
+        match r {
+            Ok(ok) => { if ok { good = good + 1u64 } }
+            Err(e) => { }
+        }
+        i = i + 1u64
+    }
+    return good
+}
+// statuser runs status of `exit N` for N from 1 to 10.
+func statuser(n: u64) -> u64 {
+    var good: u64 = 0u64
+    var i: u64 = 1u64
+    while i <= n {
+        c := process.Command.new("sh")
+        c.arg("-c")
+        script := Vec[u8].new()
+        script.extend("exit ")
+        if i >= 10u64 { script.push(49u8); script.push(48u8) } else { script.push(truncate[u8](48u64 + i)) }
+        with sv := script.as_view() { c.arg(sv) }
+        r := c.status()
+        match r {
+            Ok(s) => {
+                match s {
+                    Exited(code) => { if i64(code) == i64(i) { good = good + 1u64 } }
+                    Signaled(g) => { }
+                }
+            }
+            Err(e) => { }
+        }
+        i = i + 1u64
+    }
+    return good
+}
+// waiter waits for a Child it was handed.
+func waiter(c: own process.Child) -> u64 {
+    r := c.wait()
+    match r {
+        Ok(s) => { if s.success() { return 1u64 } }
+        Err(e) => { }
+    }
+    return 0u64
+}
+struct Counts { listings: u64; outputs: u64; statuses: u64; waited: u64 }
+func threads(base: view[]u8, short: own process.Child) -> Result[Counts, SpawnErr] {
+    with s := thread.scope() {
+        j1 := s.spawn(lister, ls(), base)?
+        j2 := s.spawn(lister, ls(), base)?
+        j3 := s.spawn(lister, ls(), base)?
+        j4 := s.spawn(lister, ls(), base)?
+        j5 := s.spawn(outputter, 10u64)?
+        j6 := s.spawn(statuser, 10u64)?
+        j7 := s.spawn(waiter, short)?
+        return Ok(Counts { listings: j1.get() + j2.get() + j3.get() + j4.get(), outputs: j5.get(), statuses: j6.get(), waited: j7.get() })
+    }
+}
+func held(base: view[]u8) -> Result[(), io.IoErr] {
+    path := io.make_temp_file("kern-std-process-threads-")?
+    var fd: i32 = -1i32
+    with p := path.as_view() { fd = io.io_open(p, false) }
+    holder := process.Command.new("cat")
+    holder.stdin(process.Stdio.Piped)
+    holder.stdout(process.Stdio.Piped)
+    h := holder.spawn()?
+    hin := h.take_stdin()?
+    hout := h.take_stdout()?
+    t := process.Command.new("true")
+    short := t.spawn()?
+    r := threads(base, short)
+    match r {
+        Ok(c) => {
+            print_str("listings "); print_u64(c.listings); say(" of 100 equal the baseline")
+            print_str("outputs "); print_u64(c.outputs); say(" of 10")
+            print_str("statuses "); print_u64(c.statuses); say(" of 10")
+            print_str("waited "); print_u64(c.waited); say(" of 1")
+        }
+        Err(e) => say("a thread could not start")
+    }
+    if fd >= 0i32 { c := io.io_close(fd) }
+    drop(hin)
+    drop(hout)
+    st := h.wait()?
+    if st.success() { say("holder exited 0") }
+    with p := path.as_view() { rm := io.remove_file(p) }
+    return Ok(())
+}
+func main() -> i32 {
+    l := ls()
+    with first := listing(l) {
+        match first {
+            Ok(base) => {
+                with b := base.as_view() {
+                    r := held(b)
+                    match r {
+                        Ok(u) => { }
+                        Err(e) => say("failed")
+                    }
+                }
+            }
+            Err(e) => say("no baseline")
+        }
+    }
+    return 0i32
+}

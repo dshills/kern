@@ -1,0 +1,89 @@
+//! phase: 6
+//! expect: output
+//! test-hooks: true
+// std/process output's failure protocol (specs/std-process R7, PLAN.md
+// Phase 4 step 2), with failures injected by the fault hook, since real
+// children cannot make a read or a non-EPIPE write fail. One child for
+// every case; it ignores SIGPIPE, so that a write to a closed pipe fails
+// instead of ending it, and it always reaches its last command, which
+// leaves a marker file. Per case: the error output returns and whether
+// the marker exists (the other operations ran to their ends and the child
+// ended). A stdin write fault (EIO), a stdout read fault (EIO), a stderr
+// read fault (EIO), and stdout (EIO) and stderr (EBADF) faults together,
+// where R7's order picks the stdout one.
+module t
+import "std/io"
+import "std/process"
+func say(s: view[]u8) { print_str(s); println() }
+func join(dir: view[]u8, name: view[]u8) -> Vec[u8] {
+    p := Vec[u8].new()
+    p.extend(dir)
+    p.push(47u8)
+    p.extend(name)
+    return p
+}
+func err_name(e: view[io.IoErr]) {
+    match e {
+        Other(c) => {
+            if c == process.proc_errno(4u8) {
+                print_str("eio")
+            } else if c == process.proc_errno(2u8) {
+                print_str("ebadf")
+            } else {
+                print_str("other")
+            }
+        }
+        NotFound => print_str("not found")
+        Permission => print_str("permission")
+        Exists => print_str("exists")
+    }
+}
+func run_case(dir: view[]u8, name: view[]u8) {
+    c := process.Command.new("sh")
+    c.arg("-c")
+    c.arg("trap '' PIPE; cat >/dev/null; printf out; printf err >&2; printf done >\"$KSP_D/marker\"")
+    c.env_set("KSP_D", dir)
+    print_str(name); print_str(": ")
+    with r := c.output("some input") {
+        match r {
+            Ok(o) => print_str("no error")
+            Err(e) => err_name(e)
+        }
+    }
+    marker := join(dir, "marker")
+    with m := marker.as_view() {
+        k := io.kind_of(m)
+        match k {
+            Ok(kind) => {
+                print_str(", marker")
+                rm := io.remove_file(m)
+            }
+            Err(e) => print_str(", no marker")
+        }
+    }
+    println()
+}
+func main() -> i32 {
+    eio := process.proc_errno(4u8)
+    with made := io.make_temp_dir("kern-std-process-faults-") {
+        match made {
+            Ok(dir) => {
+                with d := dir.as_view() {
+                    run_case(d, "none")
+                    process.fail_next_io(0u8, eio)
+                    run_case(d, "stdin")
+                    process.fail_next_io(1u8, eio)
+                    run_case(d, "stdout")
+                    process.fail_next_io(2u8, eio)
+                    run_case(d, "stderr")
+                    process.fail_next_io(1u8, eio)
+                    process.fail_next_io(2u8, process.proc_errno(2u8))
+                    run_case(d, "stdout and stderr")
+                    rm := io.remove_dir(d)
+                }
+            }
+            Err(e) => say("no temporary directory")
+        }
+    }
+    return 0i32
+}

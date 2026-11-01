@@ -639,9 +639,9 @@ int64_t kern_proc_read(int32_t fd, char *buf, int64_t n) {
 // kern_proc_write writes to a pipe end: bytes written or -errno; EINTR is
 // retried. A write to a child that closed its end is EPIPE and never
 // ends the program (R6): macOS's ends carry F_SETNOSIGPIPE; on Linux the
-// write runs with SIGPIPE blocked in the calling thread, and the SIGPIPE
-// it raised is taken back before the mask is restored, unless one was
-// already pending, which is left for the program.
+// write runs with SIGPIPE blocked in the calling thread, and a SIGPIPE
+// that became pending during it is taken back before the mask is
+// restored; one already pending before is left for the program.
 int64_t kern_proc_write(int32_t fd, const char *data, int64_t n) {
 #ifdef __APPLE__
     ssize_t r;
@@ -657,7 +657,14 @@ int64_t kern_proc_write(int32_t fd, const char *data, int64_t n) {
     ssize_t r;
     do r = write(fd, data, (size_t)n); while (r < 0 && errno == EINTR);
     int e = errno;
-    if (r < 0 && e == EPIPE && !was_pending) {
+    // the SIGPIPE this write raised: with EPIPE, or with a short write, since
+    // when the reader goes away during a blocked write Linux returns the
+    // bytes already written and still raises SIGPIPE. A SIGPIPE arriving
+    // during a full write (sent to the thread) was not raised by it, and
+    // is left pending for the program.
+    int could_raise = (r < 0 && e == EPIPE) || (r >= 0 && r < n);
+    sigpending(&pending);
+    if (could_raise && !was_pending && sigismember(&pending, SIGPIPE) == 1) {
         struct timespec zero = {0, 0};
         while (sigtimedwait(&pipeset, NULL, &zero) < 0 && errno == EINTR) { }
     }
@@ -671,9 +678,26 @@ int32_t kern_proc_errno(uint8_t which) {
     case 1: return ENAMETOOLONG;
     case 2: return EBADF;
     case 3: return EPIPE;
+    case 5: return EAGAIN;
     default: return EIO;
     }
 }
+// kern_proc_faults are the fault hook's slots, one per pipe kind (0 stdin
+// writes, 1 stdout reads, 2 stderr reads): an errno the next operation of
+// that kind returns instead of making its call. Taking is always there;
+// arming exists only in a --test-hooks build, so a program arming a fault
+// without it fails to link.
+static _Atomic int32_t kern_proc_faults[3];
+int32_t kern_proc_fault_take(uint8_t kind) {
+    if (kind > 2) return 0;
+    if (atomic_load_explicit(&kern_proc_faults[kind], memory_order_relaxed) == 0) return 0;
+    return atomic_exchange(&kern_proc_faults[kind], 0);
+}
+#ifdef KERN_TEST_HOOKS
+void kern_proc_fault_arm(uint8_t kind, int32_t code) {
+    if (kind <= 2) atomic_store(&kern_proc_faults[kind], code);
+}
+#endif
 void kern_yield(void) { sched_yield(); }
 uint64_t kern_now_ns(void) { struct timespec ts; clock_gettime(KERN_CLOCK, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
 

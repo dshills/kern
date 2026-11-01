@@ -547,7 +547,11 @@ Phase 3 is committed.
    No operation is cancelled: each runs to its own end, and each pipe is
    closed only by the thread using it, as R7 requires. The result is
    `first_err(write, out, err, wait)`, a separate kern function applying
-   R7's precedence.
+   R7's precedence. As built: the threaded part is `gather`, which
+   returns `Result[Gathered, SpawnErr]` (scoped spawn's `?` needs that
+   error type); `output` moves each stream's result out of the `Gathered`
+   with `replace`, and a reader thread that cannot start is EAGAIN, after
+   the child has been waited for.
 2. `tests/run/std_process_first_err.kern` calls `process.first_err`
    directly (std modules export every declaration) with every
    combination of present and absent errors in the four positions and
@@ -576,8 +580,10 @@ Phase 3 is committed.
      exactly once, by the first operation of that kind in the process,
      and nothing is left armed afterwards. Unarmed, the cost is one
      atomic load per pipe operation.
-   - Slots are process-wide; the fault fixture runs one `output` at a
-     time, which is what associates a fault with an invocation.
+   - Slots are process-wide natively and per program in the interpreter
+     (`sharedState`, as built: `kern test` runs several programs in one
+     process); the fault fixture runs one `output` at a time, which is
+     what associates a fault with an invocation.
 
    `tests/run/std_process_output_faults.kern` (header `test-hooks: true`,
    as the `fail_next_alloc` fixtures have, so it runs where hooks exist)

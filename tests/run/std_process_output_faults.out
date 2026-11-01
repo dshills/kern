@@ -1,0 +1,5 @@
+none: no error, marker
+stdin: eio, marker
+stdout: eio, marker
+stderr: eio, marker
+stdout and stderr: eio, marker

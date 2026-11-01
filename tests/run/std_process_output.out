@@ -1,0 +1,5 @@
+stdout 1048576
+stderr 1048576
+stdout is the input
+exited 0
+true: stdout 0, exited 0

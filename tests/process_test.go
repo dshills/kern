@@ -419,3 +419,45 @@ func TestProcessSignals(t *testing.T) {
 	expectEngines(t, src, "", nil, nil, func(string) string { return "signaled 1\nexited 0\n" })
 	expectEngines(t, src, "", nil, nil, func(string) string { return "signaled 1\nexited 0\n" }, ignoring("CHLD")...)
 }
+
+// TestProcessFaultHookGuard: the fault hook exists only under
+// --test-hooks, enforced at the entry itself, since std modules export
+// every declaration. Without hooks, arming a fault traps in the
+// interpreter and the native build fails to link; with them, both run.
+func TestProcessFaultHookGuard(t *testing.T) {
+	kern := kernBinary(t)
+	dir := t.TempDir()
+	prog := filepath.Join(dir, "prog.kern")
+	src := `module t
+import "std/process"
+func main() -> i32 {
+    process.proc_fault_arm(1u8, 5i32)
+    print_str("armed")
+    println()
+    return 0i32
+}
+`
+	if err := os.WriteFile(prog, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) (string, error) {
+		out, err := exec.Command(kern, args...).CombinedOutput()
+		return string(out), err
+	}
+	if out, err := run("run", prog); err == nil || strings.Contains(out, "armed") || !strings.Contains(out, "explicit") {
+		t.Errorf("interpreter without hooks: err %v, output %q", err, out)
+	}
+	if out, err := run("build", "-o", filepath.Join(dir, "plain"), prog); err == nil || !strings.Contains(out, "kern_proc_fault_arm") {
+		t.Errorf("native without hooks linked: err %v, output %q", err, out)
+	}
+	if out, err := run("run", "--test-hooks", prog); err != nil || out != "armed\n" {
+		t.Errorf("interpreter with hooks: err %v, output %q", err, out)
+	}
+	bin := filepath.Join(dir, "hooked")
+	if out, err := run("build", "--test-hooks", "-o", bin, prog); err != nil {
+		t.Fatalf("native with hooks: %v\n%s", err, out)
+	}
+	if out, err := exec.Command(bin).CombinedOutput(); err != nil || string(out) != "armed\n" {
+		t.Errorf("native with hooks: err %v, output %q", err, out)
+	}
+}
