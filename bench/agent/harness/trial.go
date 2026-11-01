@@ -17,10 +17,26 @@ import (
 // queries has plain-text diagnostics and the same queries, documented has
 // plain-text diagnostics and docs/bounds-checks.md (what the queries would
 // tell, written down) in its reference, plain has plain-text diagnostics
-// only. Comparing structured with queries isolates the diagnostics'
+// only. rules is documented with only the document's rules
+// (bench/agent/docs/bounds-checks-rules.md): no list of the forms that
+// stay checked and no rewrite advice, which were written knowing suite 4's
+// idioms. Comparing structured with queries isolates the diagnostics'
 // format, queries with plain the queries, documented with plain the
-// documentation, and queries with documented a tool against a document.
-var arms = []string{"structured", "queries", "documented", "plain"}
+// documentation, queries with documented a tool against a document, and
+// documented with rules the tailored part of the document.
+var arms = []string{"structured", "queries", "documented", "rules", "plain"}
+
+// armDocument is the bounds-check document an arm's reference includes,
+// relative to the repository root, or "".
+func armDocument(arm string) string {
+	switch arm {
+	case "documented":
+		return filepath.Join("docs", "bounds-checks.md")
+	case "rules":
+		return filepath.Join("bench", "agent", "docs", "bounds-checks-rules.md")
+	}
+	return ""
+}
 
 // hasQueries reports an arm offered the semantic query tools.
 func hasQueries(arm string) bool { return arm == "structured" || arm == "queries" }
@@ -51,13 +67,13 @@ func systemPrompt(root string, arm string) string {
 	if hasQueries(arm) {
 		b.WriteString(querySentence)
 	}
-	if arm == "documented" {
+	if armDocument(arm) != "" {
 		b.WriteString("The section \"Which bounds checks the compiler proves\" of the reference below says which bounds checks the compiler removes and which it keeps; use it to meet a requirement stated in terms of what the compiler reports.\n\n")
 	}
 	b.WriteString("# Language reference\n\n")
 	b.Write(ref)
-	if arm == "documented" {
-		bc, _ := os.ReadFile(filepath.Join(root, "docs", "bounds-checks.md"))
+	if doc := armDocument(arm); doc != "" {
+		bc, _ := os.ReadFile(filepath.Join(root, doc))
 		b.WriteString("\n\n")
 		b.Write(bc)
 	}

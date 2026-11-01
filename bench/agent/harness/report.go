@@ -75,6 +75,9 @@ func writeAgentReport(records []trialRecord, tasks []*task, trials, iterations i
 	if present["documented"] {
 		queriesNote += ", `documented` (text diagnostics, no queries, and `docs/bounds-checks.md` added to the reference)"
 	}
+	if present["rules"] {
+		queriesNote += ", `rules` (as `documented` with only that document's rules: `bench/agent/docs/bounds-checks-rules.md`)"
+	}
 	fmt.Fprintf(&b, "Models: %s. Trials per task, model and arm: %d. Arms: `structured` (JSON diagnostics with rule numbers, related spans and fixes, plus the semantic queries `explain_ownership`, `show_copies`, `show_allocations`, `show_bounds_checks` and `show_layout`)%s and `plain` (text diagnostics only); every arm receives the same language reference, grammar, prelude and examples.\n\n", strings.Join(modelList, ", "), trials, queriesNote)
 	cells := map[string]*cell{} // task|model|arm
 	for _, r := range records {
@@ -134,6 +137,8 @@ var pairs = []struct{ better, worse, what string }{
 	{"structured", "queries", "JSON diagnostics, the queries held constant"},
 	{"documented", "plain", "a written account of the proofs, no tools"},
 	{"queries", "documented", "the query tool against the written account"},
+	{"rules", "plain", "the proof rules alone, written down"},
+	{"documented", "rules", "the list of forms that stay checked, and the rewrite advice"},
 }
 
 // decomposition scores every pair of pairs whose arms both ran, under the

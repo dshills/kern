@@ -344,6 +344,9 @@ func TestQueriesArm(t *testing.T) {
 	if sd := systemPrompt(filepath.Join("..", "..", ".."), "documented"); !strings.Contains(sd, "# Which bounds checks the compiler proves") || strings.Contains(sd, "show_bounds_checks") || len(names("documented")) != len(names("plain")) {
 		t.Errorf("the documented arm's prompt or tools: %.400s", sd)
 	}
+	if sr := systemPrompt(filepath.Join("..", "..", ".."), "rules"); !strings.Contains(sr, "## What proves a check") || strings.Contains(sr, "midpoint") || strings.Contains(sr, "To make such an access") {
+		t.Errorf("the rules arm's document is not the rules alone: %.400s", sr)
+	}
 	if !strings.Contains(sq, "plain-text diagnostics") || !strings.Contains(sq, querySentence) || strings.Contains(sq, "structured JSON") {
 		t.Errorf("the queries arm's prompt: %.400s", sq)
 	}
