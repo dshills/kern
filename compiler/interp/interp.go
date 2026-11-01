@@ -47,6 +47,9 @@ type Interp struct {
 	// compiled form: the reference the compiled form is tested against
 	// (specs/interp-compile).
 	genericExec bool
+	// plans caches destroy's per-type work for this thread
+	// (specs/interp-destroy-plans); a child thread starts its own.
+	plans map[resolve.Type]*destroyPlan
 }
 
 // New creates an interpreter for a module. out receives program output,
@@ -103,6 +106,7 @@ func (it *Interp) child() *Interp {
 	c.globals = it.freshGlobals()
 	c.inTrap = false
 	c.cur = nil
+	c.plans = nil
 	it.sh.mu.Lock()
 	it.sh.nextTid++
 	c.tid = it.sh.nextTid
@@ -1263,41 +1267,50 @@ func (it *Interp) conv(x Value, to string, truncate, saturate bool) Value {
 // ---- destruction (spec §5.7) ----
 
 // destroy runs a value's destructor and destroys its fields in reverse
-// declaration order.
+// declaration order. What it needs about the type (Copy or not, the
+// destructor's name, the substituted field types) comes from the type's
+// plan, computed once (specs/interp-destroy-plans).
 func (it *Interp) destroy(v Value, t resolve.Type) {
-	if v == nil || resolve.IsCopy(t) {
+	if v == nil {
 		return
 	}
-	switch x := t.(type) {
-	case *resolve.Array:
+	switch t.(type) {
+	case *resolve.Array, *resolve.Named:
+	default:
+		return // no other type holds anything to destroy
+	}
+	p := it.planOf(t)
+	if p.copy {
+		return
+	}
+	if p.opaque {
+		it.destroyLibrary(v, t.(*resolve.Named))
+		return
+	}
+	if p.elem != nil {
 		arr, ok := v.(*Array)
 		if !ok {
 			return
 		}
 		for i := len(arr.Elems) - 1; i >= 0; i-- {
-			it.destroy(arr.Elems[i], x.Elem)
+			it.destroy(arr.Elems[i], p.elem)
 		}
-	case *resolve.Named:
-		if layout.Opaque(x) {
-			it.destroyLibrary(v, x)
-			return
+		return
+	}
+	if p.dtor != "" {
+		slot := v
+		it.callNamed(p.dtor, []Value{&Access{Ref: slotRef{&slot}, Edit: true}})
+		v = slot
+	}
+	switch val := v.(type) {
+	case *Struct:
+		for i := len(p.fields) - 1; i >= 0; i-- {
+			it.destroy(val.Fields[i], p.fields[i])
 		}
-		args := typeArgs(x)
-		if x.Decl.Destructor != nil {
-			slot := v
-			it.callNamed(x.String()+".destructor", []Value{&Access{Ref: slotRef{&slot}, Edit: true}})
-			v = slot
-		}
-		switch val := v.(type) {
-		case *Struct:
-			for i := len(x.Decl.Fields) - 1; i >= 0; i-- {
-				it.destroy(val.Fields[i], resolve.Subst(x.Decl.Fields[i].Type, args))
-			}
-		case *Union:
-			vd := x.Decl.Variants[val.Tag]
-			for i := len(vd.Fields) - 1; i >= 0; i-- {
-				it.destroy(val.Fields[i], resolve.Subst(vd.Fields[i].Type, args))
-			}
+	case *Union:
+		fs := p.variants[val.Tag]
+		for i := len(fs) - 1; i >= 0; i-- {
+			it.destroy(val.Fields[i], fs[i])
 		}
 	}
 }
