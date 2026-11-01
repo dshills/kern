@@ -500,7 +500,9 @@ tests do not run in parallel, so no other test's children interfere.
    `data` returning `Ok(())` without a call, then the retry loop of
    `std/io`'s `write_all`.
 2. `Child.take_stdin`, `take_stdout`, `take_stderr`: move `fds[i]` into
-   a `Pipe` and set it to -1.
+   a `Pipe` and set it to -1, returning `Result[Pipe, io.IoErr]` (EBADF
+   when there is none): an `Option[Pipe]` cannot be destructured, which
+   the fixture showed, so the spec's R5 was amended.
 3. `Piped` in both spawn implementations (step 2 of the native spawn;
    `os.Pipe` in the interpreter, the parent end stored in `files`).
    `wait` closes `fds[0]` first, waits, then closes the rest (R5).

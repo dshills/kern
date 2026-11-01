@@ -1,0 +1,176 @@
+//! phase: 6
+//! expect: output
+// std/process pipes (specs/std-process R4 Piped, R5, R6, §4 item 2): cat
+// fed through its stdin pipe and read back through its stdout; a second
+// take_stdout is EBADF; reading a stdin pipe end and writing a stdout
+// one are EBADF; a write to a child that closed its stdin is EPIPE and
+// the program carries on (the child prints r once its stdin is closed,
+// and the program reads that r before writing); try_wait on a running
+// cat, then end of file and wait; wait closing a stdin pipe it still
+// holds, so that cat can end; kill and terminate; kill after try_wait
+// reaped the child.
+module t
+import "std/io"
+import "std/process"
+func say(s: view[]u8) { print_str(s); println() }
+func err_name(e: view[io.IoErr]) {
+    match e {
+        NotFound => say("not found")
+        Permission => say("permission")
+        Exists => say("exists")
+        Other(c) => {
+            if c == process.proc_errno(2u8) {
+                say("ebadf")
+            } else if c == process.proc_errno(3u8) {
+                say("epipe")
+            } else {
+                say("other")
+            }
+        }
+    }
+}
+func show(r: view[Result[process.ExitStatus, io.IoErr]]) {
+    match r {
+        Ok(s) => {
+            match s {
+                Exited(code) => { print_str("exited "); print_i64(i64(code)); println() }
+                Signaled(g) => { print_str("signaled "); print_i64(i64(g)); println() }
+            }
+        }
+        Err(e) => err_name(e)
+    }
+}
+func piped(program: view[]u8, stdin: bool, stdout: bool) -> process.Command {
+    c := process.Command.new(program)
+    if stdin { c.stdin(process.Stdio.Piped) }
+    if stdout { c.stdout(process.Stdio.Piped) }
+    return c
+}
+
+func round_trip() -> Result[(), io.IoErr] {
+    cmd := piped("cat", true, true)
+    c := cmd.spawn()?
+    w := c.take_stdin()?
+    w.write_all("hello pipes\n")?
+    drop(w)
+    r := c.take_stdout()?
+    data := r.read_all()?
+    with b := data.as_view() { print_str(b) }
+    with again := c.take_stdout() {
+        match again {
+            Ok(p) => say("stdout twice")
+            Err(e) => err_name(e)
+        }
+    }
+    st := c.wait()
+    show(st)
+    return Ok(())
+}
+
+func wrong_way() -> Result[(), io.IoErr] {
+    cmd := piped("cat", true, true)
+    c := cmd.spawn()?
+    w := c.take_stdin()?
+    var buf: [4]u8 = zero()
+    got := w.read(buf)
+    match got {
+        Ok(n) => say("read a stdin pipe")
+        Err(e) => err_name(e)
+    }
+    drop(w)
+    r := c.take_stdout()?
+    x := r.write_all("")
+    match x {
+        Ok(u) => say("wrote a stdout pipe")
+        Err(e) => err_name(e)
+    }
+    st := c.wait()
+    show(st)
+    return Ok(())
+}
+
+func broken() -> Result[(), io.IoErr] {
+    cmd := piped("sh", true, true)
+    cmd.arg("-c")
+    cmd.arg("exec 0<&-; printf r; sleep 1")
+    c := cmd.spawn()?
+    r := c.take_stdout()?
+    var b: [1]u8 = zero()
+    n := r.read(b)?
+    if n == 1usize && b[0usize] == 114u8 { say("child closed its stdin") }
+    w := c.take_stdin()?
+    x := w.write_all("data")
+    match x {
+        Ok(u) => say("wrote")
+        Err(e) => err_name(e)
+    }
+    st := c.wait()
+    show(st)
+    say("the program carries on")
+    return Ok(())
+}
+
+func polled() -> Result[(), io.IoErr] {
+    cmd := piped("cat", true, false)
+    c := cmd.spawn()?
+    t := c.try_wait()?
+    match t {
+        Some(s) => say("ended")
+        None => say("running")
+    }
+    w := c.take_stdin()?
+    drop(w)
+    st := c.wait()
+    show(st)
+    held := piped("cat", true, false)
+    h := held.spawn()?
+    sh := h.wait()
+    show(sh)
+    return Ok(())
+}
+
+func signalled() -> Result[(), io.IoErr] {
+    k := piped("cat", true, false)
+    kc := k.spawn()?
+    kc.kill()?
+    ks := kc.wait()
+    show(ks)
+    tc := k.spawn()?
+    tc.terminate()?
+    ts := tc.wait()
+    show(ts)
+    d := process.Command.new("true")
+    dc := d.spawn()?
+    var ended: bool = false
+    while !ended {
+        t := dc.try_wait()?
+        match t {
+            Some(s) => ended = true
+            None => { }
+        }
+    }
+    dc.kill()?
+    say("kill after reap ok")
+    return Ok(())
+}
+
+func report(r: view[Result[(), io.IoErr]]) {
+    match r {
+        Ok(u) => { }
+        Err(e) => err_name(e)
+    }
+}
+
+func main() -> i32 {
+    r1 := round_trip()
+    report(r1)
+    r2 := wrong_way()
+    report(r2)
+    r3 := broken()
+    report(r3)
+    r4 := polled()
+    report(r4)
+    r5 := signalled()
+    report(r5)
+    return 0i32
+}

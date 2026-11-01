@@ -519,7 +519,7 @@ func TestProcSweep(t *testing.T) {
 // start. They run here in the test process, so their children are this
 // process's own; none may be left unreaped.
 func TestProcNoZombies(t *testing.T) {
-	for _, name := range []string{"std_process_run", "std_process_env", "std_process_raw"} {
+	for _, name := range []string{"std_process_run", "std_process_env", "std_process_raw", "std_process_pipes"} {
 		src, err := os.ReadFile(filepath.Join("..", "..", "tests", "run", name+".kern"))
 		if err != nil {
 			t.Fatal(err)

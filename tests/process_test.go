@@ -336,12 +336,46 @@ func TestProcessDescriptors(t *testing.T) {
     return 0i32
 }
 `
-	expectEngines(t, probe, "", nil, []uintptr{^uintptr(0), 1, 2}, func(e string) string {
+	stdinClosed := func(e string) string {
 		if e == "interp" {
 			return "open\nexited 0\n"
 		}
 		return "closed\nexited 0\n"
-	})
+	}
+	expectEngines(t, probe, "", nil, []uintptr{^uintptr(0), 1, 2}, stdinClosed)
+
+	// the same with the child's stdout piped: neither the pipe nor anything
+	// else takes the place of the closed descriptor 0, in the child or in
+	// the program (PLAN.md Phase 3)
+	pipedProbe := processPrelude + `func scenario() -> Result[(), io.IoErr] {
+    c := sh("if [ -e /dev/fd/0 ]; then echo open; else echo closed; fi")
+    c.stdout(process.Stdio.Piped)
+    ch := c.spawn()?
+    r := ch.take_stdout()?
+    data := r.read_all()?
+    with b := data.as_view() { print_str(b) }
+    st := ch.wait()
+    match st {
+        Ok(s) => {
+            match s {
+                Exited(code) => { print_str("exited "); print_i64(i64(code)); println() }
+                Signaled(g) => say("signaled")
+            }
+        }
+        Err(e) => say("wait failed")
+    }
+    return Ok(())
+}
+func main() -> i32 {
+    r := scenario()
+    match r {
+        Ok(u) => { }
+        Err(e) => say("failed")
+    }
+    return 0i32
+}
+`
+	expectEngines(t, pipedProbe, "", nil, []uintptr{^uintptr(0), 1, 2}, stdinClosed)
 }
 
 // TestProcessEnvParity: both engines see the environment the program

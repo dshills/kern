@@ -1,0 +1,16 @@
+hello pipes
+ebadf
+exited 0
+ebadf
+ebadf
+exited 0
+child closed its stdin
+epipe
+exited 0
+the program carries on
+running
+exited 0
+exited 0
+signaled 9
+signaled 15
+kill after reap ok

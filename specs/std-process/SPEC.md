@@ -156,9 +156,9 @@ func status(view self) -> Result[ExitStatus, io.IoErr]
 func output(view self, input: view[]u8) -> Result[Output, io.IoErr]
 
 func id(view self) -> u32                            // impl Child
-func take_stdin(edit self) -> Option[Pipe]
-func take_stdout(edit self) -> Option[Pipe]
-func take_stderr(edit self) -> Option[Pipe]
+func take_stdin(edit self) -> Result[Pipe, io.IoErr]
+func take_stdout(edit self) -> Result[Pipe, io.IoErr]
+func take_stderr(edit self) -> Result[Pipe, io.IoErr]
 func try_wait(edit self) -> Result[Option[ExitStatus], io.IoErr]
 func wait(own self) -> Result[ExitStatus, io.IoErr]
 func terminate(edit self) -> Result[(), io.IoErr]
@@ -295,8 +295,11 @@ error and no child:
 - `id()` is the child's process ID. It is not otherwise used by the
   library and may be printed by no fixture.
 - `take_stdin`, `take_stdout`, `take_stderr` return the stream's pipe end
-  the first time for a `Piped` stream, and `None` afterwards and for a
-  stream that is not `Piped`.
+  the first time for a `Piped` stream, and errno EBADF afterwards and for
+  a stream that is not `Piped`. (A `Result`, not an `Option`: a `Pipe`
+  has a destructor, so an `Option[Pipe]` cannot be destructured
+  (`OWN_DESTRUCTURE_DESTRUCTOR`), while `?` moves a `Pipe` out of a
+  `Result`; amended in Phase 3.)
 - `try_wait()` returns `Ok(Some(status))` when the child has ended (and
   reaps it), `Ok(None)` when it is still running, without blocking. A
   system call interrupted by a signal (EINTR) is retried by `try_wait`,
@@ -406,7 +409,7 @@ fixtures print `Other` as `other`.
    an inherited `printf` whose output appears between two lines the
    program prints before `spawn` and after `wait`.
 2. **`std_process_pipes`**: `cat` with stdin and stdout piped, written and
-   read back; `take_stdout` twice (`None` the second time); `read` on a
+   read back; `take_stdout` twice (EBADF the second time); `read` on a
    stdin pipe end (`other`); a write to the child's
    stdin returning EPIPE without ending the program (`other`), where the
    child is `sh -c 'exec 0<&-; printf r; sleep 1'` with stdout piped and

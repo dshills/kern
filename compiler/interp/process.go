@@ -51,6 +51,8 @@ func init() {
 		"proc_release":         procRelease,
 		"proc_flush_inherited": procFlushInherited,
 		"proc_close":           procClose,
+		"proc_read":            procRead,
+		"proc_write":           procWrite,
 		"proc_errno":           procErrno,
 	} {
 		intrinsics[k] = v
@@ -165,7 +167,7 @@ func procSpawn(it *Interp, a []Value, _ callCtx) []Value {
 		return einval
 	}
 	for _, m := range modes {
-		if m > 2 || m == 2 { // Piped: not yet (PLAN.md Phase 3)
+		if m > 2 {
 			return einval
 		}
 	}
@@ -200,8 +202,30 @@ func procSpawn(it *Interp, a []Value, _ callCtx) []Value {
 	}
 	files := make([]uintptr, 3)
 	var fwd []*forwarder
+	var piped [3]*os.File // the parent's pipe ends, handed to the Child
 	for i, m := range modes {
 		switch {
+		case m == 2:
+			r, w, err := os.Pipe()
+			if err != nil {
+				return fail(err)
+			}
+			if r, err = above2(r); err != nil {
+				_ = w.Close()
+				return fail(err)
+			}
+			if w, err = above2(w); err != nil {
+				_ = r.Close()
+				return fail(err)
+			}
+			child, parent := w, r
+			if i == 0 {
+				child, parent = r, w
+			}
+			parentEnds = append(parentEnds, parent)
+			childEnds = append(childEnds, child)
+			files[i] = child.Fd() // blocking, as a child expects; the parent's end keeps Go's mode
+			piped[i] = parent
 		case m == 1:
 			flag := os.O_WRONLY
 			if i == 0 {
@@ -318,6 +342,11 @@ func procSpawn(it *Interp, a []Value, _ callCtx) []Value {
 	}
 	for _, f := range fwd {
 		go f.run()
+	}
+	for i, f := range piped {
+		if f != nil {
+			fds.at(i).set(mkInt(tyI32, uint64(uint32(int32(it.addFile(f))))))
+		}
 	}
 	it.sh.mu.Lock()
 	if it.sh.procs == nil {
@@ -437,6 +466,67 @@ func procFlushInherited(it *Interp, a []Value, _ callCtx) []Value {
 		})
 	}
 	return nil
+}
+
+// addFile enters f in the shared file table (std/io's descriptors, from 3
+// up) and returns its key.
+func (it *Interp) addFile(f *os.File) int64 {
+	it.sh.mu.Lock()
+	defer it.sh.mu.Unlock()
+	if it.sh.files == nil {
+		it.sh.files = map[int64]*os.File{}
+	}
+	fd := int64(3)
+	for it.sh.files[fd] != nil {
+		fd++
+	}
+	it.sh.files[fd] = f
+	return fd
+}
+
+func (it *Interp) openFile(fd int64) *os.File {
+	it.sh.mu.Lock()
+	defer it.sh.mu.Unlock()
+	return it.sh.files[fd]
+}
+
+// procRead reads from a pipe end: bytes read, 0 at end of file, or -errno.
+func procRead(it *Interp, a []Value, _ callCtx) []Value {
+	f := it.openFile(signedOf(a[0].(Int)))
+	if f == nil {
+		return i64Val(-int64(syscall.EBADF))
+	}
+	seq := byteSeq(acc(a[1]))
+	if seq.length() == 0 {
+		return i64Val(0)
+	}
+	buf := make([]byte, seq.length())
+	n, err := f.Read(buf)
+	if err != nil && n == 0 {
+		if errors.Is(err, io.EOF) {
+			return i64Val(0)
+		}
+		return i64Val(-int64(errnoOf(err)))
+	}
+	for i := 0; i < n; i++ {
+		seq.at(i).set(mkInt(tyU8, uint64(buf[i])))
+	}
+	return i64Val(int64(n))
+}
+
+// procWrite writes to a pipe end: bytes written or -errno. Go reports a
+// write to a closed pipe on a descriptor other than 1 and 2 as EPIPE and
+// does not end the process (R6).
+func procWrite(it *Interp, a []Value, _ callCtx) []Value {
+	f := it.openFile(signedOf(a[0].(Int)))
+	if f == nil {
+		return i64Val(-int64(syscall.EBADF))
+	}
+	n, err := f.Write(seqBytes(acc(a[1])))
+	if err != nil && n == 0 {
+		return i64Val(-int64(errnoOf(err)))
+	}
+	return i64Val(int64(n))
 }
 
 func procClose(it *Interp, a []Value, _ callCtx) []Value {

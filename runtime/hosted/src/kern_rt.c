@@ -386,6 +386,32 @@ static void kern_sig_init(void) {
 // kern_start, before any thread exists: the source of every Null stream.
 static int kern_null = -1;
 
+// kern_pipe makes a pipe whose ends are close-on-exec and numbered 3 or
+// more: 0, or -errno. Linux sets the flag atomically; macOS has no pipe2,
+// and the moment before the flag is set cannot reach a std/process child,
+// which POSIX_SPAWN_CLOEXEC_DEFAULT keeps to the descriptors it names (R6).
+static int kern_pipe(int pp[2]) {
+#ifdef __APPLE__
+    if (pipe(pp) != 0) return -errno;
+    fcntl(pp[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pp[1], F_SETFD, FD_CLOEXEC);
+#else
+    if (pipe2(pp, O_CLOEXEC) != 0) return -errno;
+#endif
+    for (int i = 0; i < 2; i++) {
+        if (pp[i] > 2) continue; // only when the program closed a standard descriptor itself
+        int d = fcntl(pp[i], F_DUPFD_CLOEXEC, 3);
+        int e = errno;
+        close(pp[i]);
+        pp[i] = d;
+        if (d < 0) {
+            if (pp[1 - i] >= 0) close(pp[1 - i]);
+            return -e;
+        }
+    }
+    return 0;
+}
+
 // kern_cstr copies n bytes of p into a fresh NUL-terminated string, or
 // returns NULL (out of memory).
 static char *kern_cstr(const char *p, int64_t n) {
@@ -440,14 +466,13 @@ int64_t kern_proc_spawn(const char *prog, int64_t progn, const char *argvb, int6
                         const char *search, int64_t searchn, const uint8_t *modes, int64_t modesn, int32_t *fds, int64_t fdsn) {
     if (progn <= 0 || progn >= 4096 || dirn < 0 || dirn >= 4096 || searchn < 0 || modesn != 3 || fdsn < 3 || argc < 1) return -EINVAL;
     for (int i = 0; i < 3; i++) if (modes[i] > 2) return -EINVAL;
-    for (int i = 0; i < 3; i++) if (modes[i] == 2) return -EINVAL; // Piped: not yet (PLAN.md Phase 3)
     int bad = 0;
     char **argv = kern_unpack(argvb, argvn, argc, &bad);
     if (argv == NULL) return bad ? -EINVAL : -ENOMEM;
     char **envp = kern_unpack(envb, envn, envc, &bad);
     if (envp == NULL) { free(argv); return bad ? -EINVAL : -ENOMEM; }
     int64_t result = 0;
-    int child[3] = {-1, -1, -1};
+    int child[3] = {-1, -1, -1}, parent[3] = {-1, -1, -1};
     char path[4096], cwd[4096], absdir[4096];
     char *p = kern_cstr(prog, progn), *d = kern_cstr(dirp, dirn), *sp = kern_cstr(search, searchn);
     posix_spawn_file_actions_t fa;
@@ -456,11 +481,23 @@ int64_t kern_proc_spawn(const char *prog, int64_t progn, const char *argvb, int6
     if (p == NULL || d == NULL || sp == NULL) { result = -ENOMEM; goto out; }
     kern_flush(); // the program's output so far precedes the child's; a failure is ignored (R4)
     // (s) the streams, stdin then stdout then stderr: Null is the runtime's
-    // own /dev/null, opened above 2 at start
+    // own /dev/null, opened above 2 at start; Piped a new pipe, the child's
+    // end its stdin's read end or its output's write end
     for (int i = 0; i < 3; i++) {
-        if (modes[i] != 1) continue;
-        if (kern_null < 0) { result = -EMFILE; goto out; } // it could not be opened at start
-        child[i] = kern_null;
+        if (modes[i] == 1) {
+            if (kern_null < 0) { result = -EMFILE; goto out; } // it could not be opened at start
+            child[i] = kern_null;
+        } else if (modes[i] == 2) {
+            int pp[2];
+            if ((result = kern_pipe(pp)) != 0) goto out;
+            child[i] = i == 0 ? pp[0] : pp[1];
+            parent[i] = i == 0 ? pp[1] : pp[0];
+#ifdef __APPLE__
+            // a write to a child that closed its stdin is EPIPE, never a
+            // SIGPIPE that ends the program (R6)
+            if (i == 0) fcntl(parent[i], F_SETNOSIGPIPE, 1);
+#endif
+        }
     }
     // (a) the working directory, and absolute forms of it and of the
     // program, so that nothing is resolved against a directory twice
@@ -552,7 +589,11 @@ out:
     if (fa_ok) posix_spawn_file_actions_destroy(&fa);
     if (attr_ok) posix_spawnattr_destroy(&attr);
     for (int i = 0; i < 3; i++) if (child[i] >= 0 && child[i] != kern_null) close(child[i]);
-    for (int i = 0; i < 3; i++) fds[i] = -1; // the parent ends of pipes (PLAN.md Phase 3)
+    // the parent's pipe ends go to the Child; nothing is left open on failure
+    for (int i = 0; i < 3; i++) {
+        if (result < 0 && parent[i] >= 0) close(parent[i]);
+        fds[i] = result < 0 ? -1 : parent[i];
+    }
     free(p);
     free(d);
     free(sp);
@@ -588,6 +629,42 @@ uint32_t kern_proc_pid(int64_t h) { return h > 0 && h <= INT32_MAX ? (uint32_t)h
 void kern_proc_release(int64_t h) { (void)h; }
 void kern_proc_flush_inherited(int64_t h) { (void)h; }
 int32_t kern_proc_close(int32_t fd) { return close(fd) < 0 ? -errno : 0; }
+// kern_proc_read reads from a pipe end: bytes read, 0 at end of file, or
+// -errno; EINTR is retried.
+int64_t kern_proc_read(int32_t fd, char *buf, int64_t n) {
+    ssize_t r;
+    do r = read(fd, buf, (size_t)n); while (r < 0 && errno == EINTR);
+    return r < 0 ? -errno : (int64_t)r;
+}
+// kern_proc_write writes to a pipe end: bytes written or -errno; EINTR is
+// retried. A write to a child that closed its end is EPIPE and never
+// ends the program (R6): macOS's ends carry F_SETNOSIGPIPE; on Linux the
+// write runs with SIGPIPE blocked in the calling thread, and the SIGPIPE
+// it raised is taken back before the mask is restored, unless one was
+// already pending, which is left for the program.
+int64_t kern_proc_write(int32_t fd, const char *data, int64_t n) {
+#ifdef __APPLE__
+    ssize_t r;
+    do r = write(fd, data, (size_t)n); while (r < 0 && errno == EINTR);
+    return r < 0 ? -errno : (int64_t)r;
+#else
+    sigset_t pipeset, old, pending;
+    sigemptyset(&pipeset);
+    sigaddset(&pipeset, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipeset, &old);
+    sigpending(&pending);
+    int was_pending = sigismember(&pending, SIGPIPE) == 1;
+    ssize_t r;
+    do r = write(fd, data, (size_t)n); while (r < 0 && errno == EINTR);
+    int e = errno;
+    if (r < 0 && e == EPIPE && !was_pending) {
+        struct timespec zero = {0, 0};
+        while (sigtimedwait(&pipeset, NULL, &zero) < 0 && errno == EINTR) { }
+    }
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    return r < 0 ? -e : (int64_t)r;
+#endif
+}
 int32_t kern_proc_errno(uint8_t which) {
     switch (which) {
     case 0: return EINVAL;

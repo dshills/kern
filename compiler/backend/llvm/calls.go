@@ -571,6 +571,9 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.rt("kern_"+c.Intrinsic, "void (i64)", "i64 "+fe.v(a[0]))
 	case "proc_close":
 		setDst(fe.rt("kern_proc_close", "i32 (i32)", "i32 "+fe.v(a[0])))
+	case "proc_read", "proc_write":
+		p, l := fe.seqParts(a[1])
+		setDst(fe.rt("kern_"+c.Intrinsic, "i64 (i32, ptr, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l))
 	case "proc_errno":
 		setDst(fe.rt("kern_proc_errno", "i32 (i8)", "i8 "+fe.v(a[0])))
 	case "now_ns":

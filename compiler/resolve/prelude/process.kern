@@ -101,6 +101,8 @@ func proc_signal(h: i64, sig: i32) -> i32
 func proc_release(h: i64)
 func proc_flush_inherited(h: i64)
 func proc_close(fd: i32) -> i32
+func proc_read(fd: i32, buf: edit[]u8) -> i64
+func proc_write(fd: i32, data: view[]u8) -> i64
 func proc_errno(which: u8) -> i32
 
 // errno_err is the IoErr of the host's errno number which (0 EINVAL, 1
@@ -371,6 +373,21 @@ impl Child {
     // id is the child's process ID.
     func id(view self) -> u32 { return proc_pid(self.h) }
 
+    // take_stdin, take_stdout and take_stderr hand over the pipe end of a
+    // Piped stream the first time, and EBADF afterwards and for a stream
+    // that is not Piped. They return a Result, not an Option, because a
+    // Pipe comes out of either only by ?: an Option[Pipe] cannot be
+    // destructured (its payload has a destructor, OWN_DESTRUCTURE_DESTRUCTOR).
+    func take_stdin(edit self) -> Result[Pipe, io.IoErr] { return self.take_fd(0usize) }
+    func take_stdout(edit self) -> Result[Pipe, io.IoErr] { return self.take_fd(1usize) }
+    func take_stderr(edit self) -> Result[Pipe, io.IoErr] { return self.take_fd(2usize) }
+    func take_fd(edit self, i: usize) -> Result[Pipe, io.IoErr] {
+        fd := self.fds[i]
+        if fd < 0i32 { return Err(errno_err(2u8)) }
+        self.fds[i] = -1i32
+        return Ok(Pipe { fd: fd, kind: truncate[u8](i) })
+    }
+
     // try_wait returns the child's status once it has ended (reaping it),
     // None while it runs, without blocking.
     func try_wait(edit self) -> Result[Option[ExitStatus], io.IoErr] {
@@ -423,5 +440,54 @@ impl Child {
             i = i + 1usize
         }
         proc_release(self.h)
+    }
+}
+
+// Pipe is an owned end of a pipe to a child's stdin (kind 0, written) or
+// from its stdout (1) or stderr (2, both read). Its destructor closes it.
+struct Pipe nocopy { fd: i32; kind: u8 }
+
+impl Pipe {
+    // read reads at most len(buf) bytes and returns how many: 0 at end of
+    // file (the child closed its end) or for an empty buf.
+    func read(edit self, buf: edit[]u8) -> Result[usize, io.IoErr] {
+        if self.kind == 0u8 { return Err(errno_err(2u8)) }
+        n := proc_read(self.fd, buf)
+        if n < 0i64 { return Err(neg_err(n)) }
+        return Ok(usize(n))
+    }
+
+    // read_all reads to end of file.
+    func read_all(edit self) -> Result[Vec[u8], io.IoErr] {
+        if self.kind == 0u8 { return Err(errno_err(2u8)) }
+        data := Vec[u8].new()
+        var buf: [4096]u8 = zero()
+        while true {
+            n := proc_read(self.fd, buf)
+            if n < 0i64 { return Err(neg_err(n)) }
+            if n == 0i64 { break }
+            data.extend(buf[0usize : usize(n)])
+        }
+        return Ok(data)
+    }
+
+    // write_all writes all of data, retrying short writes. Writing to a
+    // child that closed its stdin is EPIPE; it never ends the program.
+    func write_all(edit self, data: view[]u8) -> Result[(), io.IoErr] {
+        if self.kind != 0u8 { return Err(errno_err(2u8)) }
+        var off: usize = 0usize
+        while off < len(data) {
+            n := proc_write(self.fd, data[off : len(data)])
+            if n < 0i64 { return Err(neg_err(n)) }
+            off = off + usize(n)
+        }
+        return Ok(())
+    }
+
+    destructor(edit self) {
+        if self.fd >= 0i32 {
+            c := proc_close(self.fd)
+            self.fd = -1i32
+        }
     }
 }
