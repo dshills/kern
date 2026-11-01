@@ -165,5 +165,5 @@ the spec where it applies:
 - **`show-effects`** does not label the `proc_*` entries; nothing in the
   spec asks for it.
 - The spec's non-goals stand: no changing the program's own environment
-  or directory, no timeouts or sleep (a later `std/time`), no shell
+  or directory, no timeouts or sleep (a later `std/time`; *2026-11-01: `std/time` exists, `specs/std-time`, with sleep and deadlines; timeouts in `std/process` remain out of scope*), no shell
   parsing, process groups or terminals, no merged stderr, no Windows.

@@ -1,0 +1,46 @@
+//! phase: 6
+//! expect: output std_time
+// std/time (specs/std-time R2-R4): duration arithmetic, saturating where
+// the spec says; sleep returns after at least its duration; the monotonic
+// clock never decreases; a far deadline is not expired at once and a near
+// one is expired after a longer sleep; the wall clock is in a plausible
+// range. Timing is checked by lower bounds (and one generous upper bound),
+// printed as true or false, so the output is the same on any host.
+module t
+import "std/time"
+func show(b: bool) {
+    if b { print_str("true") } else { print_str("false") }
+    println()
+}
+func main() -> i32 {
+    print_u64(time.millis(1500u64).as_nanos()); println()
+    print_u64(time.seconds(3u64).as_millis()); println()
+    print_u64(time.micros(7u64).plus(time.nanos(3u64)).as_nanos()); println()
+    print_u64(time.millis(2u64).minus(time.millis(5u64)).as_nanos()); println()
+    show(time.millis(2u64).less(time.millis(5u64)))
+    a := time.now()
+    b := a.plus(time.seconds(1u64))
+    print_u64(a.since(b).as_nanos()); println()
+    print_u64(b.since(a).as_millis()); println()
+    time.sleep(time.nanos(0u64))
+    t0 := time.now()
+    time.sleep(time.millis(20u64))
+    show(!t0.elapsed().less(time.millis(20u64)))
+    prev := time.now()
+    ok := true
+    for i in 0u64..1000u64 {
+        n := time.now()
+        if n.ns < prev.ns { ok = false }
+        prev = n
+    }
+    show(ok)
+    far := time.after(time.seconds(10u64))
+    show(far.expired())
+    near := time.after(time.millis(10u64))
+    time.sleep(time.millis(20u64))
+    show(near.expired())
+    print_u64(near.remaining().as_nanos()); println()
+    w := time.wall_nanos()
+    show(w > 1577836800000000000u64 && w < 4102444800000000000u64)
+    return 0i32
+}

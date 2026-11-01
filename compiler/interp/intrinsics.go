@@ -302,7 +302,18 @@ func init() {
 			}
 			return []Value{mkInt(tyUsize, uint64(len(arg)))}
 		},
+		// now_ns is monotonic: the wall clock at the first reading plus the
+		// monotonic time since (specs/std-time R5)
 		"now_ns": func(it *Interp, a []Value, _ callCtx) []Value {
+			return []Value{mkInt(tyU64, monotonicNow())}
+		},
+		"time_sleep_ns": func(it *Interp, a []Value, _ callCtx) []Value {
+			for _, d := range sleepChunks(u64(a[0])) {
+				time.Sleep(d)
+			}
+			return nil
+		},
+		"time_wall_ns": func(it *Interp, a []Value, _ callCtx) []Value {
 			return []Value{mkInt(tyU64, uint64(time.Now().UnixNano()))}
 		},
 		"zero": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{Unit{}} },

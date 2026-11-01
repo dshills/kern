@@ -68,6 +68,9 @@ var trapping = map[string]kindSet{
 	// interpreter) trap oom when their storage cannot be allocated
 	"Shared.new": kindsOf("oom"), "Mutex.new": kindsOf("oom"), "Condvar.new": kindsOf("oom"),
 	"thread.scope": kindsOf("oom"), "thread.spawn": kindsOf("oom"), "scope.spawn": kindsOf("oom"),
+	// std/time: a failure of the clock or of sleep, impossible for the
+	// arguments the runtime passes, traps explicit (specs/std-time)
+	"time_sleep_ns": kindsOf("explicit"), "time_wall_ns": kindsOf("explicit"),
 }
 
 // checkKinds are the kinds a CheckOverflow can raise, by operator and

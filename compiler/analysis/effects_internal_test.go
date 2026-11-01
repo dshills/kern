@@ -34,6 +34,8 @@ var runtimeTrapSites = []struct {
 	{"testing.fail_next_alloc", "", "explicit"},
 	{"testing.fail_next_spawn", "", "explicit"},
 	{"testing.seed_shared_count", "", "overflow"},
+	{"time_sleep_ns", "kern_time_sleep_ns", "explicit"},
+	{"time_wall_ns", "kern_time_wall_ns", "explicit"},
 }
 
 // The analysis's trapping table lists every kind the runtimes raise for an

@@ -582,6 +582,11 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.rt("kern_proc_fault_arm", "void (i8, i32)", "i8 "+fe.v(a[0])+", i32 "+fe.v(a[1]))
 	case "now_ns":
 		setDst(fe.rt("kern_now_ns", "i64 ()", ""))
+	// std/time (hosted; specs/std-time)
+	case "time_sleep_ns":
+		fe.rt("kern_time_sleep_ns", "void (i64, ptr)", "i64 "+fe.v(a[0])+", ptr "+fe.loc(c.Pos))
+	case "time_wall_ns":
+		setDst(fe.rt("kern_time_wall_ns", "i64 (ptr)", "ptr "+fe.loc(c.Pos)))
 	case "yield_now":
 		fe.rt("kern_yield", "void ()", "")
 	case "exit":

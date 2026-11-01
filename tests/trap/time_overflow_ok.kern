@@ -1,0 +1,13 @@
+//! phase: 6
+//! expect: output time_overflow_ok
+//! twin: time_overflow
+// A duration past u64 nanoseconds traps overflow (specs/std-time §2); the
+// twin builds one that fits.
+module t
+import "std/time"
+func main() -> i32 {
+    d := time.seconds(5u64)
+    print_u64(d.as_millis())
+    println()
+    return 0i32
+}
