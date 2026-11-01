@@ -364,6 +364,14 @@ func par_sum(data: view[]u64) -> Result[u64, SpawnErr] {
         return Ok(a.get() + b.get())
     }
 }
+func fill(slot: edit[u64], v: u64) { slot = v }
+func fill_both(lo: edit[u64], hi: edit[u64]) -> Result[(), SpawnErr] {
+    with s := thread.scope() {
+        a := s.spawn(fill, lo, 1u64)?           // edit: exclusive to that thread until the scope joins
+        b := s.spawn(fill, hi, 2u64)?           // a second edit of lo here would be ACC_CONFLICT
+        return Ok(())
+    }
+}
 ```
 Rejected:
 ```kern

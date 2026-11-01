@@ -143,7 +143,7 @@ func (f *fn) finish(st *flow, s ast.Node) {
 			if a.kind == accFreeze && b.kind == accFreeze {
 				continue
 			}
-			if !conflicts(a, b) {
+			if !conflicts(a, b) || a.twin == b || b.twin == a {
 				continue
 			}
 			// report on the statement's own access

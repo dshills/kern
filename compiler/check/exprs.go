@@ -584,7 +584,7 @@ func (f *fn) spawnCall(st *flow, x *ast.CallExpr, info *resolve.CallInfo) *resul
 			acc := &access{pl: r.pl, kind: kind, start: f.tick(), end: forever, pos: a.Pos, label: "spawn"}
 			f.accs = append(f.accs, acc)
 			if sc := f.scopeFor(scopeSym); sc != nil {
-				f.encl = append(f.encl, &access{pl: r.pl, kind: kind, start: 0, end: forever, pos: a.Pos, label: "spawn"})
+				f.encl = append(f.encl, &access{pl: r.pl, kind: kind, start: 0, end: forever, pos: a.Pos, label: "spawn", twin: acc})
 			}
 		default:
 			f.consumeValue(st, a.X)

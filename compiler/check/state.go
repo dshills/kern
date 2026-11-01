@@ -120,6 +120,10 @@ type access struct {
 	pos     ast.Pos
 	release bool // carries a pending release function
 	label   string
+	// twin, on an enclosing access a scoped spawn added (it lives until the
+	// scope's join), is the same argument's access in the spawning
+	// statement: the two are one access, so they never conflict
+	twin *access
 }
 
 const forever = math.MaxInt32

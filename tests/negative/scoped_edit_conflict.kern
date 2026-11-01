@@ -1,0 +1,12 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: scoped_edit_conflict_ok
+module m
+struct P { a: u64; b: u64 }
+func put(slot: edit[u64]) { slot = 7u64 }
+func f(p: edit[P]) -> Result[(), SpawnErr] {
+    with s := thread.scope() {
+        j := s.spawn(put, p.a)?
+        k := s.spawn(put, p.a)?   // ACC_CONFLICT: p.a is already edited by a thread of this scope
+        return Ok(())
+    }
+}

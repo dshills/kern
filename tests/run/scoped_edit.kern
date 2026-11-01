@@ -1,0 +1,48 @@
+//! phase: 2
+//! expect: output scoped_edit
+// Scoped spawn with edit arguments (Rule 5.5.3): each thread gets an
+// exclusive edit, held until the scope joins; two threads edit two
+// locals, two more edit two fields of one struct, and one edits a place
+// reached through the function's own edit parameter. The parent reads
+// the results only after the scope has joined every thread.
+module run
+struct P { a: u64; b: u64 }
+func fill(slot: edit[u64], v: u64) { slot = v }
+func sum_into(xs: view[]u64, total: edit[u64]) {
+    var t: u64 = 0u64
+    for x in xs { t = t + x }
+    total = t
+}
+func through(q: edit[P]) -> Result[(), SpawnErr] {
+    with s := thread.scope() {
+        j := s.spawn(fill, q.b, 40u64)?
+        return Ok(())
+    }
+}
+func run() -> Result[u64, SpawnErr] {
+    var x: u64 = 0u64
+    var y: u64 = 0u64
+    var p: P = P { a: 0u64, b: 0u64 }
+    v := Vec[u64].new()
+    var i: u64 = 1u64
+    while i <= 10u64 { v.push(i); i = i + 1u64 }
+    with xs := v.as_view() {
+        with s := thread.scope() {
+            j1 := s.spawn(fill, x, 1u64)?
+            j2 := s.spawn(fill, y, 2u64)?
+            j3 := s.spawn(sum_into, xs, p.a)?
+            j4 := s.spawn(fill, p.b, 4u64)?
+        }
+    }
+    print_u64(x); print_str(" "); print_u64(y); print_str(" "); print_u64(p.a); print_str(" "); print_u64(p.b); println()
+    through(p)?
+    print_u64(p.b); println()
+    return Ok(x + y + p.a + p.b)
+}
+func main() -> i32 {
+    match run() {
+        Ok(t) => { print_u64(t); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}

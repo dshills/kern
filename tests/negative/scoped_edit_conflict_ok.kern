@@ -1,0 +1,13 @@
+//! phase: 1
+//! expect: accept
+//! twin: scoped_edit_conflict
+module m
+struct P { a: u64; b: u64 }
+func put(slot: edit[u64]) { slot = 7u64 }
+func f(p: edit[P]) -> Result[(), SpawnErr] {
+    with s := thread.scope() {
+        j := s.spawn(put, p.a)?
+        k := s.spawn(put, p.b)?
+        return Ok(())
+    }
+}
