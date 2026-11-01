@@ -1,14 +1,20 @@
 //! phase: 6
 //! expect: accept
 //! twin: for_cursor_nested
+// The same loops over a view of the map bind views, so they nest
+// (specs/nested-cursor-loops R1).
 module m
 import "std/map"
-func main() -> i32 {
-    t := map.Map[u64, u64].new()
-    u := map.Map[u64, u64].new()
-    var s: u64 = 0u64
+import "std/str"
+func sum(t: view[map.Map[u64, str.String]]) -> usize {
+    var s: usize = 0usize
     for a, x in t {
-        for b, y in u { s = s + a * b }
+        for b, y in t { s = s + x.len() }
     }
+    return s
+}
+func main() -> i32 {
+    t := map.Map[u64, str.String].new()
+    n := sum(t)
     return 0i32
 }

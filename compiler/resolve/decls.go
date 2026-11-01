@@ -248,6 +248,13 @@ type Info struct {
 	// denotes, for the editor's navigation (specs/editor-names).
 	TypeNames  map[*ast.TypeName]*TypeDecl
 	IfaceNames map[*ast.TypeName]*InterfaceDecl
+	// CursorCalls are the cursor-method calls a cursor-protocol for was
+	// desugared into, and CursorViews its getter bindings that bind views
+	// (cursor_get, cursor_entry, not the _mut ones): the checker lets a
+	// nested loop's cursor calls read a place a view binding has frozen
+	// (specs/nested-cursor-loops).
+	CursorCalls map[*ast.CallExpr]bool
+	CursorViews map[*ast.With]bool
 }
 
 func newInfo() *Info {
@@ -257,6 +264,7 @@ func newInfo() *Info {
 		Fields: map[*ast.FieldExpr]*FieldDecl{}, Variants: map[*ast.Arm]*VariantDecl{}, Closures: map[*ast.ClosureExpr]*ClosureInfo{}, Consumed: map[ast.Expr]*ast.Ident{},
 		Drops: map[any][]*Symbol{}, OutFieldDrops: map[any]map[*Symbol][]string{}, OwnedSubject: map[any]bool{},
 		TypeNames: map[*ast.TypeName]*TypeDecl{}, IfaceNames: map[*ast.TypeName]*InterfaceDecl{},
+		CursorCalls: map[*ast.CallExpr]bool{}, CursorViews: map[*ast.With]bool{},
 	}
 }
 

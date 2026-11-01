@@ -124,6 +124,11 @@ type access struct {
 	// scope's join), is the same argument's access in the spawning
 	// statement: the two are one access, so they never conflict
 	twin *access
+	// cursor marks an access made by a desugared cursor-protocol call, and
+	// cursorView the freeze of a cursor loop's view binding: a view cursor
+	// access does not conflict with a view freeze, so loops over one place
+	// nest as loops over one sequence do (specs/nested-cursor-loops)
+	cursor, cursorView bool
 }
 
 const forever = math.MaxInt32

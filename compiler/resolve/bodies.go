@@ -1,6 +1,8 @@
 package resolve
 
 import (
+	"strings"
+
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/diag"
 )
@@ -586,6 +588,7 @@ func (c *fnCtx) cursorFor(sc *scope, s *ast.For, t Type) bool {
 		for _, a := range args {
 			x.Args = append(x.Args, &ast.Arg{Pos: ip, X: a})
 		}
+		c.r.prog.Info.CursorCalls[x] = true
 		return x
 	}
 	names := []string{s.Var, s.Var2}[:want]
@@ -600,10 +603,14 @@ func (c *fnCtx) cursorFor(sc *scope, s *ast.For, t Type) bool {
 			copies = append(copies, &ast.ShortDecl{Pos: poses[i], Name: names[i], Value: &ast.Ident{Pos: poses[i], Name: withNames[i]}})
 		}
 	}
+	get := &ast.With{Pos: sp, Names: withNames, NamePos: poses, Subject: call(getter, id("#cur")), Body: &ast.Block{Pos: s.Body.Pos, Stmts: append(copies, s.Body)}}
+	if !strings.HasSuffix(getter, "_mut") {
+		c.r.prog.Info.CursorViews[get] = true
+	}
 	loop := &ast.Block{Pos: sp, Stmts: []ast.Stmt{
 		&ast.ShortDecl{Pos: sp, Name: "#cur", Value: id("#at")},
 		&ast.Assign{Pos: sp, Target: id("#at"), Value: call("cursor_next", id("#cur"))},
-		&ast.With{Pos: sp, Names: withNames, NamePos: poses, Subject: call(getter, id("#cur")), Body: &ast.Block{Pos: s.Body.Pos, Stmts: append(copies, s.Body)}},
+		get,
 	}}
 	blk := &ast.Block{Pos: sp, Stmts: []ast.Stmt{
 		&ast.VarDecl{Pos: sp, Name: "#at", Type: &ast.PrimType{Pos: sp, Name: "usize"}, Init: call("cursor_first")},

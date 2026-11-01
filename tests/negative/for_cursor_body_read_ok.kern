@@ -1,0 +1,15 @@
+//! phase: 6
+//! expect: accept
+//! twin: for_cursor_body_read
+// The length read before the loop is accepted.
+module m
+import "std/map"
+func main() -> i32 {
+    t := map.Map[u64, u64].new()
+    k := t.len()
+    var n: usize = 0usize
+    for a, x in t {
+        n = n + k
+    }
+    return 0i32
+}

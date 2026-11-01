@@ -1,0 +1,15 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: for_cursor_body_read_ok
+// A read of the map in a loop body, other than a nested loop's own cursor
+// calls, is still rejected (spec §5.4; specs/nested-cursor-loops R2), as a
+// read of an array in a loop over it is.
+module m
+import "std/map"
+func main() -> i32 {
+    t := map.Map[u64, u64].new()
+    var n: usize = 0usize
+    for a, x in t {
+        n = n + t.len()
+    }
+    return 0i32
+}

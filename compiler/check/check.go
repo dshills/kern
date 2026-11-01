@@ -169,6 +169,11 @@ type fn struct {
 	loopExits    []loopExit
 	guards       map[*resolve.Symbol]bool // with-bindings of a Mutex lock (Condvar.wait takes one)
 	captureConv  map[*resolve.Symbol]ast.Conv // inside a closure body: how each captured symbol was captured
+
+	// cursorConflicts are the spans of desugared cursor calls already
+	// reported: the calls of one loop share its span, so its conflict is
+	// reported once however many of them conflict
+	cursorConflicts map[ast.Pos]bool
 }
 
 // bindScope is a lexical scope that owns bindings (with/match/for/block).

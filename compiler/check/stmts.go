@@ -143,6 +143,9 @@ func (f *fn) finish(st *flow, s ast.Node) {
 			if a.kind == accFreeze && b.kind == accFreeze {
 				continue
 			}
+			if cursorRead(a, b) || cursorRead(b, a) {
+				continue
+			}
 			if !conflicts(a, b) || a.twin == b || b.twin == a {
 				continue
 			}
@@ -172,10 +175,25 @@ func (f *fn) finish(st *flow, s ast.Node) {
 				f.errorf("OWN_USE_AFTER_MOVE", own.pos, "%s is used after being moved in this statement", own.pl.root.Name)
 				continue
 			}
+			if own.cursor {
+				if f.cursorConflicts[own.pos] {
+					continue
+				}
+				if f.cursorConflicts == nil {
+					f.cursorConflicts = map[ast.Pos]bool{}
+				}
+				f.cursorConflicts[own.pos] = true
+			}
 			f.errorf("ACC_CONFLICT", own.pos, "%s access to %s conflicts with a live %s access", own.kind, describePlace(own.pl), describeOther(other))
 		}
 	}
 	f.accs = f.accs[:0]
+}
+
+// cursorRead reports a nested cursor loop's view access to a place that an
+// enclosing cursor loop's view binding froze: both only read the place.
+func cursorRead(freeze, a *access) bool {
+	return freeze.kind == accFreeze && freeze.cursorView && a.cursor && a.kind == accView
 }
 
 func describeOther(a *access) string {
@@ -300,7 +318,7 @@ func (f *fn) with(st *flow, s *ast.With) *flow {
 	if r != nil && (r.isAccess || r.owned) {
 		if r.isAccess && r.pl.root != nil {
 			// freeze the underlying place for the block
-			f.encl = append(f.encl, &access{pl: r.pl, kind: accFreeze, start: 0, end: forever, pos: s.Subject.Span(), release: r.release})
+			f.encl = append(f.encl, &access{pl: r.pl, kind: accFreeze, start: 0, end: forever, pos: s.Subject.Span(), release: r.release, cursorView: f.c.info.CursorViews[s]})
 		}
 		if single != nil {
 			f.bindAccess(single, r)

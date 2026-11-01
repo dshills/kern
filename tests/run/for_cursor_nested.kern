@@ -1,0 +1,45 @@
+//! phase: 6
+//! expect: output for_cursor_nested
+// Nested cursor-protocol loops over one place (specs/nested-cursor-loops
+// R1): over a map with Copy values, whose loops bind views, and over a view
+// of a map whose values are not Copy, an all-pairs computation runs as two
+// loops over one array do, and three loops nest as well.
+module t
+import "std/map"
+import "std/str"
+func pairs(m: view[map.Map[u64, str.String]]) -> u64 {
+    n := 0u64
+    for a, x in m {
+        for b, y in m {
+            if a < b { n = n + u64(x.len()) * u64(y.len()) }
+        }
+    }
+    return n
+}
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    for i in 1u64..6u64 { o := m.insert(i, i * 10u64) }
+    s := 0u64
+    for a, x in m {
+        for b, y in m {
+            if a < b { s = s + x * y }
+        }
+    }
+    print_u64(s)
+    println()
+    count := 0u64
+    for a, x in m {
+        for b, y in m {
+            for c, z in m { count = count + 1u64 }
+        }
+    }
+    print_u64(count)
+    println()
+    w := map.Map[u64, str.String].new()
+    o1 := w.insert(1u64, str.String.from("ab"))
+    o2 := w.insert(2u64, str.String.from("cde"))
+    o3 := w.insert(3u64, str.String.from("f"))
+    print_u64(pairs(w))
+    println()
+    return 0i32
+}

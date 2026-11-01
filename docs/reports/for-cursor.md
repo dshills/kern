@@ -89,7 +89,8 @@ prism, four passes; every finding fixed:
 
 - **Nested loops over the same map** are rejected: the inner loop reads
   the map through its cursor methods, which the outer binding forbids
-  (§5.4).
+  (§5.4). *(Resolved 2026-11-01, `specs/nested-cursor-loops`: they nest
+  when the outer loop binds views.)*
   - Correction (later that day): an earlier version of this report said
     this was the same as for sequences. It is not. Two loops over the
     same array nest, because the checker treats two loop freezes as

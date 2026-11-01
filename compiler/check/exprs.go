@@ -492,10 +492,12 @@ func (f *fn) call(st *flow, x *ast.CallExpr) *result {
 		}
 	}
 	end := f.tick()
+	cursor := f.c.info.CursorCalls[x]
 	for _, a := range argAccs {
 		if a.end == forever {
 			a.end = end
 		}
+		a.cursor = cursor
 	}
 	f.checkAtomicOrdering(x, info)
 	// the result's interval starts strictly after the arguments' intervals end
@@ -522,7 +524,7 @@ func (f *fn) call(st *flow, x *ast.CallExpr) *result {
 	if anyEdit {
 		kind = accEdit
 	}
-	acc := &access{pl: *sourcePlace, kind: kind, start: start, end: forever, pos: x.Pos, release: info.Release}
+	acc := &access{pl: *sourcePlace, kind: kind, start: start, end: forever, pos: x.Pos, release: info.Release, cursor: cursor}
 	_ = sourceAcc
 	f.accs = append(f.accs, acc)
 	return &result{pl: *sourcePlace, isAccess: true, acc: acc, release: info.Release || (srcResult != nil && srcResult.release), t: t}
