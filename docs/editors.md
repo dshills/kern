@@ -47,10 +47,13 @@ error. The contract is `specs/language-server/SPEC.md`.
   its interface changed; other programs are not re-checked.
 
 - **Completion.** After `x.`, the fields and methods of `x`'s type
-  (another module's private fields left out). After a type's name, its
+  (another module's private fields left out); for a type parameter, the
+  methods of its interface constraints (where-clause bounds included),
+  and for a primitive, the methods implemented on it. After a type's name, its
   static functions and variants, and after an imported module's name,
   its exported declarations. Elsewhere, the locals in scope at the
-  cursor, the module's and the prelude's declarations, the imported
+  cursor (a loop variable, `with` name or arm binding only inside its
+  body), the module's and the prelude's declarations, the imported
   modules and the keywords. Typing `.` triggers it.
 - **Outline.** The file's declarations as document symbols: functions,
   structs with their fields, unions with their variants, interfaces and

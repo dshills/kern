@@ -181,7 +181,27 @@ func (s *Server) memberItems(prog *resolve.Program, mod *resolve.Module, file *a
 		}
 	}
 	// a value: the fields and methods of its type, through any access
-	td := ownerOf(info.Types[fe.X])
+	t := info.Types[fe.X]
+	for {
+		a, ok := t.(*resolve.Access)
+		if !ok {
+			break
+		}
+		t = a.Elem
+	}
+	var td *resolve.TypeDecl
+	switch x := t.(type) {
+	case *resolve.Named:
+		td = x.Decl
+	case *resolve.TypeParamType:
+		constraintItems(x, add)
+		return
+	case *resolve.Prim:
+		// the methods impls on the primitive declare (no fields)
+		if prog.Core != nil {
+			td = prog.Core.Types["prim_"+x.Name]
+		}
+	}
 	if td == nil {
 		return
 	}
@@ -196,6 +216,25 @@ func (s *Server) memberItems(prog *resolve.Program, mod *resolve.Module, file *a
 	for name, fd := range td.Methods {
 		if hasSelf(fd) {
 			add(name, ciMethod, fd.Type.String())
+		}
+	}
+}
+
+// constraintItems adds the self methods of a type parameter's interface
+// constraints; a name two constraints provide is offered with the first
+// one's signature, the one a call resolves to (specs/editor-complete-gaps
+// R1).
+func constraintItems(tp *resolve.TypeParamType, add func(string, int, string)) {
+	seen := map[string]bool{}
+	for _, cs := range tp.Constraints {
+		if cs.Iface == nil {
+			continue
+		}
+		for _, name := range cs.Iface.Order {
+			if fd := cs.Iface.Methods[name]; fd != nil && hasSelf(fd) && !seen[name] {
+				seen[name] = true
+				add(name, ciMethod, fd.Type.String())
+			}
 		}
 	}
 }
@@ -287,6 +326,27 @@ func localItems(prog *resolve.Program, file *ast.File, at int, add func(string, 
 			encloses[b] = true
 		}
 	}
+	// header bindings (loop variables, with names, arm bindings): in scope
+	// in their statement's body only (specs/editor-complete-gaps R3)
+	header := map[int]*ast.Block{}
+	ast.Walk(fn.Body, func(n any) bool {
+		switch x := n.(type) {
+		case *ast.For:
+			header[x.VarPos.Start] = x.Body
+			if x.Var2 != "" {
+				header[x.Var2Pos.Start] = x.Body
+			}
+		case *ast.With:
+			for _, p := range x.NamePos {
+				header[p.Start] = x.Body
+			}
+		case *ast.Arm:
+			for _, p := range x.BindPos {
+				header[p.Start] = x.Body
+			}
+		}
+		return false
+	})
 	for _, sym := range prog.Info.Decls {
 		if sym == nil || sym.File != file.Name || sym.Pos.Start < fn.Start || sym.Pos.Start >= at {
 			continue
@@ -297,7 +357,11 @@ func localItems(prog *resolve.Program, file *ast.File, at int, add func(string, 
 				add(sym.Name, ciVariable, typeLabel(sym.Type))
 			}
 		case resolve.SymLocal, resolve.SymAccess:
-			if b := innermost(sym.Pos.Start); b == nil || encloses[b] {
+			if body, ok := header[sym.Pos.Start]; ok {
+				if body != nil && body.Start <= at && at <= body.End {
+					add(sym.Name, ciVariable, typeLabel(sym.Type))
+				}
+			} else if b := innermost(sym.Pos.Start); b == nil || encloses[b] {
 				add(sym.Name, ciVariable, typeLabel(sym.Type))
 			}
 		}

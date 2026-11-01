@@ -42,12 +42,9 @@
 
 ## Not done
 
-- **Constrained type parameters.** Methods available through an
-  interface constraint (`T: Hashable`) are not offered after a value of
-  type `T`.
 - **Several unfinished dots at once.** A document holding more than one
   can mis-parse (`p.` followed by `lib.` reads as `p.lib`); editing
   normally leaves one.
-- **Loop variables after their loop.** A loop or `with` variable is
-  still offered after its body, because its declaration sits in the
-  enclosing block.
+
+Constrained type parameters and loop variables after their loop were
+closed on 2026-11-01 (`docs/reports/editor-complete-gaps.md`).
