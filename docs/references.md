@@ -179,6 +179,19 @@ confidence it is omitted and the URL stands alone.
   https://docs.adacore.com/spark2014-docs/html/lrm/ (verify).
   The formally verifiable Ada subset; proof of absence of run-time errors.
 
+### Kernel practice
+
+- **[linux-tainted]** *Tainted kernels.*
+  The Linux kernel documentation, `Documentation/admin-guide/tainted-kernels.rst`.
+  https://docs.kernel.org/admin-guide/tainted-kernels.html (verify).
+  Taint flag `D`: the kernel died recently, through an oops or a BUG.
+
+- **[linux-sysctl-kernel]** *Documentation for /proc/sys/kernel/.*
+  The Linux kernel documentation, `Documentation/admin-guide/sysctl/kernel.rst`.
+  https://docs.kernel.org/admin-guide/sysctl/kernel.html (verify).
+  `panic_on_oops`: whether the kernel panics, rather than trying to continue, on an oops or
+  a BUG.
+
 ### C++20 memory model
 
 - **[iso-cpp20]** *ISO/IEC 14882:2020 — Programming languages — C++.*

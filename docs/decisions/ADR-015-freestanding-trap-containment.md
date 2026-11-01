@@ -1,7 +1,8 @@
 # ADR-015: Containing a trap to one task in freestanding mode
 
-**Status:** Proposed (2026-11-01). The owner asked for the decision record only; nothing is
-implemented, and ADR-006 and ADR-012 stand until the owner decides.
+**Status:** Accepted (2026-11-01): option A. Option D is deferred, not rejected, until a
+concrete freestanding program needs it; B and C are rejected. Nothing is implemented;
+ADR-006 and ADR-012 stand unchanged.
 **Date:** 2026-11-01
 **Spec:** §6 (trap semantics, `trap.set_handler`, freestanding halt); `docs/ownership.md`
 "Trap handlers" and rule 6.8.
@@ -26,6 +27,13 @@ allocation failure is an error value through every allocating operation
 reports which trap kinds a function can raise (`show-effects` `trap_kinds`), so kernel-style
 code can be checked to have no `oom` path. What remains is the bugs the language detects at
 run time: an out-of-bounds index, an overflow, a stale handle, an `explicit` check.
+
+The kernel practice the objection appeals to is weaker than it sounds. Linux survives an oops
+by killing the current task, but then marks itself tainted ("kernel died recently")
+[linux-tainted], and its `panic_on_oops` setting turns every oops into a halt
+[linux-sysctl-kernel], which deployments that will not trust a kernel after a detected bug
+choose. Halting with a precise report is the conservative end of the policy kernels already
+offer, not a position outside it.
 
 ## What a trap guarantees today
 
@@ -89,17 +97,37 @@ guarantee where it matters: a trap still ends every frame that can observe broke
 because those frames and that state belong to one task whose region is discarded whole. It
 is a library and runtime change (an isolated-task type, a resettable region allocator, a
 recovery entry), not a language change, and builds directly on `BoxIn`/`VecIn`. The work
-would need its own spec; this record is the decision to make first.
+would need its own spec.
 
 ## Decision
 
-Pending the owner's choice between A (no change) and D (a spec for isolated tasks with
-region reclamation). B and C are recorded as rejected for the reasons above.
+**A.** A trap in a freestanding image halts it, as rule 6.8 says; a system that must survive
+a component's bug runs that component as its own image under a supervisor outside kern.
+B and C are rejected for the reasons above.
+
+**D is deferred.** Its guarantee depends on pieces the freestanding runtime does not have: a
+stack per task, a scheduler to return to, a region allocator that can be reset, and a trap
+handler and scheduler that cannot themselves trap. Designing those without a program that
+needs them would fix their shape by guesswork, so D's spec is written when a concrete
+freestanding consumer exists (for example a small scheduler under `examples/`), and is
+designed against it.
+
+**A condition D must add.** As written above, D lets isolated tasks connect through channels
+and atomics. An atomic operation is indivisible, so a trap cannot interrupt it halfway. A
+channel operation is not: a task that traps inside a send leaves the channel's shared state
+mid-update, outside the region that gets discarded, which is the broken invariant D exists
+to avoid. D's spec must therefore require every operation that crosses a task boundary to
+raise no trap at all, checked by the compiler: the operation's `trap_kinds` in
+`show-effects` must be empty (`specs/effect-trap-kinds`), the same check that shows code has
+no `oom` path.
 
 ## Consequences
 
-- Under A: no change; the article's answer is that a kern freestanding image is one
-  isolation unit, and supervision is outside it.
-- Under D: ADR-006 gains a freestanding amendment ("a trap in an isolated task ends that
-  task; its region is reclaimed"), ADR-012's handler obligation gains the recovery case, and
-  rule 6.8's "traps halt" becomes "traps halt, or end the isolated task they occur in".
+- Now: no change to the language, runtime or library. The article's answer is that a kern
+  freestanding image is one isolation unit, supervision is outside it, and allocation
+  failure and the compiler's trap-kind report already cover the parts of the objection that
+  do not need resumption.
+- If D is later specified and adopted: ADR-006 gains a freestanding amendment ("a trap in an
+  isolated task ends that task; its region is reclaimed"), ADR-012's handler obligation
+  gains the recovery case, rule 6.8's "traps halt" becomes "traps halt, or end the isolated
+  task they occur in", and cross-task operations carry the no-trap requirement above.
