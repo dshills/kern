@@ -403,3 +403,20 @@ func number_i64(n: i64) -> Value {
     return Number(t)
 }
 func text(s: view[]u8) -> Value { return Text(str.String.from(s)) }
+
+// as_f64 is a number's correctly rounded f64 value, None for other values
+// and for a number past the f64 range (specs/float-text).
+func as_f64(v: view[Value]) -> Option[f64] {
+    match v {
+        Number(t) => { return str.parse_f64(t.as_view()) }
+        _ => { return None }
+    }
+}
+
+// number_f64 is a number holding str.push_f64's text of v; NaN and the
+// infinities are not JSON numbers, so the writer writes them as null.
+func number_f64(n: f64) -> Value {
+    t := str.String.new()
+    t.push_f64(n)
+    return Number(t)
+}

@@ -2,6 +2,7 @@ package interp
 
 import (
 	"math"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -39,4 +40,25 @@ func sleepChunks(ns uint64) []time.Duration {
 		ns -= d
 	}
 	return out
+}
+
+// f64Digits is str_f64_digits: the fewest correctly rounded significant
+// digits, 1 to 17, that read back as v, in exponent form, the same search
+// the native runtime makes with snprintf and strtod (specs/float-text).
+func f64Digits(v float64) string {
+	var s string
+	for p := 1; p <= 17; p++ {
+		s = strconv.FormatFloat(v, 'e', p-1, 64)
+		if r, err := strconv.ParseFloat(s, 64); err == nil && r == v {
+			break
+		}
+	}
+	return s
+}
+
+// parseF64 is str_parse_f64: the correctly rounded value of text already
+// checked to be one JSON number; a range error carries ±Inf.
+func parseF64(b []byte) float64 {
+	v, _ := strconv.ParseFloat(string(b), 64)
+	return v
 }

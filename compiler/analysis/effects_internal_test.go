@@ -36,6 +36,7 @@ var runtimeTrapSites = []struct {
 	{"testing.seed_shared_count", "", "overflow"},
 	{"time_sleep_ns", "kern_time_sleep_ns", "explicit"},
 	{"time_wall_ns", "kern_time_wall_ns", "explicit"},
+	{"str_parse_f64", "kern_str_parse_f64", "oom"},
 }
 
 // The analysis's trapping table lists every kind the runtimes raise for an

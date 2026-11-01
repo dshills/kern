@@ -1,0 +1,105 @@
+//! phase: 6
+//! expect: output float_text
+// Floating-point text (specs/float-text): push_f64 writes ECMAScript's
+// Number::toString text for R1's values (with -0 kept), parse_f64 accepts
+// exactly the JSON number grammar with correct rounding (R3), and a
+// 2,000-value sweep reads every written text back to the same value and
+// prints a checksum of the texts, the same in both engines (R2).
+module t
+import "std/str"
+func show(v: f64) {
+    s := str.String.new()
+    s.push_f64(v)
+    print_str(s.as_view())
+    println()
+}
+// parsed builds a value from its decimal text (R1's large and tiny ones).
+func parsed(s: view[]u8) -> f64 {
+    match str.parse_f64(s) {
+        Some(v) => return v
+        None => return 0.0f64
+    }
+}
+func try_parse(s: view[]u8) {
+    print_str("parse [")
+    print_str(s)
+    print_str("] ")
+    match str.parse_f64(s) {
+        Some(v) => show(v)
+        None => { print_str("none"); println() }
+    }
+}
+func main() -> i32 {
+    z := 0.0f64
+    show(0.0f64)
+    show(-0.0f64)
+    show(1.0f64)
+    show(-1.0f64)
+    show(0.1f64)
+    show(1.0f64 / 3.0f64)
+    show(100.0f64)
+    show(parsed("1e21"))
+    show(parsed("1e20"))
+    show(123456789012345680000.0f64)
+    show(0.000001f64)
+    show(parsed("1e-7"))
+    show(parsed("1.5e-7"))
+    show(9007199254740992.0f64)
+    show(parsed("1.7976931348623157e308"))
+    show(parsed("5e-324"))
+    show(z / z)
+    show(1.0f64 / z)
+    show(-1.0f64 / z)
+    try_parse("0")
+    try_parse("-0")
+    try_parse("1.5")
+    try_parse("1e3")
+    try_parse("1E-3")
+    try_parse("2.5e+10")
+    try_parse("123456789012345678901234567890")
+    try_parse("4.9e-324")
+    try_parse("1e-400")
+    try_parse("")
+    try_parse("-")
+    try_parse("01")
+    try_parse("1.")
+    try_parse(".5")
+    try_parse("1e")
+    try_parse("+1")
+    try_parse("1e400")
+    try_parse("NaN")
+    try_parse("Infinity")
+    try_parse("1_0")
+    try_parse(" 1")
+    // the sweep: values a / b * 10^k from a linear congruential generator
+    seed := 12345u64
+    sum := 0u64
+    bad := 0u64
+    for i in 0u64..2000u64 {
+        seed = wrapping_add(wrapping_mul(seed, 6364136223846793005u64), 1442695040888963407u64)
+        a := f64(seed >> 11u32)
+        seed = wrapping_add(wrapping_mul(seed, 6364136223846793005u64), 1442695040888963407u64)
+        b := f64((seed >> 40u32) + 1u64)
+        v := a / b
+        k := (seed >> 20u32) % 40u64
+        for j in 0u64..k {
+            if seed & 1u64 == 0u64 { v = v * 1000.0f64 } else { v = v / 1000.0f64 }
+        }
+        if i % 2u64 == 1u64 { v = 0.0f64 - v }
+        s := str.String.new()
+        s.push_f64(v)
+        with t := s.as_view() {
+            for c in t { sum = wrapping_add(wrapping_mul(sum, 31u64), u64(c)) }
+            match str.parse_f64(t) {
+                Some(r) => { if r != v { bad = bad + 1u64 } }
+                None => { bad = bad + 1u64 }
+            }
+        }
+    }
+    print_str("sweep checksum ")
+    print_u64(sum)
+    print_str(" mismatches ")
+    print_u64(bad)
+    println()
+    return 0i32
+}

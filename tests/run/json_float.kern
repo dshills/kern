@@ -1,0 +1,46 @@
+//! phase: 6
+//! expect: output json_float
+// JSON numbers as floats (specs/float-text R4): as_f64 reads a number's
+// correctly rounded value and is None for other values; number_f64 writes
+// push_f64's text, and NaN, which is not a JSON number, is written null.
+module t
+import "std/json"
+import "std/str"
+func show(o: Option[f64]) {
+    match o {
+        Some(v) => {
+            s := str.String.new()
+            s.push_f64(v)
+            print_str(s.as_view())
+            println()
+        }
+        None => { print_str("none"); println() }
+    }
+}
+func written(v: view[json.Value]) {
+    d := str.String.new()
+    json.write(v, d)
+    print_str(d.as_view())
+    println()
+}
+func main() -> i32 {
+    with r := json.parse("[1.5, -2e3, 7, \"x\", null]") {
+        match r {
+            Ok(v) => {
+                match v {
+                    Array(items) => {
+                        for it in items.as_view() { show(json.as_f64(it)) }
+                    }
+                    _ => { print_str("not an array"); println() }
+                }
+            }
+            Err(e) => { print_str("syntax"); println() }
+        }
+    }
+    q := json.number_f64(0.25f64)
+    written(q)
+    z := 0.0f64
+    n := json.number_f64(z / z)
+    written(n)
+    return 0i32
+}

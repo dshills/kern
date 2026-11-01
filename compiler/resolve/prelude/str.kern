@@ -112,11 +112,147 @@ impl String {
         }
         return true
     }
+    // push_f64 appends v as text that reads back as exactly v
+    // (specs/float-text): NaN, Infinity, -Infinity; 0 or -0; otherwise
+    // the round-trip digits laid out by ECMAScript's Number::toString
+    // rule (plain up to 21 integer digits, 0.000ddd down to 1e-6, else
+    // d.ddde+X). Hosted only.
+    func push_f64(edit self, v: f64) {
+        if v != v {
+            self.push_str("NaN")
+            return
+        }
+        d := v - v
+        if d != d {
+            if v > 0.0f64 { self.push_str("Infinity") } else { self.push_str("-Infinity") }
+            return
+        }
+        var buf: [40]u8 = zero()
+        n := str_f64_digits(v, buf)
+        // buf is [-]d[.ddd]e+XX
+        i := 0usize
+        if buf[0usize] == 45u8 {
+            self.push(45u8)
+            i = 1usize
+        }
+        var digs: [17]u8 = zero()
+        k := 0usize
+        while i < n && buf[i] != 101u8 {
+            if buf[i] != 46u8 {
+                digs[k] = buf[i]
+                k = k + 1usize
+            }
+            i = i + 1usize
+        }
+        i = i + 1usize
+        eneg := buf[i] == 45u8
+        i = i + 1usize
+        e := 0i64
+        while i < n {
+            e = e * 10i64 + i64(buf[i] - 48u8)
+            i = i + 1usize
+        }
+        if eneg { e = 0i64 - e }
+        if k == 1usize && digs[0usize] == 48u8 {
+            self.push(48u8)
+            return
+        }
+        pt := e + 1i64
+        kk := i64(k)
+        if kk <= pt && pt <= 21i64 {
+            for j in 0usize..k { self.push(digs[j]) }
+            z := pt - kk
+            while z > 0i64 {
+                self.push(48u8)
+                z = z - 1i64
+            }
+        } else if pt > 0i64 && pt <= 21i64 {
+            p := usize(pt)
+            for j in 0usize..p { self.push(digs[j]) }
+            self.push(46u8)
+            for j in p..k { self.push(digs[j]) }
+        } else if pt > -6i64 && pt <= 0i64 {
+            self.push(48u8)
+            self.push(46u8)
+            z := 0i64 - pt
+            while z > 0i64 {
+                self.push(48u8)
+                z = z - 1i64
+            }
+            for j in 0usize..k { self.push(digs[j]) }
+        } else {
+            self.push(digs[0usize])
+            if k > 1usize {
+                self.push(46u8)
+                for j in 1usize..k { self.push(digs[j]) }
+            }
+            self.push(101u8)
+            x := pt - 1i64
+            if x >= 0i64 {
+                self.push(43u8)
+                self.push_u64(u64(x))
+            } else {
+                self.push(45u8)
+                self.push_u64(u64(0i64 - x))
+            }
+        }
+    }
     func clear(edit self) { self.bytes.clear() }
     func clone(view self) -> String { return String { bytes: self.bytes.clone() } }
     func byte(view self, i: usize) -> u8 { b := self.bytes.get(i); return b }
     // equals compares the bytes with s.
     func equals(view self, s: view[]u8) -> bool { return equal(self.bytes.as_view(), s) }
+}
+
+// Runtime intrinsics for floating-point text (hosted; specs/float-text):
+// str_f64_digits writes a finite v's round-trip digits in exponent form,
+// [-]d[.ddd]e+XX, and returns the length; str_parse_f64 is the correctly
+// rounded value of text already checked to be one JSON number, +-Inf when
+// it overflows (it traps oom only if text over 1,023 bytes cannot be
+// copied for the C call).
+func str_f64_digits(v: f64, buf: edit[]u8) -> usize
+func str_parse_f64(s: view[]u8) -> f64
+
+// parse_f64 is the correctly rounded value of s when s is exactly one JSON
+// number (RFC 8259) whose value is finite, else None (specs/float-text).
+// Hosted only.
+func parse_f64(s: view[]u8) -> Option[f64] {
+    if !json_number(s) { return None }
+    v := str_parse_f64(s)
+    d := v - v
+    if d != d { return None }
+    return Some(v)
+}
+
+// json_number reports whether s is exactly one JSON number: an optional
+// -, 0 or a digit 1-9 and digits, an optional fraction, an optional
+// exponent.
+func json_number(s: view[]u8) -> bool {
+    n := len(s)
+    i := 0usize
+    if i < n && s[i] == 45u8 { i = i + 1usize }
+    if i >= n { return false }
+    if s[i] == 48u8 {
+        i = i + 1usize
+    } else if s[i] >= 49u8 && s[i] <= 57u8 {
+        while i < n && s[i] >= 48u8 && s[i] <= 57u8 { i = i + 1usize }
+    } else {
+        return false
+    }
+    if i < n && s[i] == 46u8 {
+        i = i + 1usize
+        start := i
+        while i < n && s[i] >= 48u8 && s[i] <= 57u8 { i = i + 1usize }
+        if i == start { return false }
+    }
+    if i < n && (s[i] == 101u8 || s[i] == 69u8) {
+        i = i + 1usize
+        if i < n && (s[i] == 43u8 || s[i] == 45u8) { i = i + 1usize }
+        start := i
+        while i < n && s[i] >= 48u8 && s[i] <= 57u8 { i = i + 1usize }
+        if i == start { return false }
+    }
+    return i == n
 }
 
 // equal reports whether a and b hold the same bytes.

@@ -313,6 +313,20 @@ func init() {
 			}
 			return nil
 		},
+		// std/str floating-point text (specs/float-text)
+		"str_f64_digits": func(it *Interp, a []Value, _ callCtx) []Value {
+			text := f64Digits(a[0].(Float).V)
+			seq := byteSeq(acc(a[1]))
+			n := 0
+			for ; n < len(text) && n < seq.length(); n++ {
+				seq.at(n).set(mkInt(tyU8, uint64(text[n])))
+			}
+			return []Value{mkInt(tyUsize, uint64(n))}
+		},
+		"str_parse_f64": func(it *Interp, a []Value, _ callCtx) []Value {
+			v := parseF64(seqBytes(acc(a[0])))
+			return []Value{mkFloat("f64", v)}
+		},
 		"time_wall_ns": func(it *Interp, a []Value, _ callCtx) []Value {
 			return []Value{mkInt(tyU64, uint64(time.Now().UnixNano()))}
 		},

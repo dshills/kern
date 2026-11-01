@@ -74,5 +74,5 @@ prism, four passes, every finding fixed:
 - **Linux** runs of the new runtime entries. They use POSIX calls only
   (`mkdir`, `rmdir`, `stat`, `opendir`, `mkdtemp`, `mkstemp`), and the
   macOS host runs them in all four configurations.
-- **JSON numbers** are not read as floats; `as_u64` and `as_i64` cover
+- **JSON numbers** are not read as floats *(resolved 2026-11-01: `json.as_f64` and `json.number_f64`, over `str.parse_f64` and `push_f64`, `specs/float-text`)*; `as_u64` and `as_i64` cover
   integers.

@@ -582,6 +582,13 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.rt("kern_proc_fault_arm", "void (i8, i32)", "i8 "+fe.v(a[0])+", i32 "+fe.v(a[1]))
 	case "now_ns":
 		setDst(fe.rt("kern_now_ns", "i64 ()", ""))
+	// std/str floating-point text (hosted; specs/float-text)
+	case "str_f64_digits":
+		bp, bl := fe.seqParts(a[1])
+		setDst(fe.rt("kern_str_f64_digits", "i64 (double, ptr, i64)", "double "+fe.v(a[0])+", ptr "+bp+", i64 "+bl))
+	case "str_parse_f64":
+		sp, sl := fe.seqParts(a[0])
+		setDst(fe.rt("kern_str_parse_f64", "double (ptr, i64, ptr)", "ptr "+sp+", i64 "+sl+", ptr "+fe.loc(c.Pos)))
 	// std/time (hosted; specs/std-time)
 	case "time_sleep_ns":
 		fe.rt("kern_time_sleep_ns", "void (i64, ptr)", "i64 "+fe.v(a[0])+", ptr "+fe.loc(c.Pos))

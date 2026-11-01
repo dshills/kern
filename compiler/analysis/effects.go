@@ -71,6 +71,9 @@ var trapping = map[string]kindSet{
 	// std/time: a failure of the clock or of sleep, impossible for the
 	// arguments the runtime passes, traps explicit (specs/std-time)
 	"time_sleep_ns": kindsOf("explicit"), "time_wall_ns": kindsOf("explicit"),
+	// std/str: parsing text over 1,023 bytes copies it to the heap for the C
+	// call, which traps oom when that fails (specs/float-text)
+	"str_parse_f64": kindsOf("oom"),
 }
 
 // checkKinds are the kinds a CheckOverflow can raise, by operator and

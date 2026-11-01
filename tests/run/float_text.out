@@ -1,0 +1,41 @@
+0
+-0
+1
+-1
+0.1
+0.3333333333333333
+100
+1e+21
+100000000000000000000
+123456789012345680000
+0.000001
+1e-7
+1.5e-7
+9007199254740992
+1.7976931348623157e+308
+5e-324
+NaN
+Infinity
+-Infinity
+parse [0] 0
+parse [-0] -0
+parse [1.5] 1.5
+parse [1e3] 1000
+parse [1E-3] 0.001
+parse [2.5e+10] 25000000000
+parse [123456789012345678901234567890] 1.2345678901234568e+29
+parse [4.9e-324] 5e-324
+parse [1e-400] 0
+parse [] none
+parse [-] none
+parse [01] none
+parse [1.] none
+parse [.5] none
+parse [1e] none
+parse [+1] none
+parse [1e400] none
+parse [NaN] none
+parse [Infinity] none
+parse [1_0] none
+parse [ 1] none
+sweep checksum 3329762262150790323 mismatches 0
