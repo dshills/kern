@@ -3,3 +3,4 @@ stdin: eio, marker
 stdout: eio, marker
 stderr: eio, marker
 stdout and stderr: eio, marker
+reader thread: eagain, marker

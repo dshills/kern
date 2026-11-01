@@ -9,8 +9,9 @@
 // leaves a marker file. Per case: the error output returns and whether
 // the marker exists (the other operations ran to their ends and the child
 // ended). A stdin write fault (EIO), a stdout read fault (EIO), a stderr
-// read fault (EIO), and stdout (EIO) and stderr (EBADF) faults together,
-// where R7's order picks the stdout one.
+// read fault (EIO), stdout (EIO) and stderr (EBADF) faults together,
+// where R7's order picks the stdout one, and a stdout reader thread that
+// cannot start (EAGAIN, testing.fail_next_spawn).
 module t
 import "std/io"
 import "std/process"
@@ -27,6 +28,8 @@ func err_name(e: view[io.IoErr]) {
         Other(c) => {
             if c == process.proc_errno(4u8) {
                 print_str("eio")
+            } else if c == process.proc_errno(5u8) {
+                print_str("eagain")
             } else if c == process.proc_errno(2u8) {
                 print_str("ebadf")
             } else {
@@ -79,6 +82,10 @@ func main() -> i32 {
                     process.fail_next_io(1u8, eio)
                     process.fail_next_io(2u8, process.proc_errno(2u8))
                     run_case(d, "stdout and stderr")
+                    // a reader thread that cannot start: output closes
+                    // stdin, so the child, waiting for end of file, ends
+                    testing.fail_next_spawn()
+                    run_case(d, "reader thread")
                     rm := io.remove_dir(d)
                 }
             }
