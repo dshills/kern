@@ -260,6 +260,10 @@ type FunctionEffects struct {
 	Spawns    bool   `json:"spawns"`
 	Unsafe    bool   `json:"unsafe"`
 	Label     Label  `json:"label"`
+
+	// TrapKinds are the trap kinds the function may raise, in spec §6
+	// order, without stack (schema_version 0.4; absent at 0.2 and 0.3).
+	TrapKinds []string `json:"trap_kinds"`
 }
 
 // ShowBoundsChecksResult is the result of show-bounds-checks.
@@ -338,7 +342,7 @@ var Notes = map[string]string{
 	"emit-asm":              "Native assembly for the request target. Proven by construction; no `label`.",
 	"apply-structured-edit": "The new source of every changed file plus the diagnostics of a `check` on the result. Coordinate, overlap and symbol failures are atomic and set `ok=false` with one `EDIT_OVERLAP`, `EDIT_UNRESOLVED_SYMBOL` or `EDIT_INVALID_SPAN` diagnostic naming the offending op by `op_index`. Once the ops are applied the edit has succeeded (`ok=true`, `applied` = number of ops) even if the result does not parse or does not check. Proven by construction; no `label`.",
 
-	"Request.schema_version":    "Always `\"0.2\"`; anything else is `API_UNSUPPORTED_SCHEMA`.",
+	"Request.schema_version":    "`\"0.4\"`, `\"0.3\"` or `\"0.2\"`, answered at that version; anything else is `API_UNSUPPORTED_SCHEMA`, answered at 0.4.",
 	"Request.command":           "One of the eleven commands.",
 	"Request.files":             "Source file paths; an empty array is `API_NO_FILES`, an unreadable file `API_FILE_NOT_FOUND`.",
 	"Request.target":            "LLVM-style target triple; when absent, the host target is used. Every result is computed for that target.",
@@ -386,6 +390,8 @@ var Notes = map[string]string{
 	"ApplyEditResult.applied":   "Number of ops applied.",
 	"EditedFile.formatted":      "`true` when the new source parses and is returned formatted; `false` when it is returned verbatim with the parse diagnostics.",
 	"EditedFile.source":         "The new source text.",
+
+	"FunctionEffects.trap_kinds": "The spec §6 trap kinds the function may raise, transitively, in §6 order; `stack` is never listed, since every function's prologue can raise it. Empty iff `traps` is false; every listed kind for a call through a function value, into FFI or of `asm`. Present from `schema_version` 0.4.",
 }
 
 // RenderSchemaMarkdown renders tools/agent-api/schema.md from the types in

@@ -193,8 +193,8 @@ func TestSampleResponsesValidate(t *testing.T) {
 			Result: ShowCopiesResult{Target: "x86_64-unknown-linux-gnu", Copies: []Copy{{Loc: Loc{File: "a.kern", Span: Span{Start: 1, End: 2}}, Type: "Point", Bytes: 16, Kind: CopyBitwise, Heap: false, Label: LabelProven}}}},
 		"show-effects": {SchemaVersion: SchemaVersion, OK: true, Diagnostics: []Diagnostic{},
 			Result: ShowEffectsResult{Target: "x86_64-unknown-linux-gnu", Functions: []FunctionEffects{
-				{Name: "main", Allocates: true, Traps: false, Spawns: false, Unsafe: false, Label: LabelProven},
-				{Name: "ffi", Allocates: true, Traps: true, Spawns: true, Unsafe: true, Label: LabelAssumedUnsafe}}}},
+				{Name: "main", Allocates: true, Traps: false, TrapKinds: []string{}, Spawns: false, Unsafe: false, Label: LabelProven},
+				{Name: "ffi", Allocates: true, Traps: true, TrapKinds: []string{"bounds", "overflow", "oom", "explicit"}, Spawns: true, Unsafe: true, Label: LabelAssumedUnsafe}}}},
 		"show-bounds-checks": {SchemaVersion: SchemaVersion, OK: true, Diagnostics: []Diagnostic{},
 			Result: ShowBoundsChecksResult{Checks: []BoundsCheck{
 				{Loc: Loc{File: "a.kern", Span: Span{Start: 1, End: 2}}, Kind: CheckBounds, Label: LabelProven, ProvenBy: str("loop_bound")},
@@ -374,11 +374,11 @@ func TestResultFieldsMatchSchema(t *testing.T) {
 	}
 }
 
-// TestWriteAtVersions checks the two wire versions (specs/diag-message/SPEC.md
-// F3, F4): a 0.3 response carries every diagnostic's message and validates
-// against schema.json; a 0.2 response says 0.2, carries exactly the 0.2
-// fields of a diagnostic and no message; and neither write changes the
-// caller's response.
+// TestWriteAtVersions checks the wire versions (specs/diag-message/SPEC.md
+// F3, F4; specs/effect-trap-kinds R1): a 0.4 response validates against
+// schema.json; a 0.3 response carries every diagnostic's message; a 0.2
+// response says 0.2, carries exactly the 0.2 fields of a diagnostic and no
+// message; and no write changes the caller's response.
 func TestWriteAtVersions(t *testing.T) {
 	resp := sampleCheckResponse()
 	msg := resp.Diagnostics[0].Message
@@ -401,7 +401,7 @@ func TestWriteAtVersions(t *testing.T) {
 		t.Errorf("0.3 diagnostic message %v, want %q", d["message"], msg)
 	}
 	if err := compileSchema(t, "#/$defs/response").Validate(roundTrip(t, resp)); err != nil {
-		t.Errorf("0.3 response does not validate: %v", err)
+		t.Errorf("0.4 response does not validate: %v", err)
 	}
 	out.Reset()
 	if err := WriteAt(&out, "0.2", resp); err != nil {
@@ -425,12 +425,57 @@ func TestWriteAtVersions(t *testing.T) {
 	if resp.Diagnostics[0].Message != msg || resp.SchemaVersion != SchemaVersion {
 		t.Errorf("WriteAt changed the caller's response: %+v", resp)
 	}
-	for _, v := range []string{"0.2", "0.3"} {
+	for _, v := range []string{"0.2", "0.3", "0.4"} {
 		if !Supported(v) {
 			t.Errorf("%s is not supported", v)
 		}
 	}
-	if Supported("0.4") || Supported("") {
+	if Supported("0.5") || Supported("") {
 		t.Errorf("an unknown version is supported")
+	}
+}
+
+// TestEffectsShapeByVersion checks that show-effects carries trap_kinds at
+// 0.4 only (specs/effect-trap-kinds R1), that the 0.4 shape validates, and
+// that writing an older shape leaves the caller's result untouched.
+func TestEffectsShapeByVersion(t *testing.T) {
+	res := ShowEffectsResult{Target: "f", Functions: []FunctionEffects{{Name: "f", Traps: true, TrapKinds: []string{"bounds", "oom"}, Label: LabelProven}}}
+	for _, v := range []string{"0.2", "0.3", "0.4"} {
+		var out bytes.Buffer
+		if err := WriteAt(&out, v, Response{OK: true, Result: res, Diagnostics: []Diagnostic{}}); err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		f := got["result"].(map[string]any)["functions"].([]any)[0].(map[string]any)
+		_, has := f["trap_kinds"]
+		if has != (v == "0.4") {
+			t.Errorf("%s: trap_kinds present %v", v, has)
+		}
+		if v == "0.4" {
+			if err := compileSchema(t, "#/$defs/responses/$defs/show-effects").Validate(got); err != nil {
+				t.Errorf("0.4 show-effects does not validate: %v", err)
+			}
+		}
+	}
+	if len(res.Functions[0].TrapKinds) != 2 {
+		t.Error("WriteAt changed the caller's result")
+	}
+}
+
+// The pre-0.4 show-effects shape is FunctionEffects without trap_kinds, so
+// a field added to FunctionEffects must be added to it too (or be a 0.4
+// field like trap_kinds).
+func TestEffects03ShapeTracksFunctionEffects(t *testing.T) {
+	var want []string
+	for _, f := range JSONFields(reflect.TypeOf(FunctionEffects{})) {
+		if f != "trap_kinds" {
+			want = append(want, f)
+		}
+	}
+	if got := JSONFields(reflect.TypeOf(functionEffects03{})); !reflect.DeepEqual(got, want) {
+		t.Errorf("functionEffects03 fields %v, want %v", got, want)
 	}
 }

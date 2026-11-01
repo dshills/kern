@@ -1,0 +1,36 @@
+try_new
+  err out of memory
+try_insert that must rebuild, owned key and value
+  len 11
+  drop key 99
+  drop value 99
+  err out of memory
+  len 11
+  drop key 5
+  has 5
+  drop value 8
+  drop value 3
+  drop value 6
+  drop value 1
+  drop value 9
+  drop value 4
+  drop value 7
+  drop value 2
+  drop value 10
+  drop value 5
+  drop value 0
+  drop key 8
+  drop key 3
+  drop key 6
+  drop key 1
+  drop key 9
+  drop key 4
+  drop key 7
+  drop key 2
+  drop key 10
+  drop key 5
+  drop key 0
+try_insert that must rebuild, entries unchanged
+  len 11 sum 28288104277997010
+  err out of memory
+  len 11 sum 28288104277997010

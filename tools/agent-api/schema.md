@@ -1,4 +1,4 @@
-# kern machine API (`schema_version` 0.3)
+# kern machine API (`schema_version` 0.4)
 
 Generated from `compiler/diag/schema.go` by `go generate ./compiler/diag`; do not edit.
 This is the human-readable copy of spec §16; `tools/agent-api/schema.json` is the normative JSON Schema and the two must agree.
@@ -31,7 +31,7 @@ Every command reads one JSON request on standard input and writes one JSON respo
 
 | Field | JSON | Type | Notes |
 |---|---|---|---|
-| `SchemaVersion` | `schema_version` | string | Always `"0.2"`; anything else is `API_UNSUPPORTED_SCHEMA`. |
+| `SchemaVersion` | `schema_version` | string | `"0.4"`, `"0.3"` or `"0.2"`, answered at that version; anything else is `API_UNSUPPORTED_SCHEMA`, answered at 0.4. |
 | `Command` | `command` | string | One of the eleven commands. |
 | `Files` | `files` | [string] | Source file paths; an empty array is `API_NO_FILES`, an unreadable file `API_FILE_NOT_FOUND`. |
 | `Target` | `target` | string | Optional. LLVM-style target triple; when absent, the host target is used. Every result is computed for that target. |
@@ -271,6 +271,7 @@ Effects are transitive over statically resolved callees. `true` means the effect
 | `Spawns` | `spawns` | bool | Possible unless proven impossible (`false` only with label `proven`). |
 | `Unsafe` | `unsafe` | bool | Possible unless proven impossible (`false` only with label `proven`). |
 | `Label` | `label` | label |  |
+| `TrapKinds` | `trap_kinds` | [string] | The spec §6 trap kinds the function may raise, transitively, in §6 order; `stack` is never listed, since every function's prologue can raise it. Empty iff `traps` is false; every listed kind for a call through a function value, into FFI or of `asm`. Present from `schema_version` 0.4. |
 
 ### show-bounds-checks
 

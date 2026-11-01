@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dshills/kern/compiler/analysis"
 	"github.com/dshills/kern/compiler/check"
+	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/lower"
 	"github.com/dshills/kern/compiler/resolve"
@@ -17,6 +19,7 @@ import (
 // SystemAllocator, and Vec.push, the walk's control.
 const tryAllocProgram = `module m
 import "std/str"
+import "std/map"
 func init_n(n: out u64) -> Result[(), ()] {
     n = 1u64
     return Ok(())
@@ -64,6 +67,16 @@ func allocin() -> Result[(), AllocErr] {
     v.release()
     return Ok(())
 }
+func maps() -> Result[(), AllocErr] {
+    m := map.Map[u64, u64].try_new()?
+    o := m.try_insert(1u64, 2u64)?
+    return Ok(())
+}
+func controls() {
+    b := Box.new(1u64)
+    m := map.Map[u64, u64].new()
+    o := m.insert(1u64, 2u64)
+}
 func use_with(r: Result[(), AllocOrInit[()]]) {
     match r {
         Ok(u) => { }
@@ -92,10 +105,29 @@ func main() -> i32 {
     use_with(boxes_with())
     use(strings())
     use(allocin())
+    use(maps())
+    controls()
     v.push(3u64)
     return 0i32
 }
 `
+
+// fallibleForms are the fallible methods whose own code, and (but for the
+// _with constructors, which call the caller's initializer and are listed
+// apart) whose effect summaries, reach no oom trap: the try_ forms
+// (specs/fallible-alloc), every BoxIn and VecIn method except the
+// destructors, which only call release, and the seed_len test hook
+// (specs/alloc-containers R5), and the Map forms (specs/effect-trap-kinds).
+var fallibleForms = []string{
+	"Box.try_new",
+	"Vec.try_with_capacity", "Vec.try_reserve", "Vec.try_push", "Vec.try_extend", "Vec.try_resize",
+	"String.try_from", "String.try_reserve", "String.try_push", "String.try_push_str",
+	"BoxIn.try_new_in", "BoxIn.get", "BoxIn.at", "BoxIn.allocator", "BoxIn.release",
+	"VecIn.new_in", "VecIn.len", "VecIn.capacity", "VecIn.allocator", "VecIn.try_reserve",
+	"VecIn.try_push", "VecIn.try_extend", "VecIn.pop", "VecIn.get", "VecIn.at",
+	"VecIn.as_view", "VecIn.as_edit", "VecIn.clear", "VecIn.release",
+	"Map.try_new", "Map.try_insert",
+}
 
 // plainName drops the type-argument lists of a lowered function's name, so
 // Vec[u64].try_push and Vec.try_push[u64] are both Vec.try_push.
@@ -182,18 +214,7 @@ func TestTryFormsReachNoOOMTrap(t *testing.T) {
 			t.Errorf("control: no oom trap reached from %s", name)
 		}
 	}
-	want := []string{
-		"Box.try_new", "Box.try_new_with", "Box.try_new_with_ctx",
-		"Vec.try_with_capacity", "Vec.try_reserve", "Vec.try_push", "Vec.try_extend", "Vec.try_resize",
-		"String.try_from", "String.try_reserve", "String.try_push", "String.try_push_str",
-		// specs/alloc-containers R5: every BoxIn and VecIn method except
-		// the destructors, which only call release (walked here), and the
-		// seed_len test hook
-		"BoxIn.try_new_in", "BoxIn.get", "BoxIn.at", "BoxIn.allocator", "BoxIn.release",
-		"VecIn.new_in", "VecIn.len", "VecIn.capacity", "VecIn.allocator", "VecIn.try_reserve",
-		"VecIn.try_push", "VecIn.try_extend", "VecIn.pop", "VecIn.get", "VecIn.at",
-		"VecIn.as_view", "VecIn.as_edit", "VecIn.clear", "VecIn.release",
-	}
+	want := append([]string{"Box.try_new_with", "Box.try_new_with_ctx"}, fallibleForms...)
 	for _, w := range want {
 		if len(roots[w]) == 0 {
 			var names []string
@@ -209,6 +230,67 @@ func TestTryFormsReachNoOOMTrap(t *testing.T) {
 		for _, name := range roots[w] {
 			if p := oomReach(mod, name); p != nil {
 				t.Errorf("%s reaches an oom trap: %s", name, strings.Join(p, " -> "))
+			}
+		}
+	}
+}
+
+// No fallible form's show-effects summary lists oom, while the trapping
+// forms' summaries do (specs/effect-trap-kinds R4).
+func TestFallibleFormsListNoOOM(t *testing.T) {
+	mod := lowerPlain(t, tryAllocProgram)
+	// every lowered function of each plain name (several instantiations
+	// may share one) is checked
+	byName := map[string][][]string{}
+	for _, f := range analysis.Effects(mod, "").Functions {
+		n := plainName(f.Name)
+		byName[n] = append(byName[n], f.TrapKinds)
+	}
+	find := func(w string) [][]string {
+		var out [][]string
+		for n, ks := range byName {
+			if n == w || strings.HasSuffix(n, "."+w) {
+				out = append(out, ks...)
+			}
+		}
+		return out
+	}
+	hasOOM := func(ks []string) bool {
+		for _, k := range ks {
+			if k == "oom" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, w := range fallibleForms {
+		all := find(w)
+		if len(all) == 0 {
+			t.Errorf("%s has no effect summary", w)
+		}
+		for _, ks := range all {
+			if hasOOM(ks) {
+				t.Errorf("%s lists oom: %v", w, ks)
+			}
+		}
+	}
+	// the _with forms call the caller's initializer through a function
+	// value, so their summaries are every kind with label unknown (element
+	// code); their own code is TestTryFormsReachNoOOMTrap's
+	for _, f := range analysis.Effects(mod, "").Functions {
+		n := plainName(f.Name)
+		if (n == "Box.try_new_with" || n == "Box.try_new_with_ctx") && f.Label != diag.LabelUnknown {
+			t.Errorf("%s: label %s, want unknown", n, f.Label)
+		}
+	}
+	for _, w := range []string{"Box.new", "Vec.push", "Map.insert"} {
+		all := find(w)
+		if len(all) == 0 {
+			t.Errorf("control %s has no effect summary", w)
+		}
+		for _, ks := range all {
+			if !hasOOM(ks) {
+				t.Errorf("control %s does not list oom: %v", w, ks)
 			}
 		}
 	}

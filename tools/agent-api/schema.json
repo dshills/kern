@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/dshills/kern/tools/agent-api/schema.json",
-  "title": "kern machine API, schema_version 0.3",
-  "description": "Hand-maintained transcription of spec §7 (Machine API) and §16 (result schemas and structured-edit format). This file is the normative machine-readable copy for schema_version 0.3 (a 0.2 response differs only by the absence of the diagnostic message); tools/agent-api/schema.md is generated from compiler/diag/schema.go and must agree with it.",
+  "title": "kern machine API, schema_version 0.4",
+  "description": "Hand-maintained transcription of spec §7 (Machine API) and §16 (result schemas and structured-edit format). This file is the normative machine-readable copy for schema_version 0.4 (a 0.3 response differs only by the absence of show-effects trap_kinds, and a 0.2 response also by the absence of the diagnostic message); tools/agent-api/schema.md is generated from compiler/diag/schema.go and must agree with it.",
   "$comment": "Validate a request against #/$defs/request, a response against #/$defs/response, and a response of a known command against #/$defs/responses/$defs/<command>. The result object of each command is #/$defs/results/$defs/<command>.",
   "oneOf": [
     { "$ref": "#/$defs/request" },
@@ -11,8 +11,8 @@
   "$defs": {
     "schema_version": {
       "type": "string",
-      "const": "0.3",
-      "description": "Schema version carried by every request and response (§7)."
+      "const": "0.4",
+      "description": "Schema version carried by every request and response (§7). The compiler also answers 0.3 and 0.2 requests in their own shapes."
     },
     "command": {
       "type": "string",
@@ -452,11 +452,17 @@
                   "name": { "type": "string" },
                   "allocates": { "type": "boolean" },
                   "traps": { "type": "boolean" },
+                  "trap_kinds": {
+                    "type": "array",
+                    "description": "The spec §6 trap kinds the function may raise, transitively, in §6 order; stack is never listed, since every function's prologue can raise it. Empty iff traps is false.",
+                    "items": { "enum": ["bounds", "overflow", "div_zero", "shift", "conversion", "generation", "vacant", "identity", "disjoint", "oom", "explicit", "unreachable"] },
+                    "uniqueItems": true
+                  },
                   "spawns": { "type": "boolean" },
                   "unsafe": { "type": "boolean" },
                   "label": { "$ref": "#/$defs/label" }
                 },
-                "required": ["name", "allocates", "traps", "spawns", "unsafe", "label"],
+                "required": ["name", "allocates", "traps", "trap_kinds", "spawns", "unsafe", "label"],
                 "additionalProperties": false,
                 "if": {
                   "anyOf": [

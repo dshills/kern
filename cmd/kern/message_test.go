@@ -56,7 +56,7 @@ func TestWireMessageVersions(t *testing.T) {
 		}
 		req := string(b)
 		checked++
-		for _, v := range []string{"0.2", "0.3"} {
+		for _, v := range []string{"0.2", "0.3", "0.4"} {
 			r := versionRE.ReplaceAllString(req, `"schema_version": "`+v+`"`)
 			_, out, _ := invoke(t, r, append([]string{cmd}, probe.CLI...)...)
 			got, ds := diagnosticsOf(t, out)
@@ -68,8 +68,8 @@ func TestWireMessageVersions(t *testing.T) {
 				if v == "0.2" && has {
 					t.Errorf("%s at 0.2: diagnostic %v carries a message", filepath.Base(f), d["code"])
 				}
-				if v == "0.3" && (!has || msg == "") {
-					t.Errorf("%s at 0.3: diagnostic %v has no message", filepath.Base(f), d["code"])
+				if v != "0.2" && (!has || msg == "") {
+					t.Errorf("%s at %s: diagnostic %v has no message", filepath.Base(f), v, d["code"])
 				}
 			}
 		}
@@ -77,10 +77,10 @@ func TestWireMessageVersions(t *testing.T) {
 	if checked < 5 {
 		t.Fatalf("only %d fixtures carried a 0.2 request", checked)
 	}
-	// a passing check and a format at 0.2 answer at 0.2; at 0.3, at 0.3
+	// a passing check and a format answer at the version asked
 	hello := filepath.Join(testsRoot, "run", "hello.kern")
 	for _, cmd := range []string{"check", "format", "emit-ir", "show-bounds-checks"} {
-		for _, v := range []string{"0.2", "0.3"} {
+		for _, v := range []string{"0.2", "0.3", "0.4"} {
 			req := `{"schema_version":"` + v + `","command":"` + cmd + `","files":["` + hello + `"]}`
 			code, out, _ := invoke(t, req, cmd)
 			if got, _ := diagnosticsOf(t, out); code != 0 || got != v {
@@ -113,17 +113,19 @@ func TestWireMessageVersions(t *testing.T) {
 	// an invocation at 0.2 leaves no trace in the next (no shared state)
 	_, _, _ = invoke(t, `{"schema_version":"0.2","command":"check","files":["`+bad+`"]}`, "check")
 	_, out, _ = invoke(t, "", "check", bad)
-	if got, ds := diagnosticsOf(t, out); got != "0.3" || ds[0]["message"] == nil {
+	if got, ds := diagnosticsOf(t, out); got != diag.SchemaVersion || ds[0]["message"] == nil {
 		t.Errorf("after a 0.2 request, a command-line check answered at %s with %v", got, ds)
 	}
-	// an unknown version
-	_, out, _ = invoke(t, `{"schema_version":"0.4","command":"check","files":["x"]}`, "check")
-	if got, ds := diagnosticsOf(t, out); got != "0.3" || ds[0]["code"] != "API_UNSUPPORTED_SCHEMA" || ds[0]["message"] == nil {
-		t.Errorf("0.4: answered at %s with %v", got, ds)
+	// an unknown version, and a missing one, answered at the newest
+	for _, req := range []string{`{"schema_version":"0.5","command":"check","files":["x"]}`, `{"command":"check","files":["x"]}`} {
+		_, out, _ = invoke(t, req, "check")
+		if got, ds := diagnosticsOf(t, out); got != diag.SchemaVersion || ds[0]["code"] != "API_UNSUPPORTED_SCHEMA" || ds[0]["message"] == nil {
+			t.Errorf("%s: answered at %s with %v", req, got, ds)
+		}
 	}
 	// a failure before the version is known
 	_, out, _ = invoke(t, `{"schema_version":"0.2","command":"check","files":["x"]} {"trailing":1}`, "check")
-	if got, ds := diagnosticsOf(t, out); got != "0.3" || ds[0]["code"] != "API_MALFORMED_REQUEST" {
+	if got, ds := diagnosticsOf(t, out); got != diag.SchemaVersion || ds[0]["code"] != "API_MALFORMED_REQUEST" {
 		t.Errorf("malformed: answered at %s with %v", got, ds)
 	}
 }

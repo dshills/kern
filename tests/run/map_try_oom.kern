@@ -1,0 +1,82 @@
+//! phase: 6
+//! expect: output map_try_oom
+//! test-hooks: true
+// When the table cannot be allocated, Map.try_new and Map.try_insert return
+// an error instead of trapping (specs/effect-trap-kinds R6): try_insert's
+// key and value are destroyed once each, key first, and the map's entries
+// and len() are as before.
+module t
+import "std/map"
+struct K nocopy { id: u64 }
+impl K {
+    destructor(edit self) { print_str("  drop key "); print_u64(self.id); println() }
+}
+impl map.Hashable for K {
+    func hash(view self) -> u64 { return map.mix(self.id) }
+    func eq(view self, other: view[K]) -> bool { return self.id == other.id }
+}
+struct V nocopy { id: u64 }
+impl V {
+    destructor(edit self) { print_str("  drop value "); print_u64(self.id); println() }
+}
+func show(m: view[map.Map[u64, u64]]) {
+    h := 0u64
+    for k in 0u64..20u64 {
+        if m.contains(k) {
+            with v := m.get(k) { h = h * 31u64 + k * 1000u64 + v }
+        }
+    }
+    print_str("  len "); print_u64(u64(m.len())); print_str(" sum "); print_u64(h); println()
+}
+func new_map() -> Result[(), AllocErr] {
+    testing.fail_next_alloc()
+    m := map.Map[u64, u64].try_new()?
+    return Ok(())
+}
+func ins(m: edit[map.Map[K, V]], k: own K, v: own V) -> Result[(), AllocErr] {
+    o := m.try_insert(k, v)?
+    return Ok(())
+}
+func grow() -> Result[(), AllocErr] {
+    m := map.Map[K, V].try_new()?
+    i := 0u64
+    // eleven entries fill 16 slots to the 3/4 mark: the twelfth must rebuild
+    while i < 11u64 {
+        ins(m, K { id: i }, V { id: i })?
+        i = i + 1u64
+    }
+    print_str("  len "); print_u64(u64(m.len())); println()
+    testing.fail_next_alloc()
+    report(ins(m, K { id: 99u64 }, V { id: 99u64 }))
+    print_str("  len "); print_u64(u64(m.len())); println()
+    if m.contains(K { id: 5u64 }) { print_str("  has 5"); println() }
+    return Ok(())
+}
+func ins_u(m: edit[map.Map[u64, u64]], k: u64, v: u64) -> Result[(), AllocErr] {
+    o := m.try_insert(k, v)?
+    return Ok(())
+}
+func unchanged() -> Result[(), AllocErr] {
+    m := map.Map[u64, u64].try_new()?
+    for k in 0u64..11u64 { o := m.try_insert(k, k * 2u64)? }
+    show(m)
+    testing.fail_next_alloc()
+    report(ins_u(m, 50u64, 1u64))
+    show(m)
+    return Ok(())
+}
+func report(r: Result[(), AllocErr]) {
+    match r {
+        Ok(u) => { }
+        Err(e) => { print_str("  err out of memory"); println() }
+    }
+}
+func main() -> i32 {
+    print_str("try_new"); println()
+    report(new_map())
+    print_str("try_insert that must rebuild, owned key and value"); println()
+    report(grow())
+    print_str("try_insert that must rebuild, entries unchanged"); println()
+    report(unchanged())
+    return 0i32
+}

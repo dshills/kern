@@ -8,13 +8,14 @@ import (
 )
 
 // SchemaVersion is the machine-API schema version this compiler speaks (spec §16).
-const SchemaVersion = "0.3"
+const SchemaVersion = "0.4"
 
 // Accepted lists the request schema versions the compiler answers: the
-// newest (SchemaVersion), whose diagnostics carry a message, and 0.2,
-// answered at 0.2 with the diagnostics' messages left out
+// newest (SchemaVersion), whose show-effects entries carry trap_kinds
+// (specs/effect-trap-kinds); 0.3, answered without trap_kinds; and 0.2,
+// answered also without the diagnostics' messages
 // (specs/diag-message/SPEC.md F4).
-var Accepted = []string{"0.2", SchemaVersion}
+var Accepted = []string{"0.2", "0.3", SchemaVersion}
 
 // Supported reports whether a request's schema_version is answered.
 func Supported(v string) bool {
@@ -110,11 +111,15 @@ func Sort(ds []Diagnostic) {
 func Write(w io.Writer, r Response) error { return WriteAt(w, SchemaVersion, r) }
 
 // WriteAt encodes a response at a wire version: the response says that
-// version, and at 0.2 its diagnostics carry no message, so that a 0.2
-// consumer sees exactly the 0.2 shape. The caller's response and its
-// diagnostics are left as they are: the diagnostics are copied.
+// version, at 0.2 its diagnostics carry no message, and below 0.4 a
+// show-effects result carries no trap_kinds, so that a consumer sees
+// exactly its version's shape. The caller's response, its diagnostics and
+// its result are left as they are: what changes is copied.
 func WriteAt(w io.Writer, version string, r Response) error {
 	r.SchemaVersion = version
+	if version == "0.2" || version == "0.3" {
+		r.Result = effectsBefore04(r.Result)
+	}
 	ds := make([]Diagnostic, len(r.Diagnostics))
 	copy(ds, r.Diagnostics)
 	for i := range ds {
@@ -134,4 +139,42 @@ func WriteAt(w io.Writer, version string, r Response) error {
 // Render returns a human-readable one-line form used by `kern check --human`.
 func Render(d Diagnostic) string {
 	return fmt.Sprintf("%s:%d-%d: %s [%s rule %s]: %s", d.File, d.Span.Start, d.Span.End, d.Severity, d.Code, d.Rule, d.Message)
+}
+
+// functionEffects03 and showEffects03 are the show-effects shape before
+// schema_version 0.4: FunctionEffects without trap_kinds.
+type functionEffects03 struct {
+	Name      string `json:"name"`
+	Allocates bool   `json:"allocates"`
+	Traps     bool   `json:"traps"`
+	Spawns    bool   `json:"spawns"`
+	Unsafe    bool   `json:"unsafe"`
+	Label     Label  `json:"label"`
+}
+
+type showEffects03 struct {
+	Target    string              `json:"target"`
+	Functions []functionEffects03 `json:"functions"`
+}
+
+// effectsBefore04 returns a show-effects result in the 0.2/0.3 shape, and
+// any other result unchanged.
+func effectsBefore04(result any) any {
+	var r ShowEffectsResult
+	switch x := result.(type) {
+	case ShowEffectsResult:
+		r = x
+	case *ShowEffectsResult:
+		if x == nil {
+			return result
+		}
+		r = *x
+	default:
+		return result
+	}
+	out := showEffects03{Target: r.Target, Functions: make([]functionEffects03, len(r.Functions))}
+	for i, f := range r.Functions {
+		out.Functions[i] = functionEffects03{Name: f.Name, Allocates: f.Allocates, Traps: f.Traps, Spawns: f.Spawns, Unsafe: f.Unsafe, Label: f.Label}
+	}
+	return out
 }

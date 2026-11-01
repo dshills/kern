@@ -9,17 +9,82 @@ import (
 	"github.com/dshills/kern/compiler/resolve"
 )
 
-// trapping lists the intrinsics that may trap at runtime (checks the
-// lowering does not emit as instructions: allocator obligations, recursive
-// locking, reference-count overflow, raw memory in the interpreter). The
-// containers' checks are Trap instructions in their kern bodies and reach
-// callers through propagation.
-var trapping = map[string]bool{
-	"Mutex.lock": true, "Condvar.wait": true, "Shared.clone": true,
-	"SystemAllocator.alloc": true, "SystemAllocator.realloc": true, "SystemAllocator.alloc_zeroed": true, "SystemAllocator.free": true, "simd_shuffle": true, "asm": true,
-	"ptr_load": true, "ptr_store": true, "ptr_take": true, "ptr_load_volatile": true, "ptr_store_volatile": true, "ptr_copy": true, "ptr_store_seq": true,
-	"ptr_view": true, "ptr_edit": true, "ptr_view_seq": true, "ptr_edit_seq": true, "ptr_edit2": true, "ptr_view2": true, "ptr_view_edit": true,
-	"testing.require_hooks": true, "testing.seed_shared_count": true,
+// trapKinds are the kinds show-effects lists: spec §6's, in its order,
+// without stack, which every function's prologue can raise
+// (specs/effect-trap-kinds §2).
+var trapKinds = []string{"bounds", "overflow", "div_zero", "shift", "conversion", "generation", "vacant", "identity", "disjoint", "oom", "explicit", "unreachable"}
+
+// kindSet is a set of listed trap kinds, bit i for trapKinds[i].
+type kindSet uint16
+
+// allKinds is every listed kind: a call the analysis cannot see into. A
+// kindSet has room for 16 kinds; TestAllKindsCoversTrapKinds checks.
+var allKinds = kindSet(1)<<len(trapKinds) - 1
+
+func kindOf(k string) kindSet {
+	for i, n := range trapKinds {
+		if n == k {
+			return 1 << i
+		}
+	}
+	return 0
+}
+
+func kindsOf(ks ...string) kindSet {
+	var s kindSet
+	for _, k := range ks {
+		s |= kindOf(k)
+	}
+	return s
+}
+
+// list returns the kinds of s in trapKinds order, never nil.
+func (s kindSet) list() []string {
+	out := []string{}
+	for i, n := range trapKinds {
+		if s&(1<<i) != 0 {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// trapping lists the intrinsics that may trap at runtime, with their kinds
+// (checks the lowering does not emit as instructions: allocator
+// obligations, recursive locking, reference-count overflow, raw memory in
+// the interpreter, and the runtime objects' allocation, which traps oom).
+// The containers' checks are Trap instructions in their kern bodies and
+// reach callers through propagation. TestTrappingMatchesRuntime pins this
+// table against the runtimes' trap sites.
+var trapping = map[string]kindSet{
+	"Mutex.lock": kindsOf("explicit"), "Condvar.wait": kindsOf("explicit"), "Shared.clone": kindsOf("overflow"),
+	"SystemAllocator.alloc": kindsOf("explicit"), "SystemAllocator.realloc": kindsOf("explicit"), "SystemAllocator.alloc_zeroed": kindsOf("explicit"), "SystemAllocator.free": kindsOf("explicit"),
+	"simd_shuffle": kindsOf("bounds"), "asm": allKinds,
+	"ptr_load": kindsOf("explicit"), "ptr_store": kindsOf("explicit"), "ptr_take": kindsOf("explicit"), "ptr_load_volatile": kindsOf("explicit"), "ptr_store_volatile": kindsOf("explicit"), "ptr_copy": kindsOf("explicit"), "ptr_store_seq": kindsOf("explicit"),
+	"ptr_view": kindsOf("explicit"), "ptr_edit": kindsOf("explicit"), "ptr_view_seq": kindsOf("explicit"), "ptr_edit_seq": kindsOf("explicit"), "ptr_edit2": kindsOf("explicit"), "ptr_view2": kindsOf("explicit"), "ptr_view_edit": kindsOf("explicit"),
+	"testing.require_hooks": kindsOf("explicit"), "testing.seed_shared_count": kindsOf("explicit", "overflow"),
+	"testing.fail_next_alloc": kindsOf("explicit"), "testing.fail_next_spawn": kindsOf("explicit"),
+	// the runtime objects: kern_alloc (natively) and runtimeAlloc (in the
+	// interpreter) trap oom when their storage cannot be allocated
+	"Shared.new": kindsOf("oom"), "Mutex.new": kindsOf("oom"), "Condvar.new": kindsOf("oom"),
+	"thread.scope": kindsOf("oom"), "thread.spawn": kindsOf("oom"), "scope.spawn": kindsOf("oom"),
+}
+
+// checkKinds are the kinds a CheckOverflow can raise, by operator and
+// operand type (the backend's checks, compiler/backend/llvm emitCheck).
+func checkKinds(op, typ string) kindSet {
+	switch op {
+	case "/", "%":
+		if strings.HasPrefix(typ, "i") {
+			return kindsOf("div_zero", "overflow")
+		}
+		return kindsOf("div_zero")
+	case "<<":
+		return kindsOf("shift", "overflow")
+	case ">>":
+		return kindsOf("shift")
+	}
+	return kindsOf("overflow")
 }
 
 // spawning lists the thread-creating intrinsics.
@@ -32,6 +97,7 @@ func unsafeIntrinsic(name string) bool {
 
 type effects struct {
 	allocates, traps, spawns, unsafe bool
+	kinds                            kindSet // the trap kinds; traps iff non-empty
 	label                            diag.Label
 }
 
@@ -44,7 +110,7 @@ func Effects(mod *ir.Module, target string) diag.ShowEffectsResult {
 	summaries, defined := effectSummaries(mod)
 	for _, f := range defined {
 		e := summaries[f.Name]
-		res.Functions = append(res.Functions, diag.FunctionEffects{Name: f.Name, Allocates: e.allocates, Traps: e.traps, Spawns: e.spawns, Unsafe: e.unsafe, Label: e.label})
+		res.Functions = append(res.Functions, diag.FunctionEffects{Name: f.Name, Allocates: e.allocates, Traps: e.traps, TrapKinds: e.kinds.list(), Spawns: e.spawns, Unsafe: e.unsafe, Label: e.label})
 	}
 	sort.Slice(res.Functions, func(i, j int) bool { return res.Functions[i].Name < res.Functions[j].Name })
 	return res
@@ -62,7 +128,7 @@ func effectSummaries(mod *ir.Module) (map[string]*effects, []*ir.Func) {
 			continue
 		}
 		if f.Extern != "" && len(f.Blocks) == 0 {
-			summaries[f.Name] = &effects{allocates: true, traps: true, spawns: true, unsafe: true, label: diag.LabelAssumedUnsafe}
+			summaries[f.Name] = &effects{allocates: true, traps: true, spawns: true, unsafe: true, kinds: allKinds, label: diag.LabelAssumedUnsafe}
 			continue
 		}
 		summaries[f.Name] = &effects{label: diag.LabelProven}
@@ -81,8 +147,14 @@ func effectSummaries(mod *ir.Module) (map[string]*effects, []*ir.Func) {
 		for _, b := range f.Blocks {
 			for _, in := range b.Instrs {
 				switch i := in.(type) {
-				case *ir.CheckBounds, *ir.CheckOverflow, *ir.CheckConv, *ir.Trap:
-					d.e.traps = true
+				case *ir.CheckBounds:
+					d.e.traps, d.e.kinds = true, d.e.kinds|kindsOf("bounds")
+				case *ir.CheckOverflow:
+					d.e.traps, d.e.kinds = true, d.e.kinds|checkKinds(i.Op, i.Type)
+				case *ir.CheckConv:
+					d.e.traps, d.e.kinds = true, d.e.kinds|kindsOf("conversion")
+				case *ir.Trap:
+					d.e.traps, d.e.kinds = true, d.e.kinds|kindOf(i.Kind)
 				case *ir.UnsafeBegin:
 					d.e.unsafe = true
 				case *ir.Call:
@@ -92,13 +164,19 @@ func effectSummaries(mod *ir.Module) (map[string]*effects, []*ir.Func) {
 						// ptr_init_ctx call their initializer through one):
 						// any effect, unknown
 						d.e.allocates, d.e.traps, d.e.spawns, d.e.unsafe = true, true, true, true
+						d.e.kinds = allKinds
 						d.e.label = diag.LabelUnknown
 					case i.Intrinsic != "":
 						if always, known := allocating[i.Intrinsic]; known && (always || i.Intrinsic != "clone" || len(i.Dsts) == 0 || !resolve.IsCopy(i.Dsts[0].Type)) {
 							d.e.allocates = true
 						}
-						if trapping[i.Intrinsic] || (i.Release != "" && trapping[i.Release]) {
-							d.e.traps = true
+						if k, ok := trapping[i.Intrinsic]; ok {
+							d.e.traps, d.e.kinds = true, d.e.kinds|k
+						}
+						if i.Release != "" {
+							if k, ok := trapping[i.Release]; ok {
+								d.e.traps, d.e.kinds = true, d.e.kinds|k
+							}
 						}
 						if spawning[i.Intrinsic] {
 							d.e.spawns = true
@@ -112,8 +190,10 @@ func effectSummaries(mod *ir.Module) (map[string]*effects, []*ir.Func) {
 						}
 					}
 				case *ir.AccessEnd:
-					if i.Release != "" && trapping[i.Release] {
-						d.e.traps = true
+					if i.Release != "" {
+						if k, ok := trapping[i.Release]; ok {
+							d.e.traps, d.e.kinds = true, d.e.kinds|k
+						}
 					}
 				case *ir.Drop:
 					if g := destructorOf(mod, i.Type); g != nil {
@@ -122,7 +202,12 @@ func effectSummaries(mod *ir.Module) (map[string]*effects, []*ir.Func) {
 				}
 			}
 			if _, ok := b.Term.(*ir.Unreachable); ok {
+				// the terminator after a Trap is never reached: the trap
+				// already terminated (and set traps)
 				d.e.traps = true
+				if !endsInTrap(b) {
+					d.e.kinds |= kindsOf("unreachable")
+				}
 			}
 		}
 		directs[f.Name] = d
@@ -139,6 +224,10 @@ func effectSummaries(mod *ir.Module) (map[string]*effects, []*ir.Func) {
 		set(&e.traps, o.traps)
 		set(&e.spawns, o.spawns)
 		set(&e.unsafe, o.unsafe)
+		if o.kinds&^e.kinds != 0 {
+			e.kinds |= o.kinds
+			changed = true
+		}
 		if o.label == diag.LabelUnknown && e.label != diag.LabelUnknown {
 			e.label = diag.LabelUnknown
 			changed = true
@@ -164,6 +253,17 @@ func effectSummaries(mod *ir.Module) (map[string]*effects, []*ir.Func) {
 		}
 	}
 	return summaries, defined
+}
+
+// endsInTrap reports whether a block holds a Trap instruction, after which
+// its terminator is dead.
+func endsInTrap(b *ir.Block) bool {
+	for _, in := range b.Instrs {
+		if _, ok := in.(*ir.Trap); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // destructorOf finds the lowered destructor of a named type, if any.

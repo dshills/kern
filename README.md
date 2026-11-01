@@ -136,9 +136,11 @@ Check a file and read the diagnostics as text rather than JSON:
 Every command other than `run`, `build`, `debug`, `test` and `lsp` reads one JSON request on
 standard input (or takes files on the command line) and writes one JSON response
 on standard output; `--human` renders the response as text. The schema is in
-`tools/agent-api/schema.md`. A request names its `schema_version`: 0.3, the
-current one, whose diagnostics carry a `message`, or 0.2, answered in the 0.2
-shape without it; files on the command line get 0.3.
+`tools/agent-api/schema.md`. A request names its `schema_version`: 0.4, the
+current one, whose `show-effects` entries list the trap kinds a function may
+raise (`trap_kinds`, so a caller can check that code cannot trap `oom`); 0.3,
+answered without `trap_kinds`; or 0.2, answered also without the diagnostics'
+`message`. Files on the command line get 0.4.
 
 | Command | What it does |
 |---|---|

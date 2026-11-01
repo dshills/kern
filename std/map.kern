@@ -62,10 +62,31 @@ func with_bits[K, V](bits: u32) -> Map[K, V] {
     return m
 }
 
+// try_with_bits is with_bits returning Err(OutOfMemory) where with_bits
+// traps oom (specs/effect-trap-kinds §2). The key and value vectors are
+// reserved to the table size first, so filling them with None makes no
+// allocation call; on Err the partly built map is destroyed on return.
+func try_with_bits[K, V](bits: u32) -> Result[Map[K, V], AllocErr] {
+    if bits == 0u32 || bits > 58u32 { trap() }
+    cap := 1usize << bits
+    m := Map[K, V] { states: Vec[u8].new(), keys: Vec[Option[K]].new(), vals: Vec[Option[V]].new(), cap: cap, count: 0usize, used: 0usize, bits: bits }
+    m.states.try_resize(cap, 0u8)?
+    m.keys.try_reserve(cap)?
+    m.vals.try_reserve(cap)?
+    i := 0usize
+    while i < cap {
+        m.keys.try_push(None)?
+        m.vals.try_push(None)?
+        i = i + 1usize
+    }
+    return Ok(m)
+}
+
 // The methods that hash or compare keys bound K with a where clause
 // (spec/types.md): a Map exists for every K, and is usable for Hashable ones.
 impl Map[K, V] {
     func new() -> Map[K, V] { return with_bits[K, V](4u32) }
+    func try_new() -> Result[Map[K, V], AllocErr] { return try_with_bits[K, V](4u32) }
     func len(view self) -> usize { return self.count }
 
     // slot finds the slot holding key, or, when key is absent, the first
@@ -259,6 +280,68 @@ impl Map[K, V] {
         return None
     }
 
+    // try_insert is insert returning Err(OutOfMemory) where insert traps
+    // oom: when the table must grow and the larger table cannot be
+    // allocated, key and then val are destroyed and the map is unchanged.
+    // Once the larger table exists, moving the entries into it makes no
+    // allocation call (try_rebuild).
+    func try_insert(edit self, key: own K, val: own V) -> Result[Option[V], AllocErr] where K: Hashable {
+        if (self.used + 1usize) * 4usize >= self.cap * 3usize {
+            bits := self.bits
+            if (self.count + 1usize) * 2usize > self.cap { bits = bits + 1u32 }
+            match self.try_rebuild(bits) {
+                Ok(u) => { }
+                Err(e) => {
+                    drop(key)
+                    drop(val)
+                    return Err(e)
+                }
+            }
+        }
+        return Ok(self.place(key, val))
+    }
+
+    // place is insert's slot write without its growth check: the table
+    // must have room (a free slot within its 3/4 load), which try_insert
+    // and try_rebuild ensure.
+    func place(edit self, key: own K, val: own V) -> Option[V] where K: Hashable {
+        i := self.slot(key)
+        if self.states.get(i) == 2u8 {
+            with slot := self.vals.at(i) { return replace(slot, Some(val)) }
+        }
+        fresh := self.states.get(i) == 0u8
+        if fresh { self.used = self.used + 1usize }
+        with st := self.states.at(i) { st = 2u8 }
+        with ks := self.keys.at(i) { ks = Some(key) }
+        with vs := self.vals.at(i) { vs = Some(val) }
+        self.count = self.count + 1usize
+        return None
+    }
+
+    // try_rebuild is rebuild over try_with_bits; the new table always has
+    // room for the live entries (a same-size rebuild happens only when
+    // count + 1 <= cap / 2, and a doubled table holds fewer than 3/8 of its
+    // slots), so they are moved with place. On Err nothing has changed.
+    func try_rebuild(edit self, bits: u32) -> Result[(), AllocErr] where K: Hashable {
+        bigger := try_with_bits[K, V](bits)?
+        i := 0usize
+        while i < self.cap {
+            if self.states.get(i) == 2u8 {
+                var k: Option[K] = None
+                var v: Option[V] = None
+                with ks := self.keys.at(i) { k = replace(ks, None) }
+                with vs := self.vals.at(i) { v = replace(vs, None) }
+                match move k {
+                    Some(kk) => { place_opt(bigger, kk, v) }
+                    None => { drop(v) }
+                }
+            }
+            i = i + 1usize
+        }
+        self = bigger
+        return Ok(())
+    }
+
     // remove takes the value stored under key out of the map, if any.
     func remove(edit self, key: own K) -> Option[V] where K: Hashable {
         i := self.slot(key)
@@ -311,6 +394,14 @@ func find_text[V](m: view[Map[str.String, V]], key: view[]u8) -> Option[usize] {
         probes = probes + 1usize
     }
     return None
+}
+
+// place_opt places kk with the value in v, if any (try_rebuild's helper).
+func place_opt[K: Hashable, V](m: edit[Map[K, V]], kk: own K, v: own Option[V]) {
+    match move v {
+        Some(vv) => { m.place(kk, vv) }
+        None => { drop(kk) }
+    }
 }
 
 // insert_opt inserts kk with the value in v, if any (grow's helper).

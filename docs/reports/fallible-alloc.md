@@ -103,7 +103,7 @@ too, so its table again matches the prelude: 53 functions, 57 blocks.
 
 ## Open questions for the owner
 
-- **The effect schema.** `show-effects` reports a `try_` form as
+- **The effect schema** *(resolved 2026-11-01, `specs/effect-trap-kinds`: `show-effects` at schema 0.4 lists `trap_kinds`, and no `try_` form lists `oom`; `Map.try_insert` was added there too).* `show-effects` reports a `try_` form as
   `traps: true`, because `SystemAllocator.alloc` checks its §6
   obligations with an `explicit` trap. Telling "may trap `oom`" from other
   traps needs a §16 schema change.

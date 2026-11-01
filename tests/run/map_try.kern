@@ -1,0 +1,61 @@
+//! phase: 6
+//! expect: output map_try
+// Map.try_insert gives the entries, len() and replaced values insert gives
+// (specs/effect-trap-kinds R6): twin maps run the same sequence of inserts,
+// replacements and removes, which doubles the table twice and rebuilds it
+// once at the same size to drop tombstones, and each step prints both
+// maps' replaced value, len() and a checksum of the entries in key order,
+// so the two lines of a step are equal.
+module t
+import "std/map"
+func sum(m: view[map.Map[u64, u64]]) -> u64 {
+    h := 0u64
+    for k in 0u64..200u64 {
+        if m.contains(k) {
+            with v := m.get(k) { h = (h * 31u64 + k * 1000u64 + v) % 1000003u64 }
+        }
+    }
+    return h
+}
+func show(tag: u64, r: Option[u64], n: usize, h: u64) {
+    print_u64(tag)
+    match r {
+        Some(x) => { print_str(" replaced "); print_u64(x) }
+        None => print_str(" new")
+    }
+    print_str(" len "); print_u64(u64(n)); print_str(" sum "); print_u64(h); println()
+}
+func step(a: edit[map.Map[u64, u64]], b: edit[map.Map[u64, u64]], k: u64, v: u64) {
+    ra := a.insert(k, v)
+    show(k, ra, a.len(), sum(a))
+    match b.try_insert(k, v) {
+        Ok(rb) => show(k, rb, b.len(), sum(b))
+        Err(e) => { print_str("out of memory"); println() }
+    }
+}
+func run() -> Result[(), AllocErr] {
+    a := map.Map[u64, u64].new()
+    b := map.Map[u64, u64].try_new()?
+    // fill past 3/4 of 16 slots: the twelfth insert doubles to 32
+    for k in 0u64..14u64 { step(a, b, k, k * 3u64) }
+    // replacements
+    for k in 0u64..4u64 { step(a, b, k, k + 100u64) }
+    // removes leave tombstones; new keys then fill the slots until a
+    // rebuild at the same size drops them
+    for k in 0u64..12u64 {
+        ra := a.remove(k)
+        rb := b.remove(k)
+    }
+    print_str("removed"); println()
+    for k in 20u64..44u64 { step(a, b, k, k) }
+    // more inserts double to 64
+    for k in 50u64..80u64 { step(a, b, k, k + 7u64) }
+    return Ok(())
+}
+func main() -> i32 {
+    match run() {
+        Ok(u) => { }
+        Err(e) => { print_str("out of memory"); println() }
+    }
+    return 0i32
+}
