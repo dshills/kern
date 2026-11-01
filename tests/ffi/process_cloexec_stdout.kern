@@ -1,0 +1,24 @@
+//! phase: 6
+//! expect: output
+//! c: process_cloexec_stdout.c
+// std/process: an inherited stream reaches the child even when the
+// program's descriptor is marked close-on-exec (specs/std-process R4,
+// PLAN.md "Native spawn" step 5). The C side sets the flag on descriptor
+// 1; an inherited printf still writes the program's standard output.
+module ffi
+import "std/process"
+extern "C" func c_cloexec_stdout() -> i32
+contract { requires "the C counterpart process_cloexec_stdout.c is linked" }
+func main() -> i32 {
+    var set: i32 = 0i32
+    unsafe { set = c_cloexec_stdout() }
+    if set == 1i32 { print_str("flag set"); println() }
+    c := process.Command.new("printf")
+    c.arg("from the child\n")
+    r := c.status()
+    match r {
+        Ok(s) => { if s.success() { print_str("exited 0"); println() } }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}

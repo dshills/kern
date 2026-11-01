@@ -245,7 +245,12 @@ error and no child:
 - **Streams.** `Inherit` connects the child's stream to the program's
   (glossary). When the program's descriptor 0, 1 or 2 is closed, an
   inherited stream is closed in the child too, and a pipe or `/dev/null`
-  set up for another stream never takes its place in the child. `Null` connects it to `/dev/null`, opened for reading
+  set up for another stream never takes its place in the child. (A
+  stream closed when the program started reads as end of file and takes
+  writes in the program itself, in both engines: Go's runtime reopens it
+  on `/dev/null` in the interpreter, and the native runtime holds its
+  slot with a close-on-exec `/dev/null` so that no later descriptor lands
+  there; the native child still gets it closed.) `Null` connects it to `/dev/null`, opened for reading
   (stdin) or writing (stdout, stderr). `Piped` creates a pipe whose child
   end is the stream and whose other end the `Child` holds until taken.
 - **Inherit in the interpreter.** When the program's standard output or
@@ -270,7 +275,11 @@ error and no child:
   children concurrently.
 - **Signals.** The child starts with the default disposition for every
   signal, except those that were already ignored when the program
-  started, which stay ignored. SIGCHLD is not one of those exceptions: a
+  started, which stay ignored. SIGSEGV and SIGBUS, which the runtime
+  handles itself in both engines (the native fault handler, Go's
+  runtime), are not kept ignored: a child gets their default, since an
+  exec resets a handled signal and spawning cannot set one to ignored.
+  SIGCHLD is not one of those exceptions either: a
   program started with SIGCHLD ignored (or with `SA_NOCLDWAIT`) would
   have its children reaped by the system, so `wait` could report no
   status and `kill` could reach a reused process ID. The program's
@@ -426,9 +435,10 @@ fixtures print `Other` as `other`.
 5. **`std_process_threads`**: four scoped threads, each spawning 25
    children with piped output while the program holds an open file and
    another child's pipes; every status and output correct. Each child is
-   `ls /dev/fd`, whose listing must be exactly `0 1 2 3` (the `3` being
-   `ls`'s own directory descriptor, on both macOS and Linux), so a leak
-   of any descriptor number is caught.
+   `ls /dev/fd`, whose listing must equal that of a first `ls /dev/fd`
+   child started before the program opened anything else (what `ls`
+   itself opens differs: one descriptor on Linux, two on macOS), so a
+   leak of any descriptor number is caught.
 6. **`TestStdModulesCheck`** also covers `std/process`.
 
 ## 5. Documents

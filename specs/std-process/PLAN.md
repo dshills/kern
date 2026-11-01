@@ -16,7 +16,8 @@ gpt-6.1-sol, realitycheck, verifier; no clarion, kern keeps no
 remote CI runs whenever the owner next pushes.
 
 **Linux gate.** `scripts/linux-check.sh` (new, Phase 2): runs
-`go test -json ./tests -run '^TestFixtures$/run/std_process'`, then
+`go test -json ./tests -run '^TestFixtures$/run/std_process'` and
+`'^TestFixtures$/ffi/process'`, then
 `go test -json ./tests -run '^TestProcess'` and `go test -json
 ./compiler/interp -run '^TestProc'`, as separate commands (a `|` at the
 top of one `-run` pattern would not reach the subtests). It fails when a
@@ -432,10 +433,11 @@ Phase 2's `TestProcessEnvParity` checks it directly.
    covered by `TestProcessRelativeDir` (step 8). Errors print as the
    `std_dirs` fixture prints them (`other` for `Other`).
 8. Go tests in `tests/process_test.go`, each running a small generated
-   kern program through `kern test --engine=interp` and
-   `--engine=native` as subprocesses (so the test controls the `kern`
-   process's working directory, descriptors and signals) and requiring
-   equal results in both:
+   kern program as the process under test, in the interpreter (`kern
+   run`) and natively (the binary `kern build` makes), started with
+   `syscall.ForkExec` so the test controls that process's working
+   directory, descriptors, environment and signals, and requiring the
+   expected result from both:
    - `TestProcessSpawnOrder`, R4's error order: a `dir` that is a file
      with a missing program gives ENOTDIR; a missing program with a
      non-executable regular file earlier on the search list gives
@@ -446,15 +448,18 @@ Phase 2's `TestProcessEnvParity` checks it directly.
      `a/a/b/tool` would be ENOENT).
    - `TestProcessDescriptors`, two runs. First, `kern` started with an
      extra descriptor 3 that has no close-on-exec flag
-     (`exec.Cmd.ExtraFiles`); the child `ls /dev/fd` lists exactly
-     `0 1 2 3` (3 being `ls`'s own). Second, `kern` started with
+     (`exec.Cmd.ExtraFiles`); the child `ls /dev/fd` lists what an `ls
+     /dev/fd` started with descriptors 0 to 2 only lists (macOS's `ls`
+     opens two descriptors of its own, Linux's one). Second, `kern` started with
      descriptor 0 closed (`syscall.ForkExec` with `Files[0] =
      ^uintptr(0)`); the child, with `stdin(Inherit)`, is
-     `sh -c 'if ( : <&0 ) 2>/dev/null; then echo open; else echo closed; fi'`,
-     which tests descriptor 0 before opening anything (in a subshell:
-     dash, Ubuntu's `/bin/sh`, exits a shell whose redirection on the
-     special builtin `:` fails), and must print
-     `closed`. (The piped variant is added in Phase 3.)
+     `sh -c 'if [ -e /dev/fd/0 ]; then echo open; else echo closed; fi'`,
+     which opens nothing (`test -e` only stats; a redirection probe opens
+     a file onto the free descriptor 0 and sees it open, as found in
+     Phase 2), and must print `closed` natively. In the interpreter it
+     prints `open`: Go's runtime reopens a closed descriptor 0 to 2 on
+     `/dev/null` at start (Go 1.22 and later), so the program's stdin is
+     open and R4 hands that on. (The piped variant is added in Phase 3.)
    - `TestProcessEnvParity`: `kern` started through `syscall.ForkExec`
      (which, unlike `os/exec`, does not collapse duplicate names) with a
      controlled environment `PATH=<the test's>`, `A=1`, `B=2`, `A=3`,
@@ -599,7 +604,9 @@ Phase 3 is committed.
    holder. Four scoped threads, each given an owned `Command` (so
    `Command` crosses threads), spawn 25 `ls /dev/fd` children each with
    stdout piped, read each child's pipe on that thread, and check the
-   listing is exactly `0 1 2 3`. Two more threads run the convenience
+   listing equals the one a first `ls /dev/fd` child printed before the
+   program opened anything else (what `ls` itself opens differs by
+   system). Two more threads run the convenience
    methods concurrently with them: one calls `output` 10 times on
    `sh -c 'cat; printf e >&2'` with inputs `in0` to `in9` and checks each
    result's stdout is its own input and stderr is `e`; the other calls

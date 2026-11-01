@@ -1,22 +1,130 @@
 //! phase: 6
 //! expect: output
-// std/process's environment (specs/std-process R9): a variable the
+// std/process's environment and working directory (specs/std-process R2,
+// R3, R9, §4 item 4). The program's own environment: a variable the
 // harness always has (PATH, through which it finds clang) is set, a name
-// no host sets is not, and invalid names (one holding '=', the empty
-// name) are never found. Only Some/None is printed, since values differ
-// by host.
+// no host sets is not, and invalid names are never found (only Some/None
+// is printed, since values differ by host). A child's environment:
+// env_set, env_remove and a value holding '='; env_clear followed by two
+// env_set calls gives the child exactly those two entries, in order; an
+// env_set of PATH changes the child's PATH but not where the program is
+// searched for. The working directory: dir enters a fresh temporary
+// directory, and a relative program holding a '/' is found in it.
 module t
+import "std/io"
 import "std/process"
+func say(s: view[]u8) { print_str(s); println() }
 func show(o: view[Option[Vec[u8]]]) {
     match o {
-        Some(v) => { print_str("some"); println() }
-        None => { print_str("none"); println() }
+        Some(v) => say("some")
+        None => say("none")
     }
+}
+func run(c: view[process.Command]) {
+    r := c.status()
+    match r {
+        Ok(s) => {
+            match s {
+                Exited(code) => { if code != 0i32 { print_str("exited "); print_i64(i64(code)); println() } }
+                Signaled(g) => say("signaled")
+            }
+        }
+        Err(e) => {
+            match e {
+                NotFound => say("not found")
+                Permission => say("permission")
+                Exists => say("exists")
+                Other(code) => say("other")
+            }
+        }
+    }
+}
+func sh(script: view[]u8) -> process.Command {
+    c := process.Command.new("sh")
+    c.arg("-c")
+    c.arg(script)
+    return c
+}
+func join(dir: view[]u8, name: view[]u8) -> Vec[u8] {
+    p := Vec[u8].new()
+    p.extend(dir)
+    p.push(47u8)
+    p.extend(name)
+    return p
+}
+func base(path: view[]u8) -> Vec[u8] {
+    var i: usize = len(path)
+    while i > 0usize && path[i - 1usize] != 47u8 { i = i - 1usize }
+    b := Vec[u8].new()
+    b.extend(path[i : len(path)])
+    return b
 }
 func main() -> i32 {
     with r := process.env("PATH") { show(r) }
     with r := process.env("KERN_STD_PROCESS_UNSET") { show(r) }
     with r := process.env("A=B") { show(r) }
     with r := process.env("") { show(r) }
+
+    // set, remove, a value holding '='
+    e := sh("printf '[%s][%s][%s]\n' \"$KSP_X\" \"${HOME-unset}\" \"$KSP_Y\"")
+    e.env_set("KSP_X", "1")
+    e.env_set("KSP_X", "2")
+    e.env_remove("HOME")
+    e.env_set("KSP_Y", "a=b")
+    run(e)
+    // env_clear discards what was recorded before it
+    c := process.Command.new("/usr/bin/env")
+    c.env_set("KSP_GONE", "1")
+    c.env_clear()
+    c.env_set("KSP_A", "1")
+    c.env_set("KSP_B", "")
+    run(c)
+    // the child's PATH changes; the search still uses the program's own
+    p := sh("printf '%s\n' \"$PATH\"")
+    p.env_set("PATH", "/kern-std-process-nowhere")
+    run(p)
+
+    with made := io.make_temp_dir("kern-std-process-") {
+        match made {
+            Ok(dir) => {
+                with d := dir.as_view() {
+                    b := base(d)
+                    w := sh("case \"$(pwd -P)\" in */\"$1\") echo in the directory ;; *) echo elsewhere ;; esac")
+                    w.arg("sh")
+                    with bv := b.as_view() { w.arg(bv) }
+                    w.dir(d)
+                    run(w)
+                    tool := join(d, "tool")
+                    with tv := tool.as_view() {
+                        wr := io.write_file(tv, "#!/bin/sh\necho tool ran\n")
+                        match wr {
+                            Ok(u) => { }
+                            Err(err) => say("write failed")
+                        }
+                        m := process.Command.new("/bin/chmod")
+                        m.arg("755")
+                        m.arg(tv)
+                        run(m)
+                    }
+                    rel := process.Command.new("./tool")
+                    rel.dir(d)
+                    run(rel)
+                    with tv := tool.as_view() {
+                        rm := io.remove_file(tv)
+                        match rm {
+                            Ok(u) => { }
+                            Err(err) => say("remove failed")
+                        }
+                    }
+                    rm := io.remove_dir(d)
+                    match rm {
+                        Ok(u) => { }
+                        Err(err) => say("remove failed")
+                    }
+                }
+            }
+            Err(err) => say("no temporary directory")
+        }
+    }
     return 0i32
 }

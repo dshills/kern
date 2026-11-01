@@ -19,6 +19,16 @@
 #include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <spawn.h>
+#if defined(__linux__)
+#include <features.h>
+// posix_spawn_file_actions_addclosefrom_np keeps every descriptor above 2
+// out of a child (specs/std-process R4); glibc has it since 2.34
+#if !defined(__GLIBC__) || !__GLIBC_PREREQ(2, 34)
+#error "kern's hosted runtime needs glibc 2.34 or newer on Linux (specs/std-process)"
+#endif
+#endif
 #ifdef __APPLE__
 #include <sys/ucontext.h>
 #else
@@ -87,6 +97,44 @@ void kern_exit(int32_t code) { kern_flush(); _exit(code); }
 // Descriptor 1 goes through the output buffer so that it interleaves with
 // print_* as written.
 
+// kern_std_closed records which of descriptors 0, 1 and 2 were closed
+// when the program started. kern_start fills each such slot with a
+// close-on-exec placeholder on /dev/null before any thread exists, so that
+// no descriptor the program opens later lands there: a spawn on one thread
+// can then never mistake a file another thread is opening for a standard
+// stream, and no lock is needed (specs/std-process R4). A child still gets
+// such a stream closed. The program's own reads of it see end of file and
+// its writes succeed, as in the interpreter, where Go's runtime reopens
+// closed standard descriptors on /dev/null.
+static int kern_std_closed[3];
+static void kern_std_init(void) {
+    for (int i = 0; i < 3; i++) {
+        if (fcntl(i, F_GETFD) >= 0) continue;
+        kern_std_closed[i] = 1;
+        int fd = open("/dev/null", O_RDWR | O_CLOEXEC); // the lowest free slot, i itself
+        if (fd >= 0 && fd != i) {
+            dup2(fd, i);
+            close(fd);
+        }
+        fcntl(i, F_SETFD, FD_CLOEXEC);
+    }
+}
+// kern_open_above2 opens path (flags include O_CLOEXEC) and returns a
+// descriptor numbered 3 or more, or -errno: a descriptor below 3 arises
+// only when the program closed a standard one itself.
+static int kern_open_above2(const char *path, int flags, mode_t mode) {
+    int fd = open(path, flags, mode);
+    if (fd < 0) return -errno;
+    if (fd < 3) {
+        int d = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+        int e = errno;
+        close(fd);
+        if (d < 0) return -e;
+        fd = d;
+    }
+    return fd;
+}
+
 static int kern_argc = 0;
 static char **kern_argv = NULL;
 void kern_set_args(int32_t argc, char **argv) { kern_argc = argc; kern_argv = argv; }
@@ -97,19 +145,10 @@ int32_t kern_io_open(const char *p, int64_t n, uint8_t write) {
     memcpy(path, p, (size_t)n);
     path[n] = 0;
     // close-on-exec from the start, so that no child inherits the file
-    // (specs/std-process R6)
-    int fd = write ? open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644) : open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return -errno;
-    if (fd < 3) {
-        // a standard stream was closed at startup: keep opened files above
-        // the descriptors the output buffer and the kern side treat specially
-        int d = fcntl(fd, F_DUPFD_CLOEXEC, 3);
-        int saved = errno;
-        close(fd);
-        if (d < 0) return -saved;
-        fd = d;
-    }
-    return fd;
+    // (specs/std-process R6), and above 2: when a standard stream was
+    // closed at startup, keep opened files above the descriptors the
+    // output buffer and the kern side treat specially
+    return kern_open_above2(path, write ? O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC : O_RDONLY | O_CLOEXEC, 0644);
 }
 int64_t kern_io_read(int32_t fd, char *buf, int64_t n) {
     ssize_t r = read(fd, buf, (size_t)n);
@@ -169,8 +208,10 @@ int64_t kern_io_list(const char *p, int64_t n, char *buf, int64_t cap) {
     char path[4096];
     int e = kern_cpath(path, p, n);
     if (e < 0) return e;
-    DIR *d = opendir(path);
-    if (d == NULL) return -errno;
+    int dfd = kern_open_above2(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    if (dfd < 0) return dfd;
+    DIR *d = fdopendir(dfd);
+    if (d == NULL) { int de = errno; close(dfd); return -de; }
     char **names = NULL;
     size_t count = 0, room = 0;
     int64_t total = 0;
@@ -232,9 +273,9 @@ int64_t kern_io_temp(const char *p, int64_t n, uint8_t dir, char *buf, int64_t c
         if (mkdtemp(tmpl) == NULL) return -errno;
     } else {
         int fd = mkostemp(tmpl, O_CLOEXEC);
-        if (fd < 0) return -errno;
-        if (close(fd) < 0) {
-            int ce = errno;
+        int ce = fd < 0 ? errno : (close(fd) < 0 ? errno : 0);
+        if (fd < 0) return -ce;
+        if (ce != 0) {
             unlink(tmpl);
             return -ce;
         }
@@ -316,13 +357,17 @@ int64_t kern_proc_env_at(int64_t i, char *buf, int64_t n) {
 
 // kern_sig_ignored holds the signals that were ignored when the program
 // started; a child keeps them ignored and gets every other signal's
-// default disposition (specs/std-process R4). SIGCHLD is the exception:
+// default disposition (specs/std-process R4). SIGSEGV and SIGBUS, which
+// kern_start catches for the fault handler, reach a child at their default
+// even when ignored at start, as R4 states: an exec resets a caught signal
+// and posix_spawn cannot set one to ignored (Go's runtime, which catches
+// them too, does the same in the interpreter). SIGCHLD is the exception:
 // ignoring it (or SA_NOCLDWAIT) makes the system reap children by itself,
 // so that wait could not report a status and kill could reach a reused
 // process ID. kern_sig_init therefore resets it to the default, which for
 // SIGCHLD also discards the signal, and children get the default too, as
 // in the interpreter, where Go always installs its own SIGCHLD handler.
-sigset_t kern_sig_ignored;
+static sigset_t kern_sig_ignored;
 static void kern_sig_init(void) {
     sigemptyset(&kern_sig_ignored);
     for (int sig = 1; sig < NSIG; sig++) {
@@ -335,6 +380,222 @@ static void kern_sig_init(void) {
     dfl.sa_handler = SIG_DFL;
     sigemptyset(&dfl.sa_mask);
     sigaction(SIGCHLD, &dfl, NULL); // flags 0: SA_NOCLDWAIT cleared too
+}
+
+// kern_null is /dev/null, opened for reading and writing above 2 by
+// kern_start, before any thread exists: the source of every Null stream.
+static int kern_null = -1;
+
+// kern_cstr copies n bytes of p into a fresh NUL-terminated string, or
+// returns NULL (out of memory).
+static char *kern_cstr(const char *p, int64_t n) {
+    char *c = malloc((size_t)n + 1);
+    if (c == NULL) return NULL;
+    memcpy(c, p, (size_t)n);
+    c[n] = 0;
+    return c;
+}
+// kern_unpack checks that buf holds exactly count NUL-terminated strings
+// back to back and returns a NULL-terminated array of pointers into it,
+// or NULL (malformed: *bad set; or out of memory).
+static char **kern_unpack(const char *buf, int64_t n, int64_t count, int *bad) {
+    *bad = 0;
+    int64_t nuls = 0;
+    for (int64_t i = 0; i < n; i++) nuls += buf[i] == 0;
+    if (count < 0 || nuls != count || (n > 0 && buf[n - 1] != 0)) { *bad = 1; return NULL; }
+    char **v = malloc(((size_t)count + 1) * sizeof(char *));
+    if (v == NULL) return NULL;
+    int64_t at = 0;
+    for (int64_t i = 0; i < count; i++) {
+        v[i] = (char *)buf + at;
+        at += (int64_t)strlen(buf + at) + 1;
+    }
+    v[count] = NULL;
+    return v;
+}
+// kern_path_join writes a, '/' and b (b of bn bytes) into out (4096 bytes):
+// 0, or -ENAMETOOLONG.
+static int kern_path_join(char out[4096], const char *a, const char *b, size_t bn) {
+    size_t an = strlen(a);
+    if (an + 1 + bn >= 4096) return -ENAMETOOLONG;
+    memcpy(out, a, an);
+    out[an] = '/';
+    memcpy(out + an + 1, b, bn);
+    out[an + 1 + bn] = 0;
+    return 0;
+}
+// kern_executable reports whether path names a regular file the process
+// may execute (symbolic links followed).
+static int kern_executable(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode) && access(path, X_OK) == 0;
+}
+// kern_proc_spawn starts a child (specs/std-process R4) and returns its
+// process ID, which is the handle, or -errno. The kern side has validated
+// the strings; this entry checks only what memory safety needs. The
+// failures come in R4's order: (s) the streams, (a) entering dir, (b)
+// finding the program (R2), (c) executing it.
+int64_t kern_proc_spawn(const char *prog, int64_t progn, const char *argvb, int64_t argvn, int64_t argc,
+                        const char *envb, int64_t envn, int64_t envc, const char *dirp, int64_t dirn, uint8_t has_dir,
+                        const char *search, int64_t searchn, const uint8_t *modes, int64_t modesn, int32_t *fds, int64_t fdsn) {
+    if (progn <= 0 || progn >= 4096 || dirn < 0 || dirn >= 4096 || searchn < 0 || modesn != 3 || fdsn < 3 || argc < 1) return -EINVAL;
+    for (int i = 0; i < 3; i++) if (modes[i] > 2) return -EINVAL;
+    for (int i = 0; i < 3; i++) if (modes[i] == 2) return -EINVAL; // Piped: not yet (PLAN.md Phase 3)
+    int bad = 0;
+    char **argv = kern_unpack(argvb, argvn, argc, &bad);
+    if (argv == NULL) return bad ? -EINVAL : -ENOMEM;
+    char **envp = kern_unpack(envb, envn, envc, &bad);
+    if (envp == NULL) { free(argv); return bad ? -EINVAL : -ENOMEM; }
+    int64_t result = 0;
+    int child[3] = {-1, -1, -1};
+    char path[4096], cwd[4096], absdir[4096];
+    char *p = kern_cstr(prog, progn), *d = kern_cstr(dirp, dirn), *sp = kern_cstr(search, searchn);
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t attr;
+    int fa_ok = 0, attr_ok = 0;
+    if (p == NULL || d == NULL || sp == NULL) { result = -ENOMEM; goto out; }
+    kern_flush(); // the program's output so far precedes the child's; a failure is ignored (R4)
+    // (s) the streams, stdin then stdout then stderr: Null is the runtime's
+    // own /dev/null, opened above 2 at start
+    for (int i = 0; i < 3; i++) {
+        if (modes[i] != 1) continue;
+        if (kern_null < 0) { result = -EMFILE; goto out; } // it could not be opened at start
+        child[i] = kern_null;
+    }
+    // (a) the working directory, and absolute forms of it and of the
+    // program, so that nothing is resolved against a directory twice
+    int need_cwd = (has_dir && d[0] != '/') || (memchr(p, '/', (size_t)progn) != NULL && p[0] != '/' && !(has_dir && d[0] == '/'));
+    if (need_cwd && getcwd(cwd, sizeof cwd) == NULL) { result = -errno; goto out; }
+    if (has_dir) {
+        struct stat st;
+        if (stat(d, &st) != 0) { result = -errno; goto out; }
+        if (!S_ISDIR(st.st_mode)) { result = -ENOTDIR; goto out; }
+        if (access(d, X_OK) != 0) { result = -errno; goto out; }
+        if (d[0] == '/') {
+            memcpy(absdir, d, (size_t)dirn + 1);
+        } else if ((result = kern_path_join(absdir, cwd, d, (size_t)dirn)) != 0) {
+            goto out;
+        }
+    }
+    // (b) the program
+    if (p[0] == '/') {
+        memcpy(path, p, (size_t)progn + 1);
+    } else if (memchr(p, '/', (size_t)progn) != NULL) {
+        if ((result = kern_path_join(path, has_dir ? absdir : cwd, p, (size_t)progn)) != 0) goto out;
+    } else {
+        int found = 0;
+        for (char *e = sp; !found;) {
+            char *colon = strchr(e, ':');
+            size_t en = colon ? (size_t)(colon - e) : strlen(e);
+            if (en > 0 && e[0] == '/' && en < 4096) { // empty and relative elements are skipped (R2)
+                char dir[4096];
+                memcpy(dir, e, en);
+                dir[en] = 0;
+                if (kern_path_join(path, dir, p, (size_t)progn) == 0 && kern_executable(path)) found = 1;
+            }
+            if (colon == NULL) break;
+            e = colon + 1;
+        }
+        if (!found) { result = -ENOENT; goto out; }
+    }
+    // (c) the child: streams onto 0 to 2, the directory, the signals, and
+    // no other descriptor
+    if ((errno = posix_spawn_file_actions_init(&fa)) != 0) { result = -errno; goto out; }
+    fa_ok = 1;
+    if ((errno = posix_spawnattr_init(&attr)) != 0) { result = -errno; goto out; }
+    attr_ok = 1;
+    for (int i = 0; i < 3; i++) {
+        int e = 0;
+        if (child[i] >= 0) {
+            e = posix_spawn_file_actions_adddup2(&fa, child[i], i);
+        } else if (!kern_std_closed[i] && fcntl(i, F_GETFD) >= 0) { // Inherit an open stream; a closed one stays closed
+#ifdef __APPLE__
+            e = posix_spawn_file_actions_addinherit_np(&fa, i);
+#else
+            e = posix_spawn_file_actions_adddup2(&fa, i, i); // clears FD_CLOEXEC in the child
+#endif
+        }
+        if (e != 0) { result = -e; goto out; }
+    }
+#ifdef __APPLE__
+    // POSIX.1-2024's posix_spawn_file_actions_addchdir replaces it from
+    // macOS 26 on; the _np form also runs on every older macOS
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    if (has_dir && (errno = posix_spawn_file_actions_addchdir_np(&fa, absdir)) != 0) { result = -errno; goto out; }
+#ifdef __APPLE__
+#pragma clang diagnostic pop
+#endif
+#ifndef __APPLE__
+    if ((errno = posix_spawn_file_actions_addclosefrom_np(&fa, 3)) != 0) { result = -errno; goto out; }
+#endif
+    sigset_t def, none;
+    sigfillset(&def);
+    for (int sig = 1; sig < NSIG; sig++) if (sigismember(&kern_sig_ignored, sig) == 1) sigdelset(&def, sig);
+    sigdelset(&def, SIGKILL);
+    sigdelset(&def, SIGSTOP);
+    sigemptyset(&none);
+    short flags = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
+#ifdef __APPLE__
+    flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#endif
+    if ((errno = posix_spawnattr_setsigdefault(&attr, &def)) != 0 || (errno = posix_spawnattr_setsigmask(&attr, &none)) != 0 ||
+        (errno = posix_spawnattr_setflags(&attr, flags)) != 0) {
+        result = -errno;
+        goto out;
+    }
+    pid_t pid;
+    int e = posix_spawn(&pid, path, &fa, &attr, argv, envp);
+    result = e != 0 ? -e : (int64_t)pid;
+out:
+    if (fa_ok) posix_spawn_file_actions_destroy(&fa);
+    if (attr_ok) posix_spawnattr_destroy(&attr);
+    for (int i = 0; i < 3; i++) if (child[i] >= 0 && child[i] != kern_null) close(child[i]);
+    for (int i = 0; i < 3; i++) fds[i] = -1; // the parent ends of pipes (PLAN.md Phase 3)
+    free(p);
+    free(d);
+    free(sp);
+    free(argv);
+    free(envp);
+    return result;
+}
+// kern_proc_wait waits for the child h (block) or checks whether it has
+// ended: 1 with st[0] 0 and st[1] its exit code, or st[0] 1 and st[1] the
+// signal that ended it; 0 while it runs; or -errno.
+int32_t kern_proc_wait(int64_t h, uint8_t block, int32_t *st, int64_t n) {
+    if (h <= 0 || h > INT32_MAX) return -ESRCH; // never a process group or "any child"
+    if (n < 2) return -EINVAL;
+    int s;
+    pid_t r;
+    do r = waitpid((pid_t)h, &s, block ? 0 : WNOHANG); while (r < 0 && errno == EINTR);
+    if (r < 0) return -errno;
+    if (r == 0) return 0;
+    if (WIFSIGNALED(s)) { st[0] = 1; st[1] = WTERMSIG(s); }
+    else { st[0] = 0; st[1] = WEXITSTATUS(s); }
+    return 1;
+}
+int32_t kern_proc_signal(int64_t h, int32_t sig) {
+    if (h <= 0 || h > INT32_MAX) return -ESRCH;
+    int r;
+    do r = kill((pid_t)h, sig); while (r < 0 && errno == EINTR);
+    return r < 0 ? -errno : 0;
+}
+uint32_t kern_proc_pid(int64_t h) { return h > 0 && h <= INT32_MAX ? (uint32_t)h : 0; }
+// the handle is the process ID natively: nothing to release, and the
+// child writes inherited streams to the real descriptors, so there is no
+// forwarding to wait for
+void kern_proc_release(int64_t h) { (void)h; }
+void kern_proc_flush_inherited(int64_t h) { (void)h; }
+int32_t kern_proc_close(int32_t fd) { return close(fd) < 0 ? -errno : 0; }
+int32_t kern_proc_errno(uint8_t which) {
+    switch (which) {
+    case 0: return EINVAL;
+    case 1: return ENAMETOOLONG;
+    case 2: return EBADF;
+    case 3: return EPIPE;
+    default: return EIO;
+    }
 }
 void kern_yield(void) { sched_yield(); }
 uint64_t kern_now_ns(void) { struct timespec ts; clock_gettime(KERN_CLOCK, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
@@ -555,10 +816,23 @@ void kern_start(void) {
     static char altstack[65536];
     long pg = sysconf(_SC_PAGESIZE);
     if (pg > 0) kern_page = (uintptr_t)pg;
+    kern_std_init(); // first: before anything else opens a descriptor
     kern_env_init();
     kern_sig_init(); // before the runtime installs its own handlers
+    kern_null = kern_open_above2("/dev/null", O_RDWR | O_CLOEXEC, 0);
     if (pipe(kern_probe) != 0) kern_probe[0] = kern_probe[1] = -1; // no walk then
-    else { fcntl(kern_probe[0], F_SETFD, FD_CLOEXEC); fcntl(kern_probe[1], F_SETFD, FD_CLOEXEC); }
+    for (int i = 0; i < 2 && kern_probe[i] >= 0; i++) {
+        // above 2, so that the probe never stands in for a standard stream
+        // the program was started without (specs/std-process R4)
+        int fd = kern_probe[i] < 3 ? fcntl(kern_probe[i], F_DUPFD_CLOEXEC, 3) : kern_probe[i];
+        if (fd != kern_probe[i]) { close(kern_probe[i]); kern_probe[i] = fd; }
+        if (fd >= 0) fcntl(fd, F_SETFD, FD_CLOEXEC);
+    }
+    if (kern_probe[0] < 0 || kern_probe[1] < 0) {
+        if (kern_probe[0] >= 0) close(kern_probe[0]);
+        if (kern_probe[1] >= 0) close(kern_probe[1]);
+        kern_probe[0] = kern_probe[1] = -1;
+    }
     kern_thread_init(altstack);
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);

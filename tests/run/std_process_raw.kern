@@ -1,0 +1,59 @@
+//! phase: 6
+//! expect: output
+// std/process's raw spawn entry (specs/std-process PLAN.md, "Entry
+// contracts"): std modules export every declaration, so a program can
+// call proc_spawn itself, and each malformed shape is refused with EINVAL
+// (printed as "einval") before anything starts: an argument count that
+// disagrees with the NULs, a packed vector whose last byte is not a NUL,
+// a 2-byte modes, a mode of 3, and a 2-element fds. A well-formed call
+// starts the child.
+module t
+import "std/io"
+import "std/process"
+func say(s: view[]u8) { print_str(s); println() }
+func packed(parts: u8) -> Vec[u8] {
+    v := Vec[u8].new()
+    v.extend("true")
+    v.push(0u8)
+    if parts == 2u8 { v.extend("x") }
+    return v
+}
+func spawn(argv: view[]u8, argc: usize, modes: view[]u8, fds: edit[]i32) {
+    h := process.proc_spawn("true", argv, argc, "", 0usize, "", false, "/usr/bin:/bin", modes, fds)
+    if h < 0i64 {
+        e := process.neg_err(h)
+        match e {
+            NotFound => say("not found")
+            Permission => say("permission")
+            Exists => say("exists")
+            Other(c) => { if c == process.proc_errno(0u8) { say("einval") } else { say("other") } }
+        }
+        return
+    }
+    var st: [2]i32 = [0i32, 0i32]
+    r := process.proc_wait(h, true, st)
+    process.proc_release(h)
+    if r == 1i32 && st[0usize] == 0i32 && st[1usize] == 0i32 { say("started") } else { say("odd wait") }
+}
+func main() -> i32 {
+    var fds: [3]i32 = [-1i32, -1i32, -1i32]
+    var two: [2]i32 = [-1i32, -1i32]
+    var m3: [3]u8 = [0u8, 0u8, 0u8]
+    var m2: [2]u8 = [0u8, 0u8]
+    var bad: [3]u8 = [0u8, 3u8, 0u8]
+    ok := packed(1u8)
+    tail := packed(2u8)
+    with a := ok.as_view() {
+        spawn(a, 2usize, m3, fds)
+    }
+    with a := tail.as_view() {
+        spawn(a, 1usize, m3, fds)
+    }
+    with a := ok.as_view() {
+        spawn(a, 1usize, m2, fds)
+        spawn(a, 1usize, bad, fds)
+        spawn(a, 1usize, m3, two)
+        spawn(a, 1usize, m3, fds)
+    }
+    return 0i32
+}

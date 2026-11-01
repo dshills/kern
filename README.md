@@ -79,7 +79,9 @@ observable only as termination with a structured `TrapInfo` record.
 Requirements: Go 1.25 or newer. Native builds additionally need `clang`
 (the hosted runtime is compiled and linked with it; the compiled runtime is
 kept under the user cache directory, `kern/runtime`, one object per
-configuration, and `KERN_NO_RUNTIME_CACHE=1` turns that off); freestanding images need
+configuration, and `KERN_NO_RUNTIME_CACHE=1` turns that off) and, on Linux,
+glibc 2.34 or newer (`std/process` starts children with its
+`posix_spawn_file_actions_addclosefrom_np`); freestanding images need
 `ld.lld`, and running them needs `qemu-system-x86_64` / `qemu-system-aarch64`.
 The interpreter needs nothing beyond Go.
 

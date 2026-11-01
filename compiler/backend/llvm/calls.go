@@ -545,6 +545,34 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	case "proc_env_at":
 		p, l := fe.seqParts(a[1])
 		setDst(fe.rt("kern_proc_env_at", "i64 (i64, ptr, i64)", "i64 "+fe.v(a[0])+", ptr "+p+", i64 "+l))
+	case "proc_spawn":
+		pp, pl := fe.seqParts(a[0])
+		ap, al := fe.seqParts(a[1])
+		ep, el := fe.seqParts(a[3])
+		dp, dl := fe.seqParts(a[5])
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[6]))
+		sp, sl := fe.seqParts(a[7])
+		mp, ml := fe.seqParts(a[8])
+		fp, fl := fe.seqParts(a[9])
+		setDst(fe.rt("kern_proc_spawn", "i64 (ptr, i64, ptr, i64, i64, ptr, i64, i64, ptr, i64, i8, ptr, i64, ptr, i64, ptr, i64)",
+			"ptr "+pp+", i64 "+pl+", ptr "+ap+", i64 "+al+", i64 "+fe.v(a[2])+", ptr "+ep+", i64 "+el+", i64 "+fe.v(a[4])+
+				", ptr "+dp+", i64 "+dl+", i8 "+z+", ptr "+sp+", i64 "+sl+", ptr "+mp+", i64 "+ml+", ptr "+fp+", i64 "+fl))
+	case "proc_pid":
+		setDst(fe.rt("kern_proc_pid", "i32 (i64)", "i64 "+fe.v(a[0])))
+	case "proc_wait":
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[1]))
+		sp, sl := fe.seqParts(a[2])
+		setDst(fe.rt("kern_proc_wait", "i32 (i64, i8, ptr, i64)", "i64 "+fe.v(a[0])+", i8 "+z+", ptr "+sp+", i64 "+sl))
+	case "proc_signal":
+		setDst(fe.rt("kern_proc_signal", "i32 (i64, i32)", "i64 "+fe.v(a[0])+", i32 "+fe.v(a[1])))
+	case "proc_release", "proc_flush_inherited":
+		fe.rt("kern_"+c.Intrinsic, "void (i64)", "i64 "+fe.v(a[0]))
+	case "proc_close":
+		setDst(fe.rt("kern_proc_close", "i32 (i32)", "i32 "+fe.v(a[0])))
+	case "proc_errno":
+		setDst(fe.rt("kern_proc_errno", "i32 (i8)", "i8 "+fe.v(a[0])))
 	case "now_ns":
 		setDst(fe.rt("kern_now_ns", "i64 ()", ""))
 	case "yield_now":

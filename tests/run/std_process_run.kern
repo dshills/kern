@@ -1,0 +1,89 @@
+//! phase: 6
+//! expect: output
+// std/process: running children to completion (specs/std-process §4 item
+// 1). Exit codes, success, a child killed by a signal, programs that do
+// not exist (on PATH or by path), a working directory that does not
+// exist (or is empty), spawn's validation (a NUL in an argument, an empty program, an
+// environment name holding '='), and an inherited printf whose output
+// lands between two lines the program prints before spawn and after wait.
+module t
+import "std/io"
+import "std/process"
+func say(s: view[]u8) { print_str(s); println() }
+func show(r: view[Result[process.ExitStatus, io.IoErr]]) {
+    match r {
+        Ok(s) => {
+            match s {
+                Exited(c) => { print_str("exited "); print_i64(i64(c)) }
+                Signaled(g) => { print_str("signaled "); print_i64(i64(g)) }
+            }
+            if s.success() { print_str(" success") }
+            println()
+        }
+        Err(e) => {
+            match e {
+                NotFound => say("not found")
+                Permission => say("permission")
+                Exists => say("exists")
+                Other(c) => { if c == process.proc_errno(0u8) { say("einval") } else { say("other") } }
+            }
+        }
+    }
+}
+func sh(script: view[]u8) -> process.Command {
+    c := process.Command.new("sh")
+    c.arg("-c")
+    c.arg(script)
+    return c
+}
+func main() -> i32 {
+    t := process.Command.new("true")
+    r1 := t.status()
+    show(r1)
+    three := sh("exit 3")
+    r2 := three.status()
+    show(r2)
+    nine := sh("kill -9 $$")
+    r3 := nine.status()
+    show(r3)
+    missing := process.Command.new("kern-std-process-no-such-program")
+    r4 := missing.status()
+    show(r4)
+    bypath := process.Command.new("/nonexistent/x")
+    r5 := bypath.status()
+    show(r5)
+    nodir := process.Command.new("true")
+    nodir.dir("/nonexistent/kern-std-process")
+    r6 := nodir.status()
+    show(r6)
+    emptydir := process.Command.new("true")
+    emptydir.dir("")
+    r6b := emptydir.status()
+    show(r6b)
+    nul := process.Command.new("printf")
+    withnul := Vec[u8].new()
+    withnul.extend("a")
+    withnul.push(0u8)
+    withnul.extend("b")
+    with v := withnul.as_view() { nul.arg(v) }
+    r7 := nul.status()
+    show(r7)
+    empty := process.Command.new("")
+    r8 := empty.status()
+    show(r8)
+    badenv := process.Command.new("true")
+    badenv.env_set("A=B", "1")
+    r9 := badenv.status()
+    show(r9)
+    say("before")
+    p := process.Command.new("printf")
+    p.arg("child %s\n")
+    p.arg("output")
+    r10 := p.status()
+    say("after")
+    show(r10)
+    // the same Command runs again
+    r11 := p.status()
+    show(r11)
+    return 0i32
+}
