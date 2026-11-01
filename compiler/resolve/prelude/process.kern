@@ -1,0 +1,92 @@
+// std/process: child processes and the program's environment, for hosted
+// programs (a freestanding image has no runtime behind these). Imported
+// with `import "std/process"`; errors are std/io's IoErr, so a program
+// matching them also imports "std/io". The runtime calls below are raw
+// entries (specs/std-process/PLAN.md); the functions after them are the
+// library's interface.
+module process
+import "std/io"
+
+// Stdio is what a child's standard stream is connected to.
+union Stdio { Inherit; Null; Piped }
+
+// ExitStatus is how a child ended: its exit code (0 to 255), or the
+// signal that ended it.
+union ExitStatus { Exited(code: i32); Signaled(signal: i32) }
+
+impl ExitStatus {
+    // success is true exactly for Exited(0).
+    func success(view self) -> bool {
+        match self {
+            Exited(c) => return c == 0i32
+            Signaled(s) => return false
+        }
+        return false
+    }
+}
+
+// Output is a finished child's status and captured output.
+struct Output { status: ExitStatus; stdout: Vec[u8]; stderr: Vec[u8] }
+
+// Runtime intrinsics (hosted). The environment is a snapshot taken when
+// the program started, keeping only the first entry of a name that
+// occurs more than once.
+func proc_env_count() -> usize
+func proc_env_at(i: usize, buf: edit[]u8) -> usize
+
+// env_entry returns entry i of the start-time environment, `name=value`.
+func env_entry(i: usize) -> Vec[u8] {
+    buf := Vec[u8].new()
+    buf.resize(256usize, 0u8)
+    while true {
+        var n: usize = 0usize
+        with e := buf.as_edit() { n = proc_env_at(i, e) }
+        if n <= buf.len() {
+            entry := Vec[u8].new()
+            with b := buf.as_view() { entry.extend(b[0usize : n]) }
+            return entry
+        }
+        buf.resize(n, 0u8)
+    }
+    return buf
+}
+
+// valid_name: an environment name is non-empty and holds no '=' and no NUL.
+func valid_name(name: view[]u8) -> bool {
+    if len(name) == 0usize { return false }
+    var i: usize = 0usize
+    while i < len(name) {
+        if name[i] == 61u8 || name[i] == 0u8 { return false }
+        i = i + 1usize
+    }
+    return true
+}
+
+// env returns the value of the variable name in the environment the
+// program started with, or None when it is unset or name is not a valid
+// name.
+func env(name: view[]u8) -> Option[Vec[u8]] {
+    if !valid_name(name) { return None }
+    n := proc_env_count()
+    var i: usize = 0usize
+    while i < n {
+        e := env_entry(i)
+        k := len(name)
+        if e.len() > k && e.get(k) == 61u8 {
+            var same: bool = true
+            var j: usize = 0usize
+            while j < k {
+                if e.get(j) != name[j] { same = false; break }
+                j = j + 1usize
+            }
+            if same {
+                v := Vec[u8].new()
+                m := e.len()
+                with b := e.as_view() { v.extend(b[k + 1usize : m]) }
+                return Some(v)
+            }
+        }
+        i = i + 1usize
+    }
+    return None
+}

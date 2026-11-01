@@ -18,6 +18,12 @@ import (
 	"github.com/dshills/kern/compiler/resolve"
 )
 
+// startEnv is the environment the process started with (std/process),
+// taken during package initialisation, before any code can change it. Go
+// keeps only the first entry of a name that occurs more than once, and
+// the native runtime does the same, so both engines see one list.
+var startEnv = syscall.Environ()
+
 // intrinsicFn implements a runtime-provided prelude function.
 // callCtx carries the call's source position and type arguments.
 type callCtx struct {
@@ -264,6 +270,22 @@ func init() {
 				buf.at(i).set(mkInt(tyU8, uint64(name[i])))
 			}
 			return []Value{mkInt(tyI64, uint64(len(name)))}
+		},
+		// std/process (hosted): the start-time environment
+		"proc_env_count": func(it *Interp, a []Value, _ callCtx) []Value {
+			return []Value{mkInt(tyUsize, uint64(len(startEnv)))}
+		},
+		"proc_env_at": func(it *Interp, a []Value, _ callCtx) []Value {
+			i := u64(a[0])
+			if i >= uint64(len(startEnv)) {
+				return []Value{mkInt(tyUsize, 0)}
+			}
+			e := startEnv[i]
+			seq := byteSeq(acc(a[1]))
+			for k := 0; k < len(e) && k < seq.length(); k++ {
+				seq.at(k).set(mkInt(tyU8, uint64(e[k])))
+			}
+			return []Value{mkInt(tyUsize, uint64(len(e)))}
 		},
 		"io_argc": func(it *Interp, a []Value, _ callCtx) []Value {
 			return []Value{mkInt(tyUsize, uint64(len(it.sh.args)))}

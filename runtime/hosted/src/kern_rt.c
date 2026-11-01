@@ -96,12 +96,14 @@ int32_t kern_io_open(const char *p, int64_t n, uint8_t write) {
     if (n > 0 && memchr(p, 0, (size_t)n) != NULL) return -EINVAL; // an embedded NUL would cut the path
     memcpy(path, p, (size_t)n);
     path[n] = 0;
-    int fd = write ? open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644) : open(path, O_RDONLY);
+    // close-on-exec from the start, so that no child inherits the file
+    // (specs/std-process R6)
+    int fd = write ? open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644) : open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -errno;
     if (fd < 3) {
         // a standard stream was closed at startup: keep opened files above
         // the descriptors the output buffer and the kern side treat specially
-        int d = fcntl(fd, F_DUPFD, 3);
+        int d = fcntl(fd, F_DUPFD_CLOEXEC, 3);
         int saved = errno;
         close(fd);
         if (d < 0) return -saved;
@@ -229,7 +231,7 @@ int64_t kern_io_temp(const char *p, int64_t n, uint8_t dir, char *buf, int64_t c
     if (dir) {
         if (mkdtemp(tmpl) == NULL) return -errno;
     } else {
-        int fd = mkstemp(tmpl);
+        int fd = mkostemp(tmpl, O_CLOEXEC);
         if (fd < 0) return -errno;
         if (close(fd) < 0) {
             int ce = errno;
@@ -246,11 +248,93 @@ int64_t kern_io_temp(const char *p, int64_t n, uint8_t dir, char *buf, int64_t c
     return (int64_t)l;
 }
 int64_t kern_io_argc(void) { return kern_argc; }
+
 int64_t kern_io_arg(int64_t i, char *buf, int64_t n) {
     if (i < 0 || i >= kern_argc) return 0;
     size_t len = strlen(kern_argv[i]);
     memcpy(buf, kern_argv[i], len < (size_t)n ? len : (size_t)n);
     return (int64_t)len;
+}
+
+// ---- std/process (specs/std-process) ----
+
+// kern_env is the environment the program started with, taken by
+// kern_start: environ's entries in order, keeping only the first entry of
+// a name that occurs more than once, as Go's runtime does, so that the
+// interpreter and a native build see the same list. C code changing the
+// environment later does not alter it.
+extern char **environ;
+static char **kern_env = NULL;
+static int64_t kern_envc = 0;
+static uint64_t kern_env_hash(const char *e, size_t k) {
+    uint64_t h = 14695981039346656037ull; // FNV-1a
+    for (size_t i = 0; i < k; i++) h = (h ^ (uint8_t)e[i]) * 1099511628211ull;
+    return h;
+}
+static void kern_env_init(void) {
+    size_t n = 0;
+    while (environ != NULL && environ[n] != NULL) n++;
+    kern_env = malloc((n + 1) * sizeof(char *));
+    // seen is an open-addressing set of the names kept so far (indexes
+    // into kern_env plus one), so the scan is linear in the environment
+    size_t cap = 16;
+    while (cap < 2 * n) cap *= 2;
+    int64_t *seen = calloc(cap, sizeof(int64_t));
+    if (kern_env == NULL || seen == NULL) { free(seen); return; } // an empty environment then
+    for (size_t i = 0; i < n; i++) {
+        const char *e = environ[i];
+        if (*e == 0) continue; // an empty entry, which Go's syscall.Environ leaves out too
+        const char *eq = strchr(e, '=');
+        size_t slot = 0;
+        if (eq != NULL) { // an entry without '=' names no variable and is kept as is, as Go keeps it
+            size_t k = (size_t)(eq - e);
+            slot = (size_t)kern_env_hash(e, k) & (cap - 1);
+            int dup = 0;
+            while (seen[slot] != 0) {
+                const char *o = kern_env[seen[slot] - 1];
+                if (strncmp(o, e, k) == 0 && o[k] == '=') { dup = 1; break; }
+                slot = (slot + 1) & (cap - 1);
+            }
+            if (dup) continue;
+        }
+        char *c = strdup(e);
+        if (c == NULL) continue; // out of memory: the entry is left out
+        kern_env[kern_envc++] = c;
+        if (eq != NULL) seen[slot] = kern_envc;
+    }
+    free(seen);
+}
+int64_t kern_proc_env_count(void) { return kern_envc; }
+// kern_proc_env_at copies at most n bytes of entry i into buf and returns
+// the entry's length, 0 when there is no entry i.
+int64_t kern_proc_env_at(int64_t i, char *buf, int64_t n) {
+    if (i < 0 || i >= kern_envc) return 0;
+    size_t len = strlen(kern_env[i]);
+    memcpy(buf, kern_env[i], len < (size_t)n ? len : (size_t)n);
+    return (int64_t)len;
+}
+
+// kern_sig_ignored holds the signals that were ignored when the program
+// started; a child keeps them ignored and gets every other signal's
+// default disposition (specs/std-process R4). SIGCHLD is the exception:
+// ignoring it (or SA_NOCLDWAIT) makes the system reap children by itself,
+// so that wait could not report a status and kill could reach a reused
+// process ID. kern_sig_init therefore resets it to the default, which for
+// SIGCHLD also discards the signal, and children get the default too, as
+// in the interpreter, where Go always installs its own SIGCHLD handler.
+sigset_t kern_sig_ignored;
+static void kern_sig_init(void) {
+    sigemptyset(&kern_sig_ignored);
+    for (int sig = 1; sig < NSIG; sig++) {
+        struct sigaction old;
+        if (sig == SIGCHLD || sigaction(sig, NULL, &old) != 0) continue;
+        if (old.sa_handler == SIG_IGN) sigaddset(&kern_sig_ignored, sig);
+    }
+    struct sigaction dfl;
+    memset(&dfl, 0, sizeof dfl);
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    sigaction(SIGCHLD, &dfl, NULL); // flags 0: SA_NOCLDWAIT cleared too
 }
 void kern_yield(void) { sched_yield(); }
 uint64_t kern_now_ns(void) { struct timespec ts; clock_gettime(KERN_CLOCK, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
@@ -471,6 +555,8 @@ void kern_start(void) {
     static char altstack[65536];
     long pg = sysconf(_SC_PAGESIZE);
     if (pg > 0) kern_page = (uintptr_t)pg;
+    kern_env_init();
+    kern_sig_init(); // before the runtime installs its own handlers
     if (pipe(kern_probe) != 0) kern_probe[0] = kern_probe[1] = -1; // no walk then
     else { fcntl(kern_probe[0], F_SETFD, FD_CLOEXEC); fcntl(kern_probe[1], F_SETFD, FD_CLOEXEC); }
     kern_thread_init(altstack);

@@ -1,0 +1,22 @@
+//! phase: 6
+//! expect: output
+// std/process's environment (specs/std-process R9): a variable the
+// harness always has (PATH, through which it finds clang) is set, a name
+// no host sets is not, and invalid names (one holding '=', the empty
+// name) are never found. Only Some/None is printed, since values differ
+// by host.
+module t
+import "std/process"
+func show(o: view[Option[Vec[u8]]]) {
+    match o {
+        Some(v) => { print_str("some"); println() }
+        None => { print_str("none"); println() }
+    }
+}
+func main() -> i32 {
+    with r := process.env("PATH") { show(r) }
+    with r := process.env("KERN_STD_PROCESS_UNSET") { show(r) }
+    with r := process.env("A=B") { show(r) }
+    with r := process.env("") { show(r) }
+    return 0i32
+}

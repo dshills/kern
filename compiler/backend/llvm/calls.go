@@ -539,6 +539,12 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	case "io_arg":
 		p, l := fe.seqParts(a[1])
 		setDst(fe.rt("kern_io_arg", "i64 (i64, ptr, i64)", "i64 "+fe.v(a[0])+", ptr "+p+", i64 "+l))
+	// std/process (hosted): the start-time environment
+	case "proc_env_count":
+		setDst(fe.rt("kern_proc_env_count", "i64 ()", ""))
+	case "proc_env_at":
+		p, l := fe.seqParts(a[1])
+		setDst(fe.rt("kern_proc_env_at", "i64 (i64, ptr, i64)", "i64 "+fe.v(a[0])+", ptr "+p+", i64 "+l))
 	case "now_ns":
 		setDst(fe.rt("kern_now_ns", "i64 ()", ""))
 	case "yield_now":
