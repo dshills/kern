@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -254,7 +259,7 @@ func TestWaferClientURL(t *testing.T) {
 	t.Setenv("WAFER_API_KEY", "k")
 	for _, base := range []string{"https://pass.wafer.ai/v1/chat/completions", "https://pass.wafer.ai/v1", "https://pass.wafer.ai/", "https://pass.wafer.ai"} {
 		t.Setenv("WAFER_API_URL", base)
-		c, err := newClient("wafer", "GLM-5.3")
+		c, err := newClient("wafer", "GLM-5.3", "")
 		if err != nil {
 			t.Fatalf("%s: %v", base, err)
 		}
@@ -264,7 +269,7 @@ func TestWaferClientURL(t *testing.T) {
 	}
 	// a host that merely contains v1 is kept whole
 	t.Setenv("WAFER_API_URL", "https://v1.wafer.example/v1beta")
-	c, err := newClient("wafer", "m")
+	c, err := newClient("wafer", "m", "max")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,11 +277,226 @@ func TestWaferClientURL(t *testing.T) {
 		t.Errorf("v1 inside a name: %+v", c)
 	}
 	t.Setenv("WAFER_API_URL", "")
-	if _, err := newClient("wafer", "GLM-5.3"); err == nil || !strings.Contains(err.Error(), "WAFER_API_URL") {
+	if _, err := newClient("wafer", "GLM-5.3", ""); err == nil || !strings.Contains(err.Error(), "WAFER_API_URL") {
 		t.Errorf("a missing URL: %v", err)
 	}
 	t.Setenv("WAFER_API_KEY", "")
-	if _, err := newClient("wafer", "GLM-5.3"); err == nil || !strings.Contains(err.Error(), "WAFER_API_KEY") {
+	if _, err := newClient("wafer", "GLM-5.3", ""); err == nil || !strings.Contains(err.Error(), "WAFER_API_KEY") {
 		t.Errorf("a missing key: %v", err)
+	}
+}
+
+// -effort reaches the Responses request as reasoning.effort, is left out
+// when unset, and is refused for anthropic rather than silently ignored.
+func TestEffortInRequest(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		got map[string]any
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = nil
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"DONE"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+	for _, effort := range []string{"max", ""} {
+		c := &openaiClient{key: "k", model: "m", effort: effort, url: srv.URL}
+		conv := newConversation("sys", nil)
+		conv.user("hi")
+		if _, _, _, err := c.step(context.Background(), conv); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		r, has := got["reasoning"].(map[string]any)
+		mu.Unlock()
+		if effort == "" && has {
+			t.Errorf("no effort set, but the request has reasoning %v", r)
+		}
+		if effort != "" && (!has || r["effort"] != effort) {
+			t.Errorf("effort %q: the request has reasoning %v", effort, got["reasoning"])
+		}
+	}
+	t.Setenv("ANTHROPIC_API_KEY", "k")
+	if _, err := newClient("anthropic", "m", "max"); err == nil || !strings.Contains(err.Error(), "-effort") {
+		t.Errorf("anthropic with -effort: %v", err)
+	}
+}
+
+// TestQueriesArm (the three-arm design): the queries arm gets plain-text
+// diagnostics and the query tools; the plain arm is neither told of the
+// queries nor able to call them.
+func TestQueriesArm(t *testing.T) {
+	names := func(arm string) map[string]bool {
+		out := map[string]bool{}
+		for _, td := range tools(arm) {
+			out[td.Name] = true
+		}
+		return out
+	}
+	if q, p, s := names("queries"), names("plain"), names("structured"); !q["show_bounds_checks"] || p["show_bounds_checks"] || len(q) != len(s) {
+		t.Errorf("tools: queries %v, plain %v, structured %v", q, p, s)
+	}
+	root := t.TempDir()
+	sq, sp, ss := systemPrompt(root, "queries"), systemPrompt(root, "plain"), systemPrompt(root, "structured")
+	// the documented arm reads the repository's document itself
+	if sd := systemPrompt(filepath.Join("..", "..", ".."), "documented"); !strings.Contains(sd, "# Which bounds checks the compiler proves") || strings.Contains(sd, "show_bounds_checks") || len(names("documented")) != len(names("plain")) {
+		t.Errorf("the documented arm's prompt or tools: %.400s", sd)
+	}
+	if !strings.Contains(sq, "plain-text diagnostics") || !strings.Contains(sq, querySentence) || strings.Contains(sq, "structured JSON") {
+		t.Errorf("the queries arm's prompt: %.400s", sq)
+	}
+	if strings.Contains(sp, "show_bounds_checks") || !strings.Contains(ss, querySentence) {
+		t.Error("the plain prompt mentions the queries, or the structured one lacks them")
+	}
+	work := t.TempDir()
+	tk := &task{Name: "x", Files: []string{"a.kern"}}
+	if got := execTool(context.Background(), root, "/nonexistent/kern", work, tk, "plain", toolCall{name: "show_bounds_checks", args: "{}"}); got != "error: unknown tool" {
+		t.Errorf("the plain arm called a query: %q", got)
+	}
+}
+
+// TestDecompositionAndEnds: with a queries arm present the report scores
+// queries against plain and structured against queries, and counts how
+// failed trials ended per arm.
+func TestDecompositionAndEnds(t *testing.T) {
+	ok := []bool{true, true, true, true, true}
+	none := []bool{false, false, false, false, false}
+	fast := []int{2, 3, 3, 4, 4}
+	slow := []int{4, 5, 5, 6, 6}
+	var recs []trialRecord
+	recs = append(recs, records("t1", "A", "structured", ok, fast)...)
+	recs = append(recs, records("t1", "A", "queries", ok, slow)...)
+	plain := records("t1", "A", "plain", none, slow)
+	for i := range plain {
+		plain[i].EndReason = "done"
+	}
+	plain[4].EndReason = ""
+	recs = append(recs, plain...)
+	rep := writeAgentReport(recs, []*task{{Name: "t1", Kind: "optimization"}}, 5, 20, 30*time.Minute, "r")
+	for _, want := range []string{
+		"| t1 | optimization | A | queries | 5 | 5 | 5.0 |",
+		"| `queries` over `plain` | the semantic queries, diagnostics held to plain text | 1 of 1 | t1 5/0 |",
+		"| `structured` over `queries` | JSON diagnostics, the queries held constant | 1 of 1 | t1 5/5 |",
+		"| plain | 4 | 0 | 0 | 0 | 1 |",
+		"| structured | 0 | 0 | 0 | 0 | 0 |",
+	} {
+		if !strings.Contains(rep, want) {
+			t.Errorf("report lacks %q:\n%s", want, rep)
+		}
+	}
+	two := writeAgentReport(records("t1", "A", "structured", ok, fast), []*task{{Name: "t1"}}, 5, 20, time.Minute, "r")
+	if strings.Contains(rep, "`documented` over") {
+		t.Errorf("a pair whose arm did not run is scored:\n%s", rep)
+	}
+	if strings.Contains(two, "Arm decomposition") || strings.Contains(two, "How failed") {
+		t.Errorf("a run without the queries arm or failures has the extra sections:\n%s", two)
+	}
+}
+
+// TestRedoErrors: a trial whose model call failed is run again under the
+// same model, effort, arm and trial number; the failed record is kept as
+// .json.error, the trial that succeeded at the API is left alone, and the
+// report is written from the directory.
+func TestRedoErrors(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		efforts []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if re, ok := body["reasoning"].(map[string]any); ok {
+			mu.Lock()
+			efforts = append(efforts, fmt.Sprint(re["effort"]))
+			mu.Unlock()
+		}
+		_, _ = w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"DONE"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+	t.Setenv("WAFER_API_KEY", "k")
+	t.Setenv("WAFER_API_URL", srv.URL+"/v1")
+	tdir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tdir, "start"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tdir, "start", "a.kern"), []byte("module a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tk := &task{Name: "t1", Dir: tdir, Files: []string{"a.kern"}}
+	run := t.TempDir()
+	write := func(rec trialRecord) {
+		b, _ := json.Marshal(rec)
+		if err := os.WriteFile(filepath.Join(run, recordName(rec.Task, rec.Model, rec.Arm, rec.Trial)), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := "wafer:GLM-5.3@max"
+	write(trialRecord{Task: "t1", Model: m, Arm: "structured", Trial: 1, EndReason: "error", Error: "timeout"})
+	write(trialRecord{Task: "t1", Model: m, Arm: "plain", Trial: 1, EndReason: "done"})
+	out := filepath.Join(t.TempDir(), "report.md")
+	redo(t.TempDir(), "/nonexistent/kern", run, []*task{tk}, 2, 3, time.Minute, out)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(efforts) != 1 || efforts[0] != "max" {
+		t.Errorf("model calls with efforts %v, want one at max", efforts)
+	}
+	name := filepath.Join(run, recordName("t1", m, "structured", 1))
+	if _, err := os.Stat(name + ".error"); err != nil {
+		t.Errorf("the failed record is not kept: %v", err)
+	}
+	var rec trialRecord
+	b, err := os.ReadFile(name)
+	if err == nil {
+		err = json.Unmarshal(b, &rec)
+	}
+	if err != nil || rec.EndReason != "done" || rec.Model != m || rec.Trial != 1 {
+		t.Errorf("the re-run record: %+v (%v)", rec, err)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Errorf("no report: %v", err)
+	}
+}
+
+// TestLoadRuns merges the records of two run directories (directories
+// with different trials per cell are refused, by fatalf).
+func TestLoadRuns(t *testing.T) {
+	tk := []*task{{Name: "t1"}}
+	mk := func(model string, trials int) string {
+		d := t.TempDir()
+		for i := 1; i <= trials; i++ {
+			b, _ := json.Marshal(trialRecord{Task: "t1", Model: model, Arm: "plain", Trial: i})
+			if err := os.WriteFile(filepath.Join(d, recordName("t1", model, "plain", i)), b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return d
+	}
+	// a run directory list may carry spaces after the commas
+	recs, n := loadRuns([]string{mk("a:x", 5), " " + mk("b:y", 5)}, tk)
+	if len(recs) != 10 || n != 5 {
+		t.Errorf("merged %d records, %d trials; want 10 and 5", len(recs), n)
+	}
+}
+
+// TestPromptStatesBudget: a hidden bounds-check budget must appear in the
+// prompt, as "no runtime-checked bounds checks" for zero.
+func TestPromptStatesBudget(t *testing.T) {
+	zero, four := 0, 4
+	for _, c := range []struct {
+		prompt string
+		budget *int
+		ok     bool
+	}{
+		{"report **no runtime-checked bounds checks** in", &zero, true},
+		{"report **at most 4 runtime-checked bounds checks** in", &zero, false},
+		{"report **at most 4 runtime-checked bounds checks** in", &four, true},
+		{"anything", nil, true},
+	} {
+		tk := &task{Name: "t", Prompt: c.prompt, Hidden: hiddenSpec{MaxRuntimeBoundsChecks: c.budget}}
+		if got := promptStatesBudget(tk); (got == "") != c.ok {
+			t.Errorf("%q: %q", c.prompt, got)
+		}
 	}
 }

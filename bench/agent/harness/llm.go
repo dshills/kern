@@ -52,14 +52,17 @@ type llmClient interface {
 	step(ctx context.Context, conv *conversation) (string, []toolCall, usage, error)
 }
 
-func newClient(provider, model string) (llmClient, error) {
+func newClient(provider, model, effort string) (llmClient, error) {
+	if effort != "" && provider == "anthropic" {
+		return nil, fmt.Errorf("-effort is not supported for anthropic models")
+	}
 	switch provider {
 	case "openai":
 		key := os.Getenv("OPENAI_API_KEY")
 		if key == "" {
 			return nil, fmt.Errorf("OPENAI_API_KEY is not set")
 		}
-		return &openaiClient{key: key, model: model, url: "https://api.openai.com/v1/responses"}, nil
+		return &openaiClient{key: key, model: model, effort: effort, url: "https://api.openai.com/v1/responses"}, nil
 	case "wafer":
 		// Wafer serverless serves OpenAI's Responses API too
 		// (https://docs.wafer.ai/serverless); WAFER_API_URL may name any of
@@ -77,7 +80,7 @@ func newClient(provider, model string) (llmClient, error) {
 		} else {
 			base = strings.TrimSuffix(base, "/v1")
 		}
-		return &openaiClient{key: key, model: model, url: strings.TrimRight(base, "/") + "/v1/responses"}, nil
+		return &openaiClient{key: key, model: model, effort: effort, url: strings.TrimRight(base, "/") + "/v1/responses"}, nil
 	case "anthropic":
 		key := os.Getenv("ANTHROPIC_API_KEY")
 		if key == "" {
@@ -103,7 +106,9 @@ func paramsSchema(t toolDef) map[string]any {
 }
 
 // httpClient bounds every request so a stalled connection is retried
-// instead of consuming the trial's budget.
+// instead of consuming the trial's budget. The bound covers the whole
+// response: requests are not streamed, so a long reasoning turn sends
+// nothing until it is complete (-call-timeout raises it).
 var httpClient = &http.Client{Timeout: 180 * time.Second}
 
 func post(ctx context.Context, url string, headers map[string]string, body any) ([]byte, error) {
@@ -152,7 +157,7 @@ func post(ctx context.Context, url string, headers map[string]string, body any) 
 // (function tools with reasoning models require the Responses API; the
 // whole conversation is resent each step, stateless)
 
-type openaiClient struct{ key, model, url string }
+type openaiClient struct{ key, model, effort, url string }
 
 func (o *openaiClient) step(ctx context.Context, conv *conversation) (string, []toolCall, usage, error) {
 	var input []map[string]any
@@ -177,6 +182,9 @@ func (o *openaiClient) step(ctx context.Context, conv *conversation) (string, []
 		tools = append(tools, map[string]any{"type": "function", "name": td.Name, "description": td.Description, "parameters": paramsSchema(td)})
 	}
 	body := map[string]any{"model": o.model, "instructions": conv.system, "input": input, "tools": tools, "store": false}
+	if o.effort != "" {
+		body["reasoning"] = map[string]any{"effort": o.effort}
+	}
 	rb, err := post(ctx, o.url, map[string]string{"Authorization": "Bearer " + o.key}, body)
 	if err != nil {
 		return "", nil, usage{}, err

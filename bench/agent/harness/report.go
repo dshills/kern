@@ -16,9 +16,11 @@ type cell struct {
 
 // structuredBetter is the per-model win condition: with at least 5 trials
 // per arm and the same number in each (success counts are only comparable
-// over equal trial counts), the structured cell s beats the plain cell p
-// when it has more successful trials, or the same number and a strictly
-// lower median iteration count. Equal in both is not better.
+// over equal trial counts), the cell s beats the cell p when it has more
+// successful trials, or the same number and a strictly lower median
+// iteration count. Equal in both is not better. The primary metric compares
+// structured with plain; the three-arm decomposition applies the same rule
+// to the other pairs.
 func structuredBetter(s, p *cell) bool {
 	if s == nil || p == nil || s.n < 5 || p.n < 5 || s.n != p.n {
 		return false
@@ -38,6 +40,8 @@ func structuredBetter(s, p *cell) bool {
 // successful trials, then median iterations. A tie in both is a loss, and
 // so is a model where the plain arm is better. Wall-clock time is reported
 // and not compared.
+func key(t, m, a string) string { return t + "|" + m + "|" + a }
+
 func writeAgentReport(records []trialRecord, tasks []*task, trials, iterations int, budget time.Duration, runDir string) string {
 	var b strings.Builder
 	b.WriteString("# Agent experiment report\n\n")
@@ -51,9 +55,28 @@ func writeAgentReport(records []trialRecord, tasks []*task, trials, iterations i
 		modelList = append(modelList, m)
 	}
 	sort.Strings(modelList)
-	fmt.Fprintf(&b, "Models: %s. Trials per task, model and arm: %d. Arms: `structured` (JSON diagnostics with rule numbers, related spans and fixes, plus the semantic queries `explain_ownership`, `show_copies`, `show_allocations`, `show_bounds_checks` and `show_layout`) and `plain` (text diagnostics only); both arms receive the same language reference, grammar, prelude and examples.\n\n", strings.Join(modelList, ", "), trials)
+	present := map[string]bool{}
+	for _, r := range records {
+		present[r.Arm] = true
+	}
+	var armList []string
+	for _, a := range arms {
+		if present[a] {
+			armList = append(armList, a)
+		}
+	}
+	if len(armList) == 0 {
+		armList = []string{"structured", "plain"}
+	}
+	queriesNote := ""
+	if present["queries"] {
+		queriesNote += ", `queries` (text diagnostics plus the same semantic queries)"
+	}
+	if present["documented"] {
+		queriesNote += ", `documented` (text diagnostics, no queries, and `docs/bounds-checks.md` added to the reference)"
+	}
+	fmt.Fprintf(&b, "Models: %s. Trials per task, model and arm: %d. Arms: `structured` (JSON diagnostics with rule numbers, related spans and fixes, plus the semantic queries `explain_ownership`, `show_copies`, `show_allocations`, `show_bounds_checks` and `show_layout`)%s and `plain` (text diagnostics only); every arm receives the same language reference, grammar, prelude and examples.\n\n", strings.Join(modelList, ", "), trials, queriesNote)
 	cells := map[string]*cell{} // task|model|arm
-	key := func(t, m, a string) string { return t + "|" + m + "|" + a }
 	for _, r := range records {
 		c := cells[key(r.Task, r.Model, r.Arm)]
 		if c == nil {
@@ -76,7 +99,7 @@ func writeAgentReport(records []trialRecord, tasks []*task, trials, iterations i
 		win := len(modelList) > 0
 		for _, m := range modelList {
 			s, p := cells[key(t.Name, m, "structured")], cells[key(t.Name, m, "plain")]
-			for _, arm := range []string{"structured", "plain"} {
+			for _, arm := range armList {
 				c := cells[key(t.Name, m, arm)]
 				if c == nil {
 					fmt.Fprintf(&b, "| %s | %s | %s | %s | 0 | | | | | | |\n", t.Name, t.Kind, m, arm)
@@ -98,6 +121,101 @@ func writeAgentReport(records []trialRecord, tasks []*task, trials, iterations i
 		fmt.Fprintf(&b, " — the primary metric %s (threshold 8 of 10).", map[bool]string{true: "passes", false: "does not pass"}[wins >= 8])
 	}
 	b.WriteString("\n\nA task with fewer than 5 trials per arm, or unequal trial counts between the arms, for any model is a loss by definition (insufficient trials), so partial runs report conservatively.\n\n")
+	b.WriteString(decomposition(cells, tasks, modelList, present))
+	b.WriteString(failureEnds(records, armList))
 	b.WriteString("## Secondary comparison (descriptive only)\n\nNo Go or Rust arm was run. Any comparison with Go or Rust agents would be confounded by training data: both languages are abundantly represented in model training corpora while kern is not, so a difference in either direction would not isolate the effect of structured diagnostics. The within-kern ablation above is the only controlled comparison in this report.\n")
+	return b.String()
+}
+
+// pairs are the arm comparisons the decomposition scores, each with what
+// it isolates.
+var pairs = []struct{ better, worse, what string }{
+	{"queries", "plain", "the semantic queries, diagnostics held to plain text"},
+	{"structured", "queries", "JSON diagnostics, the queries held constant"},
+	{"documented", "plain", "a written account of the proofs, no tools"},
+	{"queries", "documented", "the query tool against the written account"},
+}
+
+// decomposition scores every pair of pairs whose arms both ran, under the
+// win rule: what each difference between arms adds.
+func decomposition(cells map[string]*cell, tasks []*task, models []string, present map[string]bool) string {
+	scored := false
+	for _, pr := range pairs {
+		scored = scored || present[pr.better] && present[pr.worse]
+	}
+	if !scored {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Arm decomposition\n\nEach pair is scored by the win rule above, task by task (a task counts when the first arm is better for every model).\n\n| comparison | isolates | tasks won | per task (successes, first arm / second arm, per model) |\n|---|---|---|---|\n")
+	for _, pr := range pairs {
+		if !present[pr.better] || !present[pr.worse] {
+			continue
+		}
+		won := 0
+		var per []string
+		for _, t := range tasks {
+			all := len(models) > 0
+			var counts []string
+			for _, m := range models {
+				x, y := cells[key(t.Name, m, pr.better)], cells[key(t.Name, m, pr.worse)]
+				all = all && structuredBetter(x, y)
+				counts = append(counts, fmt.Sprintf("%s/%s", successOf(x), successOf(y)))
+			}
+			if all {
+				won++
+			}
+			per = append(per, fmt.Sprintf("%s %s", t.Name, strings.Join(counts, ",")))
+		}
+		fmt.Fprintf(&b, "| `%s` over `%s` | %s | %d of %d | %s |\n", pr.better, pr.worse, pr.what, won, len(tasks), strings.Join(per, "; "))
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func successOf(c *cell) string {
+	if c == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d", c.successes)
+}
+
+// failureEnds counts, per arm, how the failed trials ended: the agent
+// declared the work done, it ran out of iterations, out of time, or the
+// model call failed. Records made before the harness kept the end reason
+// count as unknown.
+func failureEnds(records []trialRecord, armList []string) string {
+	reasons := []string{"done", "iterations", "timeout", "error", "unknown"}
+	counts := map[string]map[string]int{}
+	failed := false
+	for _, r := range records {
+		if r.Success {
+			continue
+		}
+		failed = true
+		why := r.EndReason
+		switch why {
+		case "done", "iterations", "timeout", "error":
+		default:
+			why = "unknown"
+		}
+		if counts[r.Arm] == nil {
+			counts[r.Arm] = map[string]int{}
+		}
+		counts[r.Arm][why]++
+	}
+	if !failed {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## How failed trials ended\n\n`done`: the agent replied DONE with the hidden tests failing, a program it believed finished. `iterations`, `timeout`: it ran out of budget. `error`: a model call failed. `unknown`: the record keeps no reason (made before the harness kept one).\n\n| arm | done | iterations | timeout | error | unknown |\n|---|---|---|---|---|---|\n")
+	for _, a := range armList {
+		fmt.Fprintf(&b, "| %s |", a)
+		for _, why := range reasons {
+			fmt.Fprintf(&b, " %d |", counts[a][why])
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 	return b.String()
 }

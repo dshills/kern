@@ -13,6 +13,21 @@ import (
 	"time"
 )
 
+// The arms: structured has JSON diagnostics and the semantic queries,
+// queries has plain-text diagnostics and the same queries, documented has
+// plain-text diagnostics and docs/bounds-checks.md (what the queries would
+// tell, written down) in its reference, plain has plain-text diagnostics
+// only. Comparing structured with queries isolates the diagnostics'
+// format, queries with plain the queries, documented with plain the
+// documentation, and queries with documented a tool against a document.
+var arms = []string{"structured", "queries", "documented", "plain"}
+
+// hasQueries reports an arm offered the semantic query tools.
+func hasQueries(arm string) bool { return arm == "structured" || arm == "queries" }
+
+// querySentence tells an arm with the queries what they answer.
+const querySentence = "The tools `explain_ownership`, `show_copies`, `show_allocations`, `show_bounds_checks` and `show_layout` answer semantic questions about places, copies, allocation sites, which bounds checks the compiler proved away and the layout of types; use them instead of guessing, and use them to verify a requirement stated in terms of what the compiler reports.\n\n"
+
 // systemPrompt gives every model the same language reference and examples;
 // the arms differ only in how diagnostics come back and which queries exist.
 func systemPrompt(root string, arm string) string {
@@ -24,12 +39,28 @@ func systemPrompt(root string, arm string) string {
 	var b strings.Builder
 	b.WriteString("You are a programmer working in kern, a systems language with second-class access (view/edit/own parameters, no references), static moves and traps. Edit the task's files with the tools until the task is done. Work in small verified steps: after each change, check the program and run it. When the program checks cleanly and prints the expected output, reply with exactly DONE.\n\n")
 	if arm == "structured" {
-		b.WriteString("The `check` tool returns structured JSON diagnostics: each has a stable code, the violated rule number, a one-sentence message, the byte span, related spans and, where one exists, a machine-applicable fix. Use the rule number to look up the rule in the reference below. The tools `explain_ownership`, `show_copies`, `show_allocations`, `show_bounds_checks` and `show_layout` answer semantic questions about places, copies, allocation sites, which bounds checks the compiler proved away and the layout of types; use them instead of guessing, and use them to verify a requirement stated in terms of what the compiler reports.\n\n")
+		b.WriteString("The `check` tool returns structured JSON diagnostics: each has a stable code, the violated rule number, a one-sentence message, the byte span, related spans and, where one exists, a machine-applicable fix. Use the rule number to look up the rule in the reference below. ")
 	} else {
-		b.WriteString("The `check` tool returns the compiler's plain-text diagnostics.\n\n")
+		b.WriteString("The `check` tool returns the compiler's plain-text diagnostics.")
+		if hasQueries(arm) {
+			b.WriteString(" ")
+		} else {
+			b.WriteString("\n\n")
+		}
+	}
+	if hasQueries(arm) {
+		b.WriteString(querySentence)
+	}
+	if arm == "documented" {
+		b.WriteString("The section \"Which bounds checks the compiler proves\" of the reference below says which bounds checks the compiler removes and which it keeps; use it to meet a requirement stated in terms of what the compiler reports.\n\n")
 	}
 	b.WriteString("# Language reference\n\n")
 	b.Write(ref)
+	if arm == "documented" {
+		bc, _ := os.ReadFile(filepath.Join(root, "docs", "bounds-checks.md"))
+		b.WriteString("\n\n")
+		b.Write(bc)
+	}
 	b.WriteString("\n\n# Grammar\n\n```\n")
 	b.Write(grammar)
 	b.WriteString("\n```\n\n# Standard library (prelude)\n\n```kern\n")
@@ -50,7 +81,7 @@ func tools(arm string) []toolDef {
 		{Name: "check", Description: "Run the kern checker on the task's files and return its diagnostics; a diagnostic may carry a machine-applicable fix (a structured edit) that write_file can apply.", Params: map[string]string{}},
 		{Name: "run", Description: "Run the program and return its standard output, standard error and exit status.", Params: map[string]string{}},
 	}
-	if arm == "structured" {
+	if hasQueries(arm) {
 		ts = append(ts,
 			toolDef{Name: "explain_ownership", Description: "Explain the ownership state, accesses and drop points of every place intersecting a byte span of a file (JSON).", Params: map[string]string{"file": "file name", "start": "byte offset", "end": "byte offset"}},
 			toolDef{Name: "show_copies", Description: "List every bitwise and explicit copy in the program with its location, type and size (JSON).", Params: map[string]string{}},
@@ -99,18 +130,25 @@ func runTrial(root, kernBin, runDir string, client llmClient, modelName, arm str
 			break
 		}
 		rec.Iterations = it
+		stepStart := time.Now()
 		reply, calls, usage, err := client.step(ctx, conv)
+		rec.StepSeconds = append(rec.StepSeconds, time.Since(stepStart).Seconds())
 		rec.InputTokens += usage.input
 		rec.OutputTok += usage.output
 		if err != nil {
 			rec.Error = err.Error()
+			rec.EndReason = "error"
 			if ctx.Err() != nil {
 				rec.TimedOut = true
 			}
 			break
 		}
+		if reply != "" {
+			rec.Replies = append(rec.Replies, replyLog{Iteration: it, Text: truncate(reply, 4000)})
+		}
 		if len(calls) == 0 {
 			if strings.Contains(strings.ToUpper(reply), "DONE") {
+				rec.EndReason = "done"
 				break
 			}
 			conv.user("Continue: use the tools to check and run the program, or reply DONE when it is finished.")
@@ -133,6 +171,13 @@ func runTrial(root, kernBin, runDir string, client llmClient, modelName, arm str
 	if ctx.Err() != nil {
 		rec.TimedOut = true
 	}
+	switch {
+	case rec.TimedOut:
+		rec.EndReason = "timeout"
+	case rec.EndReason == "":
+		rec.EndReason = "iterations"
+	}
+	rec.UsedIterations, rec.UsedSeconds = rec.Iterations, rec.WallSeconds
 	ok, _ := hiddenPasses(context.Background(), root, kernBin, t, work)
 	rec.Success = ok && !rec.TimedOut
 	rec.UnsafeAdded = max(0, unsafeLineCount(work, t.Files)-startUnsafe)
@@ -178,6 +223,13 @@ func execTool(ctx context.Context, root, kernBin, work string, t *task, arm stri
 			out = append(out, filepath.Join(work, f))
 		}
 		return out
+	}
+	switch c.name {
+	case "explain_ownership", "show_copies", "show_allocations", "show_bounds_checks", "show_layout":
+		// an arm without the queries is not told of them, and cannot call them
+		if !hasQueries(arm) {
+			return "error: unknown tool"
+		}
 	}
 	switch c.name {
 	case "read_file":

@@ -39,8 +39,20 @@ with a single tool was checked before the pilot.
 | plain | no | 20 (budget) | 1,800 s | 223,684 / 2,647 |
 
 With structured diagnostics the model met the task's bounds-check budget
-in 10 iterations. With text diagnostics it ran out of its 20 iterations,
-and wrote little: 2,647 output tokens in all.
+in 10 iterations. The plain row's 20 iterations and 1,800 s are not what
+the trial used: the harness scored a failed trial at the budget maximum
+and wrote those values over the real ones.
+
+**Correction (2026-11-01).** An earlier version of this report said the
+plain setup "ran out of its 20 iterations". The record does not show
+that. Its six tool calls end at iteration 6 with a run printing the
+expected output, and its 2,647 output tokens fit a short trial, which is
+consistent with the agent replying DONE on a correct program that
+exceeded the bounds-check budget it had no tool to see. The record kept
+neither the model's replies nor why the trial ended, so this cannot be
+confirmed. The harness now records why each trial ended (`end_reason`),
+what it used (`used_iterations`, `used_seconds`) and the model's replies
+(`replies`).
 
 This matches the earlier one-task pilot on the same task
 (`claude-opus-5-5`, 2026-10-30): the structured setup passed in 3
