@@ -84,3 +84,52 @@ func TestMarkers(t *testing.T) {
 		t.Fatal("the prelude Box has a destructor; the local stand-in does not")
 	}
 }
+
+// BoxIn and VecIn hold their element out of line and their allocator
+// inline (specs/alloc-containers §2): Send and Share hold iff both the
+// element and the allocator have them, Interior iff either has it, and
+// neither container is ever Copy.
+func TestAllocContainerMarkers(t *testing.T) {
+	prog := Resolve(nil)
+	u64 := &Prim{Name: "u64"}
+	raw := &RawPtr{Elem: &Prim{Name: "u8"}}
+	atomicDecl := prog.Core.Types["Atomic"]
+	if atomicDecl == nil {
+		t.Fatal("Atomic not declared")
+	}
+	atomic := &Named{Decl: atomicDecl, Args: []Type{u64}}
+	type mcase struct {
+		name       string
+		is         func(Type) bool
+		have, lack Type
+	}
+	cases := []mcase{
+		{"Send", IsSend, u64, raw},
+		{"Share", IsShare, u64, raw},
+		{"Interior", IsInterior, atomic, u64},
+	}
+	for _, cname := range []string{"BoxIn", "VecIn"} {
+		decl := prog.Core.Types[cname]
+		if decl == nil {
+			t.Fatalf("%s not declared", cname)
+		}
+		for _, c := range cases {
+			for _, pair := range []struct {
+				elem, alloc Type
+				label       string
+			}{{c.have, c.have, "both"}, {c.have, c.lack, "element only"}, {c.lack, c.have, "allocator only"}, {c.lack, c.lack, "neither"}} {
+				n := &Named{Decl: decl, Args: []Type{pair.elem, pair.alloc}}
+				want := pair.label == "both"
+				if c.name == "Interior" {
+					want = pair.label != "neither"
+				}
+				if got := c.is(n); got != want {
+					t.Errorf("%s %s with %s: got %v, want %v", cname, c.name, pair.label, got, want)
+				}
+				if IsCopy(n) {
+					t.Errorf("%s with %s is Copy", cname, pair.label)
+				}
+			}
+		}
+	}
+}

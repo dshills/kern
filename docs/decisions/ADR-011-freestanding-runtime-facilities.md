@@ -198,3 +198,11 @@ emulation no longer traps `explicit` on `SystemAllocator.new`.
 - **Rejected: a bounded emulation heap.** Making the interpreter fail at the same point as the
   arena would still not agree with it (fragmentation differs), and a program that depends on
   the exhaustion point is relying on the arena size, which is a build-time constant to change.
+
+## Note (2026-11-01): containers over a program's own allocator
+
+`BoxIn[T, A]` and `VecIn[T, A]` (`specs/alloc-containers/SPEC.md`, `docs/ownership.md`
+rule 5.6.5) allocate only through an `A: Allocator` the program supplies, so freestanding code
+can keep a container's storage in its own allocator (a page allocator, a budget, a bump region)
+instead of the runtime's 1 MiB arena. `tests/freestanding/vecin.kern` runs one over a budget
+allocator in the emulation and on both QEMU targets.

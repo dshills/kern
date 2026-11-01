@@ -1,0 +1,123 @@
+//! phase: 3
+//! expect: output vecin_edges
+// Edge cases of VecIn and BoxIn (specs/alloc-containers/SPEC.md §2): a
+// zero-size element's requests reach the allocator as 0-byte allocations
+// and are freed like any other; after release the allocator is still
+// readable and the vector grows from it again; a failed BoxIn.try_new_in
+// destroys its value before its allocator; pop on an empty vector is None.
+module run
+struct Z { }
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("  drop tok "); print_u64(self.id); println() }
+}
+// Loud refuses every request and prints when it is destroyed.
+struct Loud nocopy { id: u64 }
+impl Loud {
+    destructor(edit self) { print_str("  drop allocator "); print_u64(self.id); println() }
+}
+impl Allocator for Loud {
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] { return Err(OutOfMemory) }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) { }
+}
+// Budget is the fixture's user allocator: it serves requests from the
+// system allocator until its byte budget is spent, then returns
+// Err(OutOfMemory). It counts alloc calls, live allocations and live
+// bytes, and checks that each free names a live allocation with the same
+// size and alignment (an explicit trap otherwise). With trace set it
+// prints every alloc and free.
+struct Budget nocopy { left: usize; calls: usize; live: usize; bytes: usize; trace: bool; n: usize; ptrs: [64]usize; sizes: [64]usize; aligns: [64]usize }
+func budget(left: usize, trace: bool) -> Budget {
+    return Budget { left: left, calls: 0usize, live: 0usize, bytes: 0usize, trace: trace, n: 0usize, ptrs: zero(), sizes: zero(), aligns: zero() }
+}
+impl Allocator for Budget {
+    contract { requires "size and align meet the allocator obligations of spec §6" }
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] {
+        self.calls = self.calls + 1usize
+        if size > self.left {
+            if self.trace { print_str("  alloc "); print_u64(u64(size)); print_str(" refused"); println() }
+            return Err(OutOfMemory)
+        }
+        if self.n == 64usize { trap() }
+        sys := SystemAllocator.new()
+        unsafe {
+            match sys.alloc(size, align) {
+                Ok(p) => {
+                    self.ptrs[self.n] = ptr_addr(p)
+                    self.sizes[self.n] = size
+                    self.aligns[self.n] = align
+                    self.n = self.n + 1usize
+                    self.left = self.left - size
+                    self.live = self.live + 1usize
+                    self.bytes = self.bytes + size
+                    if self.trace { print_str("  alloc "); print_u64(u64(size)); print_str(" align "); print_u64(u64(align)); println() }
+                    return Ok(p)
+                }
+                Err(e) => return Err(OutOfMemory)
+            }
+        }
+    }
+    contract { requires "ptr, size and align are those of one live allocation of this Budget" }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) {
+        unsafe {
+            a := ptr_addr(ptr)
+            i := 0usize
+            while i < self.n && self.ptrs[i] != a { i = i + 1usize }
+            if i == self.n || self.sizes[i] != size || self.aligns[i] != align { trap() }
+            self.n = self.n - 1usize
+            self.ptrs[i] = self.ptrs[self.n]
+            self.sizes[i] = self.sizes[self.n]
+            self.aligns[i] = self.aligns[self.n]
+            self.left = self.left + size
+            self.live = self.live - 1usize
+            self.bytes = self.bytes - size
+            if self.trace { print_str("  free "); print_u64(u64(size)); print_str(" align "); print_u64(u64(align)); println() }
+            sys := SystemAllocator.new()
+            sys.free(ptr, size, align)
+        }
+    }
+}
+func counters(b: view[Budget]) {
+    print_str("  budget live "); print_u64(u64(b.live)); print_str(" bytes "); print_u64(u64(b.bytes))
+    print_str(" calls "); print_u64(u64(b.calls)); println()
+}
+func res(r: Result[(), AllocErr]) {
+    match r {
+        Ok(u) => { print_str("  ok"); println() }
+        Err(e) => { print_str("  err out of memory"); println() }
+    }
+}
+func state(n: usize, c: usize) { print_str("  len "); print_u64(u64(n)); print_str(" cap "); print_u64(u64(c)); println() }
+func loud_box() -> Result[(), AllocErr] {
+    b := BoxIn[Tok, Loud].try_new_in(Tok { id: 1u64 }, Loud { id: 2u64 })?
+    return Ok(())
+}
+func label(s: view[]u8) { print_str(s); println() }
+func main() -> i32 {
+    label("zero-size elements")
+    z := VecIn[Z, Budget].new_in(budget(100usize, true))
+    res(z.try_reserve(8usize))
+    for i in 0usize..10usize { res(z.try_push(Z { })) }
+    state(z.len(), z.capacity())
+    with b := z.allocator() { counters(b) }
+    z.release()
+    with b := z.allocator() { counters(b) }
+    label("grow again after release")
+    v := VecIn[u64, Budget].new_in(budget(1000usize, true))
+    res(v.try_push(1u64))
+    v.release()
+    with b := v.allocator() { counters(b) }
+    res(v.try_push(2u64))
+    state(v.len(), v.capacity())
+    with b := v.allocator() { counters(b) }
+    label("failed BoxIn.try_new_in: value, then allocator")
+    res(loud_box())
+    label("pop on an empty vector")
+    e := VecIn[u64, Budget].new_in(budget(0usize, false))
+    match e.pop() {
+        Some(x) => { print_str("  popped"); println() }
+        None => { print_str("  none"); println() }
+    }
+    label("end")
+    return 0i32
+}

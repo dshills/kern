@@ -26,7 +26,13 @@ from `Pool.alloc`/`Arena.alloc` and the `try_` forms of `Box` and `Vec`,
 `specs/fallible-alloc/SPEC.md`; the `try_` forms reach only the `heap_try_*`
 helpers, which `compiler/analysis/try_alloc_test.go` checks). Fields of a nocopy core struct are private
 to the prelude (`NAME_PRIVATE`), so the invariants named in the contracts
-cannot be broken from safe user code.
+cannot be broken from safe user code. `BoxIn` and `VecIn`
+(`specs/alloc-containers`) call their held allocator `a` instead of the
+`heap_*` helpers, with the same obligations: every request is
+`n * size_of[T]()` bytes at `align_of[T]()`, and every `free` passes the
+pointer, size and alignment of one earlier `alloc` of the same container.
+A user allocator's `alloc` and `free` are not enumerated unsafe
+operations; its own body carries its `unsafe` and contract.
 
 Returning an access opened on raw memory (`ptr_view`, `ptr_edit`,
 `ptr_view_seq`, `ptr_edit_seq`, `ptr_edit2`, `ptr_view2`, `ptr_view_edit`) is permitted only from inside
@@ -34,11 +40,11 @@ Returning an access opened on raw memory (`ptr_view`, `ptr_edit`,
 rule (Rule 6.6); the resolver classifies these intrinsics as unsafe
 operations like every `ptr_*` function.
 
-53 functions, 57 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
+67 functions, 71 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
 pool and arena elements with destructors, `Box.into`, `copy` of a vector,
 `pop`, `clear`), `tests/run/vec_resize.kern`, `tests/run/vec_extend.kern`, `tests/run/pool_handles.kern`, `tests/run/hello.kern`,
 the in-place fixtures (`tests/run/{box,pool,arena}_*alloc_with*.kern`, `box_new_with*.kern`),
-the fallible-allocation fixtures (`tests/run/{box_try_new,vec_try,vec_try_size,vec_reserved_append,string_try}*.kern`,
+the allocator-generic fixtures (`tests/run/vecin_*.kern`, `tests/trap/{boxin_released,vecin_bounds}.kern`, `tests/freestanding/vecin.kern`, each with a budget allocator that traps on a `free` naming no live allocation), the fallible-allocation fixtures (`tests/run/{box_try_new,vec_try,vec_try_size,vec_reserved_append,string_try}*.kern`,
 `tests/freestanding/try_alloc.kern`), the
 examples and the container benchmarks; the failure paths are the trap
 fixtures `tests/trap/{bounds,vacant,generation,identity,disjoint,oom}.kern`, the `_oom` fixtures
@@ -83,6 +89,20 @@ executions of every fixture compare the containers' behaviour directly.
 | `Vec.as_edit` | 1 | `ptr_edit_seq` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.clear` | 1 | `ptr_offset`, `ptr_take` | requires "data addresses cap elements of which the first size are live" |
 | `Vec.release` | 1 | `heap_free`, `ptr_cast` | requires "data addresses cap elements of which the first size are live" |
+| `BoxIn.try_new_in` | 1 | `a.alloc`, `ptr_cast`, `ptr_store` | requires "the allocation from a holds one T until release takes it" |
+| `BoxIn.get` | 1 | `ptr_addr`, `ptr_view` | requires "p is null or addresses the live T allocated from a" |
+| `BoxIn.at` | 1 | `ptr_addr`, `ptr_edit` | requires "p is null or addresses the live T allocated from a" |
+| `BoxIn.release` | 1 | `ptr_addr`, `ptr_cast`, `ptr_take`, `self.a.free` | requires "p is null or addresses the live T allocated from a" |
+| `VecIn.try_reserve` | 1 | `ptr_cast`, `ptr_copy`, `self.a.alloc`, `self.a.free` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `VecIn.try_push` | 1 | `ptr_offset`, `ptr_store` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `VecIn.try_extend` | 1 | `ptr_offset`, `ptr_store_seq` | requires "data addresses cap elements allocated from a, of which the first size are live; src does not overlap the spare capacity" |
+| `VecIn.pop` | 1 | `ptr_offset`, `ptr_take` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `VecIn.get` | 1 | `ptr_offset`, `ptr_view` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `VecIn.at` | 1 | `ptr_edit`, `ptr_offset` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `VecIn.as_view` | 1 | `ptr_view_seq` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `VecIn.as_edit` | 1 | `ptr_edit_seq` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `VecIn.clear` | 1 | `ptr_offset`, `ptr_take` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `VecIn.release` | 1 | `ptr_cast`, `self.a.free` | requires "data addresses cap elements allocated from a, of which the first size are live" |
 | `Pool.meta_at` | 1 | `ptr_cast`, `ptr_offset` | requires "i < cap" |
 | `Pool.elem_at` | 1 | `ptr_cast`, `ptr_offset` | requires "i < cap" |
 | `Pool.grow` | 1 | `heap_free`, `heap_try_alloc`, `heap_try_realloc`, `ptr_addr`, `ptr_cast`, `ptr_copy` | requires "the two buffers hold cap entries; the first count slots are initialized" |

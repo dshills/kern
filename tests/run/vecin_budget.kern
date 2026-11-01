@@ -1,0 +1,112 @@
+//! phase: 3
+//! expect: output vecin_budget
+// VecIn and BoxIn allocate only through the allocator they hold, and free
+// each allocation once with its own size and alignment
+// (specs/alloc-containers/SPEC.md R3): the budget allocator prints every
+// alloc and free and traps on a free that names no live allocation; a
+// vector grown through several reallocations, cleared, refilled and
+// released, and a box created and released, end with no live allocation.
+module run
+// Budget is the fixture's user allocator: it serves requests from the
+// system allocator until its byte budget is spent, then returns
+// Err(OutOfMemory). It counts alloc calls, live allocations and live
+// bytes, and checks that each free names a live allocation with the same
+// size and alignment (an explicit trap otherwise). With trace set it
+// prints every alloc and free.
+struct Budget nocopy { left: usize; calls: usize; live: usize; bytes: usize; trace: bool; n: usize; ptrs: [64]usize; sizes: [64]usize; aligns: [64]usize }
+func budget(left: usize, trace: bool) -> Budget {
+    return Budget { left: left, calls: 0usize, live: 0usize, bytes: 0usize, trace: trace, n: 0usize, ptrs: zero(), sizes: zero(), aligns: zero() }
+}
+impl Allocator for Budget {
+    contract { requires "size and align meet the allocator obligations of spec §6" }
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] {
+        self.calls = self.calls + 1usize
+        if size > self.left {
+            if self.trace { print_str("  alloc "); print_u64(u64(size)); print_str(" refused"); println() }
+            return Err(OutOfMemory)
+        }
+        if self.n == 64usize { trap() }
+        sys := SystemAllocator.new()
+        unsafe {
+            match sys.alloc(size, align) {
+                Ok(p) => {
+                    self.ptrs[self.n] = ptr_addr(p)
+                    self.sizes[self.n] = size
+                    self.aligns[self.n] = align
+                    self.n = self.n + 1usize
+                    self.left = self.left - size
+                    self.live = self.live + 1usize
+                    self.bytes = self.bytes + size
+                    if self.trace { print_str("  alloc "); print_u64(u64(size)); print_str(" align "); print_u64(u64(align)); println() }
+                    return Ok(p)
+                }
+                Err(e) => return Err(OutOfMemory)
+            }
+        }
+    }
+    contract { requires "ptr, size and align are those of one live allocation of this Budget" }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) {
+        unsafe {
+            a := ptr_addr(ptr)
+            i := 0usize
+            while i < self.n && self.ptrs[i] != a { i = i + 1usize }
+            if i == self.n || self.sizes[i] != size || self.aligns[i] != align { trap() }
+            self.n = self.n - 1usize
+            self.ptrs[i] = self.ptrs[self.n]
+            self.sizes[i] = self.sizes[self.n]
+            self.aligns[i] = self.aligns[self.n]
+            self.left = self.left + size
+            self.live = self.live - 1usize
+            self.bytes = self.bytes - size
+            if self.trace { print_str("  free "); print_u64(u64(size)); print_str(" align "); print_u64(u64(align)); println() }
+            sys := SystemAllocator.new()
+            sys.free(ptr, size, align)
+        }
+    }
+}
+func counters(b: view[Budget]) {
+    print_str("  budget live "); print_u64(u64(b.live)); print_str(" bytes "); print_u64(u64(b.bytes))
+    print_str(" calls "); print_u64(u64(b.calls)); println()
+}
+func boxed() -> Result[(), AllocErr] {
+    b := BoxIn[u64, Budget].try_new_in(7u64, budget(64usize, true))?
+    with g := b.get() { print_str("  value "); print_u64(g); println() }
+    with a := b.allocator() { counters(a) }
+    b.release()
+    print_str("released"); println()
+    with a := b.allocator() { counters(a) }
+    return Ok(())
+}
+func main() -> i32 {
+    print_str("vector"); println()
+    v := VecIn[u64, Budget].new_in(budget(100000usize, true))
+    for i in 0u64..20u64 {
+        match v.try_push(i * 3u64) {
+            Ok(u) => { }
+            Err(e) => { print_str("unexpected"); println() }
+        }
+    }
+    print_str("  len "); print_u64(u64(v.len())); print_str(" cap "); print_u64(u64(v.capacity())); println()
+    with b := v.allocator() { counters(b) }
+    v.clear()
+    print_str("cleared"); println()
+    with b := v.allocator() { counters(b) }
+    for i in 0u64..5u64 {
+        match v.try_push(i) {
+            Ok(u) => { }
+            Err(e) => { print_str("unexpected"); println() }
+        }
+    }
+    h := 0u64
+    for x in v.as_view() { h = h * 31u64 + x }
+    print_str("  refilled len "); print_u64(u64(v.len())); print_str(" sum "); print_u64(h); println()
+    v.release()
+    print_str("released"); println()
+    with b := v.allocator() { counters(b) }
+    print_str("box"); println()
+    match boxed() {
+        Ok(u) => { }
+        Err(e) => { print_str("unexpected"); println() }
+    }
+    return 0i32
+}

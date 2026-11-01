@@ -1,0 +1,40 @@
+try_reserve past the budget
+  len 0 cap 0
+  budget live 0 bytes 0 calls 0
+  err out of memory
+  len 0 cap 0
+  budget live 0 bytes 0 calls 1
+try_push past the budget
+  ok
+  ok
+  ok
+  ok
+  len 4 cap 4
+  budget live 1 bytes 32 calls 1
+  drop tok 99
+  err out of memory
+  len 4 cap 4
+  budget live 1 bytes 32 calls 2
+try_extend past the budget
+  ok
+  ok
+  ok
+  ok
+  len 4 cap 4
+  budget live 1 bytes 32 calls 1
+  err out of memory
+  len 4 cap 4
+  budget live 1 bytes 32 calls 2
+try_reserve past usize bytes
+  budget live 0 bytes 0 calls 0
+  err out of memory
+  len 0 cap 0
+  budget live 0 bytes 0 calls 0
+BoxIn.try_new_in with no budget
+  drop tok 5
+  err out of memory
+end
+  drop tok 3
+  drop tok 2
+  drop tok 1
+  drop tok 0

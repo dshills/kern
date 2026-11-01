@@ -1,0 +1,19 @@
+//! phase: 3
+//! expect: output boxin_released_ok
+//! twin: boxin_released
+// get on a BoxIn emptied by release traps explicit, as Box does
+// (specs/alloc-containers/SPEC.md §2); the twin reads it before release.
+module t
+func run() -> Result[(), AllocErr] {
+    b := BoxIn[u64, SystemAllocator].try_new_in(7u64, SystemAllocator.new())?
+    with g := b.get() { print_u64(g); println() }
+    b.release()
+    return Ok(())
+}
+func main() -> i32 {
+    match run() {
+        Ok(u) => { }
+        Err(e) => { print_str("out of memory"); println() }
+    }
+    return 0i32
+}

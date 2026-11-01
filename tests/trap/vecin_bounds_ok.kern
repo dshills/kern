@@ -1,0 +1,19 @@
+//! phase: 3
+//! expect: output vecin_bounds_ok
+//! twin: vecin_bounds
+// get past len() traps bounds, as Vec's does (specs/alloc-containers/SPEC.md
+// §2); the twin reads the last element.
+module t
+func push(v: edit[VecIn[u64, SystemAllocator]], x: u64) {
+    match v.try_push(x) {
+        Ok(u) => { }
+        Err(e) => { print_str("out of memory"); println() }
+    }
+}
+func main() -> i32 {
+    v := VecIn[u64, SystemAllocator].new_in(SystemAllocator.new())
+    push(v, 10u64)
+    push(v, 20u64)
+    with x := v.get(1usize) { print_u64(x); println() }
+    return 0i32
+}

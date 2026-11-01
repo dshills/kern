@@ -1668,6 +1668,18 @@ func namedMarker(n *Named, mk marker, visiting map[string]bool) bool {
 		case markerCopy:
 			return false
 		}
+	case "core.BoxIn", "core.VecIn":
+		// the same, and they hold their allocator inline: Send and Share
+		// hold iff both the element and the allocator have them, Interior
+		// iff either has it, as for a field (specs/alloc-containers §2)
+		switch mk {
+		case markerSend, markerShare:
+			return markerOf(arg(0), mk, visiting) && markerOf(arg(1), mk, visiting)
+		case markerInterior:
+			return markerOf(arg(0), mk, visiting) || markerOf(arg(1), mk, visiting)
+		case markerCopy:
+			return false
+		}
 	}
 	switch mk {
 	case markerCopy:

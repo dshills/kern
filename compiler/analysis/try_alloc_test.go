@@ -13,7 +13,8 @@ import (
 )
 
 // tryAllocProgram calls every fallible allocation form at T = u64 (no
-// destructor), E = () and C = u64, and Vec.push, the walk's control.
+// destructor), E = () and C = u64, every BoxIn and VecIn method at A =
+// SystemAllocator, and Vec.push, the walk's control.
 const tryAllocProgram = `module m
 import "std/str"
 func init_n(n: out u64) -> Result[(), ()] {
@@ -39,6 +40,28 @@ func strings() -> Result[(), AllocErr] {
     s.try_reserve(8usize)?
     s.try_push(99u8)?
     s.try_push_str("de")?
+    return Ok(())
+}
+func allocin() -> Result[(), AllocErr] {
+    b := BoxIn[u64, SystemAllocator].try_new_in(1u64, SystemAllocator.new())?
+    with g := b.get() { n := g }
+    with g := b.at() { g = 2u64 }
+    with a := b.allocator() { }
+    b.release()
+    v := VecIn[u64, SystemAllocator].new_in(SystemAllocator.new())
+    src := Vec[u64].new()
+    v.try_reserve(4usize)?
+    v.try_push(1u64)?
+    v.try_extend(src.as_view())?
+    n := v.len() + v.capacity()
+    with a := v.allocator() { }
+    with g := v.get(0usize) { m := g }
+    with g := v.at(0usize) { g = 3u64 }
+    with s := v.as_view() { }
+    with s := v.as_edit() { }
+    o := v.pop()
+    v.clear()
+    v.release()
     return Ok(())
 }
 func use_with(r: Result[(), AllocOrInit[()]]) {
@@ -68,6 +91,7 @@ func main() -> i32 {
     use(boxes())
     use_with(boxes_with())
     use(strings())
+    use(allocin())
     v.push(3u64)
     return 0i32
 }
@@ -162,6 +186,13 @@ func TestTryFormsReachNoOOMTrap(t *testing.T) {
 		"Box.try_new", "Box.try_new_with", "Box.try_new_with_ctx",
 		"Vec.try_with_capacity", "Vec.try_reserve", "Vec.try_push", "Vec.try_extend", "Vec.try_resize",
 		"String.try_from", "String.try_reserve", "String.try_push", "String.try_push_str",
+		// specs/alloc-containers R5: every BoxIn and VecIn method except
+		// the destructors, which only call release (walked here), and the
+		// seed_len test hook
+		"BoxIn.try_new_in", "BoxIn.get", "BoxIn.at", "BoxIn.allocator", "BoxIn.release",
+		"VecIn.new_in", "VecIn.len", "VecIn.capacity", "VecIn.allocator", "VecIn.try_reserve",
+		"VecIn.try_push", "VecIn.try_extend", "VecIn.pop", "VecIn.get", "VecIn.at",
+		"VecIn.as_view", "VecIn.as_edit", "VecIn.clear", "VecIn.release",
 	}
 	for _, w := range want {
 		if len(roots[w]) == 0 {

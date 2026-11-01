@@ -1,0 +1,33 @@
+try_reserve below capacity
+  ok len 5 cap 8 sum 176972
+  ok len 5 cap 8 sum 176972
+try_reserve above capacity
+  ok len 5 cap 20 sum 176972
+  ok len 5 cap 20 sum 176972
+try_push on empty
+  ok len 1 cap 4 sum 9
+  ok len 1 cap 4 sum 9
+try_push on full
+  ok len 5 cap 8 sum 176952
+  ok len 5 cap 8 sum 176952
+try_push with spare capacity
+  ok len 6 cap 8 sum 486126
+  ok len 6 cap 8 sum 486126
+try_extend that fits
+  ok len 7 cap 8 sum 69621
+  ok len 7 cap 8 sum 69621
+try_extend that doubles
+  ok len 7 cap 8 sum 42937
+  ok len 7 cap 8 sum 42937
+try_extend past double
+  ok len 14 cap 14 sum 10144
+  ok len 14 cap 14 sum 10144
+try_extend onto empty
+  ok len 3 cap 4 sum 1224
+  ok len 3 cap 4 sum 1224
+pop
+  popped 15 len 2 cap 4 sum 39
+  popped 15 len 2 cap 4 sum 39
+clear
+  ok len 0 cap 8 sum 0
+  ok len 0 cap 8 sum 0

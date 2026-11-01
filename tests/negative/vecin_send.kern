@@ -1,0 +1,14 @@
+//! expect: reject SEND_NOT_SEND rule=5.5.2
+//! twin: vecin_send_ok
+module m
+// H is an allocator handle holding a raw pointer to state elsewhere.
+struct H nocopy { state: RawPtr[u8] }
+impl Allocator for H {
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] { return Err(OutOfMemory) }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) { }
+}
+func work(v: own VecIn[u64, H]) -> u64 { return u64(v.len()) }
+func start(v: own VecIn[u64, H]) -> Result[u64, SpawnErr] {
+    t := thread.spawn(work, v)?   // SEND_NOT_SEND: H holds a RawPtr, so VecIn[u64, H] is not Send
+    return Ok(t.join())
+}

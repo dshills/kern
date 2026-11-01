@@ -1,0 +1,83 @@
+//! phase: 3
+//! expect: output vecin_system
+// VecIn over the system allocator leaves a vector as the Vec form of the
+// same name does (specs/alloc-containers/SPEC.md R2): each pair runs on
+// equal inputs and prints its result, len, capacity and an element
+// checksum, so the two lines of a pair are equal.
+module run
+func fill(n: usize) -> Vec[u64] {
+    v := Vec[u64].new()
+    for i in 0usize..n { v.push(u64(i) * 7u64 + 1u64) }
+    return v
+}
+func fillin(n: usize) -> VecIn[u64, SystemAllocator] {
+    v := VecIn[u64, SystemAllocator].new_in(SystemAllocator.new())
+    for i in 0usize..n { res_quiet(v.try_push(u64(i) * 7u64 + 1u64)) }
+    return v
+}
+func sum(s: view[]u64) -> u64 {
+    h := 0u64
+    for x in s { h = (h * 31u64 + x) % 1000003u64 }
+    return h
+}
+func show(n: usize, c: usize, h: u64) {
+    print_str("len "); print_u64(u64(n)); print_str(" cap "); print_u64(u64(c)); print_str(" sum "); print_u64(h); println()
+}
+func res(r: Result[(), AllocErr]) {
+    match r {
+        Ok(u) => print_str("  ok ")
+        Err(e) => print_str("  err ")
+    }
+}
+func res_quiet(r: Result[(), AllocErr]) {
+    match r {
+        Ok(u) => { }
+        Err(e) => { print_str("unexpected"); println() }
+    }
+}
+func popped(o: Option[u64]) {
+    match o {
+        Some(x) => { print_str("  popped "); print_u64(x); print_str(" ") }
+        None => print_str("  none ")
+    }
+}
+func label(s: view[]u8) { print_str(s); println() }
+func main() -> i32 {
+    two := fill(2usize)
+    three := fill(3usize)
+    ten := fill(10usize)
+    label("try_reserve below capacity")
+    a0 := fill(5usize); res(a0.try_reserve(3usize)); show(a0.len(), a0.capacity(), sum(a0.as_view()))
+    b0 := fillin(5usize); res(b0.try_reserve(3usize)); show(b0.len(), b0.capacity(), sum(b0.as_view()))
+    label("try_reserve above capacity")
+    a1 := fill(5usize); res(a1.try_reserve(20usize)); show(a1.len(), a1.capacity(), sum(a1.as_view()))
+    b1 := fillin(5usize); res(b1.try_reserve(20usize)); show(b1.len(), b1.capacity(), sum(b1.as_view()))
+    label("try_push on empty")
+    a2 := Vec[u64].new(); res(a2.try_push(9u64)); show(a2.len(), a2.capacity(), sum(a2.as_view()))
+    b2 := VecIn[u64, SystemAllocator].new_in(SystemAllocator.new()); res(b2.try_push(9u64)); show(b2.len(), b2.capacity(), sum(b2.as_view()))
+    label("try_push on full")
+    a3 := fill(4usize); res(a3.try_push(9u64)); show(a3.len(), a3.capacity(), sum(a3.as_view()))
+    b3 := fillin(4usize); res(b3.try_push(9u64)); show(b3.len(), b3.capacity(), sum(b3.as_view()))
+    label("try_push with spare capacity")
+    a4 := fill(5usize); res(a4.try_push(9u64)); show(a4.len(), a4.capacity(), sum(a4.as_view()))
+    b4 := fillin(5usize); res(b4.try_push(9u64)); show(b4.len(), b4.capacity(), sum(b4.as_view()))
+    label("try_extend that fits")
+    a5 := fill(5usize); res(a5.try_extend(two.as_view())); show(a5.len(), a5.capacity(), sum(a5.as_view()))
+    b5 := fillin(5usize); res(b5.try_extend(two.as_view())); show(b5.len(), b5.capacity(), sum(b5.as_view()))
+    label("try_extend that doubles")
+    a6 := fill(4usize); res(a6.try_extend(three.as_view())); show(a6.len(), a6.capacity(), sum(a6.as_view()))
+    b6 := fillin(4usize); res(b6.try_extend(three.as_view())); show(b6.len(), b6.capacity(), sum(b6.as_view()))
+    label("try_extend past double")
+    a7 := fill(4usize); res(a7.try_extend(ten.as_view())); show(a7.len(), a7.capacity(), sum(a7.as_view()))
+    b7 := fillin(4usize); res(b7.try_extend(ten.as_view())); show(b7.len(), b7.capacity(), sum(b7.as_view()))
+    label("try_extend onto empty")
+    a8 := Vec[u64].new(); res(a8.try_extend(three.as_view())); show(a8.len(), a8.capacity(), sum(a8.as_view()))
+    b8 := VecIn[u64, SystemAllocator].new_in(SystemAllocator.new()); res(b8.try_extend(three.as_view())); show(b8.len(), b8.capacity(), sum(b8.as_view()))
+    label("pop")
+    p := fill(3usize); popped(p.pop()); show(p.len(), p.capacity(), sum(p.as_view()))
+    q := fillin(3usize); popped(q.pop()); show(q.len(), q.capacity(), sum(q.as_view()))
+    label("clear")
+    c := fill(6usize); c.clear(); print_str("  ok "); show(c.len(), c.capacity(), sum(c.as_view()))
+    d := fillin(6usize); d.clear(); print_str("  ok "); show(d.len(), d.capacity(), sum(d.as_view()))
+    return 0i32
+}

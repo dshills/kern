@@ -1,0 +1,36 @@
+zero-size elements
+  alloc 0 align 1
+  ok
+  ok
+  ok
+  ok
+  ok
+  ok
+  ok
+  ok
+  ok
+  alloc 0 align 1
+  free 0 align 1
+  ok
+  ok
+  len 10 cap 16
+  budget live 1 bytes 0 calls 2
+  free 0 align 1
+  budget live 0 bytes 0 calls 2
+grow again after release
+  alloc 32 align 8
+  ok
+  free 32 align 8
+  budget live 0 bytes 0 calls 1
+  alloc 32 align 8
+  ok
+  len 1 cap 4
+  budget live 1 bytes 32 calls 2
+failed BoxIn.try_new_in: value, then allocator
+  drop tok 1
+  drop allocator 2
+  err out of memory
+pop on an empty vector
+  none
+end
+  free 32 align 8

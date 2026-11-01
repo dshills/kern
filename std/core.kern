@@ -760,6 +760,206 @@ impl Vec[T] {
     destructor(edit self) { self.release() }
 }
 
+// ---- Containers over a caller's allocator (specs/alloc-containers): each
+// holds its allocator inline and owns it, allocates its storage only
+// through it, and is fallible throughout (a user allocator running out is
+// expected, not a bug). The Allocator interface has no realloc, so a
+// vector grows by allocating the new buffer, moving the live elements into
+// it and freeing the old one. Their markers are their element's and their
+// allocator's (resolve.markerOf).
+
+struct BoxIn[T, A: Allocator] nocopy { p: RawPtr[T]; a: A }
+impl[T, A: Allocator] BoxIn[T, A] {
+    // try_new_in allocates one T from a; on Err v is destroyed, then a.
+    contract { requires "the allocation from a holds one T until release takes it" }
+    func try_new_in(v: own T, a: own A) -> Result[BoxIn[T, A], AllocErr] {
+        unsafe {
+            match a.alloc(size_of[T](), align_of[T]()) {
+                Ok(q) => {
+                    p := ptr_cast[T, u8](q)
+                    ptr_store(p, v)
+                    return Ok(BoxIn[T, A] { p: p, a: a })
+                }
+                Err(e) => {
+                    drop(v)
+                    drop(a)
+                    return Err(e)
+                }
+            }
+        }
+    }
+    // get and at trap explicit on a BoxIn emptied by release.
+    contract { requires "p is null or addresses the live T allocated from a" }
+    func get(view self) -> view[T] {
+        unsafe {
+            if ptr_addr(self.p) == 0usize { trap_kind(explicit) }
+            return ptr_view(self.p)
+        }
+    }
+    contract { requires "p is null or addresses the live T allocated from a" }
+    func at(edit self) -> edit[T] {
+        unsafe {
+            if ptr_addr(self.p) == 0usize { trap_kind(explicit) }
+            return ptr_edit(self.p)
+        }
+    }
+    func allocator(view self) -> view[A] { return self.a }
+    contract { requires "p is null or addresses the live T allocated from a" }
+    func release(edit self) {
+        unsafe {
+            if ptr_addr(self.p) != 0usize {
+                v := ptr_take(self.p)
+                drop(v)
+                self.a.free(ptr_cast[u8, T](self.p), size_of[T](), align_of[T]())
+                self.p = zero()
+            }
+        }
+    }
+    destructor(edit self) { self.release() }
+}
+
+struct VecIn[T, A: Allocator] nocopy { data: RawPtr[T]; size: usize; cap: usize; a: A }
+impl[T, A: Allocator] VecIn[T, A] {
+    func new_in(a: own A) -> VecIn[T, A] {
+        return VecIn[T, A] { data: zero(), size: 0usize, cap: 0usize, a: a }
+    }
+    func len(view self) -> usize { return self.size }
+    func capacity(view self) -> usize { return self.cap }
+    func allocator(view self) -> view[A] { return self.a }
+    // try_reserve is Vec.try_reserve over a: the new buffer is allocated,
+    // the live elements moved into it, and the old buffer freed; nothing is
+    // written when the allocation fails.
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live" }
+    func try_reserve(edit self, n: usize) -> Result[(), AllocErr] {
+        if n <= self.cap { return Ok(()) }
+        var bytes: usize = 0usize
+        match elems_bytes[T](n) {
+            Some(b) => bytes = b
+            None => return Err(OutOfMemory)
+        }
+        unsafe {
+            var q: RawPtr[u8] = zero()
+            match self.a.alloc(bytes, align_of[T]()) {
+                Ok(r) => q = r
+                Err(e) => return Err(e)
+            }
+            p := ptr_cast[T, u8](q)
+            if self.cap > 0usize {
+                var old: usize = 0usize
+                match elems_bytes[T](self.cap) {
+                    Some(b) => old = b
+                    None => trap_kind(unreachable)
+                }
+                ptr_copy(p, self.data, self.size)
+                self.a.free(ptr_cast[u8, T](self.data), old, align_of[T]())
+            }
+            self.data = p
+            self.cap = n
+        }
+        return Ok(())
+    }
+    // try_grow and try_grow_to are Vec's growth steps, with its guard.
+    func try_grow(edit self) -> Result[(), AllocErr] {
+        if self.cap > 9223372036854775807usize { return Err(OutOfMemory) }
+        n := 4usize
+        if self.cap > 0usize { n = self.cap * 2usize }
+        return self.try_reserve(n)
+    }
+    func try_grow_to(edit self, n: usize) -> Result[(), AllocErr] {
+        if self.cap > 9223372036854775807usize { return Err(OutOfMemory) }
+        want := 4usize
+        if self.cap > 0usize { want = self.cap * 2usize }
+        if want < n { want = n }
+        return self.try_reserve(want)
+    }
+    // try_push destroys v on Err.
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live" }
+    func try_push(edit self, v: own T) -> Result[(), AllocErr] {
+        if self.size == self.cap {
+            match self.try_grow() {
+                Ok(u) => { }
+                Err(e) => { drop(v); return Err(e) }
+            }
+        }
+        unsafe { ptr_store(ptr_offset(self.data, truncate[isize](self.size)), v) }
+        self.size = wrapping_add(self.size, 1usize)
+        return Ok(())
+    }
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live; src does not overlap the spare capacity" }
+    func try_extend(edit self, src: view[]T) -> Result[(), AllocErr] where T: Copy {
+        var total: usize = 0usize
+        match checked_add(self.size, len(src)) {
+            Some(t) => total = t
+            None => return Err(OutOfMemory)
+        }
+        if total > self.cap { self.try_grow_to(total)? }
+        unsafe {
+            ptr_store_seq(ptr_offset(self.data, truncate[isize](self.size)), src)
+            self.size = total
+        }
+        return Ok(())
+    }
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live" }
+    func pop(edit self) -> Option[T] {
+        if self.size == 0usize { return None }
+        self.size = self.size - 1usize
+        unsafe { return Some(ptr_take(ptr_offset(self.data, truncate[isize](self.size)))) }
+    }
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live" }
+    func get(view self, i: usize) -> view[T] {
+        if i >= self.size { trap_kind(bounds) }
+        unsafe { return ptr_view(ptr_offset(self.data, truncate[isize](i))) }
+    }
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live" }
+    func at(edit self, i: usize) -> edit[T] {
+        if i >= self.size { trap_kind(bounds) }
+        unsafe { return ptr_edit(ptr_offset(self.data, truncate[isize](i))) }
+    }
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live" }
+    func as_view(view self) -> view[]T {
+        unsafe { return ptr_view_seq(self.data, self.size) }
+    }
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live" }
+    func as_edit(edit self) -> edit[]T {
+        unsafe { return ptr_edit_seq(self.data, self.size) }
+    }
+    // clear destroys the elements from the last to the first; the capacity stays.
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live" }
+    func clear(edit self) {
+        while self.size > 0usize {
+            self.size = self.size - 1usize
+            unsafe {
+                v := ptr_take(ptr_offset(self.data, truncate[isize](self.size)))
+                drop(v)
+            }
+        }
+    }
+    // release destroys the elements and frees the storage through a,
+    // leaving an empty vector that still holds a.
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live" }
+    func release(edit self) {
+        self.clear()
+        unsafe {
+            if self.cap > 0usize {
+                match elems_bytes[T](self.cap) {
+                    Some(b) => self.a.free(ptr_cast[u8, T](self.data), b, align_of[T]())
+                    None => trap_kind(unreachable)
+                }
+                self.data = zero()
+                self.cap = 0usize
+            }
+        }
+    }
+    destructor(edit self) { self.release() }
+    // seed_len (test hook) sets the length of a vector of a zero-size Copy
+    // element, so a fixture can reach the growth guard without 2^63 pushes.
+    func seed_len(edit self, n: usize) where T: Copy {
+        testing.require_hooks()
+        if size_of[T]() != 0usize || n > self.cap { trap_kind(explicit) }
+        self.size = n
+    }
+}
+
 // PoolSlotMeta is the bookkeeping of one Pool slot: its generation, whether
 // it holds a live element, and whether it was retired at generation wrap.
 struct PoolSlotMeta { gen: u32; live: bool; retired: bool }

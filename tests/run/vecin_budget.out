@@ -1,0 +1,23 @@
+vector
+  alloc 32 align 8
+  alloc 64 align 8
+  free 32 align 8
+  alloc 128 align 8
+  free 64 align 8
+  alloc 256 align 8
+  free 128 align 8
+  len 20 cap 32
+  budget live 1 bytes 256 calls 4
+cleared
+  budget live 1 bytes 256 calls 4
+  refilled len 5 sum 31810
+  free 256 align 8
+released
+  budget live 0 bytes 0 calls 4
+box
+  alloc 8 align 8
+  value 7
+  budget live 1 bytes 8 calls 1
+  free 8 align 8
+released
+  budget live 0 bytes 0 calls 1
