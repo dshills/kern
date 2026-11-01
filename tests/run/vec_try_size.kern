@@ -1,0 +1,54 @@
+//! phase: 3
+//! expect: output vec_try_size
+// Requests no allocator can satisfy are Err(OutOfMemory) from the fallible
+// Vec forms, never a trap (specs/fallible-alloc/SPEC.md R3): a byte size
+// past usize (2^61 + 1 eight-byte elements), a length sum past usize, and a
+// full vector whose capacity is past the 2^63 - 1 growth guard. The last
+// two use a zero-size element, whose byte sizes are 0, so resize's
+// zeroed-storage path reaches those lengths without memory or a loop. The
+// program ends with exit, which runs no destructors: destroying 2^63
+// elements one by one would not finish.
+module run
+struct Z { }
+func res(r: Result[(), AllocErr]) {
+    match r {
+        Ok(u) => print_str("  ok")
+        Err(e) => print_str("  err out of memory")
+    }
+}
+func with_cap(n: usize) -> Result[(), AllocErr] {
+    v := Vec[u64].try_with_capacity(n)?
+    return Ok(())
+}
+func show(n: usize, c: usize) {
+    print_str(" len "); print_u64(u64(n)); print_str(" cap "); print_u64(u64(c)); println()
+}
+func label(s: view[]u8) { print_str(s); println() }
+func main() -> i32 {
+    big := 2305843009213693953usize
+    label("try_reserve past usize bytes")
+    a := Vec[u64].new()
+    res(a.try_reserve(big)); show(a.len(), a.capacity())
+    a.push(5u64)
+    res(a.try_reserve(big)); show(a.len(), a.capacity())
+    label("try_with_capacity past usize bytes")
+    res(with_cap(big)); println()
+    label("try_resize past usize bytes")
+    b := Vec[u64].new()
+    res(b.try_resize(big, 1u64)); show(b.len(), b.capacity())
+    b.push(5u64)
+    res(b.try_resize(big, 1u64)); show(b.len(), b.capacity())
+    label("try_extend with a length sum past usize")
+    z := Vec[Z].new()
+    z.resize(18446744073709551615usize, Z { })
+    one := Vec[Z].new()
+    one.push(Z { })
+    res(z.try_extend(one.as_view())); show(z.len(), z.capacity())
+    label("try_push past the growth guard")
+    g := Vec[Z].new()
+    g.resize(9223372036854775808usize, Z { })
+    print_str("  full"); show(g.len(), g.capacity())
+    res(g.try_push(Z { })); show(g.len(), g.capacity())
+    exit(0i32)
+    return 0i32
+}

@@ -267,6 +267,18 @@ func heap_alloc_zeroed(size: usize, align: usize) -> RawPtr[u8] {
     }
     return p
 }
+// heap_try_alloc_zeroed is heap_alloc_zeroed that yields a null pointer on
+// failure.
+contract { requires "align is a power of two at most 4096 and size is a multiple of it" }
+func heap_try_alloc_zeroed(size: usize, align: usize) -> RawPtr[u8] {
+    a := SystemAllocator.new()
+    unsafe {
+        match a.alloc_zeroed(size, align) {
+            Ok(p) => return p
+            Err(e) => return ptr_null[u8]()
+        }
+    }
+}
 // heap_realloc resizes an allocation, trapping oom on failure.
 contract { requires "p, old_size and align are those of one live allocation; new_size is a multiple of align" }
 func heap_realloc(p: RawPtr[u8], old_size: usize, new_size: usize, align: usize) -> RawPtr[u8] {
@@ -340,6 +352,52 @@ impl Box[T] {
                 Err(e) => {
                     heap_free(ptr_cast[u8, T](p), size_of[T](), align_of[T]())
                     return Err(e)
+                }
+            }
+        }
+    }
+    // try_new, try_new_with and try_new_with_ctx are new, new_with and
+    // new_with_ctx returning Err where they trap oom
+    // (specs/fallible-alloc/SPEC.md §2): on a failed allocation try_new
+    // destroys v and the _with forms return Alloc(OutOfMemory) before
+    // init is called; an initializer's own failure is Init(e), after which
+    // the allocation is freed, as in new_with.
+    contract { requires "the allocation holds one T until into or the destructor takes it" }
+    func try_new(v: own T) -> Result[Box[T], AllocErr] {
+        unsafe {
+            q := heap_try_alloc(size_of[T](), align_of[T]())
+            if ptr_addr(q) == 0usize { drop(v); return Err(OutOfMemory) }
+            p := ptr_cast[T, u8](q)
+            ptr_store(p, v)
+            return Ok(Box[T] { p: p })
+        }
+    }
+    contract { requires "init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func try_new_with[E](init: func(out T) -> Result[(), E]) -> Result[Box[T], AllocOrInit[E]] {
+        unsafe {
+            q := heap_try_alloc(size_of[T](), align_of[T]())
+            if ptr_addr(q) == 0usize { return Err(Alloc(OutOfMemory)) }
+            p := ptr_cast[T, u8](q)
+            match ptr_init(p, init) {
+                Ok(u) => return Ok(Box[T] { p: p })
+                Err(e) => {
+                    heap_free(q, size_of[T](), align_of[T]())
+                    return Err(Init(e))
+                }
+            }
+        }
+    }
+    contract { requires "init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func try_new_with_ctx[C, E](init: func(out T, view[C]) -> Result[(), E], ctx: view[C]) -> Result[Box[T], AllocOrInit[E]] {
+        unsafe {
+            q := heap_try_alloc(size_of[T](), align_of[T]())
+            if ptr_addr(q) == 0usize { return Err(Alloc(OutOfMemory)) }
+            p := ptr_cast[T, u8](q)
+            match ptr_init_ctx(p, init, ctx) {
+                Ok(u) => return Ok(Box[T] { p: p })
+                Err(e) => {
+                    heap_free(q, size_of[T](), align_of[T]())
+                    return Err(Init(e))
                 }
             }
         }
@@ -516,6 +574,132 @@ impl Vec[T] {
             }
             self.size = n
         }
+    }
+    // ---- The fallible forms (specs/fallible-alloc/SPEC.md §2): each
+    // returns Err(OutOfMemory) where its mirrored operation traps oom, and
+    // on Err the vector is unchanged. They repeat their mirrors' bodies
+    // rather than sharing them, so the existing operations' code stays as
+    // it was; tests/run/vec_try.kern compares each pair.
+
+    // capacity is the number of elements the buffer holds without growing.
+    func capacity(view self) -> usize { return self.cap }
+    func try_with_capacity(n: usize) -> Result[Vec[T], AllocErr] {
+        v := Vec[T].new()
+        v.try_reserve(n)?
+        return Ok(v)
+    }
+    // try_reserve is reserve: a failed reallocation leaves the old buffer
+    // in place (SystemAllocator.realloc), so nothing is written on Err.
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func try_reserve(edit self, n: usize) -> Result[(), AllocErr] {
+        if n <= self.cap { return Ok(()) }
+        var bytes: usize = 0usize
+        match elems_bytes[T](n) {
+            Some(b) => bytes = b
+            None => return Err(OutOfMemory)
+        }
+        unsafe {
+            var q: RawPtr[u8] = zero()
+            if self.cap > 0usize {
+                var old: usize = 0usize
+                match elems_bytes[T](self.cap) {
+                    Some(b) => old = b
+                    None => trap_kind(unreachable)
+                }
+                q = heap_try_realloc(ptr_cast[u8, T](self.data), old, bytes, align_of[T]())
+            } else {
+                q = heap_try_alloc(bytes, align_of[T]())
+            }
+            if ptr_addr(q) == 0usize { return Err(OutOfMemory) }
+            self.data = ptr_cast[T, u8](q)
+            self.cap = n
+        }
+        return Ok(())
+    }
+    // try_grow and try_grow_to are grow and grow_to.
+    func try_grow(edit self) -> Result[(), AllocErr] {
+        if self.cap > 9223372036854775807usize { return Err(OutOfMemory) }
+        n := 4usize
+        if self.cap > 0usize { n = self.cap * 2usize }
+        return self.try_reserve(n)
+    }
+    func try_grow_to(edit self, n: usize) -> Result[(), AllocErr] {
+        if self.cap > 9223372036854775807usize { return Err(OutOfMemory) }
+        want := 4usize
+        if self.cap > 0usize { want = self.cap * 2usize }
+        if want < n { want = n }
+        return self.try_reserve(want)
+    }
+    // try_push is push; on Err v is destroyed, as Pool.alloc destroys it.
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func try_push(edit self, v: own T) -> Result[(), AllocErr] {
+        if self.size == self.cap {
+            match self.try_grow() {
+                Ok(u) => { }
+                Err(e) => { drop(v); return Err(e) }
+            }
+        }
+        unsafe { ptr_store(ptr_offset(self.data, truncate[isize](self.size)), v) }
+        self.size = wrapping_add(self.size, 1usize)
+        return Ok(())
+    }
+    // try_extend is extend; a sum past usize is Err, not an overflow trap.
+    contract { requires "data addresses cap elements of which the first size are live; src does not overlap the spare capacity" }
+    func try_extend(edit self, src: view[]T) -> Result[(), AllocErr] where T: Copy {
+        var total: usize = 0usize
+        match checked_add(self.size, len(src)) {
+            Some(t) => total = t
+            None => return Err(OutOfMemory)
+        }
+        if total > self.cap { self.try_grow_to(total)? }
+        unsafe {
+            ptr_store_seq(ptr_offset(self.data, truncate[isize](self.size)), src)
+            self.size = total
+        }
+        return Ok(())
+    }
+    // try_resize is resize for a Copy element, so the copies of x are
+    // loads that run no element code. Shrinking never allocates; when
+    // growing, every fallible step runs before the vector is written.
+    contract { requires "data addresses cap elements of which the first size are live; an all-zero copy of x owns nothing" }
+    func try_resize(edit self, n: usize, x: own T) -> Result[(), AllocErr] where T: Copy {
+        while self.size > n {
+            self.size = self.size - 1usize
+            unsafe {
+                v := ptr_take(ptr_offset(self.data, truncate[isize](self.size)))
+                drop(v)
+            }
+        }
+        if self.cap == 0usize && n > 0usize {
+            var bytes: usize = 0usize
+            match elems_bytes[T](n) {
+                Some(b) => bytes = b
+                None => return Err(OutOfMemory)
+            }
+            unsafe {
+                q := heap_try_alloc_zeroed(bytes, align_of[T]())
+                if ptr_addr(q) == 0usize { return Err(OutOfMemory) }
+                self.data = ptr_cast[T, u8](q)
+                self.cap = n
+                ptr_store(self.data, copy(x))
+                self.size = 1usize
+                b := ptr_cast[u8, T](self.data)
+                k := 0usize
+                while k < size_of[T]() && ptr_load(ptr_offset(b, truncate[isize](k))) == 0u8 { k = wrapping_add(k, 1usize) }
+                if k == size_of[T]() { self.size = n }
+            }
+        }
+        self.try_reserve(n)?
+        unsafe {
+            d := self.data
+            i := self.size
+            while i < n {
+                ptr_store(ptr_offset(d, truncate[isize](i)), copy(x))
+                i = wrapping_add(i, 1usize)
+            }
+            self.size = n
+        }
+        return Ok(())
     }
     contract { requires "data addresses cap elements of which the first size are live" }
     func get(view self, i: usize) -> view[T] {

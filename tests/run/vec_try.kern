@@ -1,0 +1,100 @@
+//! phase: 3
+//! expect: output vec_try
+// The fallible Vec forms leave a vector in the state their mirrored
+// operations do (specs/fallible-alloc/SPEC.md R2): each pair runs on equal
+// inputs and prints its result, len, capacity and an element checksum, so
+// the two lines of a pair are equal. The capacities are those of spec §2:
+// reserve sets exactly n, push doubles (4 from empty), extend takes the
+// larger of double and the sum, resize past the capacity sets exactly n.
+module run
+func fill(n: usize) -> Vec[u64] {
+    v := Vec[u64].new()
+    for i in 0usize..n { v.push(u64(i) * 7u64 + 1u64) }
+    return v
+}
+func show(v: view[Vec[u64]]) {
+    h := 0u64
+    for x in v.as_view() { h = (h * 31u64 + x) % 1000003u64 }
+    print_str("len "); print_u64(u64(v.len()))
+    print_str(" cap "); print_u64(u64(v.capacity()))
+    print_str(" sum "); print_u64(h)
+    println()
+}
+func ok() { print_str("  ok ") }
+func res(r: Result[(), AllocErr]) {
+    match r {
+        Ok(u) => print_str("  ok ")
+        Err(e) => print_str("  err ")
+    }
+}
+// with_cap prints the vector try_with_capacity returns (an owned Result
+// holding a Vec is unwrapped with ?, not matched).
+func with_cap(n: usize) -> Result[(), AllocErr] {
+    v := Vec[u64].try_with_capacity(n)?
+    ok(); show(v)
+    return Ok(())
+}
+func res_quiet(r: Result[(), AllocErr]) {
+    match r {
+        Ok(u) => { }
+        Err(e) => { print_str("  err"); println() }
+    }
+}
+func label(s: view[]u8) { print_str(s); println() }
+func main() -> i32 {
+    label("reserve below capacity")
+    a := fill(5usize); a.reserve(3usize); ok(); show(a)
+    b := fill(5usize); res(b.try_reserve(3usize)); show(b)
+    label("reserve above capacity")
+    a2 := fill(5usize); a2.reserve(20usize); ok(); show(a2)
+    b2 := fill(5usize); res(b2.try_reserve(20usize)); show(b2)
+    label("with_capacity 0")
+    a3 := Vec[u64].with_capacity(0usize); ok(); show(a3)
+    res_quiet(with_cap(0usize))
+    label("with_capacity 10")
+    a4 := Vec[u64].with_capacity(10usize); ok(); show(a4)
+    res_quiet(with_cap(10usize))
+    label("push on empty")
+    a5 := Vec[u64].new(); a5.push(9u64); ok(); show(a5)
+    b5 := Vec[u64].new(); res(b5.try_push(9u64)); show(b5)
+    label("push on full")
+    a6 := fill(4usize); a6.push(9u64); ok(); show(a6)
+    b6 := fill(4usize); res(b6.try_push(9u64)); show(b6)
+    label("push with spare capacity")
+    a7 := fill(5usize); a7.push(9u64); ok(); show(a7)
+    b7 := fill(5usize); res(b7.try_push(9u64)); show(b7)
+    two := fill(2usize)
+    three := fill(3usize)
+    ten := fill(10usize)
+    label("extend that fits")
+    a8 := fill(5usize); a8.extend(two.as_view()); ok(); show(a8)
+    b8 := fill(5usize); res(b8.try_extend(two.as_view())); show(b8)
+    label("extend that doubles")
+    a9 := fill(4usize); a9.extend(three.as_view()); ok(); show(a9)
+    b9 := fill(4usize); res(b9.try_extend(three.as_view())); show(b9)
+    label("extend past double")
+    a10 := fill(4usize); a10.extend(ten.as_view()); ok(); show(a10)
+    b10 := fill(4usize); res(b10.try_extend(ten.as_view())); show(b10)
+    label("extend onto empty")
+    a11 := Vec[u64].new(); a11.extend(three.as_view()); ok(); show(a11)
+    b11 := Vec[u64].new(); res(b11.try_extend(three.as_view())); show(b11)
+    label("resize from no allocation, zero")
+    a12 := Vec[u64].new(); a12.resize(6usize, 0u64); ok(); show(a12)
+    b12 := Vec[u64].new(); res(b12.try_resize(6usize, 0u64)); show(b12)
+    label("resize from no allocation, nonzero")
+    a13 := Vec[u64].new(); a13.resize(6usize, 9u64); ok(); show(a13)
+    b13 := Vec[u64].new(); res(b13.try_resize(6usize, 9u64)); show(b13)
+    label("resize growing past capacity")
+    a14 := fill(5usize); a14.resize(12usize, 3u64); ok(); show(a14)
+    b14 := fill(5usize); res(b14.try_resize(12usize, 3u64)); show(b14)
+    label("resize growing within capacity")
+    a15 := fill(5usize); a15.resize(7usize, 3u64); ok(); show(a15)
+    b15 := fill(5usize); res(b15.try_resize(7usize, 3u64)); show(b15)
+    label("resize shrinking")
+    a16 := fill(5usize); a16.resize(2usize, 3u64); ok(); show(a16)
+    b16 := fill(5usize); res(b16.try_resize(2usize, 3u64)); show(b16)
+    label("resize to zero")
+    a17 := fill(5usize); a17.resize(0usize, 3u64); ok(); show(a17)
+    b17 := fill(5usize); res(b17.try_resize(0usize, 3u64)); show(b17)
+    return 0i32
+}

@@ -18,6 +18,18 @@ impl String {
     func as_view(view self) -> view[]u8 { return self.bytes.as_view() }
     func push(edit self, b: u8) { self.bytes.push(b) }
     func push_str(edit self, s: view[]u8) { self.bytes.extend(s) }
+    // capacity and the try_ forms are those of the byte vector
+    // (specs/fallible-alloc/SPEC.md §2): Err(OutOfMemory) where from, push
+    // and push_str trap oom, with the string unchanged.
+    func capacity(view self) -> usize { return self.bytes.capacity() }
+    func try_from(s: view[]u8) -> Result[String, AllocErr] {
+        r := String { bytes: Vec[u8].new() }
+        r.bytes.try_extend(s)?
+        return Ok(r)
+    }
+    func try_reserve(edit self, n: usize) -> Result[(), AllocErr] { return self.bytes.try_reserve(n) }
+    func try_push(edit self, b: u8) -> Result[(), AllocErr] { return self.bytes.try_push(b) }
+    func try_push_str(edit self, s: view[]u8) -> Result[(), AllocErr] { return self.bytes.try_extend(s) }
     // push_u64 appends v in decimal.
     func push_u64(edit self, v: u64) {
         if v == 0u64 { self.bytes.push(48u8); return }

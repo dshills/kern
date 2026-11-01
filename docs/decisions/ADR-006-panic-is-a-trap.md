@@ -138,3 +138,15 @@ terminating edges.
 A panic is a trap: terminate after one handler invocation, run nothing else. Errors are
 values. The trap handler is the only cleanup hook, and its obligations are documented, not
 enforced (ADR-012, Phase 2). The hosted-cleanup option from the evaluation is not adopted.
+
+## Amendment (2026-11-01): fallible allocation forms
+
+The decision makes errors a program is expected to handle values, and spec §6 treats
+allocation failure as one (`alloc` returns `Err(OutOfMemory)`), but the convenience
+operations of `Box`, `Vec` and `str.String` trapped `oom` with no alternative short of a
+container written over the unsafe allocator. Each now has a `try_` counterpart that returns
+the error and leaves the container unchanged, and an append into reserved capacity is
+guaranteed not to allocate (`specs/fallible-alloc/SPEC.md`, `docs/ownership.md` rule 5.6.4,
+`docs/reports/fallible-alloc.md`). The trap semantics above are unchanged: an allocation
+failure in a convenience operation is still a trap, and nothing catches or resumes one; a
+program that must survive allocation failure calls the `try_` forms instead.

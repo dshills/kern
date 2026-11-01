@@ -1,0 +1,13 @@
+try_reserve past usize bytes
+  err out of memory len 0 cap 0
+  err out of memory len 1 cap 4
+try_with_capacity past usize bytes
+  err out of memory
+try_resize past usize bytes
+  err out of memory len 0 cap 0
+  err out of memory len 1 cap 4
+try_extend with a length sum past usize
+  err out of memory len 18446744073709551615 cap 18446744073709551615
+try_push past the growth guard
+  full len 9223372036854775808 cap 9223372036854775808
+  err out of memory len 9223372036854775808 cap 9223372036854775808

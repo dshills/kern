@@ -1,0 +1,5 @@
+//! phase: 1
+//! expect: accept
+//! twin: vec_try_resize_copy
+module m
+func f(v: edit[Vec[u64]], x: u64) -> Result[(), AllocErr] { return v.try_resize(4usize, x) }

@@ -1,0 +1,51 @@
+reserve below capacity
+  ok len 5 cap 8 sum 176972
+  ok len 5 cap 8 sum 176972
+reserve above capacity
+  ok len 5 cap 20 sum 176972
+  ok len 5 cap 20 sum 176972
+with_capacity 0
+  ok len 0 cap 0 sum 0
+  ok len 0 cap 0 sum 0
+with_capacity 10
+  ok len 0 cap 10 sum 0
+  ok len 0 cap 10 sum 0
+push on empty
+  ok len 1 cap 4 sum 9
+  ok len 1 cap 4 sum 9
+push on full
+  ok len 5 cap 8 sum 176952
+  ok len 5 cap 8 sum 176952
+push with spare capacity
+  ok len 6 cap 8 sum 486126
+  ok len 6 cap 8 sum 486126
+extend that fits
+  ok len 7 cap 8 sum 69621
+  ok len 7 cap 8 sum 69621
+extend that doubles
+  ok len 7 cap 8 sum 42937
+  ok len 7 cap 8 sum 42937
+extend past double
+  ok len 14 cap 14 sum 10144
+  ok len 14 cap 14 sum 10144
+extend onto empty
+  ok len 3 cap 4 sum 1224
+  ok len 3 cap 4 sum 1224
+resize from no allocation, zero
+  ok len 6 cap 6 sum 0
+  ok len 6 cap 6 sum 0
+resize from no allocation, nonzero
+  ok len 6 cap 6 sum 250306
+  ok len 6 cap 6 sum 250306
+resize growing past capacity
+  ok len 12 cap 12 sum 861839
+  ok len 12 cap 12 sum 861839
+resize growing within capacity
+  ok len 7 cap 8 sum 69678
+  ok len 7 cap 8 sum 69678
+resize shrinking
+  ok len 2 cap 8 sum 39
+  ok len 2 cap 8 sum 39
+resize to zero
+  ok len 0 cap 8 sum 0
+  ok len 0 cap 8 sum 0

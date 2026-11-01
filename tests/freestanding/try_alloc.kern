@@ -1,0 +1,44 @@
+//! phase: 3
+//! expect: output try_alloc
+//! env: freestanding
+// The fallible Vec forms on bare metal (specs/fallible-alloc/SPEC.md R7):
+// a request whose byte size is past usize is Err, not a trap; a
+// reservation of 4,096 elements from the static arena succeeds; appends
+// with every Vec append form stay inside it; and a checksum goes to the
+// console, which the interpreter's emulation and both QEMU targets must
+// print the same. The convenience appends sit in the reserved region on
+// purpose (the reserve-then-append guarantee, R5): 1,000 pushes, 1,000
+// try_pushes, two extends of 100 (2,200), resize to 3,000, then try_resize
+// to 4,096, never past the reservation, so the capacity stays 4,096; a
+// change that grew past it would trap or change the printed capacity. Arena exhaustion is not used: the emulation's heap is
+// unbounded (docs/ownership.md rule 6.8), so the engines would disagree on
+// where it runs out.
+module fs
+func mix(h: u64, x: u64) -> u64 { return (h * 31u64 + x) % 1000003u64 }
+func tag(r: Result[(), AllocErr]) -> u64 {
+    match r {
+        Ok(u) => return 1u64
+        Err(e) => return 0u64
+    }
+}
+func main() -> i32 {
+    v := Vec[u64].new()
+    print_u64(tag(v.try_reserve(2305843009213693953usize))); println()
+    print_u64(tag(v.try_reserve(4096usize))); println()
+    src := Vec[u64].new()
+    for i in 0u64..100u64 { src.push(i * 3u64) }
+    for i in 0u64..1000u64 { v.push(i * 7u64) }
+    ok := 1u64
+    for i in 0u64..1000u64 { ok = ok * tag(v.try_push(i * 11u64)) }
+    v.extend(src.as_view())
+    ok = ok * tag(v.try_extend(src.as_view()))
+    v.resize(3000usize, 5u64)
+    ok = ok * tag(v.try_resize(4096usize, 9u64))
+    h := 0u64
+    for i in 0usize..v.len() { h = mix(h, v.get(i)) }
+    print_u64(ok); println()
+    print_u64(u64(v.len())); println()
+    print_u64(u64(v.capacity())); println()
+    print_u64(h); println()
+    return 0i32
+}

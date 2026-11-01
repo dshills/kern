@@ -1,0 +1,17 @@
+from
+  ok hello len 5 cap 5
+  ok hello len 5 cap 5
+from empty
+  ok  len 0 cap 0
+  ok  len 0 cap 0
+push
+  ok abcde len 5 cap 8
+  ok abcde len 5 cap 8
+push_str
+  ok hello, world len 12 cap 12
+  ok hello, world len 12 cap 12
+try_reserve
+  ok hi len 2 cap 32
+  ok hi! len 3 cap 32
+new
+  ok  len 0 cap 0

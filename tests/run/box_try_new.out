@@ -1,0 +1,11 @@
+ok 42
+drop page 1
+drop tok 10
+ok 1009
+drop tok 20
+init failed
+drop page 4
+drop tok 40
+ok 4007
+drop tok 50
+init failed

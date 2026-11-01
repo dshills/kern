@@ -1,0 +1,32 @@
+try_reserve on an empty vector
+  len 0 cap 0 sum 0
+  err out of memory
+  len 0 cap 0 sum 0
+try_reserve on a vector holding elements
+  len 5 cap 8 sum 176972
+  err out of memory
+  len 5 cap 8 sum 176972
+try_push on a full vector
+  len 4 cap 4 ids 0 1 2 3
+drop tok 99
+  err out of memory
+  len 4 cap 4 ids 0 1 2 3
+try_extend that must grow
+  len 4 cap 4 sum 37966
+  err out of memory
+  len 4 cap 4 sum 37966
+try_resize from no allocation
+  len 0 cap 0 sum 0
+  err out of memory
+  len 0 cap 0 sum 0
+try_resize from an allocated vector
+  len 5 cap 8 sum 176972
+  err out of memory
+  len 5 cap 8 sum 176972
+try_with_capacity
+  err out of memory
+end
+drop tok 3
+drop tok 2
+drop tok 1
+drop tok 0

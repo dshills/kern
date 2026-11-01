@@ -1,0 +1,74 @@
+//! phase: 3
+//! expect: output vec_try_oom
+//! test-hooks: true
+// Every failure of a fallible Vec form leaves the vector as it was
+// (specs/fallible-alloc/SPEC.md R3): each case prints the state, arms
+// testing.fail_next_alloc(), calls, and prints the result and the state
+// again, which must match. try_push destroys its argument once (its
+// destructor's line appears once, before the result); try_resize's
+// argument is Copy, so only the unchanged state shows for it.
+module run
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop tok "); print_u64(self.id); println() }
+}
+func fill(n: usize) -> Vec[u64] {
+    v := Vec[u64].new()
+    for i in 0usize..n { v.push(u64(i) * 7u64 + 1u64) }
+    return v
+}
+func show(v: view[Vec[u64]]) {
+    h := 0u64
+    for x in v.as_view() { h = (h * 31u64 + x) % 1000003u64 }
+    print_str("  len "); print_u64(u64(v.len()))
+    print_str(" cap "); print_u64(u64(v.capacity()))
+    print_str(" sum "); print_u64(h)
+    println()
+}
+func show_toks(v: view[Vec[Tok]]) {
+    print_str("  len "); print_u64(u64(v.len()))
+    print_str(" cap "); print_u64(u64(v.capacity()))
+    print_str(" ids")
+    for i in 0usize..v.len() {
+        with t := v.get(i) { print_str(" "); print_u64(t.id) }
+    }
+    println()
+}
+func res(r: Result[(), AllocErr]) {
+    match r {
+        Ok(u) => { print_str("  ok"); println() }
+        Err(e) => { print_str("  err out of memory"); println() }
+    }
+}
+func with_cap(n: usize) -> Result[(), AllocErr] {
+    v := Vec[u64].try_with_capacity(n)?
+    show(v)
+    return Ok(())
+}
+func label(s: view[]u8) { print_str(s); println() }
+func main() -> i32 {
+    label("try_reserve on an empty vector")
+    a := Vec[u64].new(); show(a)
+    testing.fail_next_alloc(); res(a.try_reserve(10usize)); show(a)
+    label("try_reserve on a vector holding elements")
+    b := fill(5usize); show(b)
+    testing.fail_next_alloc(); res(b.try_reserve(100usize)); show(b)
+    label("try_push on a full vector")
+    t := Vec[Tok].new()
+    for i in 0usize..4usize { t.push(Tok { id: u64(i) }) }
+    show_toks(t)
+    testing.fail_next_alloc(); res(t.try_push(Tok { id: 99u64 })); show_toks(t)
+    label("try_extend that must grow")
+    c := fill(4usize); src := fill(3usize); show(c)
+    testing.fail_next_alloc(); res(c.try_extend(src.as_view())); show(c)
+    label("try_resize from no allocation")
+    d := Vec[u64].new(); show(d)
+    testing.fail_next_alloc(); res(d.try_resize(6usize, 0u64)); show(d)
+    label("try_resize from an allocated vector")
+    e := fill(5usize); show(e)
+    testing.fail_next_alloc(); res(e.try_resize(12usize, 3u64)); show(e)
+    label("try_with_capacity")
+    testing.fail_next_alloc(); res(with_cap(10usize))
+    label("end")
+    return 0i32
+}

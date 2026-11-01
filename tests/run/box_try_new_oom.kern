@@ -1,0 +1,65 @@
+//! phase: 3
+//! expect: output box_try_new_oom
+//! test-hooks: true
+// When the allocation fails, the fallible Box forms return an error instead
+// of trapping (specs/fallible-alloc/SPEC.md R1): try_new destroys its value
+// once (its destructor's line appears once, before the result), and the
+// _with forms return Alloc(OutOfMemory) before the initializer runs (its
+// print does not appear).
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop tok "); print_u64(self.id); println() }
+}
+union E { Bad }
+func init_n(n: out u64) -> Result[(), E] {
+    print_str("init ran")
+    println()
+    n = 7u64
+    return Ok(())
+}
+func init_ctx(n: out u64, c: view[u64]) -> Result[(), E] {
+    print_str("init ran")
+    println()
+    n = c
+    return Ok(())
+}
+func plain() -> Result[u32, AllocErr] {
+    testing.fail_next_alloc()
+    b := Box[Tok].try_new(Tok { id: 7u64 })?
+    return Ok(0u32)
+}
+func with_init() -> Result[u32, AllocOrInit[E]] {
+    testing.fail_next_alloc()
+    b := Box[u64].try_new_with(init_n)?
+    return Ok(0u32)
+}
+func with_ctx() -> Result[u32, AllocOrInit[E]] {
+    c := 9u64
+    testing.fail_next_alloc()
+    b := Box[u64].try_new_with_ctx(init_ctx, c)?
+    return Ok(0u32)
+}
+func report_plain(r: Result[u32, AllocErr]) {
+    match r {
+        Ok(x) => { print_str("allocated"); println() }
+        Err(e) => { print_str("out of memory"); println() }
+    }
+}
+func report(r: Result[u32, AllocOrInit[E]]) {
+    match r {
+        Ok(x) => { print_str("allocated"); println() }
+        Err(e) => {
+            match e {
+                Alloc(a) => { print_str("out of memory"); println() }
+                Init(i) => { print_str("init error"); println() }
+            }
+        }
+    }
+}
+func main() -> i32 {
+    report_plain(plain())
+    report(with_init())
+    report(with_ctx())
+    return 0i32
+}
