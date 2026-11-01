@@ -89,6 +89,18 @@ capture builds without `--test-hooks`, as it does the existing ones.
   (`OWN_DESTRUCTURE_DESTRUCTOR`); the fixtures unwrap it with `?` in a
   helper.
 
+## Documents
+
+Besides spec §6, `docs/ownership.md` rule 5.6.4 and the ADR-006
+amendment, the README says that allocation failure is a value through the
+`try_` forms (the paragraph on traps, and the standard-library row),
+ADR-011's freestanding failure bullet names them, and
+`docs/unsafe-audit.md` lists the eight new functions with unsafe blocks.
+The audit had not been updated for the in-place constructors of
+2026-10-30 (`Box.new_with`, `new_with_ctx`, and the `alloc_with` /
+`alloc_with_ctx` forms of `Pool` and `Arena`); those six rows were added
+too, so its table again matches the prelude: 53 functions, 57 blocks.
+
 ## Open questions for the owner
 
 - **The effect schema.** `show-effects` reports a `try_` form as

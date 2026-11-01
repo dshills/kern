@@ -182,7 +182,9 @@ emulation no longer traps `explicit` on `SystemAllocator.new`.
   copies), otherwise takes a new block, copies the common prefix and releases the old one, and
   on failure leaves the old block. Every allocation is 16-byte aligned at least, as on the hosts.
 - **Failure.** Exhaustion returns `Err(OutOfMemory)`; the convenience constructors (`Box.new`,
-  `Vec.push`) then trap `oom` as in hosted mode. A request that violates the obligations
+  `Vec.push`) then trap `oom` as in hosted mode, and their `try_` forms (2026-11-01,
+  `docs/ownership.md` rule 5.6.4) return the error instead, on bare metal as on the hosts
+  (`tests/freestanding/try_alloc.kern`). A request that violates the obligations
   (alignment, size, or a pointer the arena does not hold) traps with kind `explicit`.
 - **Emulation.** The interpreter's freestanding emulation serves `SystemAllocator` from its
   raw heap exactly as hosted mode does, so a program's console transcript is the same in the

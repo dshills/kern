@@ -56,7 +56,13 @@ func main() -> u64 {
 `view` and `edit` are the two access conventions; `own` moves. Integer
 arithmetic traps on overflow in every build, every index is bounds-checked
 unless the compiler records a proof that removes the check, and a trap is
-observable only as termination with a structured `TrapInfo` record.
+observable only as termination with a structured `TrapInfo` record. Errors a
+program is expected to handle are values instead: running out of memory is
+`Err(OutOfMemory)` from the allocator, from `Pool` and `Arena`, and from the
+`try_` forms of `Box`, `Vec` and `String` (`try_new`, `try_reserve`,
+`try_push`, `try_extend`, ...), and an append into reserved capacity never
+allocates, so code that must survive allocation failure has no trap path for
+it (`docs/ownership.md` rule 5.6.4).
 
 ## What is here
 
@@ -66,7 +72,7 @@ observable only as termination with a structured `TrapInfo` record.
 | Language reference | `docs/ownership.md` | Normative restatement of the ownership rules, one rule per diagnostic code |
 | Decisions | `docs/decisions/ADR-*.md` | Fourteen architecture decision records with the alternatives considered |
 | Compiler | `compiler/` | Lexer and parser, resolver, ownership checker, lowering to a semantic IR, LLVM text backend, interpreter, formatter, incremental driver |
-| Standard library | `std/core.kern`, `std/str.kern`, `std/map.kern`, `std/io.kern`, `std/json.kern`, `std/process.kern` | The implicitly imported prelude (`Box`, `Vec`, `Pool`, `Arena`, `Mutex`, `Condvar`, `Atomic`, scoped threads, raw pointers; the containers are written in kern over audited `unsafe` blocks, `docs/unsafe-audit.md`), and the modules a program imports as `std/str` (an owned `String` with decimal, signed, hexadecimal and padded formatting, byte-view helpers, and UTF-8 decoding, validation, counting and encoding), `std/map` (a hash map over `Hashable` keys, with lookups that borrow the key, lookup of `String` keys by bytes, `each`/`each_mut` visits by closure, and `for k, v in m` through the cursor protocol), `std/io` (files, directories, temporary files, the standard streams and arguments; hosted only), `std/json` (JSON values, a parser that keeps numbers' text and rejects invalid UTF-8, and a writer) and `std/process` (child processes started with arguments, environment edits, a working directory and inherited, `/dev/null` or piped streams; waiting, polling and signals; `output` with no deadlock for any size; the environment the program started with; hosted only, `docs/reports/std-process.md`) |
+| Standard library | `std/core.kern`, `std/str.kern`, `std/map.kern`, `std/io.kern`, `std/json.kern`, `std/process.kern` | The implicitly imported prelude (`Box`, `Vec`, `Pool`, `Arena`, `Mutex`, `Condvar`, `Atomic`, scoped threads, raw pointers; the containers are written in kern over audited `unsafe` blocks, `docs/unsafe-audit.md`, and every allocating operation has a `try_` form that returns `Err(OutOfMemory)` where the convenience form traps, `docs/reports/fallible-alloc.md`), and the modules a program imports as `std/str` (an owned `String` with decimal, signed, hexadecimal and padded formatting, fallible `try_` appends, byte-view helpers, and UTF-8 decoding, validation, counting and encoding), `std/map` (a hash map over `Hashable` keys, with lookups that borrow the key, lookup of `String` keys by bytes, `each`/`each_mut` visits by closure, and `for k, v in m` through the cursor protocol), `std/io` (files, directories, temporary files, the standard streams and arguments; hosted only), `std/json` (JSON values, a parser that keeps numbers' text and rejects invalid UTF-8, and a writer) and `std/process` (child processes started with arguments, environment edits, a working directory and inherited, `/dev/null` or piped streams; waiting, polling and signals; `output` with no deadlock for any size; the environment the program started with; hosted only, `docs/reports/std-process.md`) |
 | Runtimes | `runtime/hosted/`, `runtime/freestanding/` | A small C runtime for Linux/macOS, and a freestanding one for bare-metal x86-64 and AArch64 images that boot under QEMU |
 | Machine API | `tools/agent-api/schema.{json,md}` | JSON request/response schema for every command, with stable diagnostic codes and machine-applicable fixes |
 | Tests | `tests/` | Positive, negative and adversarial fixtures (one rejecting fixture and one accepting twin per rule), trap fixtures, concurrency and FFI fixtures, freestanding images |
