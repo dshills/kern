@@ -29,6 +29,19 @@ var selfhostRejects = map[string]string{
 	"struct literal type":      "module m\nfunc f() { x := a.b.C { y: 1 } }\n",
 	"interface before for":     "module m\nimpl [u8] for T { }\n",
 	"non-ASCII outside string": "module m\nfunc f() { x := 1 \u00a7 2 }\n",
+	"budget before struct":     "module m\nbudget { copies 0 }\nstruct S { a: u64 }\n",
+	"budget before contract":   "module m\nbudget { copies 0 }\ncontract { requires \"x\" }\nfunc f() { }\n",
+	"budget before extern":     "module m\nbudget { copies 0 }\nextern \"C\" func puts(s: RawPtr[u8]) -> i32\n",
+	"budget before const":      "module m\nbudget { copies 0 }\nconst K: u64 = 1\n",
+	"budget at end of file":    "module m\nbudget { copies 0 }\n",
+	"budget before destructor": "module m\nstruct S { a: u64 }\nimpl S {\n    budget { copies 0 }\n    destructor(edit self) { }\n}\n",
+	"budget on interface":      "module m\ninterface I {\n    budget { copies 0 }\n    func f(view self)\n}\n",
+	"budget twice":             "module m\nbudget { copies 0 }\nbudget { allocations 0 }\nfunc f() { }\n",
+	"budget name value":        "module m\nbudget { bounds_checks n }\nfunc f() { }\n",
+	"budget negative":          "module m\nbudget { bounds_checks -1 }\nfunc f() { }\n",
+	"budget float":             "module m\nbudget { bounds_checks 1.5 }\nfunc f() { }\n",
+	"budget two on a line":     "module m\nbudget { copies 0 allocations 0 }\nfunc f() { }\n",
+	"budget missing brace":     "module m\nbudget { copies 0\nfunc f() { }\n",
 }
 
 // The kern parser of examples/selfhost_parser accepts exactly the corpus

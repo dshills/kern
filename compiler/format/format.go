@@ -286,7 +286,7 @@ func (p *printer) decl(d ast.Decl) {
 		for _, fn := range d.Funcs {
 			fn := fn
 			items = append(items, bodyItem{pos: fn.Pos, print: func() { p.funcDecl(fn, true) }, multi: func() { p.funcDeclLines(fn) }})
-			needsLines = needsLines || fn.Body == nil || stmtsNeedLines(fn.Body.Stmts)
+			needsLines = needsLines || fn.Body == nil || fn.Budget != nil || stmtsNeedLines(fn.Body.Stmts)
 		}
 		if dt := d.Destructor; dt != nil {
 			items = append(items, bodyItem{pos: dt.Pos, print: func() {
@@ -338,23 +338,66 @@ func (p *printer) decl(d ast.Decl) {
 }
 
 // funcDeclLines prints a function declaration as one or more lines: the
-// contract block, if any, then the signature and body.
+// contract block, if any, the budget block, if any, then the signature and
+// body.
 func (p *printer) funcDeclLines(d *ast.FuncDecl) {
 	headerEnd := d.End
 	if d.Body != nil {
 		headerEnd = d.Body.Start
 	}
+	start := d.Start
 	if c := d.Contract; c != nil {
-		p.beforeItem(d.Start, d.Start)
+		p.beforeItem(start, start)
 		p.contract(c)
 		p.afterItem(c.End)
 		p.allowBlank = false
-		p.beforeItem(c.End, headerEnd)
-	} else {
-		p.beforeItem(d.Start, headerEnd)
+		start = c.End
 	}
+	if b := d.Budget; b != nil {
+		p.beforeItem(start, b.Start)
+		p.budget(b)
+		p.afterItem(b.End)
+		p.allowBlank = false
+		start = b.End
+	}
+	p.beforeItem(start, headerEnd)
 	p.funcDecl(d, false)
 	p.afterItem(d.End)
+}
+
+// budget prints a budget block on one line, `budget { a 0; b 1 }`, items in
+// source order, however the source laid it out (spec/format.md). A block
+// containing a comment is laid out one item per line, as any body with a
+// comment.
+func (p *printer) budget(b *ast.Budget) {
+	p.w("budget ")
+	if p.hasCommentIn(b.Start, b.End) {
+		items := make([]bodyItem, len(b.Items))
+		for i, it := range b.Items {
+			it := it
+			items[i] = bodyItem{pos: it.Pos, print: func() { p.budgetItem(it) }}
+		}
+		p.body(b.Pos, items, true)
+		return
+	}
+	if len(b.Items) == 0 {
+		p.w("{ }")
+		return
+	}
+	p.w("{ ")
+	for i, it := range b.Items {
+		if i > 0 {
+			p.w("; ")
+		}
+		p.budgetItem(it)
+	}
+	p.w(" }")
+}
+
+func (p *printer) budgetItem(it *ast.BudgetItem) {
+	p.w(it.Name)
+	p.w(" ")
+	p.w(it.Value)
 }
 
 // funcDecl prints a signature and body on the current line. withContract

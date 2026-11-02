@@ -224,6 +224,10 @@ impl P {
             return self.parse_const(N_GLOBAL, KW_THREAD_LOCAL)
         } else if k == KW_UNSAFE {
             if self.peek(1usize) == KW_ASSERT { return self.parse_assert() }
+        } else if k == IDENT && self.at_budget() {
+            f := self.parse_func(true)
+            if self.kid(f, 5usize) == 0usize { self.stmt_end() }
+            return f
         }
         self.fail()
         return 0usize
@@ -427,11 +431,45 @@ impl P {
         return c
     }
 
+    // at_budget reports whether a budget block starts here: the identifier
+    // budget followed by `{` (contextual, not a keyword).
+    func at_budget(edit self) -> bool {
+        if !self.at(IDENT) { return false }
+        t := self.cur()
+        return self.tis(t, "budget") && self.peek(1usize) == LBRACE
+    }
+
+    // budget kids: the item list; an item holds its name in s..e and its
+    // value's text, suffix included, in s2..e2
+    func parse_budget(edit self) -> usize {
+        t := self.expect(IDENT)
+        b := self.mk(N_BUDGET, 0usize, 0usize)
+        items := self.list()
+        self.add(b, items)
+        l := self.expect(LBRACE)
+        self.skip_nl()
+        while self.more(RBRACE) {
+            n := self.expect(IDENT)
+            v := self.expect(INT)
+            it := self.mk(N_BITEM, n.s, n.e)
+            self.set2(it, v.s, v.e)
+            self.add(items, it)
+            self.stmt_end()
+            self.skip_nl()
+        }
+        e := self.expect(RBRACE)
+        self.skip_nl()
+        if !self.at(KW_FUNC) { self.fail() }
+        return b
+    }
+
     // func kids: contract (or nil), type params, params, ret, where, body
-    // (or nil), extern ABI (or nil); release in s2..e2
+    // (or nil), extern ABI (or nil), budget (or nil); release in s2..e2
     func parse_func(edit self, with_body: bool) -> usize {
         var con: usize = 0usize
         if self.at(KW_CONTRACT) { con = self.parse_contract() }
+        var bud: usize = 0usize
+        if with_body && self.at_budget() { bud = self.parse_budget() }
         t := self.expect(KW_FUNC)
         n := self.expect(IDENT)
         d := self.mk(N_FUNC, n.s, n.e)
@@ -466,6 +504,7 @@ impl P {
         self.add(d, wh)
         self.add(d, body)
         self.add(d, 0usize)
+        self.add(d, bud)
         return d
     }
 

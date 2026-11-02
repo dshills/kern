@@ -42,7 +42,7 @@ func TestDumpAllNodes(t *testing.T) {
 			seen[w[0]] = true
 		}
 	}
-	for _, name := range []string{"file", "import", "tp", "field", "struct", "variant", "union", "interface", "impl", "destructor", "param", "contract", "func", "const", "global", "assert", "prim", "tname", "array", "slice", "access", "rawptr", "functype", "unit", "block", "var", "short", "assign", "with", "arm", "match", "for", "while", "if", "return", "break", "continue", "unsafe", "expr", "int", "float", "string", "bool", "ident", "fieldx", "index", "typearg", "slicex", "arg", "call", "binary", "unary", "try", "move", "closure", "copy", "take", "replace", "drop", "trap", "conv", "finit", "structlit", "arraylit", "range", "unitlit", "paren"} {
+	for _, name := range []string{"file", "import", "tp", "field", "struct", "variant", "union", "interface", "impl", "destructor", "param", "contract", "budget", "item", "func", "const", "global", "assert", "prim", "tname", "array", "slice", "access", "rawptr", "functype", "unit", "block", "var", "short", "assign", "with", "arm", "match", "for", "while", "if", "return", "break", "continue", "unsafe", "expr", "int", "float", "string", "bool", "ident", "fieldx", "index", "typearg", "slicex", "arg", "call", "binary", "unary", "try", "move", "closure", "copy", "take", "replace", "drop", "trap", "conv", "finit", "structlit", "arraylit", "range", "unitlit", "paren"} {
 		if !seen[name] {
 			t.Errorf("all_nodes.kern produces no %s node", name)
 		}

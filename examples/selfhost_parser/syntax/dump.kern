@@ -187,10 +187,20 @@ impl P {
             self.strs(self.kid(n, 0usize), o)
             self.strs(self.kid(n, 1usize), o)
             self.strs(self.kid(n, 2usize), o)
+        } else if k == N_BUDGET {
+            self.open("budget", o)
+            self.items(self.kid(n, 0usize), o)
+        } else if k == N_BITEM {
+            self.open("item", o)
+            self.name(n, o)
+            self.name2(n, o)
         } else if k == N_FUNC {
             self.open("func", o)
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
+            // a budget is dumped only when present, as ast.Dump does
+            bud := self.kid(n, 7usize)
+            if bud != 0usize { self.child(bud, o) }
             self.items(self.kid(n, 1usize), o)
             self.items(self.kid(n, 2usize), o)
             self.items(self.kid(n, 3usize), o)

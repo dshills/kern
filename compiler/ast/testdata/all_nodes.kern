@@ -12,6 +12,8 @@ impl[T] I for P[T] {
     destructor(edit self) { }
 }
 impl P[u64] {
+    budget { allocations 1 }
+    func h(view self) -> u64 { return self.x }
     contract { invariant "i"; requires "r\n"; ensures "e" }
     func g[E](own self, o: out u64, h: func(view[u64]) -> u64, c: closure(own u64) -> (view[u64], edit[u64])) -> u64 where E: Copy release done { return 0u64 }
 }
@@ -20,6 +22,11 @@ extern "C" func exported(a: u64) -> u64 { return a }
 const K: u64 = -5i64 + 3
 thread_local T: u32 = 7u32
 unsafe assert Send for P
+contract { requires "r" }
+budget { bounds_checks 0; copies 2 }
+func budgeted(xs: view[]u64) -> u64 { return 0u64 }
+budget { }
+func empty_budget() { }
 func main() -> i32 {
     var v: []u8
     var w: edit[]u8 = x

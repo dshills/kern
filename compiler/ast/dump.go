@@ -29,7 +29,9 @@ import (
 //	Destructor  (destructor Body)
 //	Param       (param Name|_ Conv Type|_ Self)
 //	Contract    (contract [Invariant:str] [Requires:str] [Ensures:str])
-//	FuncDecl    (func Name Contract|_ [TypeParams] [Params] [Ret] [Where] Release|_ Body|_ Extern:str|_)
+//	Budget      (budget [Items])
+//	BudgetItem  (item Name Value)
+//	FuncDecl    (func Name Contract|_ [Budget] [TypeParams] [Params] [Ret] [Where] Release|_ Body|_ Extern:str|_)
 //	ConstDecl   (const Name Type Value)
 //	GlobalDecl  (global Name Type Value)
 //	AssertDecl  (assert Marker Type)
@@ -85,6 +87,9 @@ import (
 //	RangeExpr   (range Lo Hi)
 //	UnitLit     (unitlit)
 //	Paren       (paren X)
+//
+// A FuncDecl's Budget is printed only when present, so a function without
+// a budget block dumps as it did before budgets existed.
 //
 // A node type not in the table panics: a parser change that adds one must
 // add its form here and to the kern dumper.
@@ -250,10 +255,20 @@ func (d *dumper) node(n Node) {
 		d.strs(x.Invariant)
 		d.strs(x.Requires)
 		d.strs(x.Ensures)
+	case *Budget:
+		d.open("budget")
+		list(d, x.Items)
+	case *BudgetItem:
+		d.open("item")
+		d.word(x.Name)
+		d.word(x.Value)
 	case *FuncDecl:
 		d.open("func")
 		d.word(x.Name)
 		d.child(x.Contract)
+		if x.Budget != nil {
+			d.child(x.Budget)
+		}
 		list(d, x.TypeParams)
 		list(d, x.Params)
 		list(d, x.Ret)

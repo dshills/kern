@@ -138,7 +138,9 @@ func rank(xs: view[]u64, key: u64) -> usize { ... }
 with its name, value and span on the function declaration. The AST dump
 shows the block. The formatter prints it on its own line before `func`
 (after a `contract` block), items in source order separated by `; ` with
-no separator after the last, and formatting is idempotent.
+no separator after the last, and formatting is idempotent. A block that
+contains a comment is laid out one item per line instead, as any brace body
+containing a comment (`spec/format.md`), so the comment keeps its place.
 
 **R2. Well-formedness.** What the grammar of §3 rejects is a `SYNTAX`
 error, as for any other declaration: a budget block before anything but

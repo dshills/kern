@@ -27,8 +27,8 @@ Both properties are tested on every fixture under `tests/` and `examples/`.
 - Blank lines: where the source has one or more blank lines between two
   consecutive items (declarations, statements, members or comments), exactly
   one blank line is kept. Blank lines never follow an opening brace, precede
-  a closing brace, or separate a contract block from its function. There is
-  no blank line before the first line of the file.
+  a closing brace, or separate a contract or budget block from its function.
+  There is no blank line before the first line of the file.
 
 ## Declarations
 
@@ -41,6 +41,12 @@ Both properties are tested on every fixture under `tests/` and `examples/`.
   brackets, `: ` before the first constraint, ` + ` between constraints.
 - A contract block precedes its function on lines of its own, with no blank
   line between the closing `}` and the `func` line. Clauses keep source order.
+- A budget block follows the contract block, if any, and precedes its
+  function on a line of its own, with no blank line before the `func` line:
+  `budget { bounds_checks 0; copies 1 }`, items in source order separated by
+  `; `, and `budget { }` when empty, however the source laid it out. A block
+  containing a comment is a brace body containing a comment instead, one
+  item per line (below).
 - Function signatures print as `func name[TP](p: T, view self, q: own U,
   r: out V) -> R release rel`; receivers are `view self`, `edit self` or
   `own self`; tuple returns are `-> (A, B)`; unit is `()`.

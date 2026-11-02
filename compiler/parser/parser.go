@@ -203,6 +203,14 @@ func (p *parser) parseDecl() ast.Decl {
 		if p.peekKind(1) == lexer.KwAssert {
 			return p.parseAssert()
 		}
+	case lexer.Ident:
+		if p.atBudget() {
+			fn := p.parseFunc(true)
+			if fn.Body == nil {
+				p.stmtEnd()
+			}
+			return fn
+		}
 	}
 	p.errorf(t, "expected declaration, found %s", describe(t))
 	return nil
@@ -385,16 +393,54 @@ func (p *parser) parseContract() *ast.Contract {
 	return c
 }
 
-// parseFunc parses a function declaration; withBody=false parses an interface
-// method signature.
+// atBudget reports whether the current token starts a budget block: the
+// identifier `budget` followed by `{`. budget is contextual, not a keyword
+// (spec §3), and is only looked for at the start of a declaration.
+func (p *parser) atBudget() bool {
+	t := p.cur()
+	return t.Kind == lexer.Ident && t.Text == "budget" && p.peekKind(1) == lexer.LBrace
+}
+
+// parseBudget parses `budget { name value; ... }`: items are an identifier
+// and an integer literal, separated by newlines or `;`, the last separator
+// optional. Names and values are judged by the resolver (BUDGET_INVALID).
+func (p *parser) parseBudget() *ast.Budget {
+	t := p.expect(lexer.Ident)
+	b := &ast.Budget{Pos: tokPos(t)}
+	p.expect(lexer.LBrace)
+	p.skipNewlines()
+	for !p.at(lexer.RBrace) {
+		n := p.expect(lexer.Ident)
+		v := p.expect(lexer.Int)
+		b.Items = append(b.Items, &ast.BudgetItem{Pos: span(tokPos(n), tokPos(v)), Name: n.Text, NamePos: tokPos(n), Value: v.Text})
+		p.stmtEnd()
+		p.skipNewlines()
+	}
+	b.End = p.expect(lexer.RBrace).End
+	p.skipNewlines()
+	if !p.at(lexer.KwFunc) {
+		p.errorf(p.cur(), "a budget block must precede a func declaration, found %s", describe(p.cur()))
+	}
+	return b
+}
+
+// parseFunc parses a function declaration, `[contract] [budget] func ...`;
+// withBody=false parses an interface method signature, which takes no
+// budget.
 func (p *parser) parseFunc(withBody bool) *ast.FuncDecl {
 	d := &ast.FuncDecl{}
 	if p.at(lexer.KwContract) {
 		d.Contract = p.parseContract()
 		d.Pos = d.Contract.Pos
 	}
+	if withBody && p.atBudget() {
+		d.Budget = p.parseBudget()
+		if d.Contract == nil {
+			d.Pos = d.Budget.Pos
+		}
+	}
 	t := p.expect(lexer.KwFunc)
-	if d.Contract == nil {
+	if d.Contract == nil && d.Budget == nil {
 		d.Pos = tokPos(t)
 	}
 	d.Name = p.expect(lexer.Ident).Text

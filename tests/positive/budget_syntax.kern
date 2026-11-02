@@ -1,0 +1,51 @@
+//! phase: 1
+//! expect: accept
+// Budget blocks (spec §7.6, specs/declared-budgets): every accepted form,
+// on functions whose counts meet their budgets trivially. budget stays an
+// ordinary name for functions, locals and fields.
+module m
+
+struct Meter { budget: u64; copies: u64 }
+
+budget { bounds_checks 0; copies 0; allocations 0 }
+func add(a: u64, b: u64) -> u64 { return a + b }
+
+budget {
+    bounds_checks 0
+    copies 0
+}
+func sub(a: u64, b: u64) -> u64 { return a - b }
+
+budget { allocations 0; }
+func mul(a: u64, b: u64) -> u64 { return a * b }
+
+budget {
+    copies 0;
+    allocations 1_000
+
+}
+func neg(a: i64) -> i64 { return -a }
+
+budget { }
+func nothing() { }
+
+budget {} func tight() { }
+
+contract { requires "b > 0" }
+budget { bounds_checks 0 }
+func quot(a: u64, b: u64) -> u64 { return a / b }
+
+impl Meter {
+    budget { copies 0 }
+    func total(view self) -> u64 { return self.budget + self.copies }
+    contract { requires "n > 0" }
+    budget { allocations 0; bounds_checks 0 }
+    func scale(view self, n: u64) -> u64 { return self.budget * n }
+    func plain(view self) -> u64 { return self.copies }
+}
+
+func budget(budget: u64) -> u64 {
+    copies := budget
+    m := Meter { budget: copies, copies: 1u64 }
+    return m.total() + add(sub(budget, 0u64), mul(1u64, quot(4u64, 2u64))) + u64(neg(1i64) + 1i64)
+}

@@ -122,10 +122,27 @@ type Contract struct {
 	Ensures   []string
 }
 
+// Budget is a budget block (spec §7.6): the counts `kern check` holds a
+// function to.
+type Budget struct {
+	Pos
+	Items []*BudgetItem
+}
+
+// BudgetItem is one `name value` line of a budget block. Value is the
+// integer literal's text, suffix included; the resolver judges it.
+type BudgetItem struct {
+	Pos
+	Name    string
+	NamePos Pos
+	Value   string
+}
+
 // FuncDecl declares a function, method, interface method or extern function.
 type FuncDecl struct {
 	Pos
 	Contract   *Contract
+	Budget     *Budget // nil when the declaration has no budget block
 	Name       string
 	TypeParams []*TypeParam
 	Params     []*Param
