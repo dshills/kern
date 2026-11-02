@@ -527,6 +527,22 @@ module m
 extern "C" func write(fd: i32, buf: view[]u8) -> isize    // FFI_UNSUPPORTED_TYPE: a sequence access is not a C ABI type
 ```
 
+### Rule 7.6 — Declared budgets
+A function may declare how many runtime-checked bounds checks, copies and allocations it is allowed, in a budget block between its contract block, if any, and `func`. `budget` is not a keyword: it starts a block only at the start of a declaration (top level or inside `impl`) when `{` follows, so `budget` stays usable as a function, local or field name. Items are `bounds_checks`, `copies` and `allocations`, each followed by a plain integer from 0 to 2147483647, separated by newlines or `;`; an empty block constrains nothing. A misplaced block (before anything but `func`, or on an interface method) or an item that is not a name and an integer is a syntax error. An unknown item name, an item given twice, or a value with a type suffix or out of range is `BUDGET_INVALID`, once per offending item. A budget counts the entries of `show-bounds-checks`, `show-copies` and `show-allocations` located in its function's declaration, closures included; enforcement by `kern check` and `kern build` is specified in `specs/declared-budgets/SPEC.md`.
+Diagnostics: `BUDGET_INVALID`
+Accepted:
+```kern
+module m
+budget { bounds_checks 0; allocations 0 }
+func rank(xs: view[]u64, key: u64) -> usize { return 0usize }
+```
+Rejected:
+```kern
+module m
+budget { bounds_checks 0; loops 1 }    // BUDGET_INVALID: loops is not a budget item
+func rank(xs: view[]u64, key: u64) -> usize { return 0usize }
+```
+
 ## Trap handlers
 A trap (§6) runs no destructors and no release functions, unwinds no frames, and must not be caught or resumed. `trap.set_handler(f: func(view TrapInfo)) -> func(view TrapInfo)` installs `f` process-wide as a single atomic `seq_cst` exchange and returns the previously installed handler; a trapping thread selects the handler by one `seq_cst` load at the moment of the trap, runs it at most once, and then terminates (halt in freestanding mode, process abort in hosted mode). A trap inside the handler terminates immediately. **Handler obligation (ADR-012):** a custom handler is a trusted boundary. It may run in signal context on an interrupted thread (a hosted stack trap is a guard-page fault), so it must not allocate, take a lock, spawn, perform buffered I/O, or call FFI or a custom allocator that does any of these; the guaranteed-safe operations are the runtime's unbuffered `print_*` output, atomics, and computation on `TrapInfo` and pre-existing data. The obligation applies to every trap kind and the runtime performs no checks for it: a violation may deadlock the process or trap a second time, in which case the nested-trap path terminates it by `SIGABRT`; memory safety is unaffected.
 

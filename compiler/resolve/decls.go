@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/dshills/kern/compiler/ast"
@@ -1182,6 +1183,7 @@ func (r *resolver) primImpls(prim string, iface *InterfaceDecl) bool {
 // methods (nil otherwise); selfT is the Self type parameter for interfaces.
 func (r *resolver) funcSig(m *Module, file string, outer *scope, d *ast.FuncDecl, recv Type, selfT *TypeParamType, ownerParams []*TypeParamType) *FuncDecl {
 	fd := &FuncDecl{Name: d.Name, Module: m.Name, Pos: d.Pos, Release: d.Release, Contract: d.Contract, Extern: d.Extern, AST: d, OwnerParams: ownerParams, File: file}
+	r.checkBudget(file, d)
 	fd.TypeParams = r.typeParams(m, file, d.TypeParams, d.Name)
 	sc := outer.child()
 	for _, tp := range fd.TypeParams {
@@ -1275,6 +1277,38 @@ func (r *resolver) funcSig(m *Module, file string, outer *scope, d *ast.FuncDecl
 		r.pendingFFI = append(r.pendingFFI, pendingFFI{file, fd})
 	}
 	return fd
+}
+
+// budgetKinds are the items a budget block may name (spec §7.6).
+var budgetKinds = map[string]bool{"bounds_checks": true, "copies": true, "allocations": true}
+
+// budgetMax is the largest budget value, 2^31 - 1.
+const budgetMax = 1<<31 - 1
+
+// checkBudget reports one BUDGET_INVALID per offending item of d's budget
+// block (spec §7.6): an unknown name, a name already given, then a value
+// with a type suffix or above budgetMax, the first of these that applies.
+func (r *resolver) checkBudget(file string, d *ast.FuncDecl) {
+	if d.Budget == nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, it := range d.Budget.Items {
+		valuePos := ast.Pos{Start: it.End - len(it.Value), End: it.End}
+		digits := it.Value[:len(it.Value)-len(strings.TrimLeft(it.Value, "0123456789_"))]
+		v, err := strconv.ParseUint(strings.ReplaceAll(digits, "_", ""), 10, 64)
+		switch {
+		case !budgetKinds[it.Name]:
+			r.errorf("BUDGET_INVALID", file, it.NamePos, "unknown budget item %s: a budget names bounds_checks, copies or allocations", it.Name)
+		case seen[it.Name]:
+			r.errorf("BUDGET_INVALID", file, it.NamePos, "budget item %s is given twice for function %s", it.Name, d.Name)
+		case digits != it.Value:
+			r.errorf("BUDGET_INVALID", file, valuePos, "budget value %s has a type suffix: write a plain integer", it.Value)
+		case err != nil || v > budgetMax:
+			r.errorf("BUDGET_INVALID", file, valuePos, "budget value %s exceeds %d", it.Value, budgetMax)
+		}
+		seen[it.Name] = true
+	}
 }
 
 func (r *resolver) checkFFI(file string, fd *FuncDecl) {

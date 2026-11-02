@@ -1,0 +1,5 @@
+//! expect: reject BUDGET_INVALID rule=7.6
+//! twin: budget_invalid_ok
+module m
+budget { bounds_checks 0; copies 0u64 }   // BUDGET_INVALID: a budget value is a plain integer
+func sum(a: u64, b: u64) -> u64 { return a + b }

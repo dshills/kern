@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: accept
+//! twin: budget_invalid
+module m
+budget { bounds_checks 0; copies 0 }
+func sum(a: u64, b: u64) -> u64 { return a + b }

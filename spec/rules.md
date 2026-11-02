@@ -24,6 +24,7 @@ Rule identifiers are `section.bullet` into the specification (`T.n` = spec/types
 | `API_UNSUPPORTED_SCHEMA` | 7.4 | api | 0 | schema_version is not supported |
 | `ASSIGN_IMMUTABLE` | T.5 | lang | 0 | assignment through a view or to a non-place |
 | `ATOMIC_INVALID_ORDERING` | 5.5.5 | lang | 0 | memory ordering not permitted for this atomic operation |
+| `BUDGET_INVALID` | 7.6 | lang | 0 | a budget item names an unknown kind, repeats one, or has a suffixed or out-of-range value |
 | `CALL_ARITY` | T.5 | lang | 0 | wrong number of arguments |
 | `CLI_INVALID_FLAGS` | P.0 | cli | 0 | invalid or incompatible command-line flags |
 | `CONDVAR_NOT_GUARD` | 5.5.4 | lang | 0 | Condvar.wait argument is not the edit bound by a Mutex lock |
