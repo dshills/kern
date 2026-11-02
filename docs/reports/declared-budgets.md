@@ -9,7 +9,7 @@ offline here, and a paid run is the owner's decision (below).
 ## Why
 
 The four-arm experiment (`docs/reports/agent-four-arms.md`) found that on
-suite 4 the plain arm, with text diagnostics and nothing else, failed 85
+suite 4 the plain arm, with text diagnostics and nothing else, failed 84
 to 96% of its trials, mostly by replying DONE on a correct program that
 still had runtime-checked bounds checks. Nothing it received said which
 checks remained. The arms that succeeded were told what the compiler
