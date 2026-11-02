@@ -1,0 +1,47 @@
+[
+ {
+  "function": "sort",
+  "site": "xs[j - 1usize]",
+  "idiom": "transitive bound"
+ },
+ {
+  "function": "sort",
+  "site": "xs[j]",
+  "idiom": "transitive bound"
+ },
+ {
+  "function": "sort",
+  "site": "xs[j]",
+  "idiom": "transitive bound"
+ },
+ {
+  "function": "dedup",
+  "site": "xs[w - 1usize]",
+  "idiom": "transitive bound"
+ },
+ {
+  "function": "dedup",
+  "site": "xs[w]",
+  "idiom": "transitive bound"
+ },
+ {
+  "function": "contains",
+  "site": "xs[mid]",
+  "idiom": "midpoint"
+ },
+ {
+  "function": "rank",
+  "site": "xs[mid]",
+  "idiom": "midpoint"
+ },
+ {
+  "function": "pair_sum",
+  "site": "xs[lo]",
+  "idiom": "two pointers"
+ },
+ {
+  "function": "pair_sum",
+  "site": "xs[hi]",
+  "idiom": "two pointers"
+ }
+]

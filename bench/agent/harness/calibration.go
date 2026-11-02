@@ -249,6 +249,22 @@ func auditIdioms(sites []site, mapping []mappedSite, required []string) error {
 
 var stdImport = regexp.MustCompile(`(?m)^\s*import\s+"std/`)
 
+// budgetLine is a line holding only a budget block.
+var budgetLine = regexp.MustCompile(`^\s*budget \{[^}]*\}\s*$`)
+
+// programLines counts a source's lines for spec R4's size rule, leaving
+// out budget-block lines: the budgeted suite (specs/declared-budgets §5)
+// adds one per function, which is no more program to read.
+func programLines(b []byte) int {
+	n := 0
+	for _, l := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		if !budgetLine.MatchString(l) {
+			n++
+		}
+	}
+	return n
+}
+
 // mechanicalChecks applies spec R4's line count and import rule to the
 // start, reference and natural sources, the reference's run time, and
 // for a review task the reference's added unsafe; nil when all hold.
@@ -262,7 +278,7 @@ func mechanicalChecks(ctx context.Context, kernBin string, t *task) []string {
 				errs = append(errs, fmt.Sprintf("%s/%s: %v", which, f, err))
 				continue
 			}
-			n := strings.Count(strings.TrimRight(string(b), "\n"), "\n") + 1
+			n := programLines(b)
 			if n < 60 || n > 160 {
 				errs = append(errs, fmt.Sprintf("%s/%s has %d lines, not 60 to 160", which, f, n))
 			}

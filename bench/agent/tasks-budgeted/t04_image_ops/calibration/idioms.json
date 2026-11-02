@@ -1,0 +1,72 @@
+[
+ {
+  "function": "blur",
+  "site": "src[up + left]",
+  "idiom": "grid"
+ },
+ {
+  "function": "blur",
+  "site": "src[up + x]",
+  "idiom": "grid"
+ },
+ {
+  "function": "blur",
+  "site": "src[up + right]",
+  "idiom": "grid"
+ },
+ {
+  "function": "blur",
+  "site": "src[mid + left]",
+  "idiom": "grid"
+ },
+ {
+  "function": "blur",
+  "site": "src[mid + x]",
+  "idiom": "grid"
+ },
+ {
+  "function": "blur",
+  "site": "src[mid + right]",
+  "idiom": "grid"
+ },
+ {
+  "function": "blur",
+  "site": "src[down + left]",
+  "idiom": "grid"
+ },
+ {
+  "function": "blur",
+  "site": "src[down + x]",
+  "idiom": "grid"
+ },
+ {
+  "function": "blur",
+  "site": "src[down + right]",
+  "idiom": "grid"
+ },
+ {
+  "function": "blur",
+  "site": "dst[mid + x]",
+  "idiom": "grid"
+ },
+ {
+  "function": "flip",
+  "site": "g[row + x]",
+  "idiom": "grid"
+ },
+ {
+  "function": "flip",
+  "site": "g[row + w - 1usize - x]",
+  "idiom": "mirrored index"
+ },
+ {
+  "function": "row_sums",
+  "site": "g[y * w + x]",
+  "idiom": "grid"
+ },
+ {
+  "function": "scroll",
+  "site": "src[(i + k) % len(src)]",
+  "idiom": "modulo"
+ }
+]

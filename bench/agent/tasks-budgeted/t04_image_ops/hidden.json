@@ -1,0 +1,18 @@
+{
+ "main": "image.kern",
+ "expected_output": "84 78 87 96 90 69 63 72 81 75 114 108 117 126 120 99 93 102 111 105 \n4: 435 360 585 510 \n63 72 81 90 99 108 117 126 135 144 153 162 171 180 9 18 27 36 45 54 \n45 36 27 18 9 90 81 72 63 54 135 126 117 108 99 180 171 162 153 144 \n11 11 31 33 33 14 8 7 57 58 59 9 \n1: 133 \n2 6 5 11 4 7 0 3 250 1 8 40 \n8 1 250 3 0 7 4 11 5 6 2 40 \n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 0,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "image.blur",
+  "image.flip",
+  "image.row_sums",
+  "image.scroll"
+ ],
+ "frozen_functions": [
+  "main",
+  "show",
+  "report"
+ ]
+}

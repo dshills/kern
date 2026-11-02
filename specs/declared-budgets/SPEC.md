@@ -256,7 +256,8 @@ check cleanly, run and print the expected output) holds as before.
 
 Six of suite 4's starts (the rewrite and debugging tasks t04 to t09)
 already contain runtime bounds checks (15, 9, 8, 9, 9 and 17 on
-2026-11-02); the other four are stubs with none. In the budgeted suite
+2026-11-02); t01 to t03 are stubs with none, and t10's start does not
+check at all (it is the review task's starting defect). In the budgeted suite
 those six starts fail `kern check` from the first call, which is the
 intended effect: the agent is told every site to fix before it edits.
 
@@ -265,7 +266,10 @@ for each of the ten tasks (the test fails if it finds a different
 number):
 - every reference passes `kern check` with its budgets and still prints
   the expected output;
-- every start, and every natural solution with the script's budget
+- t10's start, a review task whose start does not check without its
+  budgets (unsafe operations outside `unsafe`), reports exactly its own
+  errors and no budget error, since budgets follow a clean check (R6);
+- every other start, and every natural solution with the script's budget
   blocks added in a temporary directory, gets from `kern check` exactly
   the runtime bounds checks `show-bounds-checks` lists for the same
   files, as the counted locations (file and span) of its

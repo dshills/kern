@@ -160,26 +160,7 @@ func main() {
 		tasks = sel
 	}
 	if *dryRun {
-		failed := false
-		for _, t := range tasks {
-			ok, detail := validateReference(context.Background(), root, kernBin, t)
-			fmt.Printf("%s: reference solution %s %s\n", t.Name, map[bool]string{true: "passes", false: "FAILS"}[ok], detail)
-			fmt.Printf("%s: reference measures %s\n", t.Name, measure(context.Background(), kernBin, t, filepath.Join(t.Dir, "reference")))
-			fmt.Printf("%s: start measures %s\n", t.Name, measure(context.Background(), kernBin, t, filepath.Join(t.Dir, "start")))
-			bad, detail2 := hiddenPasses(context.Background(), root, kernBin, t, filepath.Join(t.Dir, "start"))
-			fmt.Printf("%s: starting sources %s hidden tests %s\n", t.Name, map[bool]string{true: "already pass (task is trivial!)", false: "fail as intended"}[bad], detail2)
-			if msg := promptStatesBudget(t); msg != "" {
-				fmt.Printf("%s: %s\n", t.Name, msg)
-				failed = true
-			}
-			if !ok || bad {
-				failed = true
-			}
-			if t.Natural != "" && !calibrate(context.Background(), root, kernBin, t) {
-				failed = true
-			}
-		}
-		if failed {
+		if !dryRunTasks(root, kernBin, tasks) {
 			os.Exit(1)
 		}
 		return
@@ -245,6 +226,33 @@ type job struct {
 }
 
 // recordName is a trial record's file name in its run directory.
+// dryRunTasks validates tasks without calling a model and prints the
+// results: each reference passes its hidden tests, each start fails them,
+// each prompt states its hidden budgets, and each natural solution
+// calibrates. It reports whether every task passed.
+func dryRunTasks(root, kernBin string, tasks []*task) bool {
+	failed := false
+	for _, t := range tasks {
+		ok, detail := validateReference(context.Background(), root, kernBin, t)
+		fmt.Printf("%s: reference solution %s %s\n", t.Name, map[bool]string{true: "passes", false: "FAILS"}[ok], detail)
+		fmt.Printf("%s: reference measures %s\n", t.Name, measure(context.Background(), kernBin, t, filepath.Join(t.Dir, "reference")))
+		fmt.Printf("%s: start measures %s\n", t.Name, measure(context.Background(), kernBin, t, filepath.Join(t.Dir, "start")))
+		bad, detail2 := hiddenPasses(context.Background(), root, kernBin, t, filepath.Join(t.Dir, "start"))
+		fmt.Printf("%s: starting sources %s hidden tests %s\n", t.Name, map[bool]string{true: "already pass (task is trivial!)", false: "fail as intended"}[bad], detail2)
+		if msg := promptStatesBudget(t); msg != "" {
+			fmt.Printf("%s: %s\n", t.Name, msg)
+			failed = true
+		}
+		if !ok || bad {
+			failed = true
+		}
+		if t.Natural != "" && !calibrate(context.Background(), root, kernBin, t) {
+			failed = true
+		}
+	}
+	return !failed
+}
+
 func recordName(task, model, arm string, trial int) string {
 	return fmt.Sprintf("%s_%s_%s_%d.json", task, strings.ReplaceAll(model, ":", "-"), arm, trial)
 }

@@ -1,0 +1,32 @@
+[
+ {
+  "function": "histogram",
+  "site": "counts[usize(b)]",
+  "idiom": "byte into a table"
+ },
+ {
+  "function": "digit_counts",
+  "site": "digits[usize(c - 48u8)]",
+  "idiom": "offset digit"
+ },
+ {
+  "function": "most_frequent",
+  "site": "counts[best]",
+  "idiom": "argmax"
+ },
+ {
+  "function": "top_digit",
+  "site": "digits[best]",
+  "idiom": "argmax"
+ },
+ {
+  "function": "final_run",
+  "site": "data[len(data) - 1usize]",
+  "idiom": "last element"
+ },
+ {
+  "function": "final_run",
+  "site": "data[i - 1usize]",
+  "idiom": "transitive bound"
+ }
+]

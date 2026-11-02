@@ -1,0 +1,18 @@
+{
+ "main": "heap.kern",
+ "expected_output": "false\ntrue\n1 2 3 5\n7 8 9 9 \ntrue\n5 10 25 40 20 30 \n5 10 20\n4 5 6 7 9 8 \n1 3 2 9 4 5 \ntrue\n10 20 30 50 40 \n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 0,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "heap.sift_down",
+  "heap.heapify",
+  "heap.push",
+  "heap.pop",
+  "heap.is_heap"
+ ],
+ "frozen_functions": [
+  "main",
+  "show"
+ ]
+}

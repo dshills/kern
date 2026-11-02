@@ -1,0 +1,37 @@
+[
+ {
+  "function": "reverse",
+  "site": "s[i]",
+  "idiom": "mirrored index"
+ },
+ {
+  "function": "reverse",
+  "site": "s[n - 1usize - i]",
+  "idiom": "mirrored index"
+ },
+ {
+  "function": "is_palindrome",
+  "site": "s[lo]",
+  "idiom": "two pointers"
+ },
+ {
+  "function": "is_palindrome",
+  "site": "s[hi - 1usize]",
+  "idiom": "two pointers"
+ },
+ {
+  "function": "rotate",
+  "site": "src[(i + k) % len(src)]",
+  "idiom": "modulo"
+ },
+ {
+  "function": "ends_with",
+  "site": "s[len(s) - 1usize]",
+  "idiom": "last element"
+ },
+ {
+  "function": "trim_len",
+  "site": "s[n - 1usize]",
+  "idiom": "last element"
+ }
+]

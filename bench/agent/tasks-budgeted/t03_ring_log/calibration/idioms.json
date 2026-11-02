@@ -1,0 +1,37 @@
+[
+ {
+  "function": "push",
+  "site": "buf[log.next]",
+  "idiom": "modulo"
+ },
+ {
+  "function": "get",
+  "site": "buf[(oldest + i) % len(buf)]",
+  "idiom": "modulo"
+ },
+ {
+  "function": "last",
+  "site": "buf[len(buf) - 1usize]",
+  "idiom": "last element"
+ },
+ {
+  "function": "last",
+  "site": "buf[log.next - 1usize]",
+  "idiom": "modulo"
+ },
+ {
+  "function": "sum_newest",
+  "site": "buf[(log.next + len(buf) - 1usize - j) % len(buf)]",
+  "idiom": "modulo"
+ },
+ {
+  "function": "copy_out",
+  "site": "dst[i]",
+  "idiom": "length relation"
+ },
+ {
+  "function": "max_window",
+  "site": "xs[i + k]",
+  "idiom": "window"
+ }
+]

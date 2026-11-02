@@ -1,0 +1,19 @@
+{
+ "main": "set.kern",
+ "expected_output": "3 3 7 7 11 19 25 42 42 42 \ntrue 2 false\nfalse 6 false\nfalse 7 true\ntrue 7 false\nfalse 10 false\n6\n3 7 11 19 25 42 \n10 30 50 70 90 \ntrue 0 false\nfalse 1 false\nfalse 3 true\nfalse 5 true\n5\n10 30 50 70 90 \nfalse 0 false\n0\n",
+ "must_check_clean": true,
+ "max_runtime_bounds_checks": 0,
+ "no_unsafe_added": true,
+ "required_functions": [
+  "set.sort",
+  "set.dedup",
+  "set.contains",
+  "set.rank",
+  "set.pair_sum"
+ ],
+ "frozen_functions": [
+  "main",
+  "show",
+  "query"
+ ]
+}

@@ -1,0 +1,10 @@
+[
+ {"function": "at", "site": "m[r * n + c]", "idiom": "grid"},
+ {"function": "put", "site": "m[r * n + c]", "idiom": "grid"},
+ {"function": "row_sums", "site": "sums[r]", "idiom": "transitive bound"},
+ {"function": "col_sums", "site": "sums[c]", "idiom": "transitive bound"},
+ {"function": "col_sums", "site": "sums[c]", "idiom": "transitive bound"},
+ {"function": "row_reversed", "site": "dst[n - 1usize - c]", "idiom": "mirrored index"},
+ {"function": "col_reversed", "site": "dst[n - 1usize - r]", "idiom": "mirrored index"},
+ {"function": "anti_diagonal", "site": "dst[i]", "idiom": "transitive bound"}
+]

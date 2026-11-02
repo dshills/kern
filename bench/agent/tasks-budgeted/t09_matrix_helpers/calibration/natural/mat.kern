@@ -1,0 +1,142 @@
+module mat
+// Square matrices stored row by row in a flat sequence: entry (r, c) of an
+// n x n matrix m is m[r * n + c], and len(m) is n * n. The vectors the
+// functions below write into must have at least n entries; a function
+// given a shorter vector leaves it unchanged.
+
+// at returns entry (r, c) of m.
+func at(m: view[]u64, n: usize, r: usize, c: usize) -> u64 {
+    return m[r * n + c]
+}
+
+// put sets entry (r, c) of m to v.
+func put(m: edit[]u64, n: usize, r: usize, c: usize, v: u64) {
+    m[r * n + c] = v
+}
+
+// fill sets entry (r, c) of m to 10 * r + c.
+func fill(m: edit[]u64, n: usize) {
+    for r in 0usize..n {
+        for c in 0usize..n { put(m, n, r, c, 10u64 * u64(r) + u64(c)) }
+    }
+}
+
+// flip reverses the order of the entries of every row of m.
+func flip(m: edit[]u64, n: usize) {
+    for r in 0usize..n {
+        var c: usize = 0usize
+        while c < n / 2usize {
+            t := at(m, n, r, c)
+            u := at(m, n, r, n - 1usize - c)
+            put(m, n, r, c, u)
+            put(m, n, r, n - 1usize - c, t)
+            c = c + 1usize
+        }
+    }
+}
+
+// symmetrize copies every entry below the diagonal onto its mirror image
+// above it: entry (c, r) becomes entry (r, c) for every c < r.
+func symmetrize(m: edit[]u64, n: usize) {
+    for r in 0usize..n {
+        for c in 0usize..r {
+            v := at(m, n, r, c)
+            put(m, n, c, r, v)
+        }
+    }
+}
+
+// trace is the sum of the diagonal entries of m.
+func trace(m: view[]u64, n: usize) -> u64 {
+    var s: u64 = 0u64
+    for i in 0usize..n { s = s + at(m, n, i, i) }
+    return s
+}
+
+// row_sums sets sums[r] to the sum of row r of m.
+func row_sums(m: view[]u64, n: usize, sums: edit[]u64) {
+    if len(sums) < n { return }
+    for r in 0usize..n {
+        var s: u64 = 0u64
+        for c in 0usize..n { s = s + at(m, n, r, c) }
+        sums[r] = s
+    }
+}
+
+// col_sums sets sums[c] to the sum of column c of m.
+func col_sums(m: view[]u64, n: usize, sums: edit[]u64) {
+    if len(sums) < n { return }
+    for c in 0usize..n { sums[c] = 0u64 }
+    for r in 0usize..n {
+        for c in 0usize..n { sums[c] = sums[c] + at(m, n, r, c) }
+    }
+}
+
+// row_reversed sets dst to row r of m read from the last column back.
+func row_reversed(m: view[]u64, n: usize, r: usize, dst: edit[]u64) {
+    if len(dst) < n { return }
+    for c in 0usize..n { dst[n - 1usize - c] = at(m, n, r, c) }
+}
+
+// col_reversed sets dst to column c of m read from the bottom row up.
+func col_reversed(m: view[]u64, n: usize, c: usize, dst: edit[]u64) {
+    if len(dst) < n { return }
+    for r in 0usize..n { dst[n - 1usize - r] = at(m, n, r, c) }
+}
+
+// anti_diagonal sets dst[i] to entry (i, n - 1 - i) of m.
+func anti_diagonal(m: view[]u64, n: usize, dst: edit[]u64) {
+    if len(dst) < n { return }
+    for i in 0usize..n { dst[i] = at(m, n, i, n - 1usize - i) }
+}
+
+func show(xs: view[]u64) {
+    for x in xs {
+        print_u64(x)
+        print_str(" ")
+    }
+    println()
+}
+
+func report(m: edit[]u64, n: usize, v: edit[]u64) {
+    fill(m, n)
+    print_u64(trace(m, n))
+    println()
+    row_sums(m, n, v)
+    show(v)
+    col_sums(m, n, v)
+    show(v)
+    row_reversed(m, n, 1usize, v)
+    show(v)
+    col_reversed(m, n, 1usize, v)
+    show(v)
+    anti_diagonal(m, n, v)
+    show(v)
+    flip(m, n)
+    show(m)
+    print_u64(trace(m, n))
+    println()
+    fill(m, n)
+    symmetrize(m, n)
+    show(m)
+    print_u64(trace(m, n))
+    println()
+    row_sums(m, n, v)
+    show(v)
+}
+
+func main() -> i32 {
+    var a: [9]u64 = zero()
+    var b: [16]u64 = zero()
+    var v: [4]u64 = zero()
+    with m := a[0usize:9usize] {
+        with s := v[0usize:3usize] { report(m, 3usize, s) }
+    }
+    with m := b[0usize:16usize] {
+        with s := v[0usize:4usize] { report(m, 4usize, s) }
+    }
+    with m := b[0usize:16usize] {
+        with s := v[0usize:2usize] { col_reversed(m, 4usize, 0usize, s); show(s) }
+    }
+    return 0i32
+}
