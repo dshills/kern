@@ -126,18 +126,74 @@ to make a site proven; in the four-arm runs that knowledge came from the
 query tool's labels or from `docs/bounds-checks.md`, neither of which the
 plain arm has.
 
-## A paid run
+## The paid run, 2026-11-02
 
-Whether to run it is the owner's call; nothing here spent model credit.
-The comparison it would make: the plain arm on the budgeted suite
-against the four-arm report's plain arm (2 of 50 for DeepSeek-V4.1-Flash,
-6 of 41 for Kimi-K3) and `documented` arm (44 of 50, 37 of 41) on suite
-4, same models, same budgets (20 iterations, 30 minutes). It needs Wafer
-credit, which ran out on 2026-11-01:
+Authorized by the owner after adding Wafer credit ("Credits added. Run
+tests"). Plain arm only (text diagnostics, no queries, no bounds-check
+document), on `bench/agent/tasks-budgeted`, with the four-arm report's
+budgets (20 iterations, 30 minutes) and medium effort: 100 trials, all
+served, records in `bench/agent/runs/20261102-134710` (git-ignored).
+Command:
 
 ```bash
-go run ./bench/agent/harness -tasks-dir bench/agent/tasks-budgeted -arms plain -models wafer:DeepSeek-V4.1-Flash,wafer:Kimi-K3 -effort medium -trials 5 -parallel 6 -call-timeout 15m -out docs/reports/declared-budgets-run.md
+go run ./bench/agent/harness -tasks-dir bench/agent/tasks-budgeted -arms plain -models wafer:DeepSeek-V4.1-Flash,wafer:Kimi-K3 -effort medium -trials 5 -parallel 6 -call-timeout 15m
 ```
 
-If it runs, this report gains the budgeted plain arm's successes and
-median iterations per task beside those two arms.
+Beside the four-arm report's arms on suite 4 for the same models (Kimi's
+run complete after its errored trials were rerun the same day):
+
+| model | arm | succeeded | median iterations of successes | tokens per success |
+|---|---|---|---|---|
+| Flash | plain, suite 4 | 2 of 50 | 16 | 11.5M |
+| | **plain, budgeted suite** | **28 of 50** | 10 | 1.11M |
+| | documented, suite 4 | 44 of 50 | 6.5 | 0.43M |
+| Kimi-K3 | plain, suite 4 | 8 of 50 | 5 | 1.68M |
+| | **plain, budgeted suite** | **42 of 50** | 8 | 0.55M |
+| | queries, suite 4 | 43 of 50 | 8 | 0.56M |
+| | documented, suite 4 | 45 of 50 | 5 | 0.24M |
+
+Per task, successes out of 5 (plain suite 4 / plain budgeted / documented
+suite 4):
+
+| task | Flash | Kimi-K3 |
+|---|---|---|
+| t01 sorted_set | 0 / 2 / 5 | 1 / 5 / 4 |
+| t02 byte_stats | 0 / 5 / 4 | 0 / 4 / 5 |
+| t03 ring_log | 0 / 5 / 5 | 2 / 4 / 5 |
+| t04 image_ops | 1 / 1 / 5 | 0 / 2 / 5 |
+| t05 range_sums | 0 / 2 / 5 | 2 / 4 / 5 |
+| t06 text_tools | 1 / 1 / 5 | 3 / 5 / 5 |
+| t07 heap_queue | 0 / 1 / 0 | 0 / 3 / 1 |
+| t08 top_scores | 0 / 4 / 5 | 0 / 5 / 5 |
+| t09 matrix_helpers | 0 / 4 / 5 | 0 / 5 / 5 |
+| t10 buffer_review | 0 / 3 / 5 | 0 / 5 / 5 |
+
+**What it shows.**
+- Putting the requirement in `check` turns the plain arm from the worst
+  arm into one close to the tools: Kimi-K3 goes from 8 to 42 of 50, level
+  with the query tool (43) and near the document (45); DeepSeek-V4.1-Flash
+  goes from 2 to 28 of 50, short of the document (44). Tokens per success
+  fall tenfold for Flash and threefold for Kimi.
+- The plain arm's old failure, replying DONE on a program that still had
+  runtime-checked checks it was never told about, is gone. No agent
+  removed a budget block. Of the 30 failures, 20 ended with `check` still
+  reporting only `BUDGET_EXCEEDED` (18 out of iterations, 2 declaring done
+  regardless), 7 with a clean `check` and a hidden test failing on
+  something else, 3 with other errors.
+- So the remaining gap is knowing how, not where: the agent sees
+  `xs[mid]` named and does not know which rewrite the proof rules accept.
+  The tasks where budgets help least for Flash (t04, t06, t05: grid,
+  reversed and midpoint indexes, "arithmetic the rules do not track") are
+  the ones where the document's rewrite advice matters most. t07 is the
+  one task where budgets beat the document for both models.
+- **Caveats.** Five trials per cell. The run used `main`'s language
+  reference, which now includes Rule 7.6 (what a budget is) and a link
+  to `docs/bounds-checks.md`, whose contents the plain arm does not
+  receive; the suite-4 arms ran with the 29f96c4 reference. The
+  comparison is across suites that share starts, references, natural
+  solutions and hidden tests and differ only by the budget lines and one
+  sentence per prompt.
+
+**Next.** The failures point at telling the agent why each check is not
+proven, in `show-bounds-checks` and in the `BUDGET_EXCEEDED` message, so
+that the plain arm gets the document's advice per site.
