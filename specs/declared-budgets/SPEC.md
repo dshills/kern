@@ -115,7 +115,7 @@ The following consequences of this rule are required and tested (R8):
 ```ebnf
 func_decl     = [ contract ] [ budget ] "func" ident ...   (* the rest unchanged *)
 budget        = "budget" "{" [ budget_item { sep budget_item } [ sep ] ] "}" ;
-budget_item   = ( "bounds_checks" | "copies" | "allocations" ) int_lit ;
+budget_item   = ident int_lit ;   (* ident: bounds_checks, copies or allocations (R2) *)
 ```
 
 The parser must recognize `budget` as a block only at the start of a
@@ -140,16 +140,19 @@ shows the block. The formatter prints it on its own line before `func`
 (after a `contract` block), items in source order separated by `; ` with
 no separator after the last, and formatting is idempotent.
 
-**R2. Well-formedness.** Each of the following is `BUDGET_INVALID`, one
-diagnostic per offending item or block, reported by every command that
-resolves the program:
-- an item name other than the three of §3;
+**R2. Well-formedness.** What the grammar of §3 rejects is a `SYNTAX`
+error, as for any other declaration: a budget block before anything but
+`func` (a `contract`, struct, union, interface, `impl`, constant,
+thread-local or `extern` declaration, or the end of the file), and an
+item that is not an identifier followed by an integer literal (`n`,
+`-1`). This keeps the parser's acceptance a property of the grammar, which
+the self-hosted parser (`examples/selfhost_parser`) must reproduce on
+every file under `tests/`. Each of the following is `BUDGET_INVALID`, one
+diagnostic per offending item, reported by every command that resolves
+the program:
+- an item name other than `bounds_checks`, `copies` and `allocations`;
 - the same item twice in one block;
-- a value that is not a decimal integer literal without suffix, or that
-  exceeds 2^31 − 1;
-- a budget block before anything but a `func` declaration (a struct,
-  union, interface, `impl`, constant, thread-local or `extern`
-  declaration, or the end of the file).
+- a value with a type suffix (`0u64`), or one that exceeds 2^31 − 1.
 
 **R3. Counting.** For a budgeted function F and each item in its block,
 the count is the number of entries belonging to F (§2) in the show
@@ -164,7 +167,8 @@ filtering its entries by §2; a test enforces the equality (R8).
 
 **R4. Violation.** When an item's count exceeds its value, the command
 reports one `BUDGET_EXCEEDED` error for that item of that function:
-- `span`: the first entry over budget, in source order;
+- `span`: the first entry over budget: with value V, the entry V + 1 in
+  source order;
 - `related`: the budget item (label `budget declared here`) and every
   other entry counted, in source order (label `runtime-checked bounds
   check`, `copy` or `allocation site`);
@@ -215,7 +219,10 @@ gains **Rule 7.6** restating it, and `docs/bounds-checks.md` says that a
 **R8. Tests.** At least:
 - parse, dump and format round trips for every item, both separators,
   with and without `contract`, and inside `impl`;
-- each R2 case, and `budget` used as an ordinary identifier;
+- each R2 case, both the `SYNTAX` and the `BUDGET_INVALID` ones, and
+  `budget` used as an ordinary identifier;
+- the self-hosted parser accepting and dumping every budget form the Go
+  parser does (its existing corpus test, over the new fixtures);
 - each item exceeded and met, at `debug` and at `release`;
 - the R3 equality: for every fixture with a budget, the count equals the
   filtered show-query result at both levels;
@@ -245,15 +252,26 @@ The natural solutions (`calibration/natural/`) are copied unchanged, with
 no budget blocks, so the suite's calibration (which requires them to
 check cleanly, run and print the expected output) holds as before.
 
-Offline, with no model calls, a Go test over the generated suite checks:
-- every start and reference passes `kern check` with its budgets, and
-  the reference still prints the expected output;
-- every natural solution, with the script's budget blocks added in a
-  temporary directory, fails `kern check` with `BUDGET_EXCEEDED` errors
-  whose counted locations (file and span) are exactly the runtime bounds
-  checks `show-bounds-checks` lists for the same files, so a plain-arm
-  agent writing it would be told each one;
-- the harness's dry run passes on the new suite.
+Six of suite 4's starts (the rewrite and debugging tasks t04 to t09)
+already contain runtime bounds checks (15, 9, 8, 9, 9 and 17 on
+2026-11-02); the other four are stubs with none. In the budgeted suite
+those six starts fail `kern check` from the first call, which is the
+intended effect: the agent is told every site to fix before it edits.
+
+Offline, with no model calls, a Go test over the generated suite checks,
+for each of the ten tasks (the test fails if it finds a different
+number):
+- every reference passes `kern check` with its budgets and still prints
+  the expected output;
+- every start, and every natural solution with the script's budget
+  blocks added in a temporary directory, gets from `kern check` exactly
+  the runtime bounds checks `show-bounds-checks` lists for the same
+  files, as the counted locations (file and span) of its
+  `BUDGET_EXCEEDED` errors, and no other diagnostic: clean when there
+  are none, failing when there are any. Every natural solution has at
+  least 3 (suite 4's calibration), so each fails, and a plain-arm agent
+  writing it would be told each site;
+- the harness's dry-run validation passes on the new suite.
 
 A paid run (plain arm, the models of the four-arm report) is the owner's
 call and is not part of this specification. The report the evaluation
