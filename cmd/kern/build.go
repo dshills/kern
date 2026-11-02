@@ -62,6 +62,21 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 	}
 	srcs := pr.Files
 	req := Request{SchemaVersion: diag.SchemaVersion, Command: "build", Files: pr.Names()}
+	// budgets first, at the build's level and target, so that a program
+	// over its budget writes no output (spec §7.6); a program without a
+	// budget block goes straight to the build
+	target := opts.Triple
+	if target == "" {
+		target = native.HostTriple()
+	}
+	bds, err := budgetDiags(srcs, opts.Opt, target, Build)
+	if err != nil {
+		return internal(req, diag.SchemaVersion, err, stdout, stderr)
+	}
+	if len(bds) > 0 {
+		_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: bds})
+		return 2
+	}
 	ds, err := buildHook(srcs, out, opts)
 	if err != nil {
 		return internal(req, diag.SchemaVersion, &InternalError{Err: err}, stdout, stderr)
