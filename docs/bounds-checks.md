@@ -78,3 +78,62 @@ To make such an access proven, compute the index into a local and
 compare that local against `len` of the indexed place on the path just
 before the access, with no store to the local, and no call that edits
 it, in between.
+
+## Declaring a budget
+
+A budget block before a function turns these rules into a check error.
+With `budget { bounds_checks 0 }`, `kern check` and `kern build` fail
+when the function has a runtime-checked bounds check, and the error
+names every one (spec §7, rule 7.6; `docs/ownership.md` Rule 7.6):
+
+```kern
+module rank
+
+// rank is the number of elements of the sorted xs below key.
+budget { bounds_checks 0 }
+func rank(xs: view[]u64, key: u64) -> usize {
+    if len(xs) == 0usize || xs[len(xs) - 1usize] < key { return len(xs) }
+    lo := 0usize
+    hi := len(xs)
+    while lo < hi {
+        mid := (lo + hi) / 2usize
+        if xs[mid] < key { lo = mid + 1usize } else { hi = mid }
+    }
+    return lo
+}
+```
+
+```
+rank.kern:176-196: error [BUDGET_EXCEEDED rule 7.6]: function `rank` has 2 runtime-checked bounds checks, budget 0: 6:29 `xs[len(xs) - 1usize]`, 11:12 `xs[mid]`
+```
+
+Both are forms the rules do not track: `len(xs) - 1` under a length
+test, and a midpoint. Rewritten as the previous section says, with each
+index in a local compared against `len(xs)` just before the access, the
+function meets its budget:
+
+```kern
+budget { bounds_checks 0 }
+func rank(xs: view[]u64, key: u64) -> usize {
+    if len(xs) == 0usize { return 0usize }
+    last := len(xs) - 1usize
+    if last < len(xs) && xs[last] < key { return len(xs) }
+    lo := 0usize
+    hi := len(xs)
+    while lo < hi {
+        mid := (lo + hi) / 2usize
+        if mid < len(xs) && xs[mid] < key { lo = mid + 1usize } else { hi = mid }
+    }
+    return lo
+}
+```
+
+The count is the function's `runtime-checked` entries of
+`show-bounds-checks` at the command's `--opt` level, `debug` by default.
+A check in a helper counts in the helper, also where release inlining
+copies it into the caller, and release inlining can prove a helper's
+check that debug leaves checked, so a budget met with `--opt=release`
+may fail at `debug`. `kern run`, `kern test` and the show queries do
+not enforce budgets, so a program over its budget still runs. The same
+block takes `copies` and `allocations`, counted from `show-copies` and
+`show-allocations`.

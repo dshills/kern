@@ -16,6 +16,9 @@ error. The contract is `specs/language-server/SPEC.md`.
   diagnostic in an imported module is shown on that module's file. The
   message is the compiler's sentence followed by its rule number, and
   the diagnostic's code is its §16 code (`OWN_USE_AFTER_MOVE`, ...).
+  Budgets are the exception: a malformed budget block is reported, but
+  a function over its budget is not, since that takes lowering the
+  program; run `kern check` for budgets (`docs/bounds-checks.md`).
 - **Formatting.** The canonical form of `kern format`; the editor's
   indentation settings are ignored, as the format has none.
 - **Quick fixes.** Where the compiler attaches a machine-applicable fix
