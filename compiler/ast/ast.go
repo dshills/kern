@@ -153,6 +153,20 @@ type FuncDecl struct {
 	Extern     string     // ABI name, e.g. "C", for extern decls
 }
 
+// HeaderStart is the offset just past the function's contract and budget
+// blocks, where its `func` keyword follows: a search for the function's
+// name must start here, since the blocks precede it within its span and
+// may hold the same word (`budget { copies 0 }` before `func copies`).
+func (d *FuncDecl) HeaderStart() int {
+	switch {
+	case d.Budget != nil:
+		return d.Budget.End
+	case d.Contract != nil:
+		return d.Contract.End
+	}
+	return d.Start
+}
+
 // ConstDecl is `const name: T = expr`.
 type ConstDecl struct {
 	Pos

@@ -9,6 +9,7 @@ import (
 	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/parser"
+	"github.com/dshills/kern/compiler/project"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
@@ -32,22 +33,52 @@ func requestHasBudgets(srcs []*source.File) bool {
 }
 
 // budgetDiags evaluates the budgets of a program that resolved and
-// checked clean (spec §7.6, R3 to R6): it lowers the show module of srcs
-// at optLevel with lower and counts against it, the target going to the
-// copies query as show-copies passes it. Diagnostics lower returns (the
-// program did not check after all) are returned unchanged and no budget
-// is evaluated; a lowering error, a missing module or a panic is an
-// InternalError.
+// checked clean (spec §7.6, R3 to R6). A function is counted over the
+// show module of the program the show queries see: the files without
+// their test files (*_test.kern, which only check loads), so a test's
+// calls change no count. A function declared in a test file is counted
+// over the program with its tests, the only one that has it, lowered
+// only when a test file declares a budget. The target goes to the copies
+// query as show-copies passes it. Diagnostics lower returns (the program
+// did not check after all) are returned unchanged; a lowering error, a
+// missing module or a panic is an InternalError.
 func budgetDiags(srcs []*source.File, optLevel, target string, lower lowerFunc) (ds []diag.Diagnostic, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			ds, err = nil, &InternalError{Err: fmt.Errorf("budget evaluation: %v", r)}
 		}
 	}()
-	if !requestHasBudgets(srcs) {
-		return nil, nil
+	var program, tests []*source.File
+	for _, s := range srcs {
+		if project.TestFile(s.Name) {
+			tests = append(tests, s)
+		} else {
+			program = append(program, s)
+		}
 	}
-	mod, lds, lerr := lower(srcs, optLevel)
+	if requestHasBudgets(program) {
+		pds, err := evaluateBudgets(program, optLevel, target, lower, func(string) bool { return true })
+		if err != nil || len(pds) > 0 && pds[0].Code != "BUDGET_EXCEEDED" {
+			return pds, err
+		}
+		ds = pds
+	}
+	if len(tests) > 0 && requestHasBudgets(tests) {
+		tds, err := evaluateBudgets(srcs, optLevel, target, lower, project.TestFile)
+		if err != nil || len(tds) > 0 && tds[0].Code != "BUDGET_EXCEEDED" {
+			return tds, err
+		}
+		ds = append(ds, tds...)
+		diag.Sort(ds)
+	}
+	return ds, nil
+}
+
+// evaluateBudgets lowers files with lower and returns the budget
+// diagnostics of the functions declared in the files keep accepts, or
+// lower's own diagnostics unchanged.
+func evaluateBudgets(files []*source.File, optLevel, target string, lower lowerFunc, keep func(string) bool) ([]diag.Diagnostic, error) {
+	mod, lds, lerr := lower(files, optLevel)
 	switch {
 	case lerr != nil:
 		return nil, &InternalError{Err: fmt.Errorf("budget evaluation: lowering: %w", lerr)}
@@ -56,9 +87,15 @@ func budgetDiags(srcs []*source.File, optLevel, target string, lower lowerFunc) 
 	case mod == nil:
 		return nil, &InternalError{Err: errors.New("budget evaluation: lowering returned no module")}
 	}
-	prog := resolve.ResolveFor(srcs, optLevel == "release")
+	prog := resolve.ResolveFor(files, optLevel == "release")
 	if len(prog.Diags) > 0 {
 		return prog.Diags, nil
 	}
-	return analysis.Budgets(prog, srcs, mod, target), nil
+	var out []diag.Diagnostic
+	for _, d := range analysis.Budgets(prog, files, mod, target) {
+		if keep(d.File) {
+			out = append(out, d)
+		}
+	}
+	return out, nil
 }

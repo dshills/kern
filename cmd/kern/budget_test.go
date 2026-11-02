@@ -299,3 +299,53 @@ func TestBudgetLowerOutcomes(t *testing.T) {
 		t.Errorf("level %q: %v", got, err)
 	}
 }
+
+// A function is found for renaming past its budget block, which may hold
+// the same word as its name (review finding: the search started at the
+// declaration, inside the block).
+func TestBudgetRenameFunction(t *testing.T) {
+	for _, name := range []string{"budget", "copies", "bounds_checks"} {
+		src := "module m\ncontract { requires \"" + name + " holds\" }\nbudget { bounds_checks 0; copies 0 }\nfunc " + name + "(x: u64) -> u64 { return x }\nfunc g() -> u64 { return " + name + "(1u64) }\n"
+		path := writeProject(t, "m.kern", src)
+		at := strings.Index(src, "func "+name) + len("func ")
+		req := fmt.Sprintf(`{"schema_version":"0.4","command":"apply-structured-edit","files":[%q],"edit":{"ops":[{"op":"rename_symbol","file":%q,"span":{"start":%d,"end":%d},"new_name":"limit"}]}}`, path, path, at, at+len(name))
+		code, resp, _ := runWith(t, []string{"apply-structured-edit"}, req)
+		if code != 0 || !resp.OK {
+			t.Fatalf("%s: exit %d %v", name, code, codesOf(resp))
+		}
+		got := resp.Result.(map[string]any)["files"].([]any)[0].(map[string]any)["source"].(string)
+		if !strings.Contains(got, "func limit(x: u64)") || !strings.Contains(got, "return limit(1u64)") || !strings.Contains(got, "budget { bounds_checks 0; copies 0 }") {
+			t.Fatalf("%s: renamed to\n%s", name, got)
+		}
+	}
+}
+
+// Functions outside test files are counted over the program the show
+// queries see, without its test files: a generic instantiated only by a
+// test has no entries, as show-bounds-checks reports (review finding).
+// A budget in a test file is still counted, over the program with tests,
+// and both kinds are reported together.
+func TestBudgetTestFilesNotCounted(t *testing.T) {
+	main := writeProject(t, "main.kern", "module main\nbudget { bounds_checks 0 }\nfunc pick[T: Copy](xs: view[]T, i: usize) -> T { return xs[i] }\nfunc main() -> i32 { return 0i32 }\n",
+		"main_test.kern", "module main\nfunc test_pick() {\n    a := [1u64, 2u64]\n    expect(pick[u64](a[0usize:2usize], 1usize) == 2u64)\n}\n")
+	if code, resp, _ := runWith(t, []string{"check", main}, ""); code != 0 {
+		t.Fatalf("check: exit %d %v", code, codesOf(resp))
+	}
+	_, show, _ := runWith(t, []string{"show-bounds-checks", main}, "")
+	if checks := show.Result.(map[string]any)["checks"].([]any); len(checks) != 0 {
+		t.Fatalf("show-bounds-checks lists %v", checks)
+	}
+	both := writeProject(t, "main.kern", overBudget,
+		"main_test.kern", "module main\nbudget { bounds_checks 0 }\nfunc at(xs: view[]u64, i: usize) -> u64 { return xs[i] }\nfunc test_at() {\n    a := [1u64]\n    expect(at(a[0usize:1usize], 0usize) == 1u64)\n}\n")
+	code, resp, _ := runWith(t, []string{"check", both}, "")
+	if code != 2 || len(resp.Diagnostics) != 2 {
+		t.Fatalf("exit %d %+v", code, resp.Diagnostics)
+	}
+	if f0, f1 := filepath.Base(resp.Diagnostics[0].File), filepath.Base(resp.Diagnostics[1].File); f0 != "main.kern" || f1 != "main_test.kern" {
+		t.Fatalf("files %s, %s", f0, f1)
+	}
+	calls := 0
+	if code, _ := checkDirect(t, []string{both}, false, "", countingLower(&calls)); code != 2 || calls != 2 {
+		t.Fatalf("exit %d, %d lowerings, want 2 (the program, then with its tests)", code, calls)
+	}
+}

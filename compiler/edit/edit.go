@@ -231,7 +231,7 @@ func renameSpans(prog *resolve.Program, srcs []*source.File, file string, span d
 			for _, d := range f.Decls {
 				switch d := d.(type) {
 				case *ast.FuncDecl:
-					if d.Name == name && nameAt(src.Bytes, d.Pos, name, span) {
+					if d.Name == name && nameAt(src.Bytes, ast.Pos{Start: d.HeaderStart(), End: d.End}, name, span) {
 						fd := info.Funcs[d]
 						spans := []located{{file, span}}
 						for id, s := range info.Idents {

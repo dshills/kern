@@ -178,7 +178,7 @@ func buildNav(prog *resolve.Program, text map[string][]byte) *navIndex {
 			// declarations
 			declFunc := func(fd *ast.FuncDecl) {
 				if rf := info.Funcs[fd]; rf != nil {
-					add(f.Name, nameSpan(src, fd.Start, fd.End, "func", fd.Name), fnKey(rf), true)
+					add(f.Name, nameSpan(src, fd.HeaderStart(), fd.End, "func", fd.Name), fnKey(rf), true)
 				}
 			}
 			for _, d := range f.Decls {
@@ -206,7 +206,7 @@ func buildNav(prog *resolve.Program, text map[string][]byte) *navIndex {
 						// its methods: what a call through a constraint names
 						for _, fn := range x.Methods {
 							if fd := id.Methods[fn.Name]; fd != nil {
-								add(f.Name, nameSpan(src, fn.Start, fn.End, "func", fn.Name), fnKey(fd), true)
+								add(f.Name, nameSpan(src, fn.HeaderStart(), fn.End, "func", fn.Name), fnKey(fd), true)
 							}
 						}
 					}

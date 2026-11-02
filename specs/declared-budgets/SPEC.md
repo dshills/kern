@@ -165,7 +165,11 @@ module for the command's files, optimization level and target:
 
 The count equals, by construction, what a client gets by running the
 corresponding show query with the same files, `--opt` and target and
-filtering its entries by §2; a test enforces the equality (R8).
+filtering its entries by §2; a test enforces the equality (R8). `check`
+also loads the program's test files (`*_test.kern`), which the show
+queries do not: a function declared outside them is counted over the
+program without them, so a test's calls change no count, and a function
+declared in a test file over the program with its tests.
 
 **R4. Violation.** When an item's count exceeds its value, the command
 reports one `BUDGET_EXCEEDED` error for that item of that function:
