@@ -87,8 +87,8 @@ func (s *syncBuffer) String() string {
 
 // withHook sets procHook for the test.
 func withHook(t *testing.T, h func(string)) {
-	procHook = h
-	t.Cleanup(func() { procHook = nil })
+	procHook.Store(&h)
+	t.Cleanup(func() { procHook.Store(nil) })
 }
 
 // watchdog turns a hang into a failure. A hung scenario cannot be

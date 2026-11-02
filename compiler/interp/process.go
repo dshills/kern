@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -40,8 +41,17 @@ var spawnMu sync.Mutex
 
 // procHook, when set by a test, is called by a forwarder on each state
 // change and before each blocking read, around a flush request, and at
-// the start of each wait.
-var procHook func(state string)
+// the start of each wait. It is atomic because a forwarder can outlive the
+// program that spawned it (it reads until end of file after a flush has
+// returned), so a test may install the next hook while one still runs.
+var procHook atomic.Pointer[func(state string)]
+
+// callProcHook calls the installed hook, if any.
+func callProcHook(state string) {
+	if h := procHook.Load(); h != nil {
+		(*h)(state)
+	}
+}
 
 func init() {
 	for k, v := range map[string]intrinsicFn{
@@ -400,9 +410,7 @@ func procPid(it *Interp, a []Value, _ callCtx) []Value {
 // with the status in st, 0 while it runs, or -errno. It only reaps;
 // forwarding is completed by procFlushInherited.
 func procWait(it *Interp, a []Value, _ callCtx) []Value {
-	if procHook != nil {
-		procHook("wait")
-	}
+	callProcHook("wait")
 	p := it.proc(signedOf(a[0].(Int)))
 	if p == nil {
 		return i32Val(-int32(syscall.ESRCH))
@@ -599,15 +607,19 @@ type forwarder struct {
 	discard bool // the writer failed: keep reading, write nothing
 	flushCh chan struct{}
 	doneCh  chan struct{}
+	onState *func(state string) // procHook when the forwarder was made
 }
 
+// newForwarder makes a forwarder that reports its states to the hook
+// installed now: a forwarder still reading after its program has ended
+// must not call a hook a later test installed.
 func newForwarder(r *os.File, w io.Writer) *forwarder {
-	return &forwarder{r: r, w: w, flushCh: make(chan struct{}), doneCh: make(chan struct{})}
+	return &forwarder{r: r, w: w, flushCh: make(chan struct{}), doneCh: make(chan struct{}), onState: procHook.Load()}
 }
 
 func (f *forwarder) hook(state string) {
-	if procHook != nil {
-		procHook(state)
+	if f.onState != nil {
+		(*f.onState)(state)
 	}
 }
 
