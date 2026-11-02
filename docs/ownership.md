@@ -4,7 +4,7 @@
 This chapter is the normative restatement of the ownership model (specification §5, with the §4.1, §6 and §7 rules that interact with it), numbered so that every diagnostic code in `compiler/diag/codes.go` points at exactly one rule. The specification takes precedence where the two differ.
 
 ## Non-goals
-Grammar, name resolution and the type system (`spec/types.md`), execution semantics other than the trap kinds named here, the machine API, and library container internals are out of scope.
+Grammar, name resolution and the type system (`spec/types.md`), execution semantics other than the trap kinds named here, the machine API, and library container internals are out of scope. Which index and slice bounds checks the compiler proves, and which stay checked at run time, is described in `docs/bounds-checks.md`.
 
 ## Acceptance criteria and testing
 Every rule with a `Diagnostics:` line has a rejecting fixture under `tests/negative/` or `tests/adversarial/` that produces exactly that code and rule number, and an accepting twin; `go test ./tests/` enforces this. Rules without a code are exercised by the accepting fixtures and the five example programs under `examples/`.

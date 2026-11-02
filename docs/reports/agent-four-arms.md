@@ -202,9 +202,9 @@ wins 3 of 10 tasks under the win rule.
 
 - **Link `docs/bounds-checks.md` from `docs/ownership.md`** and keep it in
   step with the proof pass: it is the cheapest way to give an agent the
-  information this experiment found decisive. The link was not added
-  tonight, because `docs/ownership.md` is in every arm's prompt and
-  changing it mid-experiment would have changed the plain arm.
+  information this experiment found decisive. The link was added after the
+  runs (2026-11-02), not during them, because `docs/ownership.md` is in
+  every arm's prompt.
 - **Give the query a plain-text form**: a `show-bounds-checks --human`
   listing would carry what the JSON query carries to a toolchain or an
   agent that reads text; the `queries` arm shows the JSON is not what
@@ -214,18 +214,27 @@ wins 3 of 10 tasks under the win rule.
 
 ## Finishing the runs
 
-After adding Wafer credit, in order:
+Every arm's prompt includes `docs/ownership.md`, which since the runs
+links `docs/bounds-checks.md` (one sentence; no arm can read the file
+through it, but the plain arm's prompt now names it). So the redone
+trials match the originals only when they run from a checkout of
+29f96c4, the commit the runs used; the harness takes the reference from
+the checkout it runs in. After adding Wafer credit, in order:
 
 ```bash
-go run ./bench/agent/harness -redo-errors bench/agent/runs/20261101-151545 -call-timeout 15m -parallel 6
-go run ./bench/agent/harness -redo-errors bench/agent/runs/20261101-165447 -call-timeout 15m -parallel 6
-go run ./bench/agent/harness -redo-errors bench/agent/runs/20261101-174611 -call-timeout 15m -parallel 6
+runs="$PWD/bench/agent/runs"
+git worktree add ../kern-runs 29f96c4
+cd ../kern-runs
+go run ./bench/agent/harness -redo-errors "$runs/20261101-151545" -call-timeout 15m -parallel 6
+go run ./bench/agent/harness -redo-errors "$runs/20261101-165447" -call-timeout 15m -parallel 6
+go run ./bench/agent/harness -redo-errors "$runs/20261101-174611" -call-timeout 15m -parallel 6
 ```
 
-Each writes `bench/agent/REPORT.md` unless `-out` is given; the committed
-report is suite 2's from 2026-10-28. Run A then needs a GLM `documented`
-and `rules` run to complete its decomposition, and run F a full 50 trials
-to settle the caveat on `documented`.
+Each writes `bench/agent/REPORT.md` in the worktree unless `-out` is
+given; the committed report is suite 2's from 2026-10-28. Run A then
+needs a GLM `documented` and `rules` run to complete its decomposition,
+and run F a full 50 trials to settle the caveat on `documented`, both
+from the same worktree.
 
 ## Review
 
