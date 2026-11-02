@@ -1,0 +1,15 @@
+//! expect: reject BUDGET_EXCEEDED rule=7.6
+//! twin: budget_exceeded_ok
+module m
+// The midpoint (lo + hi) / 2 is arithmetic the proof rules do not track
+// (docs/bounds-checks.md), so xs[mid] stays checked at run time.
+budget { bounds_checks 0 }
+func lower_bound(xs: view[]u64, key: u64) -> usize {
+    lo := 0usize
+    hi := len(xs)
+    while lo < hi {
+        mid := (lo + hi) / 2usize
+        if xs[mid] < key { lo = mid + 1usize } else { hi = mid }   // BUDGET_EXCEEDED: xs[mid] is runtime-checked
+    }
+    return lo
+}

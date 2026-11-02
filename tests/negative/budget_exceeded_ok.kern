@@ -1,0 +1,20 @@
+//! phase: 1
+//! expect: accept
+//! twin: budget_exceeded
+module m
+// A guard on the same length proves the index (docs/bounds-checks.md), so
+// the function meets its budget.
+budget { bounds_checks 0 }
+func lower_bound(xs: view[]u64, key: u64) -> usize {
+    lo := 0usize
+    hi := len(xs)
+    while lo < hi {
+        mid := (lo + hi) / 2usize
+        if mid < len(xs) {
+            if xs[mid] < key { lo = mid + 1usize } else { hi = mid }
+        } else {
+            hi = mid
+        }
+    }
+    return lo
+}

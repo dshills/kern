@@ -68,7 +68,8 @@ var Registry = map[Code]Info{
 	// §7 FFI
 	"FFI_UNSUPPORTED_TYPE": {"7.2", CatLang, 0, "type not permitted in an extern \"C\" signature"},
 	// §7.6 declared budgets
-	"BUDGET_INVALID": {"7.6", CatLang, 0, "a budget item names an unknown kind, repeats one, or has a suffixed or out-of-range value"},
+	"BUDGET_INVALID":  {"7.6", CatLang, 0, "a budget item names an unknown kind, repeats one, or has a suffixed or out-of-range value"},
+	"BUDGET_EXCEEDED": {"7.6", CatLang, 0, "a function has more runtime-checked bounds checks, copies or allocation sites than its budget"},
 	// §6 thread-local storage
 	"TLS_INVALID_DECL": {"6.5", CatLang, 2, "thread_local requires a Copy type and a literal or zero() initializer"},
 	// general language errors (spec §4, types.md)

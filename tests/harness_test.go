@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dshills/kern/compiler/analysis"
+	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/backend/native"
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
@@ -132,12 +134,41 @@ func applyFix(t *testing.T, all []*source.File, fix *diag.StructuredEdit) {
 	}
 }
 
+// checkFiles is what `kern check` reports for the files at the default
+// debug level: resolution, checking and, when the files declare a budget
+// and check clean, the budgets, over the module the show queries read
+// (spec §7.6; as cmd/kern's Build, without importing it).
 func checkFiles(fs []*source.File) []diag.Diagnostic {
 	prog := resolve.Resolve(fs)
 	if len(prog.Diags) > 0 {
 		return prog.Diags
 	}
-	return check.Check(prog)
+	if ds := check.Check(prog); len(ds) > 0 {
+		return ds
+	}
+	names := map[string]bool{}
+	for _, f := range fs {
+		names[f.Name] = true
+	}
+	var own []*ast.File
+	for _, m := range prog.Modules {
+		for _, f := range m.Files {
+			if names[f.Name] {
+				own = append(own, f)
+			}
+		}
+	}
+	if !analysis.HasBudgets(own) {
+		return nil
+	}
+	mod, ds := lower.Lower(prog)
+	if len(ds) > 0 {
+		return ds
+	}
+	if err := opt.Run(mod, opt.OptionsFor("debug")); err != nil {
+		panic(err)
+	}
+	return analysis.Budgets(prog, fs, mod, "")
 }
 
 // fixtures lists fixture paths: single .kern files, and directories holding a

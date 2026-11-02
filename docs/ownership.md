@@ -528,8 +528,8 @@ extern "C" func write(fd: i32, buf: view[]u8) -> isize    // FFI_UNSUPPORTED_TYP
 ```
 
 ### Rule 7.6 — Declared budgets
-A function may declare how many runtime-checked bounds checks, copies and allocations it is allowed, in a budget block between its contract block, if any, and `func`. `budget` is not a keyword: it starts a block only at the start of a declaration (top level or inside `impl`) when `{` follows, so `budget` stays usable as a function, local or field name. Items are `bounds_checks`, `copies` and `allocations`, each followed by a plain integer from 0 to 2147483647, separated by newlines or `;`; an empty block constrains nothing. A misplaced block (before anything but `func`, or on an interface method) or an item that is not a name and an integer is a syntax error. An unknown item name, an item given twice, or a value with a type suffix or out of range is `BUDGET_INVALID`, once per offending item. A budget counts the entries of `show-bounds-checks`, `show-copies` and `show-allocations` located in its function's declaration, closures included; enforcement by `kern check` and `kern build` is specified in `specs/declared-budgets/SPEC.md`.
-Diagnostics: `BUDGET_INVALID`
+A function may declare how many runtime-checked bounds checks, copies and allocations it is allowed, in a budget block between its contract block, if any, and `func`. `budget` is not a keyword: it starts a block only at the start of a declaration (top level or inside `impl`) when `{` follows, so `budget` stays usable as a function, local or field name. Items are `bounds_checks`, `copies` and `allocations`, each followed by a plain integer from 0 to 2147483647, separated by newlines or `;`; an empty block constrains nothing. A misplaced block (before anything but `func`, or on an interface method) or an item that is not a name and an integer is a syntax error. An unknown item name, an item given twice, or a value with a type suffix or out of range is `BUDGET_INVALID`, once per offending item. A budget counts the entries of `show-bounds-checks` (only `runtime-checked` bounds checks), `show-copies` and `show-allocations` located in its function's declaration, closures included, at the command's optimization level; a bounds check in a helper counts in the helper, a library call that allocates counts in its caller. A count over the budget is `BUDGET_EXCEEDED`, once per item, at the first entry over the budget, with a message that lists the counted locations as `line:column` and their source text (the first 10, then how many more); it is reported only for a program that otherwise checks clean. Which commands enforce budgets is specified in `specs/declared-budgets/SPEC.md`.
+Diagnostics: `BUDGET_INVALID`, `BUDGET_EXCEEDED`
 Accepted:
 ```kern
 module m
@@ -541,6 +541,14 @@ Rejected:
 module m
 budget { bounds_checks 0; loops 1 }    // BUDGET_INVALID: loops is not a budget item
 func rank(xs: view[]u64, key: u64) -> usize { return 0usize }
+```
+```kern
+module m
+budget { bounds_checks 0 }
+func at_mid(xs: view[]u64) -> u64 {
+    mid := (0usize + len(xs)) / 2usize
+    return xs[mid]    // BUDGET_EXCEEDED: function `at_mid` has 1 runtime-checked bounds check, budget 0: 5:12 `xs[mid]`
+}
 ```
 
 ## Trap handlers
