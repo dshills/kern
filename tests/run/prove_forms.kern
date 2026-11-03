@@ -223,6 +223,21 @@ func ns_low_len(a: view[]u64, s: usize) -> u64 {
 func ns_zero(h: view[]u64) -> u64 {
     with r := h[0usize:0usize] { return u64(len(r)) }
 }
+// specs/paren-conditions P1: guards inside parentheses count, for an
+// early return on the negation, a parenthesized conjunction, and a
+// parenthesized operand of `&&`
+func paren_not(xs: view[]u64, i: usize, j: usize) -> u64 {
+    if !(i < len(xs) && j < len(xs)) { return 0u64 }
+    return xs[i]
+}
+func paren_and(xs: view[]u64, i: usize, j: usize) -> u64 {
+    if (i < len(xs) && j < len(xs)) { return xs[j] }
+    return 0u64
+}
+func paren_mixed(xs: view[]u64, i: usize, j: usize, k: usize) -> u64 {
+    if i < len(xs) && (j < 2usize || k < 3usize) { return xs[i] }
+    return 0u64
+}
 func main() -> i32 {
     xs := [1u64, 2u64, 3u64, 4u64, 5u64]
     ys := [10u64, 20u64, 30u64, 40u64, 50u64]
@@ -281,6 +296,8 @@ func main() -> i32 {
     print_u64(ns_index(xs[0usize:5usize], 5usize) + ns_index(xs[0usize:5usize], 9usize) + ns_index_gt(xs[0usize:5usize], 3usize) + ns_index_gt(xs[0usize:5usize], 6usize))
     println()
     print_u64(ns_slice(xs[0usize:5usize], 4usize) + ns_slice(xs[0usize:5usize], 6usize) + ns_low(xs[0usize:5usize], 1usize, 5usize) + ns_low(xs[0usize:5usize], 3usize, 2usize) + ns_low_plus(xs[0usize:5usize], 2usize, 4usize) + ns_low_len(xs[0usize:5usize], 5usize) + ns_zero(xs[0usize:0usize]))
+    println()
+    print_u64(paren_not(xs[0usize:5usize], 4usize, 1usize) + paren_not(xs[0usize:5usize], 5usize, 1usize) + paren_and(xs[0usize:5usize], 0usize, 2usize) + paren_and(xs[0usize:5usize], 9usize, 2usize) + paren_mixed(xs[0usize:5usize], 1usize, 7usize, 1usize) + paren_mixed(xs[0usize:5usize], 1usize, 7usize, 8usize))
     println()
     return 0i32
 }

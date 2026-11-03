@@ -22,7 +22,10 @@ the place being indexed:
 - `if i < len(xs) { ... xs[i] ... }`, and a `while i < len(xs)` loop's
   body;
 - a `for i in 0usize..len(xs)` loop indexing `xs[i]`;
-- `&&` conditions count: `if i < len(xs) && j < len(ys)` guards both.
+- `&&` conditions count: `if i < len(xs) && j < len(ys)` guards both,
+  and so do conditions inside parentheses, so
+  `if !(i < len(xs) && j < len(xs)) { return 0u64 }` guards the accesses
+  after it.
 
 What counts as "the same index":
 - the same local, or a local copied from it (`j := i`) with no store in

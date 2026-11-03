@@ -1118,3 +1118,21 @@ func TestSub(t *testing.T) {
 		}
 	}
 }
+
+// TestProveParenFixtures: guards inside a parenthesized condition prove
+// their checks, at both levels (specs/paren-conditions R2).
+func TestProveParenFixtures(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "tests", "run", "prove_forms.kern"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, level := range []string{"debug", "release"} {
+		mod := runWith(t, src, OptionsFor(level))
+		for _, fn := range []string{"paren_not", "paren_and", "paren_mixed"} {
+			if got := labelsWithin(mod, src, fn); got != "dominated_by_check" {
+				t.Errorf("%s %s: %q, want dominated_by_check", level, fn, got)
+			}
+		}
+	}
+}

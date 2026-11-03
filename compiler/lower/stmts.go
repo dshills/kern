@@ -509,8 +509,9 @@ func elemTypeOf(t resolve.Type) resolve.Type {
 }
 
 // condBr branches on a condition: `a && b` tests b only when a holds,
-// `a || b` only when a fails, `!a` swaps the targets, and any other
-// condition is evaluated to a value. Each comparison then terminates its
+// `a || b` only when a fails, `!a` swaps the targets, `(a)` is lowered
+// as a is (specs/paren-conditions P1), and any other condition is
+// evaluated to a value. Each comparison then terminates its
 // own block, so the proof pass reads every operand's bound on the edge it
 // establishes (specs/prove-guards/SPEC.md F2); the operands are evaluated
 // in source order, each at most once, as the value lowering evaluates
@@ -534,6 +535,9 @@ func (fl *fnLower) condBr(e ast.Expr, then, els *ir.Block) {
 			fl.condBr(x.X, els, then)
 			return
 		}
+	case *ast.Paren:
+		fl.condBr(x.X, then, els)
+		return
 	}
 	cond := fl.value(e, &resolve.Prim{Name: "bool"})
 	fl.terminate(&ir.CondBr{Cond: cond, Then: then, Else: els})

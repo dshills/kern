@@ -126,7 +126,11 @@ func genProgram(r *rand.Rand) string {
 	stmts := 2 + r.Intn(6)
 	for k := 0; k < stmts; k++ {
 		idx := func() int { return r.Intn(live + 2) } // 0..live+1: past the end about a third of the time
-		switch r.Intn(44) {
+		switch r.Intn(45) {
+		case 44:
+			// specs/paren-conditions: the guards inside `!( … && … )` prove p[i]
+			// on the else edge; i and j each fall below, at or past the length
+			fmt.Fprintf(&b, "    with d := v.as_view() { print_u64(pnot(d, %dusize, %dusize)) }\n", idx(), idx())
 		case 33, 34, 35:
 			// specs/prove-nonstrict G1: p[n - 1] and p[n - 2] under n <= len
 			// are proven, p[n] is not
@@ -460,6 +464,9 @@ func plow2(p: view[]u64, s: usize, e: usize) -> u64 {
     if s <= e && e + 1usize <= len(p) { with t := p[s + 2usize:e + 1usize] { return u64(len(t)) } }
     return 10u64
 }
+func pnot(p: view[]u64, i: usize, j: usize) -> u64 {
+    if !(i < len(p) && j < len(p)) { return 4u64 } else { return p[i] }
+}
 func pzero(p: view[]u64) -> u64 { with t := p[0usize:0usize] { return u64(len(t)) } }
 func pone(p: view[]u64) -> u64 { with t := p[0usize:1usize] { return u64(len(t)) } }
 `
@@ -492,6 +499,10 @@ func TestNonStrictBoundaries(t *testing.T) {
 		}
 	}
 	rows = append(rows, row{0, "pzero(d)"}, row{n, "pzero(d)"}, row{0, "pone(d)"}, row{n, "pone(d)"}) // G4
+	// specs/paren-conditions R4: i and j below, at and past the length
+	for _, ij := range [][2]int{{0, 0}, {n - 1, 0}, {n, 0}, {0, n}} {
+		rows = append(rows, row{n, fmt.Sprintf("pnot(d, %dusize, %dusize)", ij[0], ij[1])})
+	}
 	for _, rw := range rows {
 		t.Run(fmt.Sprintf("%d/%s", rw.elems, rw.call), func(t *testing.T) {
 			t.Parallel()
