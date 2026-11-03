@@ -59,7 +59,7 @@ func buildBudgeted(t *testing.T, files map[string]string, level string) budgetPr
 }
 
 func (p budgetProgram) budgets() []diag.Diagnostic {
-	return analysis.Budgets(p.prog, p.srcs, p.mod, "")
+	return analysis.Budgets(p.prog, p.srcs, p.mod, "", analysis.ClassifyBounds)
 }
 
 func budgetsAt(t *testing.T, src, level string) []diag.Diagnostic {
@@ -286,7 +286,7 @@ func TestBudgetExceededShape(t *testing.T) {
 	if fmt.Sprint(d.Related) != fmt.Sprint(want) {
 		t.Fatalf("related %v, want %v", d.Related, want)
 	}
-	if d.Message != "function `f` has 3 runtime-checked bounds checks, budget 1: 4:12 `xs[i]`, 4:20 `xs[j]`, 4:28 `xs[k]`" {
+	if d.Message != "function `f` has 3 runtime-checked bounds checks, budget 1: 4:12 `xs[i]` (test `i < len(xs)` on every path to it); 4:20 `xs[j]` (test `j < len(xs)` on every path to it); 4:28 `xs[k]` (test `k < len(xs)` on every path to it)" {
 		t.Fatalf("message %q", d.Message)
 	}
 	var buf bytes.Buffer
@@ -309,15 +309,17 @@ func TestBudgetExceededShape(t *testing.T) {
 
 // The message quotes each location: whitespace runs, line breaks included,
 // become one space; text past 40 code points is cut and followed by ...;
-// columns count code points; past 10 locations it says how many more.
+// columns count code points; past 10 locations it says how many more. A
+// bounds_checks location carries its hint, and locations are separated by
+// "; " (specs/unproven-reasons R4).
 func TestBudgetMessage(t *testing.T) {
 	doc := "module m\nbudget { bounds_checks 0 }\nfunc at_mid(xs: view[]u64) -> u64 {\n    mid := (0usize + len(xs)) / 2usize\n    return xs[mid]\n}\n"
-	if ds := budgetsAt(t, doc, "debug"); len(ds) != 1 || ds[0].Message != "function `at_mid` has 1 runtime-checked bounds check, budget 0: 5:12 `xs[mid]`" {
+	if ds := budgetsAt(t, doc, "debug"); len(ds) != 1 || ds[0].Message != "function `at_mid` has 1 runtime-checked bounds check, budget 0: 5:12 `xs[mid]` (test `mid < len(xs)` on every path to it)" {
 		t.Fatalf("docs/ownership.md example: %v", ds)
 	}
 	long := "module m\nbudget { bounds_checks 0 }\nfunc f(xs: view[]u64, índice_ñandú_muy_largo_para_la_prueba_xyz: usize, i: usize) -> u64 {\n    ñ := 1u64\n    return ñ + xs[índice_ñandú_muy_largo_para_la_prueba_xyz] + xs[\n        i\n    ]\n}\n"
 	ds := budgetsAt(t, long, "debug")
-	want := "function `f` has 2 runtime-checked bounds checks, budget 0: 5:16 `xs[índice_ñandú_muy_largo_para_la_prueba...`, 5:64 `xs[ i ]`"
+	want := "function `f` has 2 runtime-checked bounds checks, budget 0: 5:16 `xs[índice_ñandú_muy_largo_para_la_prueba...` (test `índice_ñandú_muy_largo_para_la_prueba_xy... < len(xs)` on every path to it); 5:64 `xs[ i ]` (test `i < len(xs)` on every path to it)"
 	if len(ds) != 1 || ds[0].Message != want {
 		t.Fatalf("got %v\nwant %q", ds, want)
 	}
@@ -334,8 +336,8 @@ func TestBudgetMessage(t *testing.T) {
 	if len(ds) != 1 {
 		t.Fatalf("got %v", ds)
 	}
-	if !strings.HasPrefix(ds[0].Message, "function `f` has 12 runtime-checked bounds checks, budget 0: 4:12 `xs[i0]`, ") ||
-		!strings.HasSuffix(ds[0].Message, "`xs[i9]`, and 2 more") || strings.Count(ds[0].Message, "`xs[") != 10 {
+	if !strings.HasPrefix(ds[0].Message, "function `f` has 12 runtime-checked bounds checks, budget 0: 4:12 `xs[i0]` (test `i0 < len(xs)` on every path to it); ") ||
+		!strings.HasSuffix(ds[0].Message, "`xs[i9]` (test `i9 < len(xs)` on every path to it); and 2 more") || strings.Count(ds[0].Message, "`xs[") != 10 {
 		t.Fatalf("message %q", ds[0].Message)
 	}
 }
@@ -453,4 +455,55 @@ func budgetedFuncs(f *ast.File) []budgetedFunc {
 		}
 	}
 	return out
+}
+
+// The spec's example: each location of a bounds_checks item carries its
+// hint (specs/unproven-reasons R4).
+func TestBudgetMessageHints(t *testing.T) {
+	src := "module rank\n\nbudget { bounds_checks 0 }\nfunc rank(xs: view[]u64, key: u64) -> usize {\n    if len(xs) == 0usize || xs[len(xs) - 1usize] < key { return len(xs) }\n    lo := 0usize\n    hi := len(xs)\n    while lo < hi {\n        mid := (lo + hi) / 2usize\n        if xs[mid] < key { lo = mid + 1usize } else { hi = mid }\n    }\n    return lo\n}\n"
+	ds := budgetsAt(t, src, "debug")
+	want := "function `rank` has 2 runtime-checked bounds checks, budget 0: 5:29 `xs[len(xs) - 1usize]` (no guard establishes `len(xs) - 1usize < len(xs)` on every path to it, and the rules do not derive it from guards on the parts of `len(xs) - 1usize`: put `len(xs) - 1usize` in a local and test it below `len(xs)` just before the access); 10:12 `xs[mid]` (test `mid < len(xs)` on every path to it)"
+	if len(ds) != 1 || ds[0].Message != want {
+		t.Fatalf("got %v\nwant %q", ds, want)
+	}
+}
+
+// A copies or allocations message is unchanged by R4: no hint, ", "
+// between locations.
+func TestBudgetMessageCopiesUnchanged(t *testing.T) {
+	src := "module m\nstruct P { x: u64; y: u64 }\nbudget { copies 0 }\nfunc two(ps: view[[4]P]) -> u64 {\n    p := ps[0usize]\n    q := ps[1usize]\n    return p.x + q.y\n}\n"
+	ds := budgetsAt(t, src, "debug")
+	want := "function `two` has 2 copies, budget 0: 5:10 `ps[0usize]`, 6:10 `ps[1usize]`"
+	if len(ds) != 1 || ds[0].Message != want {
+		t.Fatalf("got %v\nwant %q", ds, want)
+	}
+}
+
+// Budgets classifies once, over the exceeded bounds_checks items'
+// locations only, and not at all without one (R5).
+func TestBudgetClassifiesOnlyExceededBounds(t *testing.T) {
+	var calls, entries int
+	counting := func(prog *resolve.Program, srcs []*source.File, snap *analysis.BoundsSnapshot, want func(diag.BoundsCheck) bool) (map[int]analysis.Reason, analysis.ClassifyStats) {
+		calls++
+		r, st := analysis.ClassifyBounds(prog, srcs, snap, want)
+		entries += st.Entries
+		return r, st
+	}
+	for _, tc := range []struct {
+		name, src      string
+		calls, entries int
+	}{
+		{"met", "module m\nbudget { bounds_checks 1 }\nfunc f(xs: view[]u64, i: usize) -> u64 { return xs[i] }\nfunc g(xs: view[]u64, i: usize) -> u64 { return xs[i] }\n", 0, 0},
+		{"copies only", "module m\nstruct P { x: u64; y: u64 }\nbudget { copies 0; bounds_checks 5 }\nfunc two(ps: view[[4]P], i: usize) -> u64 {\n    p := ps[0usize]\n    return p.x + ps[i].y\n}\n", 0, 0},
+		// two functions over: both items' locations, in one call; the
+		// unbudgeted g's location is not classified
+		{"exceeded", "module m\nbudget { bounds_checks 0 }\nfunc f(xs: view[]u64, i: usize) -> u64 { return xs[i] }\nbudget { bounds_checks 0 }\nfunc h(xs: view[]u64, i: usize, j: usize) -> u64 { return xs[i] + xs[j] }\nfunc g(xs: view[]u64, i: usize) -> u64 { return xs[i] }\n", 1, 3},
+	} {
+		calls, entries = 0, 0
+		p := buildBudgeted(t, map[string]string{"m.kern": tc.src}, "debug")
+		analysis.Budgets(p.prog, p.srcs, p.mod, "", counting)
+		if calls != tc.calls || entries != tc.entries {
+			t.Errorf("%s: %d calls over %d entries, want %d over %d", tc.name, calls, entries, tc.calls, tc.entries)
+		}
+	}
 }

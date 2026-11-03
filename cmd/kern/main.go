@@ -202,15 +202,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fn(req, wire, srcs, stdout, stderr)
 	}
 	cfg.Target = req.Target
-	return runCheck(req, wire, srcs, human, cacheDir, cfg, stdout, stderr, Build)
+	return runCheck(req, wire, srcs, human, cacheDir, cfg, stdout, stderr, budgetDefaults())
 }
 
 // runCheck is `kern check` once the request is loaded: resolution and
 // checking (through the cache when cacheDir is set), the test files'
 // static diagnostics and, for a clean program whose files declare a
-// budget, the budgets at cfg's level and target, lowered with lower
-// (spec §7.6). A request without a budget block is only parsed once more.
-func runCheck(req Request, wire string, srcs []*source.File, human bool, cacheDir string, cfg incremental.Config, stdout, stderr io.Writer, lower lowerFunc) int {
+// budget, the budgets at cfg's level and target, lowered and classified
+// with deps (spec §7.6). A request without a budget block is only parsed
+// once more.
+func runCheck(req Request, wire string, srcs []*source.File, human bool, cacheDir string, cfg incremental.Config, stdout, stderr io.Writer, deps budgetDeps) int {
 	var ds []diag.Diagnostic
 	var err error
 	if cacheDir != "" {
@@ -232,7 +233,7 @@ func runCheck(req Request, wire string, srcs []*source.File, human bool, cacheDi
 		diag.Sort(ds)
 	}
 	if len(ds) == 0 {
-		bds, err := budgetDiags(srcs, cfg.Opt, cfg.Target, lower)
+		bds, err := budgetDiags(srcs, cfg.Opt, cfg.Target, deps)
 		if err != nil {
 			return internal(req, wire, err, stdout, stderr)
 		}

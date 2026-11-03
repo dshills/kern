@@ -69,7 +69,7 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 	if target == "" {
 		target = native.HostTriple()
 	}
-	bds, err := budgetDiags(srcs, opts.Opt, target, Build)
+	bds, err := budgetDiags(srcs, opts.Opt, target, budgetDefaults())
 	if err != nil {
 		return internal(req, diag.SchemaVersion, err, stdout, stderr)
 	}

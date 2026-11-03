@@ -1,6 +1,6 @@
 # Declared budgets: bounds checks, copies and allocations that `check` enforces
 
-**Version:** 0.1 (2026-11-02). **Scope:** the grammar (`spec/grammar.ebnf`),
+**Version:** 0.2 (2026-11-03; 0.1 2026-11-02, amended by `specs/unproven-reasons` R4). **Scope:** the grammar (`spec/grammar.ebnf`),
 the parser, AST and formatter (`compiler/parser`, `compiler/ast`,
 `compiler/format`), a budget evaluation over the lowered module
 (`compiler/analysis`), the `check`, `build`, `run` and `test` commands
@@ -191,6 +191,12 @@ reports one `BUDGET_EXCEEDED` error for that item of that function:
 
 A count at or under its value reports nothing. The message carries the
 locations because the plain-text rendering prints no related spans (§1).
+
+*Amended by `specs/unproven-reasons` R4 (2026-11-03):* for a
+`bounds_checks` item each listed entry is followed by ` (hint)`, the
+reason hint of that specification's §3, and entries are separated by
+`; ` with the tail `; and N more`; `copies` and `allocations` messages
+are as above.
 
 **R5. Commands.** `check` and `build` must evaluate budgets and fail
 with exit code 2 on a `BUDGET_EXCEEDED`; `build` then writes no output

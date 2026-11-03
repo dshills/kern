@@ -10,11 +10,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dshills/kern/compiler/analysis"
 	"github.com/dshills/kern/compiler/backend/native"
 	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/incremental"
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/project"
+	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
 
@@ -115,7 +117,7 @@ func TestBudgetHumanManyLocations(t *testing.T) {
 	main := writeProject(t, "m.kern", "module m\nbudget { bounds_checks 0 }\nfunc f(xs: view[]u64, "+strings.Join(params, ", ")+") -> u64 {\n    return "+strings.Join(terms, " + ")+"\n}\n")
 	var out, errb bytes.Buffer
 	if code := run([]string{"check", "--human", main}, strings.NewReader(""), &out, &errb); code != 2 || strings.Count(out.String(), "\n") != 1 ||
-		strings.Count(out.String(), "`xs[") != 10 || !strings.HasSuffix(out.String(), "`xs[i9]`, and 2 more\n") {
+		strings.Count(out.String(), "`xs[") != 10 || !strings.HasSuffix(out.String(), "`xs[i9]` (test `i9 < len(xs)` on every path to it); and 2 more\n") {
 		t.Fatalf("exit %d %q", code, out.String())
 	}
 }
@@ -218,6 +220,12 @@ func countingLower(n *int) lowerFunc {
 // checkDirect runs runCheck on paths as the dispatcher does, with lower.
 func checkDirect(t *testing.T, paths []string, human bool, cacheDir string, lower lowerFunc) (int, string) {
 	t.Helper()
+	return checkDirectWith(t, paths, human, cacheDir, budgetDeps{lower: lower, classify: analysis.ClassifyBounds})
+}
+
+// checkDirectWith is checkDirect with both of the evaluation's dependencies.
+func checkDirectWith(t *testing.T, paths []string, human bool, cacheDir string, deps budgetDeps) (int, string) {
+	t.Helper()
 	cwd, _ := os.Getwd()
 	pr := project.LoadTests(cwd, paths)
 	if len(pr.Diags) > 0 {
@@ -226,7 +234,7 @@ func checkDirect(t *testing.T, paths []string, human bool, cacheDir string, lowe
 	req := Request{SchemaVersion: diag.SchemaVersion, Command: "check", Files: pr.Names(), Target: native.HostTriple()}
 	cfg := incremental.Config{Opt: "debug", Env: "hosted", Target: req.Target}
 	var out, errb bytes.Buffer
-	code := runCheck(req, diag.SchemaVersion, pr.Files, human, cacheDir, cfg, &out, &errb, lower)
+	code := runCheck(req, diag.SchemaVersion, pr.Files, human, cacheDir, cfg, &out, &errb, deps)
 	return code, out.String()
 }
 
@@ -276,18 +284,18 @@ func TestBudgetLowerOutcomes(t *testing.T) {
 	srcs := []*source.File{{Name: "main.kern", Bytes: []byte(overBudget)}}
 	cause := errors.New("boom")
 	failing := func([]*source.File, string) (*ir.Module, []diag.Diagnostic, error) { return nil, nil, cause }
-	if _, err := budgetDiags(srcs, "debug", "", failing); !errors.Is(err, cause) || !errors.As(err, new(*InternalError)) || !strings.Contains(err.Error(), "budget evaluation: lowering: boom") {
+	if _, err := budgetDiags(srcs, "debug", "", budgetDeps{lower: failing, classify: analysis.ClassifyBounds}); !errors.Is(err, cause) || !errors.As(err, new(*InternalError)) || !strings.Contains(err.Error(), "budget evaluation: lowering: boom") {
 		t.Errorf("error: %v", err)
 	}
 	d := diag.New("TYPE_MISMATCH", "main.kern", diag.Span{}, "x")
 	disagreeing := func([]*source.File, string) (*ir.Module, []diag.Diagnostic, error) {
 		return nil, []diag.Diagnostic{d}, nil
 	}
-	if ds, err := budgetDiags(srcs, "debug", "", disagreeing); err != nil || len(ds) != 1 || ds[0].Code != "TYPE_MISMATCH" {
+	if ds, err := budgetDiags(srcs, "debug", "", budgetDeps{lower: disagreeing, classify: analysis.ClassifyBounds}); err != nil || len(ds) != 1 || ds[0].Code != "TYPE_MISMATCH" {
 		t.Errorf("diagnostics: %v %v", ds, err)
 	}
 	empty := func([]*source.File, string) (*ir.Module, []diag.Diagnostic, error) { return nil, nil, nil }
-	if _, err := budgetDiags(srcs, "debug", "", empty); !errors.As(err, new(*InternalError)) {
+	if _, err := budgetDiags(srcs, "debug", "", budgetDeps{lower: empty, classify: analysis.ClassifyBounds}); !errors.As(err, new(*InternalError)) {
 		t.Errorf("no module: %v", err)
 	}
 	got := ""
@@ -295,7 +303,7 @@ func TestBudgetLowerOutcomes(t *testing.T) {
 		got = optLevel
 		return Build(srcs, optLevel)
 	}
-	if _, err := budgetDiags(srcs, "release", "", levels); err != nil || got != "release" {
+	if _, err := budgetDiags(srcs, "release", "", budgetDeps{lower: levels, classify: analysis.ClassifyBounds}); err != nil || got != "release" {
 		t.Errorf("level %q: %v", got, err)
 	}
 }
@@ -347,5 +355,42 @@ func TestBudgetTestFilesNotCounted(t *testing.T) {
 	calls := 0
 	if code, _ := checkDirect(t, []string{both}, false, "", countingLower(&calls)); code != 2 || calls != 2 {
 		t.Fatalf("exit %d, %d lowerings, want 2 (the program, then with its tests)", code, calls)
+	}
+}
+
+// countingClassify is ClassifyBounds with a call counter.
+func countingClassify(n *int) analysis.Classifier {
+	return func(prog *resolve.Program, srcs []*source.File, snap *analysis.BoundsSnapshot, want func(diag.BoundsCheck) bool) (map[int]analysis.Reason, analysis.ClassifyStats) {
+		*n++
+		return analysis.ClassifyBounds(prog, srcs, snap, want)
+	}
+}
+
+// check classifies only for an exceeded bounds_checks item, once, on the
+// direct and the cached path, and its message carries the hint
+// (specs/unproven-reasons R4, R5). build takes the same evaluation
+// (budgetDiags with budgetDefaults); run and test evaluate no budget.
+func TestBudgetClassifyCost(t *testing.T) {
+	cache := t.TempDir()
+	for _, tc := range []struct {
+		name, src string
+		calls     int
+	}{
+		{"no budget", "module main\nfunc pick(xs: view[]u64, i: usize) -> u64 { return xs[i] }\nfunc main() -> i32 { return 0i32 }\n", 0},
+		{"met", "module main\nbudget { bounds_checks 1 }\nfunc pick(xs: view[]u64, i: usize) -> u64 { return xs[i] }\nfunc main() -> i32 { return 0i32 }\n", 0},
+		{"copies only", "module main\nstruct P { x: u64; y: u64 }\nbudget { copies 0; bounds_checks 3 }\nfunc two(ps: view[[4]P], i: usize) -> u64 {\n    p := ps[0usize]\n    return p.x + ps[i].y\n}\nfunc main() -> i32 { return 0i32 }\n", 0},
+		{"exceeded", overBudget, 1},
+	} {
+		for _, c := range []string{"", cache} {
+			calls := 0
+			main := writeProject(t, "main.kern", tc.src)
+			code, out := checkDirectWith(t, []string{main}, false, c, budgetDeps{lower: Build, classify: countingClassify(&calls)})
+			if calls != tc.calls {
+				t.Errorf("%s (cache %q): %d classifications, want %d", tc.name, c, calls, tc.calls)
+			}
+			if tc.calls > 0 && (code != 2 || !strings.Contains(out, "(test `i < len(xs)` on every path to it)")) {
+				t.Errorf("%s: exit %d, no hint in %s", tc.name, code, out)
+			}
+		}
 	}
 }

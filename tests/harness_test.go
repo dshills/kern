@@ -168,7 +168,7 @@ func checkFiles(fs []*source.File) []diag.Diagnostic {
 	if err := opt.Run(mod, opt.OptionsFor("debug")); err != nil {
 		panic(err)
 	}
-	return analysis.Budgets(prog, fs, mod, "")
+	return analysis.Budgets(prog, fs, mod, "", analysis.ClassifyBounds)
 }
 
 // fixtures lists fixture paths: single .kern files, and directories holding a

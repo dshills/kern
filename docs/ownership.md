@@ -547,7 +547,7 @@ module m
 budget { bounds_checks 0 }
 func at_mid(xs: view[]u64) -> u64 {
     mid := (0usize + len(xs)) / 2usize
-    return xs[mid]    // BUDGET_EXCEEDED: function `at_mid` has 1 runtime-checked bounds check, budget 0: 5:12 `xs[mid]`
+    return xs[mid]    // BUDGET_EXCEEDED: function `at_mid` has 1 runtime-checked bounds check, budget 0: 5:12 `xs[mid]` (test `mid < len(xs)` on every path to it)
 }
 ```
 

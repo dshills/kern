@@ -57,8 +57,11 @@ const (
 // show-allocations read, at the command's level and target), and returns
 // one BUDGET_EXCEEDED per item a function exceeds, sorted (spec §7.6).
 // prog must have resolved and checked with no error, so every item is
-// valid. srcs supplies the source text the messages quote.
-func Budgets(prog *resolve.Program, srcs []*source.File, mod *ir.Module, target string) []diag.Diagnostic {
+// valid. srcs supplies the source text the messages quote. When a
+// bounds_checks item is exceeded, classify gives each of the exceeded
+// items' locations its hint (specs/unproven-reasons R4), in one call over
+// the module's one snapshot; it is not called otherwise (R5).
+func Budgets(prog *resolve.Program, srcs []*source.File, mod *ir.Module, target string, classify Classifier) []diag.Diagnostic {
 	type budgeted struct {
 		fn   namedFunc
 		file string
@@ -76,8 +79,9 @@ func Budgets(prog *resolve.Program, srcs []*source.File, mod *ir.Module, target 
 	if len(fns) == 0 {
 		return nil
 	}
+	snap := Snapshot(mod)
 	entries := map[string][]diag.Loc{}
-	for _, c := range BoundsChecks(mod).Checks {
+	for _, c := range snap.Result.Checks {
 		if c.Kind == diag.CheckBounds && c.Label == diag.LabelRuntimeChecked {
 			entries["bounds_checks"] = append(entries["bounds_checks"], c.Loc)
 		}
@@ -92,7 +96,16 @@ func Budgets(prog *resolve.Program, srcs []*source.File, mod *ir.Module, target 
 	for _, s := range srcs {
 		text[s.Name] = s.Bytes
 	}
-	var out []diag.Diagnostic
+	// exceeded is one item over its budget, before its message is written
+	type exceeded struct {
+		b       budgeted
+		it      *ast.BudgetItem
+		kind    budgetKind
+		limit   uint64
+		counted []diag.Loc
+	}
+	var over []exceeded
+	boundsOver := false
 	for _, b := range fns {
 		d := b.fn.decl
 		for _, it := range d.Budget.Items {
@@ -119,16 +132,44 @@ func Budgets(prog *resolve.Program, srcs []*source.File, mod *ir.Module, target 
 				}
 				return counted[i].Span.End < counted[j].Span.End
 			})
-			over := counted[limit]
-			dg := diag.New("BUDGET_EXCEEDED", b.file, over.Span, "%s", budgetMessage(b.fn.name, kind, limit, counted, text[b.file]))
-			dg.Related = append(dg.Related, diag.Related{Label: "budget declared here", Start: it.Start, End: it.End})
-			for i, l := range counted {
-				if uint64(i) != limit {
-					dg.Related = append(dg.Related, diag.Related{Label: kind.related, Start: l.Span.Start, End: l.Span.End})
+			over = append(over, exceeded{b, it, kind, limit, counted})
+			boundsOver = boundsOver || it.Name == "bounds_checks"
+		}
+	}
+	// the hints of the exceeded bounds_checks items' locations
+	hints := map[diag.Loc]string{}
+	if boundsOver {
+		listed := map[diag.Loc]bool{}
+		for _, e := range over {
+			if e.it.Name == "bounds_checks" {
+				for _, l := range e.counted {
+					listed[l] = true
 				}
 			}
-			out = append(out, dg)
 		}
+		reasons, _ := classify(prog, srcs, snap, func(c diag.BoundsCheck) bool { return listed[c.Loc] })
+		for i, r := range reasons {
+			hints[snap.Result.Checks[i].Loc] = r.Hint
+		}
+	}
+	var out []diag.Diagnostic
+	for _, e := range over {
+		var hs []string
+		if e.it.Name == "bounds_checks" {
+			hs = make([]string, len(e.counted))
+			for i, l := range e.counted {
+				hs[i] = hints[l]
+			}
+		}
+		at := e.counted[e.limit]
+		dg := diag.New("BUDGET_EXCEEDED", e.b.file, at.Span, "%s", budgetMessage(e.b.fn.name, e.kind, e.limit, e.counted, hs, text[e.b.file]))
+		dg.Related = append(dg.Related, diag.Related{Label: "budget declared here", Start: e.it.Start, End: e.it.End})
+		for i, l := range e.counted {
+			if uint64(i) != e.limit {
+				dg.Related = append(dg.Related, diag.Related{Label: e.kind.related, Start: l.Span.Start, End: l.Span.End})
+			}
+		}
+		out = append(out, dg)
 	}
 	diag.Sort(out)
 	return out
@@ -137,23 +178,33 @@ func Budgets(prog *resolve.Program, srcs []*source.File, mod *ir.Module, target 
 // budgetMessage is the sentence of a BUDGET_EXCEEDED: the function, the
 // count and the budget, then each counted location as line:column with
 // its source text, since the plain-text rendering prints no related spans.
-func budgetMessage(name string, kind budgetKind, limit uint64, counted []diag.Loc, src []byte) string {
+// With hints (a bounds_checks item, specs/unproven-reasons R4) each
+// location is followed by its hint in parentheses and locations are
+// separated by "; "; without, by ", " as before.
+func budgetMessage(name string, kind budgetKind, limit uint64, counted []diag.Loc, hints []string, src []byte) string {
 	noun := kind.many
 	if len(counted) == 1 {
 		noun = kind.one
+	}
+	sep := ", "
+	if hints != nil {
+		sep = "; "
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "function `%s` has %d %s, budget %d: ", name, len(counted), noun, limit)
 	for i, l := range counted {
 		if i == budgetListed {
-			fmt.Fprintf(&b, ", and %d more", len(counted)-budgetListed)
+			fmt.Fprintf(&b, "%sand %d more", sep, len(counted)-budgetListed)
 			break
 		}
 		if i > 0 {
-			b.WriteString(", ")
+			b.WriteString(sep)
 		}
 		line, col := lineCol(src, l.Span.Start)
 		fmt.Fprintf(&b, "%d:%d `%s`", line, col, snippet(src, l.Span))
+		if hints != nil && hints[i] != "" {
+			fmt.Fprintf(&b, " (%s)", hints[i])
+		}
 	}
 	return b.String()
 }

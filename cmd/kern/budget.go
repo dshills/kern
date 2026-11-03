@@ -19,6 +19,20 @@ import (
 // check and build pass Build; tests pass a counting wrapper.
 type lowerFunc func(srcs []*source.File, optLevel string) (*ir.Module, []diag.Diagnostic, error)
 
+// budgetDeps is what a budget evaluation calls: lower for the show module
+// and classify for the hints of an exceeded bounds_checks item
+// (specs/unproven-reasons R4, R5). check and build pass budgetDefaults;
+// tests pass counting wrappers.
+type budgetDeps struct {
+	lower    lowerFunc
+	classify analysis.Classifier
+}
+
+// budgetDefaults are the evaluation's real dependencies.
+func budgetDefaults() budgetDeps {
+	return budgetDeps{lower: Build, classify: analysis.ClassifyBounds}
+}
+
 // requestHasBudgets parses the request's files, nothing else, and reports
 // whether one declares a budget block (spec §7.6, R6): a request without
 // one is never resolved again or lowered for its budgets.
@@ -42,7 +56,7 @@ func requestHasBudgets(srcs []*source.File) bool {
 // query as show-copies passes it. Diagnostics lower returns (the program
 // did not check after all) are returned unchanged; a lowering error, a
 // missing module or a panic is an InternalError.
-func budgetDiags(srcs []*source.File, optLevel, target string, lower lowerFunc) (ds []diag.Diagnostic, err error) {
+func budgetDiags(srcs []*source.File, optLevel, target string, deps budgetDeps) (ds []diag.Diagnostic, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			ds, err = nil, &InternalError{Err: fmt.Errorf("budget evaluation: %v", r)}
@@ -57,14 +71,14 @@ func budgetDiags(srcs []*source.File, optLevel, target string, lower lowerFunc) 
 		}
 	}
 	if requestHasBudgets(program) {
-		pds, err := evaluateBudgets(program, optLevel, target, lower, func(string) bool { return true })
+		pds, err := evaluateBudgets(program, optLevel, target, deps, func(string) bool { return true })
 		if err != nil || len(pds) > 0 && pds[0].Code != "BUDGET_EXCEEDED" {
 			return pds, err
 		}
 		ds = pds
 	}
 	if len(tests) > 0 && requestHasBudgets(tests) {
-		tds, err := evaluateBudgets(srcs, optLevel, target, lower, project.TestFile)
+		tds, err := evaluateBudgets(srcs, optLevel, target, deps, project.TestFile)
 		if err != nil || len(tds) > 0 && tds[0].Code != "BUDGET_EXCEEDED" {
 			return tds, err
 		}
@@ -77,8 +91,8 @@ func budgetDiags(srcs []*source.File, optLevel, target string, lower lowerFunc) 
 // evaluateBudgets lowers files with lower and returns the budget
 // diagnostics of the functions declared in the files keep accepts, or
 // lower's own diagnostics unchanged.
-func evaluateBudgets(files []*source.File, optLevel, target string, lower lowerFunc, keep func(string) bool) ([]diag.Diagnostic, error) {
-	mod, lds, lerr := lower(files, optLevel)
+func evaluateBudgets(files []*source.File, optLevel, target string, deps budgetDeps, keep func(string) bool) ([]diag.Diagnostic, error) {
+	mod, lds, lerr := deps.lower(files, optLevel)
 	switch {
 	case lerr != nil:
 		return nil, &InternalError{Err: fmt.Errorf("budget evaluation: lowering: %w", lerr)}
@@ -92,7 +106,7 @@ func evaluateBudgets(files []*source.File, optLevel, target string, lower lowerF
 		return prog.Diags, nil
 	}
 	var out []diag.Diagnostic
-	for _, d := range analysis.Budgets(prog, files, mod, target) {
+	for _, d := range analysis.Budgets(prog, files, mod, target, deps.classify) {
 		if keep(d.File) {
 			out = append(out, d)
 		}
