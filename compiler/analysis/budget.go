@@ -176,10 +176,16 @@ func snippet(src []byte, span diag.Span) string {
 	if span.Start < 0 || span.End > len(src) || span.Start > span.End {
 		return ""
 	}
+	return clip(string(src[span.Start:span.End]))
+}
+
+// clip is text with each run of whitespace replaced by one space and, past
+// budgetSnippet code points, cut there and followed by "...".
+func clip(text string) string {
 	var b strings.Builder
 	n := 0
 	space := false
-	for _, r := range string(src[span.Start:span.End]) {
+	for _, r := range text {
 		if unicode.IsSpace(r) {
 			space = true
 			continue
