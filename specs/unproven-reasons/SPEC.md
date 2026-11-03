@@ -1,6 +1,6 @@
 # Why a bounds check is not proven: reasons in `show-bounds-checks` and `BUDGET_EXCEEDED`
 
-**Version:** 0.1 (2026-11-03). **Scope:** a classification of
+**Version:** 0.2 (2026-11-03; 0.1 the same day, before the slice hint's amendment in §3 item 8). **Scope:** a classification of
 runtime-checked bounds checks over the AST and the lowered module
 (`compiler/analysis`), the proof pass only to record which bound of a
 slice check it failed to prove (`compiler/opt/prove.go`, `compiler/ir`),
@@ -201,7 +201,20 @@ type's name.
    (it records which bound failed; when both did, this one). Hint:
    ``the rules prove a high bound only when it is `len(X)`, a literal
    within an array's length, or `v + c` with a literal c ≥ 1 under a
-   guard `v + (c - 1) < len(X)`; `H <= len(X)` does not prove it``.
+   guard `v + (c - 1) < len(X)`, `v` not itself a value plus or minus a
+   literal; `H <= len(X)` does not prove it: slice to `len(X)` instead,
+   `X[L:len(X)]`, and test each index below the slice's length``,
+   where, when L is not the literal `0usize` (or omitted), the text
+   ``, after testing `L < len(X)` `` follows `` `X[L:len(X)]` `` if L is
+   an integer literal or has a variable, and otherwise
+   `` `X[L:len(X)]` `` is replaced by ``from `L` put in a local and
+   tested below `len(X)` first`` (a call result, for one, is not the
+   same value when written twice). (Version
+   0.1 ended the hint at "does not prove it"; the evaluation of
+   `docs/reports/unproven-reasons.md` found that the `v + c` form, written
+   the natural way with a local `k := w - 1usize`, is read back as `w`
+   plus 0 and stays checked, while slicing to the length and guarding the
+   indexes is proven.)
 9. **`slice_low_bound`**: the high bound was proven and the low one was
    not. Hint: ``the rules prove a low bound only when it is `0usize`, a
    literal not above a literal high bound, `v + a` under a high bound

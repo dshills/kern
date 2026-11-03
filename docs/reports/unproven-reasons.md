@@ -100,11 +100,13 @@ for the rewritten access.
 | t10 3376311375 | `counts[usize(b)]` | `type_range` | `counts[usize(b) & 255usize]` | proven (`constant`) |
 | t04 961917248 | `b[i]` (loop on `len(a)`) | `other_length` | `if i < len(b) { b[i] = a[i] }` | proven |
 | t05 877116110 | `ps[i]` (loop on `len(xs)`) | `other_length` | `if i < len(ps)` | proven |
-| t04 3450304529 | `u[0usize:w]` | `slice_high_bound` | `k := w - 1usize; if k < len(u) { u[0usize:k + 1usize] }` | **runtime-checked** |
-| t04 95975594 | `g[i:i + w]` | `slice_high_bound` | `e := i + w - 1usize; if e < len(g) { g[i:e + 1usize] }` | **runtime-checked** |
+| t04 3450304529 | `u[0usize:w]` | `slice_high_bound` | v0.1 hint: `k := w - 1usize; if k < len(u) { u[0usize:k + 1usize] }` | **runtime-checked** |
+| | | | v0.2 hint: `u[0usize:len(u)]`, `if x < len(r)` on each index | proven |
+| t04 95975594 | `g[i:i + w]` | `slice_high_bound` | v0.1 hint: `e := i + w - 1usize; if e < len(g) { g[i:e + 1usize] }` | **runtime-checked** |
+| | | | v0.2 hint: `if i < len(g) { g[i:len(g)] }` | proven |
 
-Every index hint's rewrite is proven. The slice hint is not enough: it
-says, correctly, that a high bound is proven only as `len(X)`, a literal
+Every index hint's rewrite is proven. The slice hint as first specified
+(v0.1) was not enough: it said, correctly, that a high bound is proven only as `len(X)`, a literal
 within an array's length, or `v + c` under `v + (c - 1) < len(X)`, but
 the obvious way to write that form, a local `k := w - 1usize` and the
 bound `k + 1usize`, is read back by the proof pass as `w` plus 0, so the
@@ -114,18 +116,27 @@ with `k` a parameter is proven). What proves the two accesses above is to
 slice to the length and guard the indexes instead
 (`with r := u[0usize:len(u)] { ... if x < len(r) { r[x] } }`, and
 `if i < len(g) { g[i:len(g)] }`), which changes what the code does when
-`w` is out of range.
+`w` is out of range. The spec was amended (v0.2, §3 item 8) and the
+hint now ends with that rewrite, written with the access's own place
+and low bound:
+
+```
+... `w <= len(u)` does not prove it: slice to `len(u)` instead, `u[0usize:len(u)]`, and test each index below the slice's length
+```
+
+With it both accesses are proven (the v0.2 rows above), as are the
+fixtures `f8` and `f8b` of `compiler/analysis/reasons_test.go`.
 
 ## What this shows, and what it does not
 
 - For every index form the agents left over budget, `check` now names a
   rewrite the rules prove, and the eight index checks above confirm it on
   their own programs.
-- `slice_high_bound` is 13 of the run's 82 locations (16%), and its hint
-  does not lead to a proven rewrite. Two ways to fix it: amend the hint
-  to recommend slicing to `len(X)` and guarding the indexes, or close
-  the proof gap of spec §6 (`n <= len(h)` proving `h[0usize:n]`), which
-  would also change the agent suites' calibration.
+- `slice_high_bound` is 13 of the run's 82 locations (16%). Its v0.1
+  hint did not lead to a proven rewrite; the amended hint does, at the
+  cost of not trapping when the bound is past the end. Closing the proof
+  gap of spec §6 (`n <= len(h)` proving `h[0usize:n]`) would keep the
+  trap, and would also change the agent suites' calibration.
 - None of the run's locations had a guard that missed a path or was too
   weak: the agents' remaining checks had no guard on the indexed length
   at all, or a computed index. The two guard reasons are covered only by

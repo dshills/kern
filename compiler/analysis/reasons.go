@@ -107,7 +107,8 @@ type access struct {
 	start int
 	x     ast.Expr // the place
 	e     ast.Expr // an index access's index; nil for a slice
-	hi    ast.Expr // a slice's high bound, nil when omitted
+	lo    ast.Expr // a slice's bounds, nil when omitted
+	hi    ast.Expr
 	slice bool
 	// a byte-order call: e is the index argument I, and the width W gives
 	// the synthetic index I + (W - 1)usize
@@ -162,7 +163,22 @@ func (c *classifier) classify(f *ast.File, span diag.Span, highFailed bool) (Rea
 			if acc.hi != nil {
 				h = c.text(acc.hi)
 			}
-			return Reason{ReasonSliceHighBound, fmt.Sprintf("the rules prove a high bound only when it is `len(%s)`, a literal within an array's length, or `v + c` with a literal c ≥ 1 under a guard `v + (c - 1) < len(%s)`; `%s <= len(%s)` does not prove it", x, x, h, x)}, true
+			// the rewrite that is always proven: slice to the length, the
+			// low bound tested first unless it is 0, and put in a local first
+			// when it is neither a literal nor a variable plus or minus one
+			// (specs/unproven-reasons v0.2, §3 item 8)
+			slice := fmt.Sprintf("`%s[0usize:len(%s)]`", x, x)
+			lit, isLit := acc.lo.(*ast.IntLit)
+			_, _, _, isVar := variable(acc.lo)
+			switch {
+			case acc.lo == nil || isLit && lit.Value == 0 && !lit.Neg:
+			case isLit || isVar:
+				l := c.text(acc.lo)
+				slice = fmt.Sprintf("`%s[%s:len(%s)]`, after testing `%s < len(%s)`", x, l, x, l, x)
+			default:
+				slice = fmt.Sprintf("from `%s` put in a local and tested below `len(%s)` first", c.text(acc.lo), x)
+			}
+			return Reason{ReasonSliceHighBound, fmt.Sprintf("the rules prove a high bound only when it is `len(%s)`, a literal within an array's length, or `v + c` with a literal c ≥ 1 under a guard `v + (c - 1) < len(%s)`, `v` not itself a value plus or minus a literal; `%s <= len(%s)` does not prove it: slice to `len(%s)` instead, %s, and test each index below the slice's length", x, x, h, x, x, slice)}, true
 		}
 		return Reason{ReasonSliceLowBound, fmt.Sprintf("the rules prove a low bound only when it is `0usize`, a literal not above a literal high bound, `v + a` under a high bound `v + b` with a ≤ b, or below `len(%s)` under a guard when the high bound is `len(%s)`", x, x)}, true
 	}
@@ -234,7 +250,7 @@ func (c *classifier) walk(decl *ast.FuncDecl) *funcIndex {
 				fi.accesses[[2]int{x.Start, x.End}] = access{start: x.Start, x: unparen(x.X), e: unparen(x.Args[0])}
 			}
 		case *ast.SliceExpr:
-			fi.accesses[[2]int{x.Start, x.End}] = access{start: x.Start, x: unparen(x.X), hi: unparenOrNil(x.Hi), slice: true}
+			fi.accesses[[2]int{x.Start, x.End}] = access{start: x.Start, x: unparen(x.X), lo: unparenOrNil(x.Lo), hi: unparenOrNil(x.Hi), slice: true}
 		case *ast.CallExpr:
 			if byteOrderCall(x) && len(x.Args) >= 2 {
 				fi.accesses[[2]int{x.Start, x.End}] = access{start: x.Start, x: unparen(x.Args[0].X), e: unparen(x.Args[1].X), byteOrder: true, width: c.byteWidth(x)}

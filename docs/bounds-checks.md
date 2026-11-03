@@ -160,11 +160,17 @@ the access (a closure's body is its own); `v` is a name or field path and
 | `remainder_by_value` | the index is a remainder by a value | `src[i % len(src)]` |
 | `computed_index` | the index is computed, not a variable plus or minus a literal | `s[n - 1usize - i]`, `xs[len(xs) - 1usize]` |
 | `no_guard` | any other index: no guard at all | `xs[mid]`, `ps[0usize]` |
-| `slice_high_bound` | a slice's high bound is not proven | `h[0usize:n]` under `n <= len(h)` |
+| `slice_high_bound` | a slice's high bound is not proven | `h[0usize:n]` under `n <= len(h)` (slice to `len(h)` and test each index) |
 | `slice_low_bound` | a slice's high bound is proven and its low bound is not | `a[s:len(a)]` with no guard on `s` |
 
-For every reason but the two slice ones the hint gives a rewrite the
+For every reason but `slice_low_bound` the hint gives a rewrite the
 rules prove: test the index (put in a local first when it is computed)
 below `len` of the indexed place just before the access, or mask a
 converted byte. No guard proves a slice's high bound `n` from
-`n <= len(h)` today; the slice hints say which forms the rules do prove.
+`n <= len(h)` today, and the `v + c` form is read back through a local
+(`k := w - 1usize` makes `k + 1usize` the value `w`), so the
+`slice_high_bound` hint gives the form that is always proven: slice to
+the length, `h[0usize:len(h)]` (or `g[i:len(g)]` after testing
+`i < len(g)`), and test each index below the slice's length. That
+rewrite no longer traps when `n` is past the end; whether that is right
+is the program's decision.

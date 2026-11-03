@@ -124,6 +124,14 @@ func f8(h: view[]u64, n: usize) -> usize {
     if n <= len(h) { return count(h[0usize:n]) }
     return 0usize
 }
+func f8b(g: view[]u64, i: usize, w: usize) -> usize {
+    if i + w <= len(g) { return count(g[i:i + w]) }
+    return 0usize
+}
+func f8c(g: view[]u64, xs: view[]u64, w: usize) -> usize {
+    if count(xs) + w <= len(g) { return count(g[count(xs):count(xs) + w]) }
+    return 0usize
+}
 func f9(a: view[]u64, s: usize) -> usize { return count(a[s:len(a)]) }
 func main() -> i32 { return 0i32 }
 `
@@ -168,6 +176,33 @@ func f7lit(ps: view[]u64) -> u64 {
     if 0usize < len(ps) { return ps[0usize] }
     return 0u64
 }
+func f8(h: view[]u64, n: usize) -> u64 {
+    var s: u64 = 0u64
+    with r := h[0usize:len(h)] {
+        for x in 0usize..n { if x < len(r) { s = s + r[x] } }
+    }
+    return s
+}
+func f8b(g: view[]u64, i: usize, w: usize) -> u64 {
+    var s: u64 = 0u64
+    if i < len(g) {
+        with r := g[i:len(g)] {
+            for x in 0usize..w { if x < len(r) { s = s + r[x] } }
+        }
+    }
+    return s
+}
+func f8c(g: view[]u64, xs: view[]u64, w: usize) -> u64 {
+    var s: u64 = 0u64
+    k := count(xs)
+    if k < len(g) {
+        with r := g[k:len(g)] {
+            for x in 0usize..w { if x < len(r) { s = s + r[x] } }
+        }
+    }
+    return s
+}
+func count(xs: view[]u64) -> usize { return len(xs) }
 func main() -> i32 { return 0i32 }
 `
 
@@ -188,10 +223,14 @@ func TestReasonsEach(t *testing.T) {
 	c.expect(t, "xs[mid]", analysis.ReasonNoGuard, "test `mid < len(xs)` on every path to it")
 	c.expect(t, "ps[0usize]", analysis.ReasonNoGuard, "test `0usize < len(ps)` on every path to it")
 	c.expect(t, "h[0usize:n]", analysis.ReasonSliceHighBound,
-		"the rules prove a high bound only when it is `len(h)`, a literal within an array's length, or `v + c` with a literal c ≥ 1 under a guard `v + (c - 1) < len(h)`; `n <= len(h)` does not prove it")
+		"the rules prove a high bound only when it is `len(h)`, a literal within an array's length, or `v + c` with a literal c ≥ 1 under a guard `v + (c - 1) < len(h)`, `v` not itself a value plus or minus a literal; `n <= len(h)` does not prove it: slice to `len(h)` instead, `h[0usize:len(h)]`, and test each index below the slice's length")
+	c.expect(t, "g[i:i + w]", analysis.ReasonSliceHighBound,
+		"the rules prove a high bound only when it is `len(g)`, a literal within an array's length, or `v + c` with a literal c ≥ 1 under a guard `v + (c - 1) < len(g)`, `v` not itself a value plus or minus a literal; `i + w <= len(g)` does not prove it: slice to `len(g)` instead, `g[i:len(g)]`, after testing `i < len(g)`, and test each index below the slice's length")
+	c.expect(t, "g[count(xs):count(xs) + w]", analysis.ReasonSliceHighBound,
+		"the rules prove a high bound only when it is `len(g)`, a literal within an array's length, or `v + c` with a literal c ≥ 1 under a guard `v + (c - 1) < len(g)`, `v` not itself a value plus or minus a literal; `count(xs) + w <= len(g)` does not prove it: slice to `len(g)` instead, from `count(xs)` put in a local and tested below `len(g)` first, and test each index below the slice's length")
 	c.expect(t, "a[s:len(a)]", analysis.ReasonSliceLowBound,
 		"the rules prove a low bound only when it is `0usize`, a literal not above a literal high bound, `v + a` under a high bound `v + b` with a ≤ b, or below `len(a)` under a guard when the high bound is `len(a)`")
-	for _, fn := range []string{"f1", "f2", "f3", "f4", "f5", "f6", "f7", "f7lit"} {
+	for _, fn := range []string{"f1", "f2", "f3", "f4", "f5", "f6", "f7", "f7lit", "f8", "f8b", "f8c"} {
 		if n := unprovenIn(t, reasonsRewritten, "debug", fn); n != 0 {
 			t.Errorf("rewritten %s: %d runtime-checked bounds checks, want 0", fn, n)
 		}
