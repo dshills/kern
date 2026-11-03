@@ -32,7 +32,10 @@ parentheses and truncation are defined per fragment; R5 bounds only
 classification work, not R2's recording. Kept as written:
 R5's assertion that the classification is not entered, an observable
 cost property the tests check, as `specs/declared-budgets` R6 does; the
-preflight warnings that read R1 to R8 as undefined acronyms.
+preflight warnings that read R1 to R8 as undefined acronyms. Amended
+while planning (plancritic): closures use only the innermost body's
+guards; an unlocated entry's fixed hint (§2); a byte-order index's
+offset; R2 compares the LLVM IR, not the linked executable.
 
 **Glossary.** R1 to R8: the requirements of §4. Entry: an element of
 `show-bounds-checks`' `checks`. Unproven entry: an entry with `kind`
@@ -111,7 +114,14 @@ An unproven entry's span is the span of one of:
 - a call of `load_be`, `load_le`, `store_be` or `store_le` of a
   `W`-byte type with buffer argument X and index argument I: place X and
   index `I + (W - 1)usize` (written with the decimal value of W − 1), or
-  I itself when W is 1.
+  I itself when W is 1. This E is one fragment (truncated as a whole).
+  Its variable and offset are I's, with W − 1 added to the offset, when
+  I has a variable; it has none otherwise.
+
+An entry whose span is none of these is not expected (the lowering
+emits bounds checks only for them); should one occur, it gets
+`no_guard` with the hint ``test that the index is below the length on
+every path to it``, and R8's suite sweep asserts that none occurs.
 
 Parentheses around E, L, H or X are dropped. The *variable* of an index
 is defined when the index is a name or a field path of a name (`v`,
@@ -123,9 +133,10 @@ has no variable.
 ## 3. Reasons
 
 Every unproven entry gets exactly one reason, the first of this list that
-applies. *Guard candidates* of an access are, within the body of the
-function that contains it (not inside a closure literal in that body,
-unless the access is in that closure), the comparisons of a condition (of
+applies. *Guard candidates* of an access are, within the innermost body
+that contains it (the closure literal's body when the access is in one,
+else the function's body), and not inside any closure literal nested in
+that body, the comparisons of a condition (of
 `if`, `while`, or an operand of `&&`, `||` or `!` within one) and the
 headers `for v in A..B`, where one side is `len(Q)` for some expression
 Q and the other is a name or field path of a name plus or minus an
@@ -222,9 +233,13 @@ which depends only on the source.
 **R2. The proof pass.** The proof pass records, for a slice check it
 does not prove, whether the high bound was proven. It changes no label
 and no `proven_by`, and every compiled artifact is byte-identical to
-the previous binary's for every program: the files `build` writes, the
-`emit-ir` and `emit-asm` results, and what a program `run` executes
-prints (checked on `tests/` and the agent suites' references, R8).
+the previous binary's for every program: the LLVM IR `build` compiles
+(`--emit-llvm`), the `emit-ir` and `emit-asm` results, and what a
+program `run` executes prints and its exit status (checked on the
+programs under `tests/` that the previous binary builds, and the agent
+suites' references, R8). The linked executable is not compared: two
+builds of one program by one binary already differ on this host, so its
+input, the LLVM IR, stands for it.
 Diagnostics are not artifacts: R4 changes the `BUDGET_EXCEEDED`
 message.
 
