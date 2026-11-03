@@ -30,8 +30,9 @@ What counts as "the same index":
 - the same pure expression recomputed (`xs[a + b]` under `a + b <
   len(xs)`);
 - an index plus or minus a literal: `i + 1 < len(xs)` covers `xs[i]` and
-  `xs[i + 1]`; `i < len(xs)` covers `xs[i - 1]`; `x <= y` with `x` at
-  least one more than something gives `x - 1 < y`.
+  `xs[i + 1]`; `i < len(xs)` covers `xs[i - 1]`; `x <= y` gives
+  `x - 1 < y`, so `n <= len(xs)` covers `xs[n - 1]` (not `xs[n]`) and
+  `i + 2 <= len(xs)` covers `xs[i + 1]`.
 
 What counts as "the same length":
 - `len` of the same access (it never changes) or of the same array;
@@ -52,6 +53,20 @@ A mask by a value one below the length, `x & (len(xs) - 1usize)`, is
 also proven: the subtraction is checked, so for an empty `xs` it traps
 before the index is reached.
 
+**Slices.** A slice `xs[lo:hi]` is proven when its high bound is in
+range and its low bound is not above the high one. The high bound is in
+range when it is:
+- `len(xs)` (or omitted);
+- a literal within an array's length, or the literal 0;
+- a value plus a literal under a guard that keeps it within the length:
+  `h[0usize:n]` and `h[i:n]` under `n <= len(h)`, and `h[i:i + 2usize]`
+  under `i + 2usize <= len(h)`.
+
+The low bound is not above the high one when it is `0usize` (or
+omitted), a literal not above a literal high bound, the same value with
+a smaller offset (`a[i:i + 2usize]`), or under a guard against the high
+bound: `a[s:e]` under `s <= e`, and `a[s:len(a)]` under `s <= len(a)`.
+
 ## What does not prove a check
 
 Nothing beyond the rules above is assumed. In particular:
@@ -63,6 +78,10 @@ Nothing beyond the rules above is assumed. In particular:
   `if i < len(xs)` with `i := i0`). A call that cannot reach the index
   forgets nothing about it, and the lengths of arrays and sequences
   survive every call.
+- **A high bound read as a value minus a literal**: `h[0usize:n - 1usize]`
+  under `n <= len(h)`, and `h[0usize:len(h) - 1usize]` even after
+  `h[len(h) - 1usize]` passed; also through a local (`k := n - 1usize`
+  and `h[0usize:k]`).
 - **Arithmetic the rules do not track**: a midpoint `(lo + hi) / 2`, a
   reversed index `n - 1 - i`, `len(xs) - 1` under `len(xs) > 0`, a grid
   index `y * w + x` under `x < w && y < h`, a digit offset `c - 48`
@@ -160,17 +179,18 @@ the access (a closure's body is its own); `v` is a name or field path and
 | `remainder_by_value` | the index is a remainder by a value | `src[i % len(src)]` |
 | `computed_index` | the index is computed, not a variable plus or minus a literal | `s[n - 1usize - i]`, `xs[len(xs) - 1usize]` |
 | `no_guard` | any other index: no guard at all | `xs[mid]`, `ps[0usize]` |
-| `slice_high_bound` | a slice's high bound is not proven | `h[0usize:n]` under `n <= len(h)` (slice to `len(h)` and test each index) |
-| `slice_low_bound` | a slice's high bound is proven and its low bound is not | `a[s:len(a)]` with no guard on `s` |
+| `slice_high_bound` | a slice's high bound is not proven | `h[0usize:n]` with no guard (test `n <= len(h)`), `h[0usize:n - 1usize]` (slice to `len(h)` and test each index) |
+| `slice_low_bound` | a slice's high bound is proven and its low bound is not | `a[s:e]` under `e <= len(a)` alone (test `s <= e`) |
 
-For every reason but `slice_low_bound` the hint gives a rewrite the
-rules prove: test the index (put in a local first when it is computed)
-below `len` of the indexed place just before the access, or mask a
-converted byte. No guard proves a slice's high bound `n` from
-`n <= len(h)` today, and the `v + c` form is read back through a local
-(`k := w - 1usize` makes `k + 1usize` the value `w`), so the
-`slice_high_bound` hint gives the form that is always proven: slice to
-the length, `h[0usize:len(h)]` (or `g[i:len(g)]` after testing
-`i < len(g)`), and test each index below the slice's length. That
-rewrite no longer traps when `n` is past the end; whether that is right
-is the program's decision.
+Every hint gives a rewrite the rules prove: test the index (put in a
+local first when it is computed) below `len` of the indexed place just
+before the access, or mask a converted byte. For a slice, test the high
+bound `<=` the length and, when the low bound is not 0, the low bound
+`<=` the high one (test `s <= n && n <= len(h)` just before it),
+putting a computed bound in a local first. The exception is a high bound
+the rules read as a value minus a literal, which no guard proves. For
+that one the hint gives the form that is always proven: slice to the
+length, `h[0usize:len(h)]` (or `h[s:len(h)]` after testing
+`s < len(h)`), and test each index below the slice's length. That
+rewrite no longer traps when the bound is past the end; whether that is
+right is the program's decision.

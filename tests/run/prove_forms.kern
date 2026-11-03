@@ -188,6 +188,41 @@ func guard_mask(p: view[]u64, x: usize, m: usize) -> u64 {
     if m < len(p) { return p[x & m] }
     return 0u64
 }
+// specs/prove-nonstrict G1: a non-strict guard with no positive offset
+// covers the index one below it, on its then edge and on the else edge
+// of the opposite test
+func ns_index(h: view[]u64, n: usize) -> u64 {
+    if n <= len(h) { return h[n - 1usize] }
+    return 0u64
+}
+func ns_index_gt(h: view[]u64, n: usize) -> u64 {
+    if n > len(h) { return 0u64 }
+    return h[n - 2usize]
+}
+// G2: a slice's high bound under `n <= len(h)`
+func ns_slice(h: view[]u64, n: usize) -> u64 {
+    if n <= len(h) { with r := h[0usize:n] { return u64(len(r)) } }
+    return 0u64
+}
+// G2 and G3: both bounds, the low one under a guard on the high one's
+// variable
+func ns_low(a: view[]u64, s: usize, e: usize) -> u64 {
+    if s <= e && e <= len(a) { with r := a[s:e] { return u64(len(r)) } }
+    return 0u64
+}
+func ns_low_plus(a: view[]u64, s: usize, e: usize) -> u64 {
+    if s <= e && e + 1usize <= len(a) { with r := a[s:e + 1usize] { return u64(len(r)) } }
+    return 0u64
+}
+// G3: a low bound not above the length
+func ns_low_len(a: view[]u64, s: usize) -> u64 {
+    if s <= len(a) { with r := a[s:len(a)] { return u64(len(r)) } }
+    return 0u64
+}
+// G4: the literal high bound 0
+func ns_zero(h: view[]u64) -> u64 {
+    with r := h[0usize:0usize] { return u64(len(r)) }
+}
 func main() -> i32 {
     xs := [1u64, 2u64, 3u64, 4u64, 5u64]
     ys := [10u64, 20u64, 30u64, 40u64, 50u64]
@@ -242,6 +277,10 @@ func main() -> i32 {
     print_u64(rem_at(mr, 37usize) + ring_sum(mr, 5usize) + join_pick(mr, 13usize, true) + join_pick(mr, 29usize, false))
     println()
     print_u64(len_mask(xs[0usize:5usize], 6usize) + len_mask(xs[0usize:0usize], 3usize) + len_mask(xs[0usize:3usize], 7usize) + guard_mask(xs[0usize:5usize], 7usize, 3usize))
+    println()
+    print_u64(ns_index(xs[0usize:5usize], 5usize) + ns_index(xs[0usize:5usize], 9usize) + ns_index_gt(xs[0usize:5usize], 3usize) + ns_index_gt(xs[0usize:5usize], 6usize))
+    println()
+    print_u64(ns_slice(xs[0usize:5usize], 4usize) + ns_slice(xs[0usize:5usize], 6usize) + ns_low(xs[0usize:5usize], 1usize, 5usize) + ns_low(xs[0usize:5usize], 3usize, 2usize) + ns_low_plus(xs[0usize:5usize], 2usize, 4usize) + ns_low_len(xs[0usize:5usize], 5usize) + ns_zero(xs[0usize:0usize]))
     println()
     return 0i32
 }

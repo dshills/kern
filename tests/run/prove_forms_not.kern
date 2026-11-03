@@ -67,6 +67,37 @@ func join_wide(r: view[[8]u64], x: usize, c: bool) -> u64 {
     return r[p]
 }
 func len_whole(p: view[]u64, x: usize) -> u64 { return p[x & len(p)] }
+// specs/prove-nonstrict §0: the length minus a literal stays checked, as
+// an index under a length test and as a high bound after the index
+// check on the same value
+func nsn_last(xs: view[]u64) -> u64 {
+    if len(xs) > 0usize { return xs[len(xs) - 1usize] }
+    return 0u64
+}
+func nsn_pop(h: view[]u64) -> u64 {
+    if len(h) == 0usize { return 0u64 }
+    x := h[len(h) - 1usize]
+    with r := h[0usize:len(h) - 1usize] { return x + u64(len(r)) }
+}
+// a high bound read as a value minus a literal
+func nsn_neg(h: view[]u64, n: usize) -> u64 {
+    if n <= len(h) { with r := h[0usize:n - 1usize] { return u64(len(r)) } }
+    return 0u64
+}
+// `n <= len(h)` does not cover h[n]
+func nsn_at(h: view[]u64, n: usize) -> u64 {
+    if n <= len(h) { return h[n] }
+    return 0u64
+}
+// a low bound with no guard against the high bound
+func nsn_low(a: view[]u64, s: usize, e: usize) -> u64 {
+    if e <= len(a) { with r := a[s:e] { return u64(len(r)) } }
+    return 0u64
+}
+// a literal high bound other than 0 with no guard
+func nsn_one(h: view[]u64) -> u64 {
+    with r := h[0usize:1usize] { return u64(len(r)) }
+}
 func main() -> i32 {
     xs := [1u64, 2u64, 3u64]
     ys := [10u64, 20u64, 30u64]
@@ -87,6 +118,10 @@ func main() -> i32 {
     print_u64(mask_len(mr, 7usize) + mask_past(mr, 1usize) + mask_var(mr, 11usize, 7usize) + mask_call(mr, 14usize))
     println()
     print_u64(rem_past(mr, 12usize) + rem_len(xs[0usize:3usize], 7usize) + ring_from(mr, 3usize, 4usize) + join_wide(mr, 6usize, false) + join_wide(mr, 7usize, true) + len_whole(xs[0usize:3usize], 4usize))
+    println()
+    // v.len() is 1: a call result, so release inlining cannot read the
+    // bounds as literals
+    print_u64(nsn_last(xs[0usize:3usize]) + nsn_pop(xs[0usize:3usize]) + nsn_neg(xs[0usize:3usize], v.len()) + nsn_at(xs[0usize:3usize], v.len() + 1usize) + nsn_low(xs[0usize:3usize], v.len(), 3usize) + nsn_one(xs[0usize:3usize]))
     println()
     return 0i32
 }

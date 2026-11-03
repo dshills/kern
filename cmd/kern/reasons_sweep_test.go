@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -59,7 +60,7 @@ func TestReasonsSuiteSweep(t *testing.T) {
 	if len(dirs) != 60 {
 		t.Fatalf("%d suite program directories, want 60 (2 suites x 10 tasks x 3)", len(dirs))
 	}
-	total, programs := 0, 0
+	total, programs, otherPlace := 0, 0, 0
 	codes := map[string]int{}
 	for _, dir := range dirs {
 		var srcs []*source.File
@@ -84,6 +85,10 @@ func TestReasonsSuiteSweep(t *testing.T) {
 			if st.Unlocated != 0 {
 				t.Errorf("%s %s: %d entries not located", dir, level, st.Unlocated)
 			}
+			text := map[string][]byte{}
+			for _, s := range srcs {
+				text[s.Name] = s.Bytes
+			}
 			for i, c := range snap.Result.Checks {
 				r, ok := reasons[i]
 				unproven := c.Kind == diag.CheckBounds && c.Label == diag.LabelRuntimeChecked
@@ -96,6 +101,14 @@ func TestReasonsSuiteSweep(t *testing.T) {
 				}
 				total++
 				codes[r.Code]++
+				if r.Code == analysis.ReasonSliceHighBound || r.Code == analysis.ReasonSliceLowBound {
+					// the hint's guarantee is for a place that is a name or a
+					// field path of a name (specs/prove-nonstrict C4)
+					quoted := string(text[c.Loc.File][c.Loc.Span.Start:c.Loc.Span.End])
+					if j := strings.IndexByte(quoted, '['); j < 0 || !placePath.MatchString(quoted[:j]) {
+						otherPlace++
+					}
+				}
 				if !slices.Contains(analysis.ReasonCodes, r.Code) || r.Hint == "" {
 					t.Errorf("%s %s: entry %v: reason %q, hint %q", dir, level, c.Loc, r.Code, r.Hint)
 				}
@@ -105,8 +118,11 @@ func TestReasonsSuiteSweep(t *testing.T) {
 	if programs < 100 || total < 100 {
 		t.Errorf("only %d programs and %d unproven entries swept", programs, total)
 	}
-	t.Logf("%d programs, %d unproven entries: %v", programs, total, codes)
+	t.Logf("%d programs, %d unproven entries: %v; %d slice entries whose place is not a name or a field path of a name", programs, total, codes, otherPlace)
 }
+
+// placePath is a name or a field path of a name.
+var placePath = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
 
 // The fields reach the CLI's JSON for a suite start.
 func TestReasonsSuiteCLI(t *testing.T) {

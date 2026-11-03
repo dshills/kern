@@ -49,8 +49,9 @@ var _ Classifier = ClassifyBounds
 
 // ClassifyBounds is the Classifier of specs/unproven-reasons: each entry's
 // reason comes from the source of the function that contains the access,
-// its types, and whether the proof pass proved a slice's high bound;
-// nothing else.
+// its types, whether the proof pass proved a slice's high bound, and
+// whether it read the high bound as a value minus a literal
+// (specs/prove-nonstrict C2); nothing else.
 func ClassifyBounds(prog *resolve.Program, srcs []*source.File, snap *BoundsSnapshot, want func(diag.BoundsCheck) bool) (map[int]Reason, ClassifyStats) {
 	text := map[string][]byte{}
 	for _, s := range srcs {
@@ -72,7 +73,7 @@ func ClassifyBounds(prog *resolve.Program, srcs []*source.File, snap *BoundsSnap
 		}
 		st.Entries++
 		cl := &classifier{info: prog.Info, src: text[c.Loc.File], decls: decls, index: index}
-		r, ok := cl.classify(files[c.Loc.File], c.Loc.Span, snap.highFailed[i])
+		r, ok := cl.classify(files[c.Loc.File], c.Loc.Span, snap.highFailed[i], snap.highNegative[i])
 		if !ok {
 			st.Unlocated++
 			r = Reason{ReasonNoGuard, unlocatedHint}
@@ -128,7 +129,7 @@ type candidate struct {
 	scope   ast.Pos // the innermost closure literal containing it, or {-1, -1}
 }
 
-func (c *classifier) classify(f *ast.File, span diag.Span, highFailed bool) (Reason, bool) {
+func (c *classifier) classify(f *ast.File, span diag.Span, highFailed, highNegative bool) (Reason, bool) {
 	if f == nil || c.src == nil {
 		return Reason{}, false
 	}
@@ -158,29 +159,7 @@ func (c *classifier) classify(f *ast.File, span diag.Span, highFailed bool) (Rea
 	}
 	x := c.text(acc.x)
 	if acc.slice {
-		if highFailed {
-			h := "len(" + x + ")"
-			if acc.hi != nil {
-				h = c.text(acc.hi)
-			}
-			// the rewrite that is always proven: slice to the length, the
-			// low bound tested first unless it is 0, and put in a local first
-			// when it is neither a literal nor a variable plus or minus one
-			// (specs/unproven-reasons v0.2, §3 item 8)
-			slice := fmt.Sprintf("`%s[0usize:len(%s)]`", x, x)
-			lit, isLit := acc.lo.(*ast.IntLit)
-			_, _, _, isVar := variable(acc.lo)
-			switch {
-			case acc.lo == nil || isLit && lit.Value == 0 && !lit.Neg:
-			case isLit || isVar:
-				l := c.text(acc.lo)
-				slice = fmt.Sprintf("`%s[%s:len(%s)]`, after testing `%s < len(%s)`", x, l, x, l, x)
-			default:
-				slice = fmt.Sprintf("from `%s` put in a local and tested below `len(%s)` first", c.text(acc.lo), x)
-			}
-			return Reason{ReasonSliceHighBound, fmt.Sprintf("the rules prove a high bound only when it is `len(%s)`, a literal within an array's length, or `v + c` with a literal c ≥ 1 under a guard `v + (c - 1) < len(%s)`, `v` not itself a value plus or minus a literal; `%s <= len(%s)` does not prove it: slice to `len(%s)` instead, %s, and test each index below the slice's length", x, x, h, x, x, slice)}, true
-		}
-		return Reason{ReasonSliceLowBound, fmt.Sprintf("the rules prove a low bound only when it is `0usize`, a literal not above a literal high bound, `v + a` under a high bound `v + b` with a ≤ b, or below `len(%s)` under a guard when the high bound is `len(%s)`", x, x)}, true
+		return c.sliceReason(acc, x, highFailed, highNegative), true
 	}
 	e := c.text(acc.e)
 	vNode, v, off, hasVar := variable(acc.e)
@@ -237,6 +216,66 @@ func (c *classifier) classify(f *ast.File, span diag.Span, highFailed bool) (Rea
 		return Reason{ReasonComputedIndex, fmt.Sprintf("no guard establishes `%s < len(%s)` on every path to it, and the rules do not derive it from guards on the parts of `%s`: put `%s` in a local and test it below `len(%s)` just before the access", e, x, e, e, x)}, true
 	}
 	return Reason{ReasonNoGuard, fmt.Sprintf("test `%s < len(%s)` on every path to it", e, x)}, true
+}
+
+// sliceReason is a slice access's reason and hint (§3 items 8 and 9,
+// as specs/prove-nonstrict C2 and C3 amend them): every hint names a
+// rewrite the rules prove.
+func (c *classifier) sliceReason(acc access, x string, highFailed, highNegative bool) Reason {
+	h := "len(" + x + ")"
+	if acc.hi != nil {
+		h = c.text(acc.hi)
+	}
+	lit, isLit := unparenOrNil(acc.lo).(*ast.IntLit)
+	loNeedsTest := acc.lo != nil && (!isLit || lit.Value != 0 || lit.Neg)
+	if !highFailed {
+		l := "0usize" // an omitted low bound is always proven; kept total
+		if acc.lo != nil {
+			l = c.text(acc.lo)
+		}
+		if simple(acc.lo) && simple(acc.hi) {
+			return Reason{ReasonSliceLowBound, fmt.Sprintf("test `%s <= %s` just before it", l, h)}
+		}
+		return Reason{ReasonSliceLowBound, fmt.Sprintf("put `%s` and `%s` in locals, test the first `<=` the second just before the access, and slice with them", l, h)}
+	}
+	if !highNegative {
+		switch {
+		case simple(acc.hi) && !loNeedsTest:
+			return Reason{ReasonSliceHighBound, fmt.Sprintf("test `%s <= len(%s)` just before it", h, x)}
+		case simple(acc.hi) && simple(acc.lo):
+			return Reason{ReasonSliceHighBound, fmt.Sprintf("test `%s <= %s && %s <= len(%s)` just before it", c.text(acc.lo), h, h, x)}
+		}
+		return Reason{ReasonSliceHighBound, fmt.Sprintf("put the bounds in locals, test the low one `<=` the high one when the low one is not `0usize` and the high one `<= len(%s)` just before the access, and slice with them", x)}
+	}
+	// the rewrite that is always proven: slice to the length, the low bound
+	// tested first unless it is 0, and put in a local first when it is
+	// neither a literal nor a variable plus or minus one
+	// (specs/unproven-reasons v0.2, §3 item 8)
+	slice := fmt.Sprintf("`%s[0usize:len(%s)]`", x, x)
+	switch {
+	case !loNeedsTest:
+	case simple(acc.lo):
+		l := c.text(acc.lo)
+		slice = fmt.Sprintf("`%s[%s:len(%s)]`, after testing `%s < len(%s)`", x, l, x, l, x)
+	default:
+		slice = fmt.Sprintf("from `%s` put in a local and tested below `len(%s)` first", c.text(acc.lo), x)
+	}
+	return Reason{ReasonSliceHighBound, fmt.Sprintf("the rules do not prove a high bound they read as a value minus a literal: slice to `len(%s)` instead, %s, and test each index below the slice's length", x, slice)}
+}
+
+// simple is a bound that is an integer literal or has a variable (a name
+// or a field path of a name, plus or minus an integer literal):
+// specs/prove-nonstrict C2. A guard on a simple bound reads the same
+// value as the slice when nothing is stored between them.
+func simple(e ast.Expr) bool {
+	if e == nil {
+		return false
+	}
+	if lit, ok := unparen(e).(*ast.IntLit); ok {
+		return !lit.Neg
+	}
+	_, _, _, ok := variable(e)
+	return ok
 }
 
 // walk indexes decl in one traversal: every access of §2 by its span,
@@ -422,7 +461,7 @@ func covers(cd candidate, o int64) bool {
 	if strict {
 		return cd.a >= o
 	}
-	return cd.a >= 1 && cd.a-1 >= o
+	return cd.a-1 >= o // any a: specs/prove-nonstrict C1, following G1
 }
 
 // cite is the candidate a hint names: the last one starting before the

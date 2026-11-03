@@ -290,13 +290,17 @@ type CheckOverflow struct {
 // HighProven is set by the proof pass's marking round on a slice check:
 // true when Hi <= Len is proven, whatever Lo (specs/unproven-reasons R2);
 // it is meaningless on an index check and before the proof pass.
+// HighNegative is set by the same round when Hi was read as a value minus
+// a literal, which no rule proves in range (specs/prove-nonstrict §1);
+// the reason classification reads it.
 type CheckBounds struct {
-	Index      *Value
-	Lo, Hi     *Value
-	Len        *Value
-	Prov       Provenance
-	Pos        ast.Pos
-	HighProven bool
+	Index        *Value
+	Lo, Hi       *Value
+	Len          *Value
+	Prov         Provenance
+	Pos          ast.Pos
+	HighProven   bool
+	HighNegative bool
 }
 
 // CheckConv traps with kind conversion unless X fits the target type.

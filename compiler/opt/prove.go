@@ -37,8 +37,13 @@ import (
 // access referent never changes; an array's length is its type's, so a
 // literal equal to it names the same length; and an equality guard on two
 // lengths makes them one. A comparison establishes its strict bound on
-// the strict edge, and `x <= y` the bound `x - 1 < y` when `x` is an
-// offset of at least one. Nothing else is assumed: a wrapping operation is
+// the strict edge, and `x <= y` the bound `x - 1 < y` for any offset of x
+// (specs/prove-nonstrict G1: a fact's offset may be negative, and facts
+// are read in the integers). A slice's high bound is in range when it is
+// the length, a literal within an array's length, the literal 0, or a
+// value plus an offset ho >= 0 with a fact giving value + (ho - 1) <
+// length; never when ho < 0, which keeps the fourth agent suite's
+// `len(xs) - 1usize` checked. Nothing else is assumed: a wrapping operation is
 // not read as an offset, a signed comparison proves nothing, a store
 // through an access or a call forgets every value a local it may reach
 // held (but not the lengths of arrays and sequences, which are fixed), and
@@ -928,8 +933,10 @@ func (p *prover) maskedBelow(s *facts, base *ir.Value, off int64, ln *ir.Value) 
 }
 
 // sliceCheck proves a slice check (spec F9): the high bound in range (the
-// length itself, a literal under an array length, or an offset whose
-// predecessor is a known index) and the low bound not above the high one.
+// length itself, a literal under an array length, the literal 0, or a
+// value plus a non-negative offset under a fact on the value: G2 and G4
+// of specs/prove-nonstrict) and the low bound not above the high one (by
+// F9's cases, else under a fact against the high bound or its value: G3).
 func (p *prover) sliceCheck(s *facts, i *ir.CheckBounds, mark bool) {
 	if i.Lo == nil || i.Hi == nil {
 		return
@@ -945,7 +952,14 @@ func (p *prover) sliceCheck(s *facts, i *ir.CheckBounds, mark bool) {
 		hiOK = true
 	case hb == nil && ho >= 0 && hasLen && uint64(ho) <= n:
 		hiOK, hiConst = true, true
-	case ho >= 1:
+	case hb == nil && ho == 0:
+		// the literal 0 is within any length (G4)
+		hiOK, hiConst = true, true
+	case ho >= 0:
+		// a high bound read with a negative offset is never in range by this
+		// rule: it would prove `h[0usize:len(h) - 1usize]` after the check
+		// `h[len(h) - 1usize]`, the fourth agent suite's "last element"
+		// (specs/prove-nonstrict §0)
 		if k, ok := s.bound(hb, ln); ok && k >= ho-1 {
 			hiOK = true
 		}
@@ -958,19 +972,34 @@ func (p *prover) sliceCheck(s *facts, i *ir.CheckBounds, mark bool) {
 		loOK = true
 	case lb == nil && hb == nil && lo <= ho:
 		loOK, loConst = true, true
-	case hiIsLen:
-		if k, ok := s.bound(lb, ln); ok && k >= lo {
-			loOK = true
+	default:
+		// G3: lb + k < H gives lb + lo <= H for k >= lo - 1, keyed by H's
+		// own value as an edge from a guard on H keys it (with H the length,
+		// `a[s:len(a)]` under `s <= len(a)`); lb + k < hb gives
+		// lb + lo <= hb + ho for k >= lo - ho - 1. A threshold that
+		// overflows proves nothing.
+		if need, ok := sub(lo, 1); ok {
+			if k, found := s.bound(lb, p.lenKey(s, i.Hi)); found && k >= need {
+				loOK = true
+			}
+		}
+		if d, ok := sub(lo, ho); !loOK && hb != nil && ok {
+			if need, ok := sub(d, 1); ok {
+				if k, found := s.bound(lb, p.lenKey(s, hb)); found && k >= need {
+					loOK = true
+				}
+			}
 		}
 	}
 	if mark {
 		// recorded for the unproven-reasons classification; kept once set,
 		// as a proven label is
 		i.HighProven = i.HighProven || hiOK
+		i.HighNegative = i.HighNegative || hb != nil && ho < 0
 	}
 	if mark && i.Prov.Label != "proven" && hiOK && loOK {
 		by := "dominated_by_check"
-		if hiConst && loConst && hasLen {
+		if hiConst && loConst && (hasLen || hb == nil && ho == 0) {
 			by = "constant"
 		}
 		i.Prov = ir.Provenance{Label: "proven", ProvenBy: by}
@@ -1028,8 +1057,8 @@ func (p *prover) constLen(n uint64) *ir.Value {
 
 // edgeFacts adds what the branch from pred to b establishes, on unsigned
 // operands (spec F3, F4): the strict bound on the strict edge of `<`, `>`,
-// `>=` and `<=`; on the non-strict edge, `x <= y` with x an offset of at
-// least one establishes x - 1 < y; `len >= K` and `len == K` with a
+// `>=` and `<=`; on the non-strict edge, `x <= y` establishes x - 1 < y
+// for any offset of x (specs/prove-nonstrict G1); `len >= K` and `len == K` with a
 // literal K establish K - 1 < len; and `a == b` makes two lengths one.
 func (p *prover) edgeFacts(s *facts, pred, b *ir.Block) {
 	cb, ok := pred.Term.(*ir.CondBr)
@@ -1091,10 +1120,20 @@ func (p *prover) edgeFacts(s *facts, pred, b *ir.Block) {
 		s.addLt(base, off, p.lenKey(s, hi))
 		return
 	}
-	// lo <= hi: the bound lo - 1 < hi when lo is an offset of at least one
-	if off >= 1 {
-		s.addLt(base, off-1, p.lenKey(s, hi))
+	// lo <= hi: the bound lo - 1 < hi, for every offset (specs/prove-nonstrict
+	// G1): with off <= 0 the fact's k is negative, read in the integers.
+	// index keeps each step's literal to 2^62 but a chain of subtractions
+	// can reach math.MinInt64, where off - 1 would wrap to a bound that
+	// proves anything: no fact then.
+	if k, ok := sub(off, 1); ok {
+		s.addLt(base, k, p.lenKey(s, hi))
 	}
+}
+
+// sub is a - b, and false when it overflows an int64.
+func sub(a, b int64) (int64, bool) {
+	d := a - b
+	return d, (b >= 0 && d <= a) || (b < 0 && d > a)
 }
 
 // canon follows the equivalences recorded for the state and the

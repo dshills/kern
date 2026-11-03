@@ -1,6 +1,6 @@
 # Why a bounds check is not proven: reasons in `show-bounds-checks` and `BUDGET_EXCEEDED`
 
-**Version:** 0.2 (2026-11-03; 0.1 the same day, before the slice hint's amendment in §3 item 8). **Scope:** a classification of
+**Version:** 0.3 (2026-11-03; 0.1 and 0.2 the same day: 0.2 amended the slice hint of §3 item 8, and 0.3 the covering rule and both slice hints of §3 items 8 and 9 to follow `specs/prove-nonstrict`). **Scope:** a classification of
 runtime-checked bounds checks over the AST and the lowered module
 (`compiler/analysis`), the proof pass only to record which bound of a
 slice check it failed to prove (`compiler/opt/prove.go`, `compiler/ir`),
@@ -146,7 +146,9 @@ literal a when its non-`len` side has variable V and offset a. It
 *covers* an index with offset o when it is written `V + a < len(Q)`,
 `len(Q) > V + a`, `V + a >= len(Q)` or `len(Q) <= V + a` with a ≥ o, or
 `V + a <= len(Q)`, `len(Q) >= V + a`, `V + a > len(Q)` or `len(Q) < V + a`
-with a ≥ 1 and a − 1 ≥ o. Q and X are the same place when their token
+with a − 1 ≥ o (before version 0.3: a ≥ 1 and a − 1 ≥ o; the proof pass
+reads a non-strict guard at any offset since `specs/prove-nonstrict`
+G1). Q and X are the same place when their token
 sequences are identical after outer parentheses are dropped from both. When several candidates qualify for a reason,
 the one cited is the last one that starts before the access, or, if none
 does, the first one after it. L:C is its start as `line:column`, the
@@ -198,30 +200,49 @@ type's name.
 **Slice accesses**:
 
 8. **`slice_high_bound`**: the proof pass did not prove the high bound
-   (it records which bound failed; when both did, this one). Hint:
-   ``the rules prove a high bound only when it is `len(X)`, a literal
-   within an array's length, or `v + c` with a literal c ≥ 1 under a
-   guard `v + (c - 1) < len(X)`, `v` not itself a value plus or minus a
-   literal; `H <= len(X)` does not prove it: slice to `len(X)` instead,
-   `X[L:len(X)]`, and test each index below the slice's length``,
-   where, when L is not the literal `0usize` (or omitted), the text
-   ``, after testing `L < len(X)` `` follows `` `X[L:len(X)]` `` if L is
-   an integer literal or has a variable, and otherwise
-   `` `X[L:len(X)]` `` is replaced by ``from `L` put in a local and
-   tested below `len(X)` first`` (a call result, for one, is not the
-   same value when written twice). (Version
-   0.1 ended the hint at "does not prove it"; the evaluation of
+   (it records which bound failed; when both did, this one). A *simple*
+   bound is an integer literal or has a variable; L *needs a test*
+   unless it is the literal `0usize` or omitted. The hint depends on
+   whether the proof pass read the high bound as a value minus a literal
+   (it records that too; an entry has it when any of its occurrences
+   does):
+   - not so read, H simple, and L simple or not needing a test:
+     ``test `H <= len(X)` just before it`` when L does not need a test,
+     ``test `L <= H && H <= len(X)` just before it`` when it does;
+   - not so read, otherwise: ``put the bounds in locals, test the low
+     one `<=` the high one when the low one is not `0usize` and the high
+     one `<= len(X)` just before the access, and slice with them``;
+   - so read: ``the rules do not prove a high bound they read as a value
+     minus a literal: slice to `len(X)` instead, `X[L:len(X)]`, and test
+     each index below the slice's length``, where, when L needs a test,
+     the text ``, after testing `L < len(X)` `` follows
+     `` `X[L:len(X)]` `` if L is simple, and otherwise
+     `` `X[L:len(X)]` `` is replaced by ``from `L` put in a local and
+     tested below `len(X)` first`` (a call result, for one, is not the
+     same value when written twice).
+
+   (Version 0.1 ended the hint at "does not prove it"; the evaluation of
    `docs/reports/unproven-reasons.md` found that the `v + c` form, written
    the natural way with a local `k := w - 1usize`, is read back as `w`
    plus 0 and stays checked, while slicing to the length and guarding the
-   indexes is proven.)
+   indexes is proven. Version 0.2 gave that rewrite for every high bound;
+   since `specs/prove-nonstrict`, `H <= len(X)` proves a high bound the
+   pass does not read as a value minus a literal, and version 0.3 gives
+   the guard.)
 9. **`slice_low_bound`**: the high bound was proven and the low one was
-   not. Hint: ``the rules prove a low bound only when it is `0usize`, a
-   literal not above a literal high bound, `v + a` under a high bound
-   `v + b` with a ≤ b, or below `len(X)` under a guard when the high
-   bound is `len(X)` ``.
+   not. Hint: when L and H are each simple (item 8), ``test `L <= H` just
+   before it``; otherwise ``put `L` and `H` in locals, test the first
+   `<=` the second just before the access, and slice with them``. (Before
+   version 0.3 the hint listed the forms the rules proved and gave no
+   rewrite.)
 
-Every hint is true of the program by construction: a reason other than
+Every hint gives a rewrite the rules prove, of the whole access, when
+the place X is a name or a field path of a name (`specs/prove-nonstrict`
+C4): a test a hint names compares the access's own index or bounds, as
+written, of type `usize`, with `len(X)` or with each other, and a bound
+that is neither a literal nor has a variable is put in a local first.
+For any other X the hint's text is the same, and its rewrite is proven
+once X is bound to a name. Every hint is true of the program by construction: a reason other than
 `guard_not_on_every_path` states a fact about the source text and the
 rules, and `guard_not_on_every_path` states only that the guard does not
 establish the bound on every path to the access, which the entry's label
@@ -233,7 +254,9 @@ xs[i] }` cites the guard, which holds there with the other sense.
 
 **R1. Classification.** Every unproven entry is assigned a reason and a
 hint as §3 defines them, from the AST of the function whose span
-contains the access and the proof outcome; nothing else (no other
+contains the access and the proof outcome (which bound of a slice
+failed, and whether its high bound was read as a value minus a literal);
+nothing else (no other
 function, no file order, no map iteration order) affects them. An entry
 that aggregates several IR occurrences can have occurrences with
 different reasons only on a slice whose occurrences fail different
@@ -241,7 +264,9 @@ bounds, since every other condition of §3 depends only on the source
 (`type_range` excludes generic types). It takes, among its
 runtime-checked occurrences' reasons, the one earliest in the list of
 §3, whatever the order of the occurrences, and that reason's hint,
-which depends only on the source.
+which depends on the source and, for `slice_high_bound`, on whether any
+of the entry's occurrences, proven or not, had its high bound read as a
+value minus a literal (since version 0.3).
 
 **R2. The proof pass.** The proof pass records, for a slice check it
 does not prove, whether the high bound was proven. It changes no label
@@ -311,13 +336,14 @@ the four-arm results were measured without them.
 **R8. Tests.** At least:
 - for each of reasons 1 to 7, a fixture access that gets it and its
   exact hint, and the same function rewritten as the hint says, whose
-  entry is then proven; for 8 and 9,
-  a fixture each with the exact hint;
+  entry is then proven; for 8 and 9, the same for every hint form
+  (since version 0.3, when every slice hint gives a proven rewrite);
 - the byte-order call form of §2, at W = 8 and W = 1;
 - the choice among several candidates (the last before the access, else
   the first after), a candidate in a closure, a `for` header candidate,
   and each covering form of §3 at its boundary (`V + 1usize <= len(X)`
-  covers `X[V]` but not `X[V + 1usize]`; `V <= len(X)` covers nothing);
+  covers `X[V]` but not `X[V + 1usize]`; `V <= len(X)` covers
+  `X[V - 1usize]` but not `X[V]`);
 - hint truncation at 40 code points;
 - R3: a 0.5 response with both fields, a 0.4 request answered without
   them, `reason` and `hint` null on a proven entry and on an overflow
@@ -348,11 +374,13 @@ access. The result goes in `docs/reports/unproven-reasons.md`. A paid run
 of the plain arm on the budgeted suite, the experiment this
 specification is for, is the owner's decision and is not part of it.
 
-## 6. Proof gaps found, not addressed
+## 6. Proof gaps found
 
 The probes behind §1 found four forms the rules leave checked although
 the check provably passes; each is a candidate for its own specification,
-which must update the agent suites' calibration:
+which must update the agent suites' calibration. Items 2 to 4 are closed
+by `specs/prove-nonstrict` (2026-11-03); the first stays open, as the
+fourth agent suite's calibrated "last element" idiom:
 - `xs[len(xs) - 1usize]`, with or without a guard `len(xs) > 0usize`:
   the subtraction is checked, so the index is below the length whenever
   it is reached.

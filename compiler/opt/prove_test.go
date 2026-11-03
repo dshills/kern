@@ -2,8 +2,10 @@ package opt
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -221,6 +223,28 @@ func TestProve(t *testing.T) {
 // proveWith lowers a source and runs the pass, returning the module.
 func proveWith(t *testing.T, src string) *ir.Module {
 	t.Helper()
+	mod := lowered(t, src)
+	Prove(mod)
+	if errs := ir.Validate(mod); len(errs) > 0 {
+		t.Fatalf("validator: %v", errs[0])
+	}
+	return mod
+}
+
+// runWith lowers a source and runs the pipeline o selects, returning the
+// module.
+func runWith(t *testing.T, src string, o Options) *ir.Module {
+	t.Helper()
+	mod := lowered(t, src)
+	if err := Run(mod, o); err != nil {
+		t.Fatal(err)
+	}
+	return mod
+}
+
+// lowered resolves, checks and lowers a source.
+func lowered(t *testing.T, src string) *ir.Module {
+	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "prove.kern")
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
@@ -240,10 +264,6 @@ func proveWith(t *testing.T, src string) *ir.Module {
 	mod, ds := lower.Lower(prog)
 	if len(ds) > 0 {
 		t.Fatalf("lower: %s", ds[0].Message)
-	}
-	Prove(mod)
-	if errs := ir.Validate(mod); len(errs) > 0 {
-		t.Fatalf("validator: %v", errs[0])
 	}
 	return mod
 }
@@ -749,6 +769,9 @@ func sliceOutcomes(mod *ir.Module, name string) string {
 				if cb.HighProven {
 					high = "high"
 				}
+				if cb.HighNegative {
+					high += "/neg"
+				}
 				got = append(got, label+"/"+high)
 			}
 		}
@@ -758,10 +781,7 @@ func sliceOutcomes(mod *ir.Module, name string) string {
 
 const sliceHighSource = `module t
 func count(xs: view[]u64) -> usize { return len(xs) }
-func high_unproven(h: view[]u64, n: usize) -> usize {
-    if n <= len(h) { return count(h[0usize:n]) }
-    return 0usize
-}
+func high_unproven(h: view[]u64, n: usize) -> usize { return count(h[0usize:n]) }
 func low_unproven(a: view[]u64, s: usize) -> usize { return count(a[s:len(a)]) }
 func proven(xs: view[]u64, i: usize) -> usize {
     if i < len(xs) { return count(xs[i:len(xs)]) }
@@ -815,5 +835,286 @@ func main() -> i32 {
 	validate(t, mod)
 	if got := sliceOutcomes(mod, "t.main"); got != want {
 		t.Errorf("main: %q, want %q (were tail, head and cut inlined?)\n%s", got, want, ir.Print(mod))
+	}
+}
+
+const nonStrictSource = `module t
+func idx(h: view[]u64, n: usize) -> u64 {
+    if n <= len(h) { return h[n - 1usize] }
+    return 0u64
+}
+func idx2(h: view[]u64, n: usize) -> u64 {
+    if n <= len(h) { return h[n - 2usize] }
+    return 0u64
+}
+func at(h: view[]u64, n: usize) -> u64 {
+    if n <= len(h) { return h[n] }
+    return 0u64
+}
+func sl(h: view[]u64, n: usize) -> usize {
+    if n <= len(h) { with r := h[0usize:n] { return len(r) } }
+    return 0usize
+}
+func slfrom(h: view[]u64, i: usize, n: usize) -> usize {
+    if i <= n && n <= len(h) { with r := h[i:n] { return len(r) } }
+    return 0usize
+}
+func low(a: view[]u64, s: usize, e: usize) -> usize {
+    if s <= e && e <= len(a) { with r := a[s:e] { return len(r) } }
+    return 0usize
+}
+func lowplus(a: view[]u64, s: usize, e: usize) -> usize {
+    if s <= e && e + 1usize <= len(a) { with r := a[s:e + 1usize] { return len(r) } }
+    return 0usize
+}
+func lowlen(a: view[]u64, s: usize) -> usize {
+    if s <= len(a) { with r := a[s:len(a)] { return len(r) } }
+    return 0usize
+}
+func lowlit(a: view[]u64, e: usize) -> usize {
+    if 1usize <= e && e <= len(a) { with r := a[1usize:e] { return len(r) } }
+    return 0usize
+}
+func lit2(h: view[]u64) -> usize {
+    if 2usize <= len(h) { with r := h[0usize:2usize] { return len(r) } }
+    return 0usize
+}
+func zero(h: view[]u64) -> usize { with r := h[0usize:0usize] { return len(r) } }
+func arr(a: view[[4]u64]) -> usize { with r := a[0usize:2usize] { return len(r) } }
+func last(xs: view[]u64) -> u64 {
+    if len(xs) > 0usize { return xs[len(xs) - 1usize] }
+    return 0u64
+}
+func pop(h: view[]u64) -> usize {
+    if len(h) == 0usize { return 0usize }
+    x := h[len(h) - 1usize]
+    with r := h[0usize:len(h) - 1usize] { return len(r) + usize(x) }
+}
+func neg(h: view[]u64, n: usize) -> usize {
+    if n <= len(h) { with r := h[0usize:n - 1usize] { return len(r) } }
+    return 0usize
+}
+func lowonly(a: view[]u64, s: usize, e: usize) -> usize {
+    if e <= len(a) { with r := a[s:e] { return len(r) } }
+    return 0usize
+}
+func one(h: view[]u64) -> usize { with r := h[0usize:1usize] { return len(r) } }
+func wrap(xs: view[]u64, x: usize) -> u64 {
+    if x - 4611686018427387904usize - 4611686018427387904usize <= len(xs) { return xs[x] }
+    return 0u64
+}
+func full(xs: view[]u64, i: usize) -> u64 {
+    with r := xs[i:len(xs)] { if len(r) == 0usize { return 0u64 } }
+    return xs[len(xs) - 1usize]
+}
+func main() -> i32 { return 0i32 }
+`
+
+// TestProveNonStrict: G1 to G4 of specs/prove-nonstrict prove their forms
+// with their labels, and the non-goals of its §0 stay runtime-checked.
+func TestProveNonStrict(t *testing.T) {
+	mod := proveWith(t, nonStrictSource)
+	for name, want := range map[string]string{
+		"t.idx":     "dominated_by_check",
+		"t.idx2":    "dominated_by_check",
+		"t.at":      "runtime",
+		"t.sl":      "dominated_by_check",
+		"t.slfrom":  "dominated_by_check",
+		"t.low":     "dominated_by_check",
+		"t.lowplus": "dominated_by_check",
+		"t.lowlen":  "dominated_by_check",
+		"t.lowlit":  "dominated_by_check",
+		"t.lit2":    "dominated_by_check", // proven before this change: label kept
+		"t.zero":    "constant",
+		"t.arr":     "constant", // proven before this change: label kept
+		"t.last":    "runtime",
+		"t.pop":     "runtime runtime",
+		"t.neg":     "runtime",
+		"t.lowonly": "runtime",
+		"t.one":     "runtime",
+		"t.full":    "runtime runtime", // no fact past a passed slice check
+		"t.wrap":    "runtime",         // the guard's offset is MinInt64: off - 1 would wrap
+	} {
+		if got := checkLabels(mod, name); got != want {
+			t.Errorf("%s: %q, want %q", name, got, want)
+		}
+	}
+	for name, want := range map[string]string{
+		"t.sl":      "dominated_by_check/high",
+		"t.neg":     "runtime/nohigh/neg",
+		"t.pop":     "runtime/nohigh/neg",
+		"t.lowonly": "runtime/high",
+		"t.one":     "runtime/nohigh",
+	} {
+		if got := sliceOutcomes(mod, name); got != want {
+			t.Errorf("%s slice: %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestProveNonStrictEdges: every edge that establishes a non-strict
+// relation (specs/prove-nonstrict G1) covers the index one below its
+// left side and not the left side itself; a signed comparison covers
+// nothing.
+func TestProveNonStrictEdges(t *testing.T) {
+	src := `module t
+func le(h: view[]u64, n: usize) -> u64 {
+    if n <= len(h) { return h[n - 1usize] + h[n] }
+    return 0u64
+}
+func ge(h: view[]u64, n: usize) -> u64 {
+    if len(h) >= n { return h[n - 1usize] + h[n] }
+    return 0u64
+}
+func gt(h: view[]u64, n: usize) -> u64 {
+    if n > len(h) { return 0u64 }
+    return h[n - 1usize] + h[n]
+}
+func lt(h: view[]u64, n: usize) -> u64 {
+    if len(h) < n { return 0u64 }
+    return h[n - 1usize] + h[n]
+}
+func signed(h: view[]u64, i: i64) -> u64 {
+    if i <= i64(len(h)) { return h[usize(i) - 1usize] }
+    return 0u64
+}
+func main() -> i32 { return 0i32 }
+`
+	mod := proveWith(t, src)
+	for _, name := range []string{"le", "ge", "gt", "lt"} {
+		if got := checkLabels(mod, "t."+name); got != "dominated_by_check runtime" {
+			t.Errorf("%s: %q, want %q", name, got, "dominated_by_check runtime")
+		}
+	}
+	if got := checkLabels(mod, "t.signed"); got != "runtime" {
+		t.Errorf("signed: %q, want runtime", got)
+	}
+}
+
+// TestProveNonStrictInlined: a release-inlined copy of a marked slice
+// check keeps HighNegative, as it keeps HighProven.
+func TestProveNonStrictInlined(t *testing.T) {
+	mod := lowerSrc(t, `module t
+func neg(h: view[]u64, n: usize) -> usize {
+    if n <= len(h) { with r := h[0usize:n - 1usize] { return len(r) } }
+    return 0usize
+}
+func main() -> i32 {
+    var a: [4]u64 = zero()
+    return i32(neg(a, 2usize))
+}
+`)
+	Prove(mod)
+	if got := sliceOutcomes(mod, "t.neg"); got != "runtime/nohigh/neg" {
+		t.Fatalf("callee before inlining: %q", got)
+	}
+	Inline(mod)
+	validate(t, mod)
+	if got := sliceOutcomes(mod, "t.main"); got != "runtime/nohigh/neg" {
+		t.Errorf("main: %q, want runtime/nohigh/neg (was neg inlined?)\n%s", got, ir.Print(mod))
+	}
+}
+
+// TestProveNonStrictFixtures pins the specs/prove-nonstrict functions of
+// the two fixture files at both levels (R4).
+func TestProveNonStrictFixtures(t *testing.T) {
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join("..", "..", "tests", "run", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	proven := map[string]string{
+		"ns_index": "dominated_by_check", "ns_index_gt": "dominated_by_check",
+		"ns_slice": "dominated_by_check", "ns_low": "dominated_by_check",
+		"ns_low_plus": "dominated_by_check", "ns_low_len": "dominated_by_check",
+		"ns_zero": "constant",
+	}
+	not := map[string]string{
+		"nsn_last": "runtime", "nsn_pop": "runtime runtime", "nsn_neg": "runtime",
+		"nsn_at": "runtime", "nsn_low": "runtime", "nsn_one": "runtime",
+	}
+	for _, level := range []string{"debug", "release"} {
+		for file, want := range map[string]map[string]string{"prove_forms.kern": proven, "prove_forms_not.kern": not} {
+			src := read(file)
+			mod := runWith(t, src, OptionsFor(level))
+			for fn, w := range want {
+				if got := labelsWithin(mod, src, fn); got != w {
+					t.Errorf("%s %s %s: %q, want %q", level, file, fn, got, w)
+				}
+			}
+		}
+	}
+}
+
+// labelsWithin renders the bounds checks whose source position lies in
+// function fn's declaration, as show-bounds-checks reports them: over the
+// functions that are emitted (not Inlined), one entry per position in
+// source order, runtime when any copy is (release inlining moves a
+// callee's checks into its callers, at the callee's positions).
+func labelsWithin(mod *ir.Module, src, fn string) string {
+	start := strings.Index(src, "\nfunc "+fn+"(")
+	if start < 0 {
+		return "<no function>"
+	}
+	end := strings.Index(src[start+1:], "\nfunc ")
+	if end < 0 {
+		end = len(src)
+	} else {
+		end += start + 1
+	}
+	labels := map[int]string{}
+	for _, f := range mod.Funcs {
+		if f.Inlined {
+			continue
+		}
+		for _, b := range f.Blocks {
+			for _, in := range b.Instrs {
+				cb, ok := in.(*ir.CheckBounds)
+				if !ok || cb.Pos.Start < start || cb.Pos.Start >= end {
+					continue
+				}
+				l := "runtime"
+				if cb.Prov.Label == "proven" {
+					l = cb.Prov.ProvenBy
+				}
+				if _, seen := labels[cb.Pos.Start]; !seen || l == "runtime" {
+					labels[cb.Pos.Start] = l
+				}
+			}
+		}
+	}
+	pos := make([]int, 0, len(labels))
+	for p := range labels {
+		pos = append(pos, p)
+	}
+	sort.Ints(pos)
+	got := make([]string, len(pos))
+	for i, p := range pos {
+		got[i] = labels[p]
+	}
+	return strings.Join(got, " ")
+}
+
+// sub reports the int64 overflows the proof pass's offset arithmetic must
+// not wrap through (specs/prove-nonstrict G1, G3).
+func TestSub(t *testing.T) {
+	for _, tc := range []struct {
+		a, b, want int64
+		ok         bool
+	}{
+		{5, 1, 4, true},
+		{-5, 1, -6, true},
+		{math.MinInt64, 1, 0, false},
+		{math.MinInt64 + 1, 1, math.MinInt64, true},
+		{math.MaxInt64, -1, 0, false},
+		{0, math.MinInt64, 0, false},
+		{-1, math.MinInt64, math.MaxInt64, true},
+	} {
+		got, ok := sub(tc.a, tc.b)
+		if ok != tc.ok || ok && got != tc.want {
+			t.Errorf("sub(%d, %d) = %d, %v; want %d, %v", tc.a, tc.b, got, ok, tc.want, tc.ok)
+		}
 	}
 }

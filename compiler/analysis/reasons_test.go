@@ -9,6 +9,7 @@ import (
 	"github.com/dshills/kern/compiler/analysis"
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
+	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/lower"
 	"github.com/dshills/kern/compiler/opt"
 	"github.com/dshills/kern/compiler/resolve"
@@ -120,19 +121,43 @@ func f5(src: view[]u64, i: usize) -> u64 {
 func f6(s: view[]u64, n: usize, i: usize) -> u64 { return s[n - 1usize - i] }
 func f7(xs: view[]u64, mid: usize) -> u64 { return xs[mid] }
 func f7lit(ps: view[]u64) -> u64 { return ps[0usize] }
-func f8(h: view[]u64, n: usize) -> usize {
-    if n <= len(h) { return count(h[0usize:n]) }
-    return 0usize
+func f1b(xs: view[]u64, n: usize, c: bool) -> u64 {
+    if c {
+        if n > len(xs) { return 0u64 }
+    }
+    return xs[n - 1usize]
 }
-func f8b(g: view[]u64, i: usize, w: usize) -> usize {
-    if i + w <= len(g) { return count(g[i:i + w]) }
-    return 0usize
+func f1c(xs: view[]u64, n: usize) -> u64 {
+    if n <= len(xs) { return xs[n] }
+    return 0u64
 }
+func f8(h: view[]u64, n: usize) -> usize { return count(h[0usize:n]) }
+func f8b(g: view[]u64, i: usize, n: usize) -> usize { return count(g[i:n]) }
 func f8c(g: view[]u64, xs: view[]u64, w: usize) -> usize {
     if count(xs) + w <= len(g) { return count(g[count(xs):count(xs) + w]) }
     return 0usize
 }
+func f8d(h: view[]u64, n: usize) -> usize {
+    if n <= len(h) { return count(h[0usize:n - 1usize]) }
+    return 0usize
+}
+func f8e(h: view[]u64, s: usize, n: usize) -> usize {
+    k := n - 1usize
+    return count(h[s:k])
+}
+func f8f(h: view[]u64, xs: view[]u64, n: usize) -> usize {
+    if n <= len(h) { return count(h[count(xs):n - 1usize]) }
+    return 0usize
+}
 func f9(a: view[]u64, s: usize) -> usize { return count(a[s:len(a)]) }
+func f9b(a: view[]u64, s: usize, e: usize) -> usize {
+    if e <= len(a) { return count(a[s:e]) }
+    return 0usize
+}
+func f9c(g: view[]u64, i: usize, w: usize) -> usize {
+    if i + w <= len(g) { return count(g[i:i + w]) }
+    return 0usize
+}
 func main() -> i32 { return 0i32 }
 `
 
@@ -176,31 +201,73 @@ func f7lit(ps: view[]u64) -> u64 {
     if 0usize < len(ps) { return ps[0usize] }
     return 0u64
 }
-func f8(h: view[]u64, n: usize) -> u64 {
+func f1b(xs: view[]u64, n: usize, c: bool) -> u64 {
+    if c {
+        if n > len(xs) { return 0u64 }
+    }
+    k := n - 1usize
+    if k < len(xs) { return xs[k] }
+    return 0u64
+}
+func f1c(xs: view[]u64, n: usize) -> u64 {
+    if n < len(xs) { return xs[n] }
+    return 0u64
+}
+func f8(h: view[]u64, n: usize) -> usize {
+    if n <= len(h) { return count(h[0usize:n]) }
+    return 0usize
+}
+func f8b(g: view[]u64, i: usize, n: usize) -> usize {
+    if i <= n && n <= len(g) { return count(g[i:n]) }
+    return 0usize
+}
+func f8c(g: view[]u64, xs: view[]u64, w: usize) -> usize {
+    lo := count(xs)
+    hi := lo + w
+    if lo <= hi && hi <= len(g) { return count(g[lo:hi]) }
+    return 0usize
+}
+func f8d(h: view[]u64, n: usize) -> u64 {
     var s: u64 = 0u64
     with r := h[0usize:len(h)] {
         for x in 0usize..n { if x < len(r) { s = s + r[x] } }
     }
     return s
 }
-func f8b(g: view[]u64, i: usize, w: usize) -> u64 {
-    var s: u64 = 0u64
-    if i < len(g) {
-        with r := g[i:len(g)] {
-            for x in 0usize..w { if x < len(r) { s = s + r[x] } }
+func f8e(h: view[]u64, s: usize, n: usize) -> u64 {
+    var t: u64 = 0u64
+    if s < len(h) {
+        with r := h[s:len(h)] {
+            for x in 0usize..n { if x < len(r) { t = t + r[x] } }
         }
     }
-    return s
+    return t
 }
-func f8c(g: view[]u64, xs: view[]u64, w: usize) -> u64 {
-    var s: u64 = 0u64
+func f8f(h: view[]u64, xs: view[]u64, n: usize) -> u64 {
+    var t: u64 = 0u64
     k := count(xs)
-    if k < len(g) {
-        with r := g[k:len(g)] {
-            for x in 0usize..w { if x < len(r) { s = s + r[x] } }
+    if k < len(h) {
+        with r := h[k:len(h)] {
+            for x in 0usize..n { if x < len(r) { t = t + r[x] } }
         }
     }
-    return s
+    return t
+}
+func f9(a: view[]u64, s: usize) -> usize {
+    lo := s
+    hi := len(a)
+    if lo <= hi { return count(a[lo:hi]) }
+    return 0usize
+}
+func f9b(a: view[]u64, s: usize, e: usize) -> usize {
+    if s <= e && e <= len(a) { return count(a[s:e]) }
+    return 0usize
+}
+func f9c(g: view[]u64, i: usize, w: usize) -> usize {
+    lo := i
+    hi := i + w
+    if hi <= len(g) && lo <= hi { return count(g[lo:hi]) }
+    return 0usize
 }
 func count(xs: view[]u64) -> usize { return len(xs) }
 func main() -> i32 { return 0i32 }
@@ -222,15 +289,30 @@ func TestReasonsEach(t *testing.T) {
 		"no guard establishes `n - 1usize - i < len(s)` on every path to it, and the rules do not derive it from guards on the parts of `n - 1usize - i`: put `n - 1usize - i` in a local and test it below `len(s)` just before the access")
 	c.expect(t, "xs[mid]", analysis.ReasonNoGuard, "test `mid < len(xs)` on every path to it")
 	c.expect(t, "ps[0usize]", analysis.ReasonNoGuard, "test `0usize < len(ps)` on every path to it")
-	c.expect(t, "h[0usize:n]", analysis.ReasonSliceHighBound,
-		"the rules prove a high bound only when it is `len(h)`, a literal within an array's length, or `v + c` with a literal c ≥ 1 under a guard `v + (c - 1) < len(h)`, `v` not itself a value plus or minus a literal; `n <= len(h)` does not prove it: slice to `len(h)` instead, `h[0usize:len(h)]`, and test each index below the slice's length")
-	c.expect(t, "g[i:i + w]", analysis.ReasonSliceHighBound,
-		"the rules prove a high bound only when it is `len(g)`, a literal within an array's length, or `v + c` with a literal c ≥ 1 under a guard `v + (c - 1) < len(g)`, `v` not itself a value plus or minus a literal; `i + w <= len(g)` does not prove it: slice to `len(g)` instead, `g[i:len(g)]`, after testing `i < len(g)`, and test each index below the slice's length")
+	// specs/prove-nonstrict C1: a non-strict guard with offset 0 covers
+	// `n - 1usize`, not `n`
+	c.expect(t, "xs[n - 1usize]", analysis.ReasonGuardNotOnEveryPath,
+		"the guard at "+c.at(t, "n > len(xs)")+" does not establish `n - 1usize < len(xs)` on every path to it (a path may bypass it or take its other branch, or a store to `n`, a call that edits it or a write that may reach it may come after it): test `n - 1usize < len(xs)` just before it")
+	c.expect(t, "xs[n]", analysis.ReasonGuardTooWeak,
+		"the guard at "+c.at(t, "n <= len(xs)")+" does not bound `n` below `len(xs)` as the rules read it: test `n < len(xs)`")
+	// C2: a simple high bound with a low bound of 0, with a simple low
+	// bound to test, and bounds that are not simple
+	const lenRewrite = "the rules do not prove a high bound they read as a value minus a literal: slice to `len(h)` instead, "
+	c.expect(t, "h[0usize:n]", analysis.ReasonSliceHighBound, "test `n <= len(h)` just before it")
+	c.expect(t, "g[i:n]", analysis.ReasonSliceHighBound, "test `i <= n && n <= len(g)` just before it")
 	c.expect(t, "g[count(xs):count(xs) + w]", analysis.ReasonSliceHighBound,
-		"the rules prove a high bound only when it is `len(g)`, a literal within an array's length, or `v + c` with a literal c ≥ 1 under a guard `v + (c - 1) < len(g)`, `v` not itself a value plus or minus a literal; `count(xs) + w <= len(g)` does not prove it: slice to `len(g)` instead, from `count(xs)` put in a local and tested below `len(g)` first, and test each index below the slice's length")
+		"put the bounds in locals, test the low one `<=` the high one when the low one is not `0usize` and the high one `<= len(g)` just before the access, and slice with them")
+	// C2 with HighNegative, directly and through a local
+	c.expect(t, "h[0usize:n - 1usize]", analysis.ReasonSliceHighBound, lenRewrite+"`h[0usize:len(h)]`, and test each index below the slice's length")
+	c.expect(t, "h[s:k]", analysis.ReasonSliceHighBound, lenRewrite+"`h[s:len(h)]`, after testing `s < len(h)`, and test each index below the slice's length")
+	c.expect(t, "h[count(xs):n - 1usize]", analysis.ReasonSliceHighBound, lenRewrite+"from `count(xs)` put in a local and tested below `len(h)` first, and test each index below the slice's length")
+	// C3: bounds that are not both simple, and simple ones
 	c.expect(t, "a[s:len(a)]", analysis.ReasonSliceLowBound,
-		"the rules prove a low bound only when it is `0usize`, a literal not above a literal high bound, `v + a` under a high bound `v + b` with a ≤ b, or below `len(a)` under a guard when the high bound is `len(a)`")
-	for _, fn := range []string{"f1", "f2", "f3", "f4", "f5", "f6", "f7", "f7lit", "f8", "f8b", "f8c"} {
+		"put `s` and `len(a)` in locals, test the first `<=` the second just before the access, and slice with them")
+	c.expect(t, "a[s:e]", analysis.ReasonSliceLowBound, "test `s <= e` just before it")
+	c.expect(t, "g[i:i + w]", analysis.ReasonSliceLowBound,
+		"put `i` and `i + w` in locals, test the first `<=` the second just before the access, and slice with them")
+	for _, fn := range []string{"f1", "f1b", "f1c", "f2", "f3", "f4", "f5", "f6", "f7", "f7lit", "f8", "f8b", "f8c", "f8d", "f8e", "f8f", "f9", "f9b", "f9c"} {
 		if n := unprovenIn(t, reasonsRewritten, "debug", fn); n != 0 {
 			t.Errorf("rewritten %s: %d runtime-checked bounds checks, want 0", fn, n)
 		}
@@ -481,5 +563,47 @@ func TestReasonsDeterministic(t *testing.T) {
 		if all[i] != r {
 			t.Errorf("entry %d: selected %v, all %v", i, r, all[i])
 		}
+	}
+}
+
+// An entry whose occurrences differ in HighNegative gets the hint for a
+// high bound read as a value minus a literal: release inlining copies
+// cut's slice into main twice, read as `v.len() - 1` and as `v.len()`,
+// and only that rewrite is proven for both (specs/prove-nonstrict C2).
+func TestReasonsHighNegativeAggregated(t *testing.T) {
+	for _, order := range []string{"cut(a, v.len() + 1usize) + cut(a, v.len())", "cut(a, v.len()) + cut(a, v.len() + 1usize)"} {
+		src := `module m
+func count(xs: view[]u64) -> usize { return len(xs) }
+func cut(h: view[]u64, n: usize) -> usize { return count(h[0usize:n - 1usize]) }
+func main() -> i32 {
+    var a: [4]u64 = zero()
+    v := Vec[u64].new()
+    v.push(1u64)
+    x := ` + order + `
+    return i32(x)
+}
+`
+		// the premise: release inlining made two copies of cut's slice in
+		// main, one read with a negative offset and one without; without
+		// it the entry has one occurrence and the test proves nothing
+		p := buildBudgeted(t, map[string]string{"m.kern": src}, "release")
+		at := strings.Index(src, "func cut(")
+		end := at + strings.Index(src[at:], "\n")
+		var neg []bool
+		for _, f := range p.mod.Funcs {
+			for _, blk := range f.Blocks {
+				for _, in := range blk.Instrs {
+					if cb, ok := in.(*ir.CheckBounds); ok && cb.Index == nil && !f.Inlined && cb.Pos.Start >= at && cb.Pos.Start < end {
+						neg = append(neg, cb.HighNegative)
+					}
+				}
+			}
+		}
+		if len(neg) != 2 || neg[0] == neg[1] {
+			t.Fatalf("%s: emitted copies of cut's slice read negative %v, want two that differ", order, neg)
+		}
+		c := classify(t, src, "release")
+		c.expect(t, "h[0usize:n - 1usize]", analysis.ReasonSliceHighBound,
+			"the rules do not prove a high bound they read as a value minus a literal: slice to `len(h)` instead, `h[0usize:len(h)]`, and test each index below the slice's length")
 	}
 }

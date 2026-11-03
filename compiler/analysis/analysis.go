@@ -246,10 +246,14 @@ func BoundsChecks(mod *ir.Module) diag.ShowBoundsChecksResult {
 // BoundsSnapshot is one collection of a module's checks: the
 // show-bounds-checks result and, for the unproven-reasons classification
 // (specs/unproven-reasons), which unproven bounds entries have a
-// runtime-checked slice occurrence whose high bound is not proven.
+// runtime-checked slice occurrence whose high bound is not proven, and
+// which entries have a slice occurrence, proven or not, whose high bound
+// the proof pass read as a value minus a literal (specs/prove-nonstrict
+// C2).
 type BoundsSnapshot struct {
-	Result     diag.ShowBoundsChecksResult
-	highFailed []bool // parallel to Result.Checks
+	Result       diag.ShowBoundsChecksResult
+	highFailed   []bool // parallel to Result.Checks
+	highNegative []bool // parallel to Result.Checks
 }
 
 // Snapshot collects mod's checks once, for BoundsChecks and for a
@@ -262,7 +266,8 @@ func Snapshot(mod *ir.Module) *BoundsSnapshot {
 	}
 	index := map[key]int{}
 	highFailed := map[key]bool{}
-	add := func(f *ir.Func, b *ir.Block, p ast.Pos, kind string, prov ir.Provenance, sliceHighFailed bool) {
+	highNegative := map[key]bool{}
+	add := func(f *ir.Func, b *ir.Block, p ast.Pos, kind string, prov ir.Provenance, sliceHighFailed, sliceHighNegative bool) {
 		c := diag.BoundsCheck{Loc: loc(f, b, p), Kind: kind, Label: diag.Label(prov.Label)}
 		if prov.Label == "proven" && prov.ProvenBy != "" {
 			by := prov.ProvenBy
@@ -271,6 +276,9 @@ func Snapshot(mod *ir.Module) *BoundsSnapshot {
 		k := key{c.Loc, kind}
 		if c.Label != diag.Label("proven") && sliceHighFailed {
 			highFailed[k] = true
+		}
+		if sliceHighNegative {
+			highNegative[k] = true // any occurrence, proven or not
 		}
 		if i, seen := index[k]; seen {
 			prev := &res.Checks[i]
@@ -290,9 +298,9 @@ func Snapshot(mod *ir.Module) *BoundsSnapshot {
 			for _, in := range b.Instrs {
 				switch i := in.(type) {
 				case *ir.CheckBounds:
-					add(f, b, i.Pos, diag.CheckBounds, i.Prov, i.Index == nil && !i.HighProven)
+					add(f, b, i.Pos, diag.CheckBounds, i.Prov, i.Index == nil && !i.HighProven, i.Index == nil && i.HighNegative)
 				case *ir.CheckOverflow:
-					add(f, b, i.Pos, diag.CheckOverflow, i.Prov, false)
+					add(f, b, i.Pos, diag.CheckOverflow, i.Prov, false, false)
 				case *ir.Call:
 					key := i.Intrinsic
 					if key == "" {
@@ -301,16 +309,17 @@ func Snapshot(mod *ir.Module) *BoundsSnapshot {
 						}
 					}
 					if kind, ok := checking[key]; ok {
-						add(f, b, i.Pos, kind, ir.RuntimeChecked, false)
+						add(f, b, i.Pos, kind, ir.RuntimeChecked, false, false)
 					}
 				}
 			}
 		}
 	}
 	sortByLoc(res.Checks, func(c diag.BoundsCheck) diag.Loc { return c.Loc })
-	snap := &BoundsSnapshot{Result: res, highFailed: make([]bool, len(res.Checks))}
+	snap := &BoundsSnapshot{Result: res, highFailed: make([]bool, len(res.Checks)), highNegative: make([]bool, len(res.Checks))}
 	for i, c := range res.Checks {
 		snap.highFailed[i] = highFailed[key{c.Loc, c.Kind}]
+		snap.highNegative[i] = highNegative[key{c.Loc, c.Kind}]
 	}
 	return snap
 }
