@@ -34,6 +34,7 @@ Rule identifiers are `section.bullet` into the specification (`T.n` = spec/types
 | `EDIT_INVALID_SPAN` | 16.2 | edit | 4 | structured-edit span or offset is invalid |
 | `EDIT_OVERLAP` | 16.2 | edit | 4 | structured-edit ops overlap |
 | `EDIT_UNRESOLVED_SYMBOL` | 16.2 | edit | 4 | rename_symbol span is not a resolvable declaration |
+| `ENV_HOSTED_ONLY` | 6.8 | lang | 3 | a freestanding program calls a function that needs the hosted runtime |
 | `FFI_UNSUPPORTED_TYPE` | 7.2 | lang | 0 | type not permitted in an extern "C" signature |
 | `IMPL_INCOMPLETE` | T.4 | lang | 0 | impl lacks an interface method |
 | `IMPL_SIGNATURE_MISMATCH` | T.4 | lang | 0 | impl method signature differs from the interface |

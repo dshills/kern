@@ -181,6 +181,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if cliTarget != "" {
 		req.Target = cliTarget
 	}
+	givenTarget := req.Target // a freestanding check builds for it, else the bare-metal default
 	if req.Target == "" {
 		req.Target = native.HostTriple()
 	}
@@ -202,7 +203,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fn(req, wire, srcs, stdout, stderr)
 	}
 	cfg.Target = req.Target
-	return runCheck(req, wire, srcs, human, cacheDir, cfg, stdout, stderr, budgetDefaults())
+	return runCheck(req, wire, srcs, human, cacheDir, cfg, freestandingTriple(givenTarget), stdout, stderr, checkDeps{budget: budgetDefaults(), hosted: hostedDefaults()})
+}
+
+// checkDeps are runCheck's dependencies: the budget evaluation's and, in
+// freestanding mode, the hosted-only evaluation's.
+type checkDeps struct {
+	budget budgetDeps
+	hosted hostedDeps
 }
 
 // runCheck is `kern check` once the request is loaded: resolution and
@@ -210,8 +218,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // static diagnostics and, for a clean program whose files declare a
 // budget, the budgets at cfg's level and target, lowered and classified
 // with deps (spec §7.6). A request without a budget block is only parsed
-// once more.
-func runCheck(req Request, wire string, srcs []*source.File, human bool, cacheDir string, cfg incremental.Config, stdout, stderr io.Writer, deps budgetDeps) int {
+// once more. In freestanding mode a clean program is also evaluated for
+// calls that need the hosted runtime, on fsTriple (Rule 6.8,
+// specs/freestanding-availability F3); in hosted mode never.
+func runCheck(req Request, wire string, srcs []*source.File, human bool, cacheDir string, cfg incremental.Config, fsTriple string, stdout, stderr io.Writer, deps checkDeps) int {
 	var ds []diag.Diagnostic
 	var err error
 	if cacheDir != "" {
@@ -233,11 +243,18 @@ func runCheck(req Request, wire string, srcs []*source.File, human bool, cacheDi
 		diag.Sort(ds)
 	}
 	if len(ds) == 0 {
-		bds, err := budgetDiags(srcs, cfg.Opt, cfg.Target, deps)
+		bds, err := budgetDiags(srcs, cfg.Opt, cfg.Target, deps.budget)
 		if err != nil {
 			return internal(req, wire, err, stdout, stderr)
 		}
 		ds = bds
+	}
+	if len(ds) == 0 && cfg.Env == "freestanding" {
+		hds, err := hostedDiags(srcs, cfg.Opt, fsTriple, deps.hosted)
+		if err != nil {
+			return internal(req, wire, err, stdout, stderr)
+		}
+		ds = hds
 	}
 	if human {
 		for _, d := range ds {

@@ -72,6 +72,8 @@ var Registry = map[Code]Info{
 	"BUDGET_EXCEEDED": {"7.6", CatLang, 0, "a function has more runtime-checked bounds checks, copies or allocation sites than its budget"},
 	// §6 thread-local storage
 	"TLS_INVALID_DECL": {"6.5", CatLang, 2, "thread_local requires a Copy type and a literal or zero() initializer"},
+	// §6 freestanding mode (specs/freestanding-availability)
+	"ENV_HOSTED_ONLY": {"6.8", CatLang, 3, "a freestanding program calls a function that needs the hosted runtime"},
 	// general language errors (spec §4, types.md)
 	"SYNTAX":                  {"4.0", CatLang, 0, "syntax error"},
 	"MODULE_MISMATCH":         {"T.1", CatLang, 0, "files of one directory declare different module names"},

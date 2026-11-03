@@ -35,11 +35,53 @@ type Options struct {
 	// Sources enables DWARF emission: file name to bytes, for line and
 	// column numbers (PLAN.md Phase 5 debugger).
 	Sources map[string][]byte
+	// Record keeps a RuntimeRef for every request to declare a runtime
+	// entry (specs/freestanding-availability); EmitRecorded sets it. The
+	// emitted text does not depend on it.
+	Record bool
+}
+
+// RuntimeRef is one request to declare a runtime entry (a `kern_` symbol
+// the module does not define), made while Instr of Block in Func was
+// emitted. Func, Block and Instr are nil for a module-level request (the
+// entry point, the trap entry).
+type RuntimeRef struct {
+	Symbol string
+	Func   *ir.Func
+	Block  *ir.Block
+	Instr  ir.Instr
+}
+
+// recording is the emitter's state for Options.Record: what is being
+// emitted, and the requests so far.
+type recording struct {
+	f    *ir.Func
+	b    *ir.Block
+	in   ir.Instr
+	refs []RuntimeRef
+}
+
+// EmitRecorded emits a module as EmitWith does and returns, instead of the
+// text, every runtime-entry request with the instruction that made it, in
+// emission order. A symbol requested at several instructions is recorded
+// at each.
+func EmitRecorded(mod *ir.Module, opts Options) ([]RuntimeRef, []error) {
+	opts.Record = true
+	e, _, errs := emitWith(mod, opts)
+	return e.rec.refs, errs
 }
 
 // EmitWith renders a module for the given options.
 func EmitWith(mod *ir.Module, opts Options) (string, []error) {
+	_, text, errs := emitWith(mod, opts)
+	return text, errs
+}
+
+func emitWith(mod *ir.Module, opts Options) (*emitter, string, []error) {
 	e := &emitter{mod: mod, opts: opts, types: map[string]bool{}, glue: map[string]bool{}, runtime: map[string]bool{}, files: map[string]string{}, locs: map[string]string{}, fnLocIdx: map[string]int64{}}
+	if opts.Record {
+		e.rec = &recording{}
+	}
 	if opts.Sources != nil {
 		e.dbg = newDebugInfo(opts.Sources)
 	}
@@ -64,7 +106,10 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 			e.externDecl(f)
 			continue
 		}
-		if f.Intrinsic || f.Inlined {
+		// a recording emits the functions the inliner copied everywhere
+		// too: their own calls are the program's, whether or not anything
+		// is left to call them (specs/freestanding-availability F2)
+		if f.Intrinsic || f.Inlined && !opts.Record {
 			continue
 		}
 		e.function(f)
@@ -116,7 +161,7 @@ func EmitWith(mod *ir.Module, opts Options) (string, []error) {
 	if attrs := e.fnAttrs(); attrs != "" {
 		fmt.Fprintf(&out, "attributes #0 = {%s }\n", attrs)
 	}
-	return out.String(), e.errs
+	return e, out.String(), e.errs
 }
 
 // fnAttrs is the attribute group every function carries. Hosted builds probe
@@ -520,6 +565,10 @@ func (e *emitter) retType(f *ir.Func) string {
 }
 
 func (e *emitter) function(f *ir.Func) {
+	if e.rec != nil {
+		e.rec.f, e.rec.b, e.rec.in = f, nil, nil
+		defer func() { e.rec.f, e.rec.b, e.rec.in = nil, nil, nil }()
+	}
 	fe := &fnEmit{e: e, f: f, vals: map[*ir.Value]string{}, accs: map[*ir.Value]bool{}, addrs: map[*ir.Value]string{}, strs: map[*ir.Value][]byte{}, tags: map[*ir.Value]int{}, packed: map[*ir.Value]bool{}, labels: map[*ir.Block]string{}}
 	for _, b := range f.Blocks {
 		fe.labels[b] = fmt.Sprintf("bb%d", b.ID)
@@ -579,7 +628,13 @@ func (e *emitter) function(f *ir.Func) {
 			if e.dbg != nil {
 				fe.dbgLoc = e.dbg.location(f, b, instrPos(in))
 			}
+			if e.rec != nil {
+				e.rec.f, e.rec.b, e.rec.in = f, b, in
+			}
 			fe.instr(in)
+		}
+		if e.rec != nil {
+			e.rec.b, e.rec.in = b, nil
 		}
 		if e.dbg != nil {
 			fe.dbgLoc = e.dbg.location(f, nil, f.Pos)

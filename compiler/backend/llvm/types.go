@@ -31,6 +31,7 @@ type emitter struct {
 	errs     []error
 	thunks   int
 	dbg      *debugInfo // DWARF metadata, nil without debug info
+	rec      *recording // runtime-entry requests, nil unless Options.Record
 }
 
 // lty maps a type to its LLVM type in registers (bool is i1).
@@ -290,6 +291,10 @@ func (e *emitter) namedGlue(b *strings.Builder, n *resolve.Named) {
 
 // declare records an external runtime function declaration.
 func (e *emitter) declare(name, sig string) {
+	if e.rec != nil && strings.HasPrefix(name, "kern_") {
+		r := e.rec
+		e.rec.refs = append(e.rec.refs, RuntimeRef{Symbol: name, Func: r.f, Block: r.b, Instr: r.in})
+	}
 	key := name
 	if e.runtime[key] {
 		return

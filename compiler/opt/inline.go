@@ -637,7 +637,7 @@ func (m *copier) instr(in ir.Instr) ir.Instr {
 	case *ir.Tag:
 		return &ir.Tag{Dst: m.v(i.Dst), Place: m.place(i.Place)}
 	case *ir.FuncRef:
-		return &ir.FuncRef{Dst: m.v(i.Dst), Name: i.Name}
+		return &ir.FuncRef{Dst: m.v(i.Dst), Name: i.Name, Pos: i.Pos}
 	case *ir.MakeClosure:
 		return &ir.MakeClosure{Dst: m.v(i.Dst), Name: i.Name, Captures: m.vs(i.Captures), Pos: i.Pos}
 	case *ir.Trap:

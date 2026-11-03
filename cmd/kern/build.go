@@ -77,6 +77,17 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 		_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: bds})
 		return 2
 	}
+	if opts.Freestanding {
+		// before anything is compiled or written (Rule 6.8)
+		hds, err := hostedDiags(srcs, opts.Opt, freestandingTriple(opts.Triple), buildHosted)
+		if err != nil {
+			return internal(req, diag.SchemaVersion, err, stdout, stderr)
+		}
+		if len(hds) > 0 {
+			_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: hds})
+			return 2
+		}
+	}
 	ds, err := buildHook(srcs, out, opts)
 	if err != nil {
 		return internal(req, diag.SchemaVersion, &InternalError{Err: err}, stdout, stderr)
@@ -90,3 +101,6 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 
 // buildHook is the native build entry point; tests replace it.
 var buildHook = native.Build
+
+// buildHosted is build's hosted-only evaluation; tests replace it.
+var buildHosted = hostedDefaults()

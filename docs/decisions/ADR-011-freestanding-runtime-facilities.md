@@ -136,6 +136,8 @@ final list.
 
 ## Decision (Phase 3 closing entry, 2026-10-26)
 
+*Since 2026-11-03* (`specs/freestanding-availability`): the compiler reads this set from the embedded runtime sources (`freestanding.Provided`, checked against the compiled objects with `llvm-nm`), and a freestanding program that needs any other runtime entry is rejected with `ENV_HOSTED_ONLY` (Rule 6.8) before it links.
+
 The mandatory freestanding runtime is the symbol set that `runtime/freestanding/src/rt.c`
 and the startup code provide, and nothing else:
 

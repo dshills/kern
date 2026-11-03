@@ -234,7 +234,7 @@ func checkDirectWith(t *testing.T, paths []string, human bool, cacheDir string, 
 	req := Request{SchemaVersion: diag.SchemaVersion, Command: "check", Files: pr.Names(), Target: native.HostTriple()}
 	cfg := incremental.Config{Opt: "debug", Env: "hosted", Target: req.Target}
 	var out, errb bytes.Buffer
-	code := runCheck(req, diag.SchemaVersion, pr.Files, human, cacheDir, cfg, &out, &errb, deps)
+	code := runCheck(req, diag.SchemaVersion, pr.Files, human, cacheDir, cfg, freestandingTriple(""), &out, &errb, checkDeps{budget: deps, hosted: hostedDefaults()})
 	return code, out.String()
 }
 

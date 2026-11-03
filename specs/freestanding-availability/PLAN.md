@@ -1,6 +1,6 @@
 # Hosted-only runtime entries: implementation plan
 
-**Spec:** `specs/freestanding-availability/SPEC.md` v0.1 (F1 to F3, R1 to
+**Spec:** `specs/freestanding-availability/SPEC.md` v0.2 (F1 to F3, R1 to
 R7). **Branch:** `main`, one commit per phase after an internal review
 (the owner chose internal review over prism on 2026-11-03). Each phase is
 verified in a scratch worktree holding only its own diff before it is

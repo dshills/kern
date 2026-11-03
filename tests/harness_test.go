@@ -138,7 +138,13 @@ func applyFix(t *testing.T, all []*source.File, fix *diag.StructuredEdit) {
 // debug level: resolution, checking and, when the files declare a budget
 // and check clean, the budgets, over the module the show queries read
 // (spec §7.6; as cmd/kern's Build, without importing it).
-func checkFiles(fs []*source.File) []diag.Diagnostic {
+func checkFiles(fs []*source.File) []diag.Diagnostic { return checkFilesIn(fs, "hosted") }
+
+// checkFilesIn is checkFiles in an environment: in freestanding mode a
+// clean program is also evaluated for calls that need the hosted runtime,
+// as `kern check --env freestanding` does (Rule 6.8), on the default
+// bare-metal target.
+func checkFilesIn(fs []*source.File, env string) []diag.Diagnostic {
 	prog := resolve.Resolve(fs)
 	if len(prog.Diags) > 0 {
 		return prog.Diags
@@ -158,7 +164,7 @@ func checkFiles(fs []*source.File) []diag.Diagnostic {
 			}
 		}
 	}
-	if !analysis.HasBudgets(own) {
+	if !analysis.HasBudgets(own) && env != "freestanding" {
 		return nil
 	}
 	mod, ds := lower.Lower(prog)
@@ -168,7 +174,19 @@ func checkFiles(fs []*source.File) []diag.Diagnostic {
 	if err := opt.Run(mod, opt.OptionsFor("debug")); err != nil {
 		panic(err)
 	}
-	return analysis.Budgets(prog, fs, mod, "", analysis.ClassifyBounds)
+	if analysis.HasBudgets(own) {
+		if ds := analysis.Budgets(prog, fs, mod, "", analysis.ClassifyBounds); len(ds) > 0 {
+			return ds
+		}
+	}
+	if env != "freestanding" {
+		return nil
+	}
+	res, err := analysis.HostedOnly(mod, native.FreestandingTriple)
+	if err != nil {
+		panic(err)
+	}
+	return res.Diagnostics
 }
 
 // fixtures lists fixture paths: single .kern files, and directories holding a
@@ -264,7 +282,7 @@ func TestFixtures(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			f, all := loadFixture(t, path)
 			h := parseHeader(t, f)
-			ds := checkFiles(all)
+			ds := checkFilesIn(all, h.env)
 			switch h.expect {
 			case "accept", "output", "trap":
 				if h.phase < 1 {

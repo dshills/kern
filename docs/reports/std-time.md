@@ -55,7 +55,8 @@ build durations with checked arithmetic (past `u64` nanoseconds is an
 - Timeouts in `std/process` (`wait` with a deadline) and `std/io`.
 - A clock for freestanding mode (a timer device per target).
 - A diagnostic, not a link error, for a hosted-only module in a
-  freestanding build.
+  freestanding build. *(Resolved 2026-11-03, `specs/freestanding-availability`:
+  `ENV_HOSTED_ONLY` from `check`, `build` and `run`, Rule 6.8.)*
 
 ## Review
 

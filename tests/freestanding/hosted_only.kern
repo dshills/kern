@@ -1,0 +1,14 @@
+//! expect: reject ENV_HOSTED_ONLY rule=6.8
+//! twin: hosted_only_ok
+//! env: freestanding
+// A freestanding image has no clock: std/time's now reaches the hosted
+// runtime's kern_now_ns, so the call is rejected before the program is
+// built or run (Rule 6.8, specs/freestanding-availability).
+module fs
+import "std/time"
+func main() -> i32 {
+    t := time.now()
+    print_u64(t.ns)
+    println()
+    return 0i32
+}

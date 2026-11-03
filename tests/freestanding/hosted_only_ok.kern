@@ -1,0 +1,15 @@
+//! phase: 3
+//! expect: accept
+//! env: freestanding
+//! twin: hosted_only
+// The twin of hosted_only: a value counted by the program itself instead
+// of read from a clock, and console output, which the freestanding runtime
+// provides.
+module fs
+func main() -> i32 {
+    var ticks: u64 = 0u64
+    while ticks < 3u64 { ticks = ticks + 1u64 }
+    print_u64(ticks)
+    println()
+    return 0i32
+}

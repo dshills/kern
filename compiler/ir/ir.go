@@ -349,6 +349,10 @@ type Tag struct {
 type FuncRef struct {
 	Dst  *Value
 	Name string
+	// Pos is the referring expression's span, for diagnostics that
+	// attribute a use of the function to the source
+	// (specs/freestanding-availability F1).
+	Pos ast.Pos
 }
 
 // MakeClosure materializes a closure value: the closure function Name

@@ -322,7 +322,7 @@ func (fl *fnLower) ident(x *ast.Ident) operand {
 		return operand{pl: ir.Place{Global: fl.l.global(sym.Global)}, perm: ast.ConvEdit}
 	case resolve.SymFunc:
 		v := fl.newValue(t)
-		fl.emit(&ir.FuncRef{Dst: v, Name: fl.l.request(sym.Func, nil, fl.file)})
+		fl.emit(&ir.FuncRef{Dst: v, Name: fl.l.request(sym.Func, nil, fl.file), Pos: x.Pos})
 		return operand{val: v}
 	case resolve.SymType:
 		// a bare variant without payload (e.g. None resolved through bareVariant)
@@ -361,7 +361,7 @@ func (fl *fnLower) field(x *ast.FieldExpr) operand {
 			if sym := fl.l.info.Idents[id]; sym != nil && sym.Kind == resolve.SymModule && sym.Module != nil {
 				if fd := sym.Module.Funcs[x.Name]; fd != nil {
 					v := fl.newValue(t)
-					fl.emit(&ir.FuncRef{Dst: v, Name: fl.l.request(fd, nil, fl.file)})
+					fl.emit(&ir.FuncRef{Dst: v, Name: fl.l.request(fd, nil, fl.file), Pos: x.Pos})
 					return operand{val: v}
 				}
 			}

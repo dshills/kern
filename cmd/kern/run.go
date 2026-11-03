@@ -155,6 +155,9 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 	return opts, files, prog, nil // no file named: the manifest's entry (project.Load)
 }
 
+// runHosted is run's hosted-only evaluation; tests replace it.
+var runHosted = hostedDefaults()
+
 // runProgram implements `kern run`: check failures write the JSON response
 // to stdout and exit 2; otherwise stdout belongs to the program, a trap
 // writes its record to stderr and exits 134.
@@ -183,6 +186,22 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 	}
 	if mod.Entry == "" {
 		return fail(stdout, "CLI_INVALID_FLAGS", "program has no main function")
+	}
+	if opts.Env == "freestanding" {
+		// the interpreter emulates hosted entries a freestanding image has
+		// not, so the program is refused before it runs (Rule 6.8)
+		given := ""
+		if m := pr.Manifest; m != nil && m.Target != nil {
+			given = *m.Target
+		}
+		hds, err := hostedDiags(srcs, opts.Opt, freestandingTriple(given), runHosted)
+		if err != nil {
+			return internal(req, diag.SchemaVersion, err, stdout, stderr)
+		}
+		if len(hds) > 0 {
+			_ = diag.Write(stdout, diag.Response{SchemaVersion: diag.SchemaVersion, OK: false, Result: nil, Diagnostics: hds})
+			return 2
+		}
 	}
 	it := interp.New(mod, files[0], stdout, stderr)
 	it.SetArgs(append([]string{files[0]}, progArgs...))

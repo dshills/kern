@@ -1,6 +1,6 @@
 # Hosted-only runtime entries in a freestanding program: a diagnostic
 
-**Version:** 0.1 (2026-11-03). **Scope:** a new diagnostic code under
+**Version:** 0.2 (2026-11-03; 0.1 the same day: 0.2 corrects where `kern_stack_limit` is defined). **Scope:** a new diagnostic code under
 Rule 6.8 (`docs/ownership.md`); its evaluation by `check`, `build` and
 `run` in freestanding mode (`cmd/kern`); the analysis that finds the
 runtime entries a program reaches (`compiler/analysis`, with recording in
@@ -55,9 +55,11 @@ mapping from an IR instruction to the entries it uses.
 are built from the same runtime). The external symbols `runtime/freestanding/src/rt.c`
 defines: functions and objects at file scope that are not `static`. The
 set is read from the C source embedded in the compiler
-(`runtime/freestanding.RuntimeC`). The startup code's symbols (`_start`,
-`kern_stack_limit`) are defined by the assembly startup files, embedded
-beside it, and belong to the set.
+(`runtime/freestanding.RuntimeC`). The startup code's global labels
+(`_start`, and the stack bounds `_kern_stack_bottom` and `_kern_stack_top`)
+are defined by the assembly startup files, embedded beside it, and belong
+to the set. `kern_stack_limit` is an object of `rt.c`. (Version 0.1 said
+the startup files define it.)
 
 **Hosted-only entry.** A runtime entry the freestanding emission of a
 program declares that is not in the provided set.
