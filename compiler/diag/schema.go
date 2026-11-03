@@ -277,6 +277,11 @@ type BoundsCheck struct {
 	Kind     string  `json:"kind"`
 	Label    Label   `json:"label"`
 	ProvenBy *string `json:"proven_by"`
+
+	// Reason and Hint say why a runtime-checked bounds check is not proven
+	// (schema_version 0.5; absent at 0.2 to 0.4; specs/unproven-reasons).
+	Reason *string `json:"reason"`
+	Hint   *string `json:"hint"`
 }
 
 // Check kinds (§16).
@@ -342,7 +347,7 @@ var Notes = map[string]string{
 	"emit-asm":              "Native assembly for the request target. Proven by construction; no `label`.",
 	"apply-structured-edit": "The new source of every changed file plus the diagnostics of a `check` on the result. Coordinate, overlap and symbol failures are atomic and set `ok=false` with one `EDIT_OVERLAP`, `EDIT_UNRESOLVED_SYMBOL` or `EDIT_INVALID_SPAN` diagnostic naming the offending op by `op_index`. Once the ops are applied the edit has succeeded (`ok=true`, `applied` = number of ops) even if the result does not parse or does not check. Proven by construction; no `label`.",
 
-	"Request.schema_version":    "`\"0.4\"`, `\"0.3\"` or `\"0.2\"`, answered at that version; anything else is `API_UNSUPPORTED_SCHEMA`, answered at 0.4.",
+	"Request.schema_version":    "`\"0.5\"`, `\"0.4\"`, `\"0.3\"` or `\"0.2\"`, answered at that version; anything else is `API_UNSUPPORTED_SCHEMA`, answered at 0.5.",
 	"Request.command":           "One of the eleven commands.",
 	"Request.files":             "Source file paths; an empty array is `API_NO_FILES`, an unreadable file `API_FILE_NOT_FOUND`.",
 	"Request.target":            "LLVM-style target triple; when absent, the host target is used. Every result is computed for that target.",
@@ -385,6 +390,8 @@ var Notes = map[string]string{
 	"FunctionEffects.unsafe":    "Possible unless proven impossible (`false` only with label `proven`).",
 	"BoundsCheck.kind":          "`bounds`, `generation`, `disjoint` or `overflow`.",
 	"BoundsCheck.label":         "`runtime-checked` or `proven`.",
+	"BoundsCheck.reason":        "Non-null iff `kind` is `bounds` and `label` is `runtime-checked`: why the proof rules leave the check in, one of `guard_not_on_every_path`, `guard_too_weak`, `other_length`, `type_range`, `remainder_by_value`, `computed_index`, `no_guard`, `slice_high_bound`, `slice_low_bound` (specs/unproven-reasons §3), judged from the source of the function that contains the access. Stable across compiler versions, like `code`. Present from `schema_version` 0.5.",
+	"BoundsCheck.hint":          "Non-null iff `reason` is: one clause for a reader, naming the access's own expressions, with a rewrite the proof rules accept where one exists. Not stable across compiler versions, like `message`. Present from `schema_version` 0.5.",
 	"BoundsCheck.proven_by":     "Non-null iff `label` is `proven`: `loop_bound`, `dominated_by_check` or `constant`. `constant` covers a literal index into an array whose length its type gives, and an index bounded by a constant below such a length: a mask `x & c`, a remainder `x % c`, a local every store to which was so bounded (across branches and loops), through conversions and plus a constant offset; such an index below a length a guard bounded from below, and a mask by a value below the length (`x & (len(xs) - 1)`), are `dominated_by_check`.",
 	"ApplyEditResult.files":     "Every changed file.",
 	"ApplyEditResult.applied":   "Number of ops applied.",

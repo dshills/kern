@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/dshills/kern/tools/agent-api/schema.json",
-  "title": "kern machine API, schema_version 0.4",
-  "description": "Hand-maintained transcription of spec §7 (Machine API) and §16 (result schemas and structured-edit format). This file is the normative machine-readable copy for schema_version 0.4 (a 0.3 response differs only by the absence of show-effects trap_kinds, and a 0.2 response also by the absence of the diagnostic message); tools/agent-api/schema.md is generated from compiler/diag/schema.go and must agree with it.",
+  "title": "kern machine API, schema_version 0.5",
+  "description": "Hand-maintained transcription of spec §7 (Machine API) and §16 (result schemas and structured-edit format). This file is the normative machine-readable copy for schema_version 0.5 (a 0.4 response differs only by the absence of show-bounds-checks reason and hint, a 0.3 response also by the absence of show-effects trap_kinds, and a 0.2 response also by the absence of the diagnostic message); tools/agent-api/schema.md is generated from compiler/diag/schema.go and must agree with it.",
   "$comment": "Validate a request against #/$defs/request, a response against #/$defs/response, and a response of a known command against #/$defs/responses/$defs/<command>. The result object of each command is #/$defs/results/$defs/<command>.",
   "oneOf": [
     { "$ref": "#/$defs/request" },
@@ -11,8 +11,8 @@
   "$defs": {
     "schema_version": {
       "type": "string",
-      "const": "0.4",
-      "description": "Schema version carried by every request and response (§7). The compiler also answers 0.3 and 0.2 requests in their own shapes."
+      "const": "0.5",
+      "description": "Schema version carried by every request and response (§7). The compiler also answers 0.4, 0.3 and 0.2 requests in their own shapes."
     },
     "command": {
       "type": "string",
@@ -481,7 +481,7 @@
         },
         "show-bounds-checks": {
           "type": "object",
-          "description": "show-bounds-checks: every runtime check and every check replaced by a proof fact. label is runtime-checked or proven; proven_by is non-null iff label is proven.",
+          "description": "show-bounds-checks: every runtime check and every check replaced by a proof fact. label is runtime-checked or proven; proven_by is non-null iff label is proven; reason and hint are non-null iff kind is bounds and label is runtime-checked.",
           "properties": {
             "checks": {
               "type": "array",
@@ -494,13 +494,33 @@
                   "proven_by": {
                     "description": "The recorded proof fact (loop_bound, dominated_by_check, constant) when label is proven; null otherwise.",
                     "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+                  },
+                  "reason": {
+                    "description": "Why the proof rules leave a runtime-checked bounds check in (specs/unproven-reasons §3), judged from the source of the function that contains the access; null for every other entry. Stable across compiler versions, like a diagnostic code.",
+                    "oneOf": [
+                      { "type": "null" },
+                      { "type": "string", "enum": ["guard_not_on_every_path", "guard_too_weak", "other_length", "type_range", "remainder_by_value", "computed_index", "no_guard", "slice_high_bound", "slice_low_bound"] }
+                    ]
+                  },
+                  "hint": {
+                    "description": "One clause for a reader that goes with reason, naming the access's own expressions, with a rewrite the proof rules accept where one exists; null iff reason is. Not stable across compiler versions, like a diagnostic message.",
+                    "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
                   }
                 },
-                "required": ["loc", "kind", "label", "proven_by"],
+                "required": ["loc", "kind", "label", "proven_by", "reason", "hint"],
                 "additionalProperties": false,
-                "if": { "properties": { "label": { "const": "proven" } }, "required": ["label"] },
-                "then": { "properties": { "proven_by": { "type": "string" } } },
-                "else": { "properties": { "proven_by": { "type": "null" } } }
+                "allOf": [
+                  {
+                    "if": { "properties": { "label": { "const": "proven" } }, "required": ["label"] },
+                    "then": { "properties": { "proven_by": { "type": "string" } } },
+                    "else": { "properties": { "proven_by": { "type": "null" } } }
+                  },
+                  {
+                    "if": { "properties": { "kind": { "const": "bounds" }, "label": { "const": "runtime-checked" } }, "required": ["kind", "label"] },
+                    "then": { "properties": { "reason": { "type": "string" }, "hint": { "type": "string" } } },
+                    "else": { "properties": { "reason": { "type": "null" }, "hint": { "type": "null" } } }
+                  }
+                ]
               }
             }
           },

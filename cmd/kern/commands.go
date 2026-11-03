@@ -9,6 +9,8 @@ import (
 	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/edit"
 	"github.com/dshills/kern/compiler/format"
+	"github.com/dshills/kern/compiler/ir"
+	"github.com/dshills/kern/compiler/opt"
 	"github.com/dshills/kern/compiler/resolve"
 	"github.com/dshills/kern/compiler/source"
 )
@@ -95,14 +97,55 @@ func showAllocations(req Request, wire string, srcs []*source.File, stdout, stde
 }
 
 func showBoundsChecks(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {
-	mod, ds, err := Build(srcs, cliOpt)
+	return showBoundsChecksWith(analysis.ClassifyBounds, req, wire, srcs, stdout, stderr)
+}
+
+// showBoundsChecksWith answers show-bounds-checks, with each unproven
+// bounds entry's reason and hint from classify at schema_version 0.5
+// (specs/unproven-reasons R3); an older version's request never
+// classifies (R5).
+func showBoundsChecksWith(classify analysis.Classifier, req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {
+	if wire != diag.SchemaVersion {
+		mod, ds, err := Build(srcs, cliOpt)
+		if err != nil {
+			return internal(req, wire, err, stdout, stderr)
+		}
+		if len(ds) > 0 {
+			return respond(stdout, wire, nil, ds)
+		}
+		return respond(stdout, wire, analysis.BoundsChecks(mod), nil)
+	}
+	prog, mod, ds, err := buildProg(srcs, cliOpt, opt.OptionsFor(cliOpt))
 	if err != nil {
 		return internal(req, wire, err, stdout, stderr)
 	}
 	if len(ds) > 0 {
 		return respond(stdout, wire, nil, ds)
 	}
-	return respond(stdout, wire, analysis.BoundsChecks(mod), nil)
+	res, err := classifyChecks(classify, prog, srcs, mod)
+	if err != nil {
+		return internal(req, wire, err, stdout, stderr)
+	}
+	return respond(stdout, wire, res, nil)
+}
+
+// classifyChecks is mod's show-bounds-checks result with reason and hint
+// filled on every unproven bounds entry, converting a classifier panic to
+// an InternalError.
+func classifyChecks(classify analysis.Classifier, prog *resolve.Program, srcs []*source.File, mod *ir.Module) (res diag.ShowBoundsChecksResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = &InternalError{Err: errorf("unproven-reasons classification: %v", r)}
+		}
+	}()
+	snap := analysis.Snapshot(mod)
+	reasons, _ := classify(prog, srcs, snap, nil)
+	res = snap.Result
+	for i, r := range reasons {
+		code, hint := r.Code, r.Hint
+		res.Checks[i].Reason, res.Checks[i].Hint = &code, &hint
+	}
+	return res, nil
 }
 
 func emitAsm(req Request, wire string, srcs []*source.File, stdout, stderr io.Writer) int {

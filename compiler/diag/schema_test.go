@@ -375,7 +375,8 @@ func TestResultFieldsMatchSchema(t *testing.T) {
 }
 
 // TestWriteAtVersions checks the wire versions (specs/diag-message/SPEC.md
-// F3, F4; specs/effect-trap-kinds R1): a 0.4 response validates against
+// F3, F4; specs/effect-trap-kinds R1; specs/unproven-reasons R3): a 0.5
+// response validates against
 // schema.json; a 0.3 response carries every diagnostic's message; a 0.2
 // response says 0.2, carries exactly the 0.2 fields of a diagnostic and no
 // message; and no write changes the caller's response.
@@ -401,7 +402,7 @@ func TestWriteAtVersions(t *testing.T) {
 		t.Errorf("0.3 diagnostic message %v, want %q", d["message"], msg)
 	}
 	if err := compileSchema(t, "#/$defs/response").Validate(roundTrip(t, resp)); err != nil {
-		t.Errorf("0.4 response does not validate: %v", err)
+		t.Errorf("0.5 response does not validate: %v", err)
 	}
 	out.Reset()
 	if err := WriteAt(&out, "0.2", resp); err != nil {
@@ -425,22 +426,22 @@ func TestWriteAtVersions(t *testing.T) {
 	if resp.Diagnostics[0].Message != msg || resp.SchemaVersion != SchemaVersion {
 		t.Errorf("WriteAt changed the caller's response: %+v", resp)
 	}
-	for _, v := range []string{"0.2", "0.3", "0.4"} {
+	for _, v := range []string{"0.2", "0.3", "0.4", "0.5"} {
 		if !Supported(v) {
 			t.Errorf("%s is not supported", v)
 		}
 	}
-	if Supported("0.5") || Supported("") {
+	if Supported("0.6") || Supported("") {
 		t.Errorf("an unknown version is supported")
 	}
 }
 
-// TestEffectsShapeByVersion checks that show-effects carries trap_kinds at
-// 0.4 only (specs/effect-trap-kinds R1), that the 0.4 shape validates, and
+// TestEffectsShapeByVersion checks that show-effects carries trap_kinds from
+// 0.4 (specs/effect-trap-kinds R1), that the newest shape validates, and
 // that writing an older shape leaves the caller's result untouched.
 func TestEffectsShapeByVersion(t *testing.T) {
 	res := ShowEffectsResult{Target: "f", Functions: []FunctionEffects{{Name: "f", Traps: true, TrapKinds: []string{"bounds", "oom"}, Label: LabelProven}}}
-	for _, v := range []string{"0.2", "0.3", "0.4"} {
+	for _, v := range []string{"0.2", "0.3", "0.4", "0.5"} {
 		var out bytes.Buffer
 		if err := WriteAt(&out, v, Response{OK: true, Result: res, Diagnostics: []Diagnostic{}}); err != nil {
 			t.Fatal(err)
@@ -451,12 +452,12 @@ func TestEffectsShapeByVersion(t *testing.T) {
 		}
 		f := got["result"].(map[string]any)["functions"].([]any)[0].(map[string]any)
 		_, has := f["trap_kinds"]
-		if has != (v == "0.4") {
+		if has != (v >= "0.4") {
 			t.Errorf("%s: trap_kinds present %v", v, has)
 		}
-		if v == "0.4" {
+		if v == SchemaVersion {
 			if err := compileSchema(t, "#/$defs/responses/$defs/show-effects").Validate(got); err != nil {
-				t.Errorf("0.4 show-effects does not validate: %v", err)
+				t.Errorf("%s show-effects does not validate: %v", v, err)
 			}
 		}
 	}
@@ -477,5 +478,77 @@ func TestEffects03ShapeTracksFunctionEffects(t *testing.T) {
 	}
 	if got := JSONFields(reflect.TypeOf(functionEffects03{})); !reflect.DeepEqual(got, want) {
 		t.Errorf("functionEffects03 fields %v, want %v", got, want)
+	}
+}
+
+// TestBoundsShapeByVersion checks that show-bounds-checks carries reason
+// and hint at 0.5 only (specs/unproven-reasons R3), that the 0.5 shape
+// validates, null on proven and overflow entries included, and that
+// writing an older shape leaves the caller's result untouched.
+func TestBoundsShapeByVersion(t *testing.T) {
+	by, reason, hint := "dominated_by_check", "no_guard", "test `i < len(xs)` on every path to it"
+	res := ShowBoundsChecksResult{Checks: []BoundsCheck{
+		{Loc: Loc{File: "m.kern", Span: Span{Start: 1, End: 6}}, Kind: CheckBounds, Label: LabelRuntimeChecked, Reason: &reason, Hint: &hint},
+		{Loc: Loc{File: "m.kern", Span: Span{Start: 8, End: 13}}, Kind: CheckBounds, Label: LabelProven, ProvenBy: &by},
+		{Loc: Loc{File: "m.kern", Span: Span{Start: 15, End: 20}}, Kind: CheckOverflow, Label: LabelRuntimeChecked},
+	}}
+	for _, v := range []string{"0.2", "0.3", "0.4", "0.5"} {
+		var out bytes.Buffer
+		if err := WriteAt(&out, v, Response{OK: true, Result: res, Diagnostics: []Diagnostic{}}); err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		for i, c := range got["result"].(map[string]any)["checks"].([]any) {
+			e := c.(map[string]any)
+			_, hasReason := e["reason"]
+			_, hasHint := e["hint"]
+			if hasReason != (v == "0.5") || hasHint != (v == "0.5") {
+				t.Errorf("%s entry %d: reason present %v, hint present %v", v, i, hasReason, hasHint)
+			}
+		}
+		if v == SchemaVersion {
+			if err := compileSchema(t, "#/$defs/responses/$defs/show-bounds-checks").Validate(got); err != nil {
+				t.Errorf("0.5 show-bounds-checks does not validate: %v", err)
+			}
+		}
+	}
+	if res.Checks[0].Reason == nil || *res.Checks[0].Reason != reason {
+		t.Error("WriteAt changed the caller's result")
+	}
+	// the schema rejects a reason on a proven entry and a missing one on
+	// an unproven bounds entry
+	for name, bad := range map[string]ShowBoundsChecksResult{
+		"reason on proven": {Checks: []BoundsCheck{{Loc: Loc{File: "m.kern"}, Kind: CheckBounds, Label: LabelProven, ProvenBy: &by, Reason: &reason, Hint: &hint}}},
+		"no reason":        {Checks: []BoundsCheck{{Loc: Loc{File: "m.kern"}, Kind: CheckBounds, Label: LabelRuntimeChecked}}},
+	} {
+		var out bytes.Buffer
+		if err := WriteAt(&out, SchemaVersion, Response{OK: true, Result: bad, Diagnostics: []Diagnostic{}}); err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if compileSchema(t, "#/$defs/responses/$defs/show-bounds-checks").Validate(got) == nil {
+			t.Errorf("%s: validates", name)
+		}
+	}
+}
+
+// The pre-0.5 show-bounds-checks shape is BoundsCheck without reason and
+// hint, so a field added to BoundsCheck must be added to it too (or be a
+// 0.5 field).
+func TestBounds04ShapeTracksBoundsCheck(t *testing.T) {
+	var want []string
+	for _, f := range JSONFields(reflect.TypeOf(BoundsCheck{})) {
+		if f != "reason" && f != "hint" {
+			want = append(want, f)
+		}
+	}
+	if got := JSONFields(reflect.TypeOf(boundsCheck04{})); !reflect.DeepEqual(got, want) {
+		t.Errorf("boundsCheck04 fields %v, want %v", got, want)
 	}
 }

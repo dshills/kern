@@ -76,21 +76,29 @@ func buildExec(srcs []*source.File, optLevel string) (*ir.Module, []diag.Diagnos
 }
 
 func buildWith(srcs []*source.File, optLevel string, o opt.Options) (*ir.Module, []diag.Diagnostic, error) {
+	_, mod, ds, err := buildProg(srcs, optLevel, o)
+	return mod, ds, err
+}
+
+// buildProg is buildWith that also returns the resolved program the module
+// was lowered from, for a caller that reads the source too (the
+// unproven-reasons classification).
+func buildProg(srcs []*source.File, optLevel string, o opt.Options) (*resolve.Program, *ir.Module, []diag.Diagnostic, error) {
 	prog := resolve.ResolveFor(srcs, optLevel == "release")
 	if len(prog.Diags) > 0 {
-		return nil, prog.Diags, nil
+		return nil, nil, prog.Diags, nil
 	}
 	if ds := check.Check(prog); len(ds) > 0 {
-		return nil, ds, nil
+		return nil, nil, ds, nil
 	}
 	mod, ds := lower.Lower(prog)
 	if len(ds) > 0 {
-		return nil, nil, &InternalError{Err: fmt.Errorf("%s", ds[0].Message)}
+		return nil, nil, nil, &InternalError{Err: fmt.Errorf("%s", ds[0].Message)}
 	}
 	if err := opt.Run(mod, o); err != nil {
-		return nil, nil, &InternalError{Err: fmt.Errorf("IR validation after %v", err)}
+		return nil, nil, nil, &InternalError{Err: fmt.Errorf("IR validation after %v", err)}
 	}
-	return mod, nil, nil
+	return prog, mod, nil, nil
 }
 
 // cliOpt is the `--opt` level of the current machine command, set by main

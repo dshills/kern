@@ -8,14 +8,15 @@ import (
 )
 
 // SchemaVersion is the machine-API schema version this compiler speaks (spec §16).
-const SchemaVersion = "0.4"
+const SchemaVersion = "0.5"
 
 // Accepted lists the request schema versions the compiler answers: the
-// newest (SchemaVersion), whose show-effects entries carry trap_kinds
-// (specs/effect-trap-kinds); 0.3, answered without trap_kinds; and 0.2,
-// answered also without the diagnostics' messages
-// (specs/diag-message/SPEC.md F4).
-var Accepted = []string{"0.2", "0.3", SchemaVersion}
+// newest (SchemaVersion), whose show-bounds-checks entries carry reason
+// and hint (specs/unproven-reasons); 0.4, answered without them, whose
+// show-effects entries carry trap_kinds (specs/effect-trap-kinds); 0.3,
+// answered also without trap_kinds; and 0.2, answered also without the
+// diagnostics' messages (specs/diag-message/SPEC.md F4).
+var Accepted = []string{"0.2", "0.3", "0.4", SchemaVersion}
 
 // Supported reports whether a request's schema_version is answered.
 func Supported(v string) bool {
@@ -111,14 +112,18 @@ func Sort(ds []Diagnostic) {
 func Write(w io.Writer, r Response) error { return WriteAt(w, SchemaVersion, r) }
 
 // WriteAt encodes a response at a wire version: the response says that
-// version, at 0.2 its diagnostics carry no message, and below 0.4 a
-// show-effects result carries no trap_kinds, so that a consumer sees
-// exactly its version's shape. The caller's response, its diagnostics and
-// its result are left as they are: what changes is copied.
+// version, at 0.2 its diagnostics carry no message, below 0.4 a
+// show-effects result carries no trap_kinds, and below 0.5 a
+// show-bounds-checks result carries no reason or hint, so that a consumer
+// sees exactly its version's shape. The caller's response, its diagnostics
+// and its result are left as they are: what changes is copied.
 func WriteAt(w io.Writer, version string, r Response) error {
 	r.SchemaVersion = version
 	if version == "0.2" || version == "0.3" {
 		r.Result = effectsBefore04(r.Result)
+	}
+	if version != SchemaVersion {
+		r.Result = boundsBefore05(r.Result)
 	}
 	ds := make([]Diagnostic, len(r.Diagnostics))
 	copy(ds, r.Diagnostics)
@@ -175,6 +180,41 @@ func effectsBefore04(result any) any {
 	out := showEffects03{Target: r.Target, Functions: make([]functionEffects03, len(r.Functions))}
 	for i, f := range r.Functions {
 		out.Functions[i] = functionEffects03{Name: f.Name, Allocates: f.Allocates, Traps: f.Traps, Spawns: f.Spawns, Unsafe: f.Unsafe, Label: f.Label}
+	}
+	return out
+}
+
+// boundsCheck04 and showBoundsChecks04 are the show-bounds-checks shape
+// before schema_version 0.5: BoundsCheck without reason and hint.
+type boundsCheck04 struct {
+	Loc      Loc     `json:"loc"`
+	Kind     string  `json:"kind"`
+	Label    Label   `json:"label"`
+	ProvenBy *string `json:"proven_by"`
+}
+
+type showBoundsChecks04 struct {
+	Checks []boundsCheck04 `json:"checks"`
+}
+
+// boundsBefore05 returns a show-bounds-checks result in the 0.2 to 0.4
+// shape, and any other result unchanged.
+func boundsBefore05(result any) any {
+	var r ShowBoundsChecksResult
+	switch x := result.(type) {
+	case ShowBoundsChecksResult:
+		r = x
+	case *ShowBoundsChecksResult:
+		if x == nil {
+			return result
+		}
+		r = *x
+	default:
+		return result
+	}
+	out := showBoundsChecks04{Checks: make([]boundsCheck04, len(r.Checks))}
+	for i, c := range r.Checks {
+		out.Checks[i] = boundsCheck04{Loc: c.Loc, Kind: c.Kind, Label: c.Label, ProvenBy: c.ProvenBy}
 	}
 	return out
 }

@@ -45,7 +45,7 @@ func TestWriteAndSort(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	if strings.Count(out, "\n") != 1 || !strings.Contains(out, "\"message\":\"a1\"") || !strings.Contains(out, "\"schema_version\":\"0.4\"") {
+	if strings.Count(out, "\n") != 1 || !strings.Contains(out, "\"message\":\"a1\"") || !strings.Contains(out, "\"schema_version\":\"0.5\"") {
 		t.Fatalf("wire format: %q", out)
 	}
 	var back map[string]any

@@ -1,0 +1,11 @@
+module m
+
+// One unproven index, one proven index and an overflow check
+// (specs/unproven-reasons R3, cmd/kern/reasons_version_test.go).
+func pick(xs: view[]u64, mid: usize) -> u64 {
+    a := xs[mid]
+    if mid < len(xs) { return a + xs[mid] }
+    return a
+}
+
+func main() -> i32 { return 0i32 }

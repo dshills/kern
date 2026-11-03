@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// show-effects carries trap_kinds at 0.4 only, and the corrected traps of
+// show-effects carries trap_kinds from 0.4, and the corrected traps of
 // the runtime object operations at every version
 // (specs/effect-trap-kinds R1, R3).
 func TestEffectsByVersion(t *testing.T) {
@@ -17,7 +17,7 @@ func TestEffectsByVersion(t *testing.T) {
 	if err := os.WriteFile(f, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, v := range []string{"0.2", "0.3", "0.4"} {
+	for _, v := range []string{"0.2", "0.3", "0.4", "0.5"} {
 		req := `{"schema_version":"` + v + `","command":"show-effects","files":["` + f + `"]}`
 		code, out, _ := invoke(t, req, "show-effects")
 		if code != 0 {
@@ -43,7 +43,7 @@ func TestEffectsByVersion(t *testing.T) {
 				continue
 			}
 			byName[name] = fn
-			if _, has := fn["trap_kinds"]; has != (v == "0.4") {
+			if _, has := fn["trap_kinds"]; has != (v >= "0.4") {
 				t.Errorf("%s: %v has trap_kinds %v", v, fn["name"], has)
 			}
 		}
@@ -51,7 +51,7 @@ func TestEffectsByVersion(t *testing.T) {
 		if lock == nil || lock["traps"] != true {
 			t.Errorf("%s: a function creating a Mutex does not trap: %v", v, lock)
 		}
-		if v == "0.4" {
+		if v >= "0.4" {
 			if ks, _ := json.Marshal(lock["trap_kinds"]); string(ks) != `["oom"]` {
 				t.Errorf("lock trap_kinds %s, want [\"oom\"]", ks)
 			}
@@ -65,7 +65,7 @@ func TestEffectsByVersion(t *testing.T) {
 	var resp struct {
 		SchemaVersion string `json:"schema_version"`
 	}
-	if err := json.Unmarshal([]byte(out), &resp); err != nil || resp.SchemaVersion != "0.4" {
+	if err := json.Unmarshal([]byte(out), &resp); err != nil || resp.SchemaVersion != "0.5" {
 		t.Errorf("command line: %v %s", err, out)
 	}
 }

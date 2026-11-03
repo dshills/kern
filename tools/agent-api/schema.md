@@ -1,4 +1,4 @@
-# kern machine API (`schema_version` 0.4)
+# kern machine API (`schema_version` 0.5)
 
 Generated from `compiler/diag/schema.go` by `go generate ./compiler/diag`; do not edit.
 This is the human-readable copy of spec §16; `tools/agent-api/schema.json` is the normative JSON Schema and the two must agree.
@@ -31,7 +31,7 @@ Every command reads one JSON request on standard input and writes one JSON respo
 
 | Field | JSON | Type | Notes |
 |---|---|---|---|
-| `SchemaVersion` | `schema_version` | string | `"0.4"`, `"0.3"` or `"0.2"`, answered at that version; anything else is `API_UNSUPPORTED_SCHEMA`, answered at 0.4. |
+| `SchemaVersion` | `schema_version` | string | `"0.5"`, `"0.4"`, `"0.3"` or `"0.2"`, answered at that version; anything else is `API_UNSUPPORTED_SCHEMA`, answered at 0.5. |
 | `Command` | `command` | string | One of the eleven commands. |
 | `Files` | `files` | [string] | Source file paths; an empty array is `API_NO_FILES`, an unreadable file `API_FILE_NOT_FOUND`. |
 | `Target` | `target` | string | Optional. LLVM-style target triple; when absent, the host target is used. Every result is computed for that target. |
@@ -291,6 +291,8 @@ Every `check_*` instruction of the IR, kept or replaced by a recorded proof fact
 | `Kind` | `kind` | string | `bounds`, `generation`, `disjoint` or `overflow`. |
 | `Label` | `label` | label | `runtime-checked` or `proven`. |
 | `ProvenBy` | `proven_by` | string \| null | Non-null iff `label` is `proven`: `loop_bound`, `dominated_by_check` or `constant`. `constant` covers a literal index into an array whose length its type gives, and an index bounded by a constant below such a length: a mask `x & c`, a remainder `x % c`, a local every store to which was so bounded (across branches and loops), through conversions and plus a constant offset; such an index below a length a guard bounded from below, and a mask by a value below the length (`x & (len(xs) - 1)`), are `dominated_by_check`. |
+| `Reason` | `reason` | string \| null | Non-null iff `kind` is `bounds` and `label` is `runtime-checked`: why the proof rules leave the check in, one of `guard_not_on_every_path`, `guard_too_weak`, `other_length`, `type_range`, `remainder_by_value`, `computed_index`, `no_guard`, `slice_high_bound`, `slice_low_bound` (specs/unproven-reasons §3), judged from the source of the function that contains the access. Stable across compiler versions, like `code`. Present from `schema_version` 0.5. |
+| `Hint` | `hint` | string \| null | Non-null iff `reason` is: one clause for a reader, naming the access's own expressions, with a rewrite the proof rules accept where one exists. Not stable across compiler versions, like `message`. Present from `schema_version` 0.5. |
 
 ### emit-ir
 

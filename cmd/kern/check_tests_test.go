@@ -47,7 +47,7 @@ func TestCheckWithoutTestFilesUnchanged(t *testing.T) {
 		"lib/l.kern": "module lib\nfunc F() -> u64 { return 1u64 }\n",
 	})
 	code, out, _ := invoke(t, "", "check")
-	if want := `{"schema_version":"0.4","ok":true,"result":{"files":["app.kern","lib/l.kern"]},"diagnostics":[]}` + "\n"; code != 0 || out != want {
+	if want := `{"schema_version":"0.5","ok":true,"result":{"files":["app.kern","lib/l.kern"]},"diagnostics":[]}` + "\n"; code != 0 || out != want {
 		t.Errorf("check: exit %d\n%s\nwant\n%s", code, out, want)
 	}
 }
