@@ -1,6 +1,6 @@
 # Proof pass: non-strict guards and slice bounds
 
-**Version:** 0.1 (2026-11-03). **Scope:** the bounds-check proof pass
+**Version:** 0.2 (2026-11-03). **Scope:** the bounds-check proof pass
 (`compiler/opt/prove.go`) and the field it records on `ir.CheckBounds`;
 the reason classification (`compiler/analysis/reasons.go`) where its
 covering rule and slice hints follow the proof rules; fixtures under
@@ -254,7 +254,10 @@ over budget):
 - how many of the 22 programs then meet their budgets.
 
 It hand-checks one rewrite of each new hint form (C2, C3) on a run
-program. No model is called; a paid run is the owner's decision.
+program, for every form that at least one of the run's locations
+receives. It names the forms none receives, which R5's rewrite fixtures
+cover. (Version 0.1 asked for every form on a run program, and a form
+the run does not contain cannot be checked there.) No model is called; a paid run is the owner's decision.
 
 ## 5. Risks
 
