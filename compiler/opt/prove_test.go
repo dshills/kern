@@ -730,3 +730,90 @@ func TestProveBoundsShared(t *testing.T) {
 		t.Errorf("the bound search took %v", d)
 	}
 }
+
+// sliceOutcomes renders a function's slice checks in block order as the
+// label and the recorded high-bound outcome, "runtime/high" for example.
+func sliceOutcomes(mod *ir.Module, name string) string {
+	fn := mod.Func(name)
+	if fn == nil {
+		return "<no function>"
+	}
+	var got []string
+	for _, b := range fn.Blocks {
+		for _, in := range b.Instrs {
+			if cb, ok := in.(*ir.CheckBounds); ok && cb.Index == nil {
+				label, high := "runtime", "nohigh"
+				if cb.Prov.Label == "proven" {
+					label = cb.Prov.ProvenBy
+				}
+				if cb.HighProven {
+					high = "high"
+				}
+				got = append(got, label+"/"+high)
+			}
+		}
+	}
+	return strings.Join(got, " ")
+}
+
+const sliceHighSource = `module t
+func count(xs: view[]u64) -> usize { return len(xs) }
+func high_unproven(h: view[]u64, n: usize) -> usize {
+    if n <= len(h) { return count(h[0usize:n]) }
+    return 0usize
+}
+func low_unproven(a: view[]u64, s: usize) -> usize { return count(a[s:len(a)]) }
+func proven(xs: view[]u64, i: usize) -> usize {
+    if i < len(xs) { return count(xs[i:len(xs)]) }
+    return 0usize
+}
+func both_unproven(a: view[]u64, s: usize, e: usize) -> usize { return count(a[s:e]) }
+func main() -> i32 { return 0i32 }
+`
+
+// TestProveSliceHighProven: the proof pass records whether a slice
+// check's high bound is proven, whatever its low bound
+// (specs/unproven-reasons R2).
+func TestProveSliceHighProven(t *testing.T) {
+	mod := proveWith(t, sliceHighSource)
+	for name, want := range map[string]string{
+		"t.high_unproven": "runtime/nohigh",
+		"t.low_unproven":  "runtime/high",
+		"t.proven":        "dominated_by_check/high",
+		"t.both_unproven": "runtime/nohigh",
+	} {
+		if got := sliceOutcomes(mod, name); got != want {
+			t.Errorf("%s: %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestProveSliceHighProvenInlined: a copy the inliner makes of a check
+// the proof pass has already marked (library inlining runs after Prove in
+// release execution) keeps the recorded high-bound outcome.
+func TestProveSliceHighProvenInlined(t *testing.T) {
+	mod := lowerSrc(t, `module t
+func tail(a: view[]u64, s: usize) -> usize { with t := a[s:len(a)] { return len(t) } }
+func head(h: view[]u64, n: usize) -> usize {
+    if n < len(h) { with s := h[0usize:n + 1usize] { return len(s) } }
+    return 0usize
+}
+func cut(h: view[]u64, n: usize) -> usize { with s := h[0usize:n] { return len(s) } }
+func main() -> i32 {
+    var a: [4]u64 = zero()
+    x := tail(a, 1usize) + head(a, 2usize) + cut(a, 3usize)
+    return i32(x)
+}
+`)
+	Prove(mod)
+	want := "runtime/high dominated_by_check/high runtime/nohigh"
+	callees := sliceOutcomes(mod, "t.tail") + " " + sliceOutcomes(mod, "t.head") + " " + sliceOutcomes(mod, "t.cut")
+	if callees != want {
+		t.Fatalf("callees before inlining: %q, want %q", callees, want)
+	}
+	Inline(mod)
+	validate(t, mod)
+	if got := sliceOutcomes(mod, "t.main"); got != want {
+		t.Errorf("main: %q, want %q (were tail, head and cut inlined?)\n%s", got, want, ir.Print(mod))
+	}
+}

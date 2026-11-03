@@ -287,12 +287,16 @@ type CheckOverflow struct {
 }
 
 // CheckBounds traps with kind bounds unless Index < Len (or Lo <= Hi <= Len).
+// HighProven is set by the proof pass's marking round on a slice check:
+// true when Hi <= Len is proven, whatever Lo (specs/unproven-reasons R2);
+// it is meaningless on an index check and before the proof pass.
 type CheckBounds struct {
-	Index  *Value
-	Lo, Hi *Value
-	Len    *Value
-	Prov   Provenance
-	Pos    ast.Pos
+	Index      *Value
+	Lo, Hi     *Value
+	Len        *Value
+	Prov       Provenance
+	Pos        ast.Pos
+	HighProven bool
 }
 
 // CheckConv traps with kind conversion unless X fits the target type.

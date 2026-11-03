@@ -963,6 +963,11 @@ func (p *prover) sliceCheck(s *facts, i *ir.CheckBounds, mark bool) {
 			loOK = true
 		}
 	}
+	if mark {
+		// recorded for the unproven-reasons classification; kept once set,
+		// as a proven label is
+		i.HighProven = i.HighProven || hiOK
+	}
 	if mark && i.Prov.Label != "proven" && hiOK && loOK {
 		by := "dominated_by_check"
 		if hiConst && loConst && hasLen {

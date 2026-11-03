@@ -621,7 +621,7 @@ func (m *copier) instr(in ir.Instr) ir.Instr {
 	case *ir.CheckOverflow:
 		return &ir.CheckOverflow{Op: i.Op, L: m.v(i.L), R: m.v(i.R), Type: i.Type, Prov: i.Prov, Pos: i.Pos}
 	case *ir.CheckBounds:
-		return &ir.CheckBounds{Index: m.v(i.Index), Lo: m.v(i.Lo), Hi: m.v(i.Hi), Len: m.v(i.Len), Prov: i.Prov, Pos: i.Pos}
+		return &ir.CheckBounds{Index: m.v(i.Index), Lo: m.v(i.Lo), Hi: m.v(i.Hi), Len: m.v(i.Len), Prov: i.Prov, Pos: i.Pos, HighProven: i.HighProven}
 	case *ir.CheckConv:
 		return &ir.CheckConv{X: m.v(i.X), To: i.To, Prov: i.Prov, Pos: i.Pos}
 	case *ir.Len:
