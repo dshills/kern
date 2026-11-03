@@ -1645,7 +1645,6 @@ func (e *emitter) libraryThunk(f *ir.Func) string {
 	return sym
 }
 
-
 // baseName strips the specialization suffix: "Vec.grow[T=u64]" -> "Vec.grow".
 func baseName(name string) string {
 	if i := strings.Index(name, "["); i >= 0 {

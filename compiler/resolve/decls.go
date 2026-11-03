@@ -100,7 +100,7 @@ type TypeDecl struct {
 	Packed                                  bool
 	View                                    bool
 	Destructor                              *ast.Destructor
-	DestructorFile                          string // the source file of the impl that declares the destructor
+	DestructorFile                          string                  // the source file of the impl that declares the destructor
 	Methods                                 map[string]*FuncDecl    // inherent and interface methods by name
 	Impls                                   map[*InterfaceDecl]bool // interfaces implemented
 	AssertSend, AssertShare, AssertInterior bool
@@ -134,9 +134,9 @@ type FuncDecl struct {
 	Receiver    *TypeDecl // non-nil for methods
 	RecvIface   *InterfaceDecl
 	Iface       *InterfaceDecl // the interface this declaration is a method signature of: a call through a constraint dispatches to the implementing method
-	Intrinsic   bool // declared without body in the prelude
+	Intrinsic   bool           // declared without body in the prelude
 	AST         *ast.FuncDecl
-	Type        *Func // function type with receiver as first param when a method
+	Type        *Func  // function type with receiver as first param when a method
 	File        string // the source file of the declaration (its body is lowered against it)
 }
 

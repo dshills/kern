@@ -56,18 +56,18 @@ type TrapInfo struct {
 
 // Run is one execution of one test in one configuration (R8, R11).
 type Run struct {
-	Engine          string    `json:"engine"`
-	Opt             string    `json:"opt"`
-	Outcome         string    `json:"outcome"` // return | trap | exit | crash | timeout
-	Status          int       `json:"status"`
-	Trap            *TrapInfo `json:"trap"`
+	Engine  string    `json:"engine"`
+	Opt     string    `json:"opt"`
+	Outcome string    `json:"outcome"` // return | trap | exit | crash | timeout
+	Status  int       `json:"status"`
+	Trap    *TrapInfo `json:"trap"`
 	// Message is what a failing expect_msg wrote before its trap
 	// (specs/test-runs R1); absent for any other run.
-	Message         string    `json:"message,omitempty"`
-	Stdout          string    `json:"stdout"`
-	StdoutTruncated bool      `json:"stdout_truncated"`
-	Millis          int64     `json:"millis"`
-	out             output    // the captured output's head, length and digest, compared by Agree
+	Message         string `json:"message,omitempty"`
+	Stdout          string `json:"stdout"`
+	StdoutTruncated bool   `json:"stdout_truncated"`
+	Millis          int64  `json:"millis"`
+	out             output // the captured output's head, length and digest, compared by Agree
 }
 
 // TestResult is one test's entry in the response (R11).

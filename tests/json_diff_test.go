@@ -210,7 +210,7 @@ func TestJSONDifferential(t *testing.T) {
 				}
 			case 5:
 				if i := bytes.Index(text, []byte(`\u`)); i >= 0 && i+4 <= len(text) {
-					text = append(text[: i+4 : i+4], text[min(i+6, len(text)):]...)
+					text = append(text[:i+4:i+4], text[min(i+6, len(text)):]...)
 				}
 			case 0:
 				text = append(text[:at:at], text[at+1:]...)

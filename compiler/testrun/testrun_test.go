@@ -56,7 +56,7 @@ func codesOf(ds []diag.Diagnostic) string {
 
 func TestFindOrderAndExpectations(t *testing.T) {
 	tests, ds := find(t, map[string]string{
-		"a.kern": "module t\nfunc main() -> i32 { return 0i32 }\nfunc test_not_in_test_file() {}\n",
+		"a.kern":      "module t\nfunc main() -> i32 { return 0i32 }\nfunc test_not_in_test_file() {}\n",
 		"b_test.kern": "module t\n// a plain comment\n//! expect: trap bounds\nfunc test_b() {}\n",
 		"a_test.kern": "module t\nfunc helper() -> u64 { return 1u64 }\n//! phase: 3\n//! expect: return\n// trailing words\nfunc test_z() {}\nfunc test_a() {}\n\n//! expect: trap overflow\n\nfunc test_gap() {}\n",
 	})
