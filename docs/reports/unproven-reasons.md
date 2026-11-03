@@ -141,6 +141,12 @@ fixtures `f8` and `f8b` of `compiler/analysis/reasons_test.go`.
   weak: the agents' remaining checks had no guard on the indexed length
   at all, or a computed index. The two guard reasons are covered only by
   the fixtures.
+- *Since 2026-11-03* (`specs/prove-nonstrict`, `docs/reports/prove-nonstrict.md`):
+  §6's items 2 to 4 are closed. `n <= len(h)` now proves `h[n - 1usize]`
+  and `h[0usize:n]`, a low bound under `s <= e` is proven, and so is the
+  literal high bound 0. The `slice_high_bound` hint names a guard,
+  `n <= len(h)`. It falls back to slicing to the length only for a high
+  bound read as a value minus a literal, which no guard proves.
 - Nothing here measures agents. Whether the plain arm, given these hints,
   closes the gap to the documented arm (Flash 28 vs 44 of 50, Kimi 42 vs
   45) needs a paid run of the plain arm on `bench/agent/tasks-budgeted`,
