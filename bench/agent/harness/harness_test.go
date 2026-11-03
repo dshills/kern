@@ -111,6 +111,7 @@ func TestWriteAgentReportWins(t *testing.T) {
 		"| t3 | | | **loss** |",
 		"| t1 | debugging | A | plain | 5 | 4 | 3.0 |",
 		"Models: A, B. Trials per task, model and arm: 5.",
+		"since schema 0.5 gives every runtime-checked bounds check a `reason` and a `hint`",
 	} {
 		if !strings.Contains(rep, want) {
 			t.Errorf("report lacks %q:\n%s", want, rep)

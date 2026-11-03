@@ -119,6 +119,10 @@ stats.kern:1432-1444: error [BUDGET_EXCEEDED rule 7.6]: function `top_digit` has
 stats.kern:2241-2265: error [BUDGET_EXCEEDED rule 7.6]: function `final_run` has 2 runtime-checked bounds checks, budget 0: 70:13 `data[len(data) - 1usize]`, 73:25 `data[i - 1usize]`
 ```
 
+(These are the messages of the run. Since `specs/unproven-reasons`, each
+location is also followed by the hint of its reason, separated by `; `;
+see `docs/reports/unproven-reasons.md`.)
+
 What this shows offline is only that the plain arm can no longer finish
 with a clean `check` on a program that misses the hidden budget, and
 that it is told each site. It does not show that an agent then knows how

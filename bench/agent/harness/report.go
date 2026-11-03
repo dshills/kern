@@ -78,7 +78,7 @@ func writeAgentReport(records []trialRecord, tasks []*task, trials, iterations i
 	if present["rules"] {
 		queriesNote += ", `rules` (as `documented` with only that document's rules: `bench/agent/docs/bounds-checks-rules.md`)"
 	}
-	fmt.Fprintf(&b, "Models: %s. Trials per task, model and arm: %d. Arms: `structured` (JSON diagnostics with rule numbers, related spans and fixes, plus the semantic queries `explain_ownership`, `show_copies`, `show_allocations`, `show_bounds_checks` and `show_layout`)%s and `plain` (text diagnostics only); every arm receives the same language reference, grammar, prelude and examples.\n\n", strings.Join(modelList, ", "), trials, queriesNote)
+	fmt.Fprintf(&b, "Models: %s. Trials per task, model and arm: %d. Arms: `structured` (JSON diagnostics with rule numbers, related spans and fixes, plus the semantic queries `explain_ownership`, `show_copies`, `show_allocations`, `show_bounds_checks` and `show_layout`)%s and `plain` (text diagnostics only); every arm receives the same language reference, grammar, prelude and examples. The `show_bounds_checks` query answers at the compiler's newest schema, which since schema 0.5 gives every runtime-checked bounds check a `reason` and a `hint` (specs/unproven-reasons); runs before it did not.\n\n", strings.Join(modelList, ", "), trials, queriesNote)
 	cells := map[string]*cell{} // task|model|arm
 	for _, r := range records {
 		c := cells[key(r.Task, r.Model, r.Arm)]

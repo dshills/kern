@@ -104,11 +104,12 @@ func rank(xs: view[]u64, key: u64) -> usize {
 ```
 
 ```
-rank.kern:176-196: error [BUDGET_EXCEEDED rule 7.6]: function `rank` has 2 runtime-checked bounds checks, budget 0: 6:29 `xs[len(xs) - 1usize]`, 11:12 `xs[mid]`
+rank.kern:176-196: error [BUDGET_EXCEEDED rule 7.6]: function `rank` has 2 runtime-checked bounds checks, budget 0: 6:29 `xs[len(xs) - 1usize]` (no guard establishes `len(xs) - 1usize < len(xs)` on every path to it, and the rules do not derive it from guards on the parts of `len(xs) - 1usize`: put `len(xs) - 1usize` in a local and test it below `len(xs)` just before the access); 11:12 `xs[mid]` (test `mid < len(xs)` on every path to it)
 ```
 
-Both are forms the rules do not track: `len(xs) - 1` under a length
-test, and a midpoint. Rewritten as the previous section says, with each
+Each location carries the hint of its reason (next section). Both are
+forms the rules do not track: `len(xs) - 1` under a length test, and a
+midpoint. Rewritten as the previous section says, with each
 index in a local compared against `len(xs)` just before the access, the
 function meets its budget:
 
@@ -137,3 +138,33 @@ may fail at `debug`. `kern run`, `kern test` and the show queries do
 not enforce budgets, so a program over its budget still runs. The same
 block takes `copies` and `allocations`, counted from `show-copies` and
 `show-allocations`.
+
+## Why a check is not proven
+
+`kern show-bounds-checks` (at `schema_version` 0.5) gives every
+runtime-checked bounds check a `reason` and a `hint`, and a
+`BUDGET_EXCEEDED` for `bounds_checks` puts each location's hint in its
+message (`specs/unproven-reasons`). The reason is judged from the source
+of the function that contains the access. A *guard* here is a comparison
+`v + a < len(q)` (or `<=`, `>`, `>=`, either way round) in an `if` or
+`while` condition, or a header `for v in a..len(q)`, in the same body as
+the access (a closure's body is its own); `v` is a name or field path and
+`a` an optional literal offset. The first reason that applies is given:
+
+| reason | when | example access |
+|---|---|---|
+| `guard_not_on_every_path` | a guard on the same length covers the index but does not hold on every path to it: a path bypasses it or takes its other branch, or a store, an edit call or a write after it forgets it | `xs[i]` after `if c { if i >= len(xs) { return 0u64 } }` |
+| `guard_too_weak` | a guard on the same length bounds the index's variable, but not by enough as the rules read it | `xs[i + 1usize]` under `i + 1usize <= len(xs)` |
+| `other_length` | a guard bounds the index's variable by another place's length | `xs[i]` under `i < len(ys)` |
+| `type_range` | the index is a narrower unsigned value converted, into an array its type's range fits | `counts[usize(b)]` with `b: u8`, `counts: [256]u64` (mask it: `usize(b) & 255usize`) |
+| `remainder_by_value` | the index is a remainder by a value | `src[i % len(src)]` |
+| `computed_index` | the index is computed, not a variable plus or minus a literal | `s[n - 1usize - i]`, `xs[len(xs) - 1usize]` |
+| `no_guard` | any other index: no guard at all | `xs[mid]`, `ps[0usize]` |
+| `slice_high_bound` | a slice's high bound is not proven | `h[0usize:n]` under `n <= len(h)` |
+| `slice_low_bound` | a slice's high bound is proven and its low bound is not | `a[s:len(a)]` with no guard on `s` |
+
+For every reason but the two slice ones the hint gives a rewrite the
+rules prove: test the index (put in a local first when it is computed)
+below `len` of the indexed place just before the access, or mask a
+converted byte. No guard proves a slice's high bound `n` from
+`n <= len(h)` today; the slice hints say which forms the rules do prove.
