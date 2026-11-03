@@ -23,13 +23,15 @@ func (e *emitter) eqFor(t resolve.Type) string {
 		return sym
 	}
 	e.eqs[name] = true
-	g := &eqGen{e: e}
-	fmt.Fprintf(&g.b, "define internal i1 %s(ptr %%a, ptr %%b) {\nentry:\n", sym)
+	g := &eqGen{e: e, b: &strings.Builder{}}
+	fmt.Fprintf(g.b, "define internal i1 %s(ptr %%a, ptr %%b) {\nentry:\n", sym)
 	switch x := t.(type) {
 	case *resolve.Array:
 		g.array(x)
 	case *resolve.Tuple:
-		g.fields(x.Elems, func(i int) string { return fmt.Sprintf("getelementptr %s, ptr %%%%s, i32 0, i32 %d", e.lty(x), i) })
+		g.fields(x.Elems, func(i int, p string) string {
+			return fmt.Sprintf("getelementptr %s, ptr %s, i32 0, i32 %d", e.lty(x), p, i)
+		})
 	case *resolve.Named:
 		switch x.Decl.Kind {
 		case resolve.KindStruct:
@@ -38,8 +40,8 @@ func (e *emitter) eqFor(t resolve.Type) string {
 			for _, f := range x.Decl.Fields {
 				fts = append(fts, resolve.Subst(f.Type, args))
 			}
-			g.fields(fts, func(i int) string {
-				return fmt.Sprintf("getelementptr %s, ptr %%%%s, i32 0, i32 %d", e.namedType(x), i)
+			g.fields(fts, func(i int, p string) string {
+				return fmt.Sprintf("getelementptr %s, ptr %s, i32 0, i32 %d", e.namedType(x), p, i)
 			})
 		case resolve.KindUnion:
 			g.union(x)
@@ -52,7 +54,7 @@ func (e *emitter) eqFor(t resolve.Type) string {
 
 type eqGen struct {
 	e *emitter
-	b strings.Builder
+	b *strings.Builder // the body being written; a union's variants swap in their own
 	n int
 }
 
@@ -75,17 +77,17 @@ func (g *eqGen) scalar(pa, pb string, ty resolve.Type) string {
 	case *resolve.Prim, *resolve.RawPtr, *resolve.Func:
 		mt := e.mty(ty)
 		a, b, r := g.next(), g.next(), g.next()
-		fmt.Fprintf(&g.b, "  %s = load %s, ptr %s\n  %s = load %s, ptr %s\n", a, mt, pa, b, mt, pb)
+		fmt.Fprintf(g.b, "  %s = load %s, ptr %s\n  %s = load %s, ptr %s\n", a, mt, pa, b, mt, pb)
 		if resolve.IsFloat(ty) {
-			fmt.Fprintf(&g.b, "  %s = fcmp oeq %s %s, %s\n", r, mt, a, b)
+			fmt.Fprintf(g.b, "  %s = fcmp oeq %s %s, %s\n", r, mt, a, b)
 		} else {
-			fmt.Fprintf(&g.b, "  %s = icmp eq %s %s, %s\n", r, mt, a, b)
+			fmt.Fprintf(g.b, "  %s = icmp eq %s %s, %s\n", r, mt, a, b)
 		}
 		return r
 	case *resolve.Named:
 		if layout.Opaque(x) {
 			a, b, r := g.next(), g.next(), g.next()
-			fmt.Fprintf(&g.b, "  %s = load ptr, ptr %s\n  %s = load ptr, ptr %s\n  %s = icmp eq ptr %s, %s\n", a, pa, b, pb, r, a, b)
+			fmt.Fprintf(g.b, "  %s = load ptr, ptr %s\n  %s = load ptr, ptr %s\n  %s = icmp eq ptr %s, %s\n", a, pa, b, pb, r, a, b)
 			return r
 		}
 	case *resolve.Access, *resolve.Slice:
@@ -93,22 +95,24 @@ func (g *eqGen) scalar(pa, pb string, ty resolve.Type) string {
 		return "true"
 	}
 	r := g.next()
-	fmt.Fprintf(&g.b, "  %s = call i1 %s(ptr %s, ptr %s)\n", r, g.e.eqFor(ty), pa, pb)
+	fmt.Fprintf(g.b, "  %s = call i1 %s(ptr %s, ptr %s)\n", r, g.e.eqFor(ty), pa, pb)
 	return r
 }
 
 // require branches to fail unless cond holds.
 func (g *eqGen) require(cond string) {
 	l := g.label()
-	fmt.Fprintf(&g.b, "  br i1 %s, label %%%s, label %%fail\n%s:\n", cond, l, l)
+	fmt.Fprintf(g.b, "  br i1 %s, label %%%s, label %%fail\n%s:\n", cond, l, l)
 }
 
-// fields compares fields addressed by gep(i) with "%s" standing for the base.
-func (g *eqGen) fields(fts []resolve.Type, gep func(i int) string) {
+// fields compares fields addressed by gep(i, p), field i of the value at
+// p. gep renders the instruction whole: the LLVM type name in it starts
+// with `%`, so it must not pass through a format string again.
+func (g *eqGen) fields(fts []resolve.Type, gep func(i int, p string) string) {
 	for i, ft := range fts {
 		pa, pb := g.next(), g.next()
-		fmt.Fprintf(&g.b, "  %s = %s\n", pa, fmt.Sprintf(gep(i), "a"))
-		fmt.Fprintf(&g.b, "  %s = %s\n", pb, fmt.Sprintf(gep(i), "b"))
+		fmt.Fprintf(g.b, "  %s = %s\n", pa, gep(i, "%a"))
+		fmt.Fprintf(g.b, "  %s = %s\n", pb, gep(i, "%b"))
 		g.require(g.scalar(pa, pb, ft))
 	}
 }
@@ -118,9 +122,9 @@ func (g *eqGen) array(x *resolve.Array) {
 		return
 	}
 	et := g.e.mty(x.Elem)
-	fmt.Fprintf(&g.b, "  br label %%loop\nloop:\n  %%i = phi i64 [ 0, %%entry ], [ %%next, %%cont ]\n  %%done = icmp eq i64 %%i, %d\n  br i1 %%done, label %%exit, label %%body\nbody:\n  %%ea = getelementptr %s, ptr %%a, i64 %%i\n  %%eb = getelementptr %s, ptr %%b, i64 %%i\n", x.Len, et, et)
+	fmt.Fprintf(g.b, "  br label %%loop\nloop:\n  %%i = phi i64 [ 0, %%entry ], [ %%next, %%cont ]\n  %%done = icmp eq i64 %%i, %d\n  br i1 %%done, label %%exit, label %%body\nbody:\n  %%ea = getelementptr %s, ptr %%a, i64 %%i\n  %%eb = getelementptr %s, ptr %%b, i64 %%i\n", x.Len, et, et)
 	r := g.scalar("%ea", "%eb", x.Elem)
-	fmt.Fprintf(&g.b, "  br i1 %s, label %%cont, label %%fail\ncont:\n  %%next = add i64 %%i, 1\n  br label %%loop\nexit:\n", r)
+	fmt.Fprintf(g.b, "  br i1 %s, label %%cont, label %%fail\ncont:\n  %%next = add i64 %%i, 1\n  br label %%loop\nexit:\n", r)
 }
 
 func (g *eqGen) union(n *resolve.Named) {
@@ -130,7 +134,7 @@ func (g *eqGen) union(n *resolve.Named) {
 		tagTy = "i16"
 	}
 	ta, tb, same := g.next(), g.next(), g.next()
-	fmt.Fprintf(&g.b, "  %s = load %s, ptr %%a\n  %s = load %s, ptr %%b\n  %s = icmp eq %s %s, %s\n", ta, tagTy, tb, tagTy, same, tagTy, ta, tb)
+	fmt.Fprintf(g.b, "  %s = load %s, ptr %%a\n  %s = load %s, ptr %%b\n  %s = icmp eq %s %s, %s\n", ta, tagTy, tb, tagTy, same, tagTy, ta, tb)
 	g.require(same)
 	var cases []string
 	var bodies []string
@@ -145,17 +149,17 @@ func (g *eqGen) union(n *resolve.Named) {
 		offs := layout.VariantLayout(n, v)
 		fts := resolve.VariantFieldTypes(n, v)
 		saved := g.b
-		g.b = vb
+		g.b = &vb
 		for i, ft := range fts {
 			pa, pb := g.next(), g.next()
-			fmt.Fprintf(&g.b, "  %s = getelementptr i8, ptr %%a, i64 %d\n  %s = getelementptr i8, ptr %%b, i64 %d\n", pa, offs[i], pb, offs[i])
+			fmt.Fprintf(g.b, "  %s = getelementptr i8, ptr %%a, i64 %d\n  %s = getelementptr i8, ptr %%b, i64 %d\n", pa, offs[i], pb, offs[i])
 			g.require(g.scalar(pa, pb, ft))
 		}
 		g.b.WriteString("  ret i1 true\n")
 		bodies = append(bodies, g.b.String())
 		g.b = saved
 	}
-	fmt.Fprintf(&g.b, "  switch %s %s, label %%same [ %s ]\nsame:\n  ret i1 true\n", tagTy, ta, strings.Join(cases, " "))
+	fmt.Fprintf(g.b, "  switch %s %s, label %%same [ %s ]\nsame:\n  ret i1 true\n", tagTy, ta, strings.Join(cases, " "))
 	for _, body := range bodies {
 		g.b.WriteString(body)
 	}

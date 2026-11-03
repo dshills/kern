@@ -1124,6 +1124,15 @@ func (it *Interp) binary(op string, l, r Value, mode string) Value {
 		case "!=":
 			return Bool(!equalValues(a, b))
 		}
+	case *Array:
+		// arrays compare element by element, as the native glue does
+		b := r.(*Array)
+		switch op {
+		case "==":
+			return Bool(equalValues(a, b))
+		case "!=":
+			return Bool(!equalValues(a, b))
+		}
 	}
 	panic(fmt.Sprintf("interp: unsupported binary %s on %T", op, l))
 }

@@ -1,0 +1,28 @@
+//! phase: 2
+//! expect: output eq_glue
+// Equality of values the backend compares through generated glue: a union
+// whose payload is a struct (an Option of a pool handle-like struct), a
+// struct, a tuple, and an array of structs. The union's glue swapped its
+// body builder by value (a Go panic in the emitter), and a struct field's
+// address was rendered through a format string that the `%` of the LLVM
+// type name broke; tasks-v1 t07's `cur != None` hit both.
+module run
+struct P { a: u32; b: u32 }
+func show(c: bool) {
+    print_bool(c)
+    println()
+}
+func main() -> i32 {
+    var x: Option[P] = Some(P { a: 1u32, b: 2u32 })
+    var y: Option[P] = Some(P { a: 1u32, b: 3u32 })
+    var n: Option[P] = None
+    show(x == x)
+    show(x == y)
+    show(x != n)
+    show(n == None)
+    show(P { a: 4u32, b: 5u32 } == P { a: 4u32, b: 5u32 })
+    var a: [2]P = [P { a: 1u32, b: 1u32 }, P { a: 2u32, b: 2u32 }]
+    var b: [2]P = [P { a: 1u32, b: 1u32 }, P { a: 2u32, b: 2u32 }]
+    show(a == b)
+    return 0i32
+}
