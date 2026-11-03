@@ -1062,9 +1062,29 @@ func (fl *fnLower) spawn(x *ast.CallExpr, info *resolve.CallInfo, t resolve.Type
 	if recvAcc != nil && info.Intrinsic == "scope.spawn" {
 		fl.emit(&ir.AccessEnd{Access: recvAcc})
 	}
-	// scoped accesses stay open until the scope block ends (after the join)
+	// scoped accesses stay open until the scope block ends (after the join).
+	// A spawn in a block nested inside the scope's (an if, a loop body) runs
+	// on some paths only, and an access ended at the scope's exits would be
+	// ended on paths that never opened it; it is ended at its own block's
+	// exits instead, which every path through the spawn reaches. That is
+	// bookkeeping: an access without a release does nothing when it ends,
+	// and the checker keeps the argument borrowed until the scope joins. An
+	// access with a release must end after the join, at the scope's exits,
+	// which a nested spawn cannot reach on every path: that is reported
+	// rather than lowered to invalid IR (none reaches a spawn today: the
+	// checker rejects a lock guard as an argument).
 	if scopeFrame >= 0 {
-		fl.frames[scopeFrame].late = append(fl.frames[scopeFrame].late, spawned...)
+		inner := len(fl.frames) - 1
+		for _, acc := range spawned {
+			at := scopeFrame
+			if inner > scopeFrame {
+				if _, rel := fl.relOf[acc]; rel {
+					fl.fail(x.Pos, "a scoped spawn argument with a release must be spawned in the scope's own block, not in a block nested inside it")
+				}
+				at = inner
+			}
+			fl.frames[at].late = append(fl.frames[at].late, acc)
+		}
 	} else {
 		for _, acc := range spawned {
 			fl.emit(&ir.AccessEnd{Access: acc})

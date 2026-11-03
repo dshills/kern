@@ -1,0 +1,81 @@
+//! phase: 2
+//! expect: output scoped_nested
+// Scoped spawns in a block nested inside the scope's: under an if whose
+// other path never spawns, and in a loop body that may run zero times.
+// Each spawn's argument access is ended on the paths that opened it (it
+// was ended at every exit of the scope, an internal error in lowering).
+module run
+func size(xs: view[]u8) -> u64 { return u64(len(xs)) }
+func maybe(v: view[Vec[u8]], c: bool) -> Result[u64, SpawnErr] {
+    with xs := v.as_view() {
+        with s := thread.scope() {
+            if c {
+                j := s.spawn(size, xs)?
+                return Ok(j.get())
+            }
+            return Ok(0u64)
+        }
+    }
+}
+func fall(v: view[Vec[u8]], c: bool) -> Result[u64, SpawnErr] {
+    with xs := v.as_view() {
+        with s := thread.scope() {
+            var t: u64 = 7u64
+            if c {
+                j := s.spawn(size, xs)?
+                t = j.get()
+            }
+            return Ok(t)
+        }
+    }
+}
+func repeat(v: view[Vec[u8]], n: usize) -> Result[u64, SpawnErr] {
+    with xs := v.as_view() {
+        with s := thread.scope() {
+            var t: u64 = 0u64
+            var i: usize = 0usize
+            while i < n {
+                j := s.spawn(size, xs)?
+                t = t + j.get()
+                i = i + 1usize
+            }
+            return Ok(t)
+        }
+    }
+}
+// the argument a binding of the nested block, which ends there too
+func inner(v: view[Vec[u8]], c: bool) -> Result[u64, SpawnErr] {
+    with xs := v.as_view() {
+        with s := thread.scope() {
+            var t: u64 = 5u64
+            if c {
+                with r := xs[0usize:1usize] {
+                    j := s.spawn(size, r)?
+                    t = j.get()
+                }
+            }
+            return Ok(t)
+        }
+    }
+}
+func show(r: Result[u64, SpawnErr]) {
+    match r {
+        Ok(t) => { print_u64(t) }
+        Err(e) => { print_str("spawn failed") }
+    }
+    println()
+}
+func main() -> i32 {
+    v := Vec[u8].new()
+    v.push(1u8)
+    v.push(2u8)
+    show(maybe(v, true))
+    show(maybe(v, false))
+    show(fall(v, true))
+    show(fall(v, false))
+    show(repeat(v, 3usize))
+    show(repeat(v, 0usize))
+    show(inner(v, true))
+    show(inner(v, false))
+    return 0i32
+}
