@@ -97,6 +97,84 @@ type Union struct {
 	Fields []Value
 }
 
+// newStruct is a struct of n fields, all nil, and newUnion a union of tag
+// with n fields. With at most four fields the value and its fields are one
+// allocation, the field array sized exactly (copying and decoding small
+// aggregates allocated twice per value). Fields' capacity is n, so it is
+// never extended in place: a struct's field slots stay fixed once it is
+// built, which slotRef relies on.
+func newStruct(n int) *Struct {
+	switch n {
+	case 0:
+		return &Struct{}
+	case 1:
+		p := &struct {
+			s Struct
+			f [1]Value
+		}{}
+		p.s.Fields = p.f[:]
+		return &p.s
+	case 2:
+		p := &struct {
+			s Struct
+			f [2]Value
+		}{}
+		p.s.Fields = p.f[:]
+		return &p.s
+	case 3:
+		p := &struct {
+			s Struct
+			f [3]Value
+		}{}
+		p.s.Fields = p.f[:]
+		return &p.s
+	case 4:
+		p := &struct {
+			s Struct
+			f [4]Value
+		}{}
+		p.s.Fields = p.f[:]
+		return &p.s
+	}
+	return &Struct{Fields: make([]Value, n)}
+}
+
+func newUnion(tag, n int) *Union {
+	switch n {
+	case 0:
+		return &Union{Tag: tag}
+	case 1:
+		p := &struct {
+			u Union
+			f [1]Value
+		}{}
+		p.u.Tag, p.u.Fields = tag, p.f[:]
+		return &p.u
+	case 2:
+		p := &struct {
+			u Union
+			f [2]Value
+		}{}
+		p.u.Tag, p.u.Fields = tag, p.f[:]
+		return &p.u
+	case 3:
+		p := &struct {
+			u Union
+			f [3]Value
+		}{}
+		p.u.Tag, p.u.Fields = tag, p.f[:]
+		return &p.u
+	case 4:
+		p := &struct {
+			u Union
+			f [4]Value
+		}{}
+		p.u.Tag, p.u.Fields = tag, p.f[:]
+		return &p.u
+	}
+	return &Union{Tag: tag, Fields: make([]Value, n)}
+}
+
 // Array is a fixed array.
 type Array struct{ Elems []Value }
 
@@ -353,17 +431,19 @@ func zeroOf(t resolve.Type) Value {
 		args := typeArgs(x)
 		switch x.Decl.Kind {
 		case resolve.KindStruct:
-			s := &Struct{}
-			for _, f := range x.Decl.Fields {
-				s.Fields = append(s.Fields, zeroOf(resolve.Subst(f.Type, args)))
+			s := newStruct(len(x.Decl.Fields))
+			for i, f := range x.Decl.Fields {
+				s.Fields[i] = zeroOf(resolve.Subst(f.Type, args))
 			}
 			return s
 		case resolve.KindUnion:
-			u := &Union{Tag: 0}
-			if len(x.Decl.Variants) > 0 {
-				for _, f := range x.Decl.Variants[0].Fields {
-					u.Fields = append(u.Fields, zeroOf(resolve.Subst(f.Type, args)))
-				}
+			if len(x.Decl.Variants) == 0 {
+				return &Union{Tag: 0}
+			}
+			fs := x.Decl.Variants[0].Fields
+			u := newUnion(0, len(fs))
+			for i, f := range fs {
+				u.Fields[i] = zeroOf(resolve.Subst(f.Type, args))
 			}
 			return u
 		}
@@ -386,13 +466,13 @@ func typeArgs(n *resolve.Named) map[string]resolve.Type {
 func copyValue(v Value) Value {
 	switch x := v.(type) {
 	case *Struct:
-		n := &Struct{Fields: make([]Value, len(x.Fields))}
+		n := newStruct(len(x.Fields))
 		for i, f := range x.Fields {
 			n.Fields[i] = copyValue(f)
 		}
 		return n
 	case *Union:
-		n := &Union{Tag: x.Tag, Fields: make([]Value, len(x.Fields))}
+		n := newUnion(x.Tag, len(x.Fields))
 		for i, f := range x.Fields {
 			n.Fields[i] = copyValue(f)
 		}

@@ -323,6 +323,26 @@ func compileCall(fi *funcInfo, i *ir.Call) op {
 		return out
 	}
 	switch {
+	case i.Intrinsic != "" && fastIntrinsics[i.Intrinsic] != nil:
+		fn := fastIntrinsics[i.Intrinsic]
+		d := -1
+		if len(dsts) > 0 {
+			d = dsts[0]
+		}
+		return func(it *Interp, fr *frame) {
+			if cap(it.intrBuf) < len(argIDs) {
+				it.intrBuf = make([]Value, len(argIDs), len(argIDs)+4)
+			}
+			a := it.intrBuf[:len(argIDs)]
+			for k, id := range argIDs {
+				a[k] = fr.vals[id]
+			}
+			v := fn(it, a, callCtx{pos: fr.at(pos), targs: typeArgs})
+			clear(a) // the buffer keeps no argument alive past the call
+			if d >= 0 {
+				fr.vals[d] = v
+			}
+		}
 	case i.Intrinsic != "":
 		fn := target.intrinsic
 		if fn == nil {
@@ -359,10 +379,10 @@ func compileCall(fi *funcInfo, i *ir.Call) op {
 		// generic path (genericExec) still returns a slice, stored here
 		if callee.Library {
 			// entering (or staying in) the library: traps report this call
+			site := &pos // fixed per call site: the span needs no copy
 			return func(it *Interp, fr *frame) {
 				a := buf(it, fr)
-				p := fr.at(pos)
-				store(fr, it.callWith(callee, infoOf(it), a, &p, fr, dsts))
+				store(fr, it.callWith(callee, infoOf(it), a, fr.spanAt(site), fr, dsts))
 			}
 		}
 		return func(it *Interp, fr *frame) {

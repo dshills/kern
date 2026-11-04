@@ -633,25 +633,7 @@ func init() {
 			return nil
 		},
 		// raw pointers (spec §6) over the byte-addressed heap
-		"ptr_null":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt(tyUsize, 0)} },
-		"ptr_from_addr": func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt(tyUsize, u64(a[0]))} },
-		"ptr_addr":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt(tyUsize, u64(a[0]))} },
-		"ptr_cast":      func(it *Interp, a []Value, _ callCtx) []Value { return []Value{mkInt(tyUsize, u64(a[0]))} },
-		"ptr_offset": func(it *Interp, a []Value, c callCtx) []Value {
-			n := signedOf(a[1].(Int))
-			size := int64(layout.Of(c.targ(0)).Size)
-			return []Value{mkInt(tyUsize, uint64(int64(u64(a[0]))+n*size))}
-		},
-		"ptr_load": func(it *Interp, a []Value, c callCtx) []Value {
-			return []Value{it.decode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0))}
-		},
-		"ptr_take": func(it *Interp, a []Value, c callCtx) []Value {
-			return []Value{it.decode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0))}
-		},
-		"ptr_store": func(it *Interp, a []Value, c callCtx) []Value {
-			it.encode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0), a[1])
-			return nil
-		},
+		// raw pointers (spec §6): the hot ones are fastIntrinsics
 		"ptr_load_volatile": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{it.decode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0))}
 		},
@@ -685,13 +667,8 @@ func init() {
 			}
 			return nil
 		},
-		// accesses on raw memory (the kern containers' elements)
-		"ptr_view": func(it *Interp, a []Value, c callCtx) []Value {
-			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}}}
-		},
-		"ptr_edit": func(it *Interp, a []Value, c callCtx) []Value {
-			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}}
-		},
+		// accesses on raw memory (the kern containers' elements): ptr_view
+		// and ptr_edit are fastIntrinsics
 		// ptr_init: the initializer's out parameter is an access on the raw
 		// storage, as natively it is the pointer itself
 		"ptr_init": func(it *Interp, a []Value, c callCtx) []Value {
@@ -732,12 +709,6 @@ func init() {
 		},
 		"ptr_view_edit": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}}, &Access{Ref: rawRef{it: it, addr: u64(a[1]), t: c.targ(1)}, Edit: true}}
-		},
-		"size_of": func(it *Interp, a []Value, c callCtx) []Value {
-			return []Value{mkInt(tyUsize, uint64(layout.Of(c.targ(0)).Size))}
-		},
-		"align_of": func(it *Interp, a []Value, c callCtx) []Value {
-			return []Value{mkInt(tyUsize, uint64(layout.Of(c.targ(0)).Align))}
 		},
 		"container_identity": func(it *Interp, a []Value, _ callCtx) []Value {
 			return []Value{mkInt(tyU32, uint64(it.newIdentity()))}
@@ -814,6 +785,63 @@ func init() {
 	} {
 		intrinsics[k] = v
 	}
+	for k, f := range fastIntrinsics {
+		intrinsics[k] = f.slow()
+	}
+}
+
+// fastIntrinsic is an intrinsic with at most one result (nil for none)
+// that keeps no reference to its argument slice after it returns and runs
+// no kern code, so no intrinsic call can start while it runs. A compiled
+// call passes it a per-thread argument buffer and stores its result
+// itself, sparing the argument and result slices of an ordinary
+// intrinsic call (specs/interp-alloc).
+type fastIntrinsic func(it *Interp, a []Value, c callCtx) Value
+
+// slow is f as an ordinary intrinsic, for every other path (exec, calls by
+// name), so both run the same code.
+func (f fastIntrinsic) slow() intrinsicFn {
+	return func(it *Interp, a []Value, c callCtx) []Value {
+		if v := f(it, a, c); v != nil {
+			return []Value{v}
+		}
+		return nil
+	}
+}
+
+// fastIntrinsics are the raw-pointer core's hot operations (spec §6).
+var fastIntrinsics = map[string]fastIntrinsic{
+	"ptr_null":      func(it *Interp, a []Value, _ callCtx) Value { return mkInt(tyUsize, 0) },
+	"ptr_from_addr": func(it *Interp, a []Value, _ callCtx) Value { return mkInt(tyUsize, u64(a[0])) },
+	"ptr_addr":      func(it *Interp, a []Value, _ callCtx) Value { return mkInt(tyUsize, u64(a[0])) },
+	"ptr_cast":      func(it *Interp, a []Value, _ callCtx) Value { return mkInt(tyUsize, u64(a[0])) },
+	"ptr_offset": func(it *Interp, a []Value, c callCtx) Value {
+		n := signedOf(a[1].(Int))
+		size := int64(layout.Of(c.targ(0)).Size)
+		return mkInt(tyUsize, uint64(int64(u64(a[0]))+n*size))
+	},
+	"ptr_load": func(it *Interp, a []Value, c callCtx) Value {
+		return it.decode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0))
+	},
+	"ptr_take": func(it *Interp, a []Value, c callCtx) Value {
+		return it.decode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0))
+	},
+	"ptr_store": func(it *Interp, a []Value, c callCtx) Value {
+		it.encode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0), a[1])
+		return nil
+	},
+	"ptr_view": func(it *Interp, a []Value, c callCtx) Value {
+		return &Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}}
+	},
+	"ptr_edit": func(it *Interp, a []Value, c callCtx) Value {
+		return &Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}
+	},
+	"size_of": func(it *Interp, a []Value, c callCtx) Value {
+		return mkInt(tyUsize, uint64(layout.Of(c.targ(0)).Size))
+	},
+	"align_of": func(it *Interp, a []Value, c callCtx) Value {
+		return mkInt(tyUsize, uint64(layout.Of(c.targ(0)).Align))
+	},
 }
 
 // atomicLoad reads the cell behind a view of an Atomic (its struct's only
@@ -874,13 +902,13 @@ func deepClone(it *Interp, v Value, pos ast.Pos) Value {
 		// aggregates: clone fields recursively (library objects inside them too)
 		switch y := x.(type) {
 		case *Struct:
-			n := &Struct{Fields: make([]Value, len(y.Fields))}
+			n := newStruct(len(y.Fields))
 			for i, f := range y.Fields {
 				n.Fields[i] = deepClone(it, f, pos)
 			}
 			return n
 		case *Union:
-			n := &Union{Tag: y.Tag, Fields: make([]Value, len(y.Fields))}
+			n := newUnion(y.Tag, len(y.Fields))
 			for i, f := range y.Fields {
 				n.Fields[i] = deepClone(it, f, pos)
 			}

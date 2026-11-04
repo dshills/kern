@@ -60,6 +60,17 @@ runs; its checksum (`3969867084`) is the same for both compilers. The
 bench programs spend their time in loops, indexing and intrinsics (`Vec`,
 `Map`) rather than in user calls, so the gain there is small.
 
+**Wall time (2026-11-04, later).** The quiet-host timing was run with
+the host given over to it, though Spotlight kept the load near 20. It
+interleaved 74d339e, the commit just before this change, with
+`dd16b89`, which includes it, in five rounds:
+- `fib(29)` took 0.20 s and then 0.14 s (medians), with instructions
+  retired going from 4.60 G to 3.12 G;
+- `arena_ast`, `vector` and `hash_table` were 0.7% to 1.4% faster.
+
+The figures are in `docs/reports/interp-alloc.md`, which also cuts the
+allocations listed below.
+
 ## What remains
 
 Profiling `fib` puts about 9% of instructions in the garbage collector.

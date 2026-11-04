@@ -262,9 +262,9 @@ func (it *Interp) decode(b []byte, t resolve.Type) Value {
 		return a
 	case *resolve.Tuple:
 		li := layout.Of(t)
-		s := &Struct{}
+		s := newStruct(len(x.Elems))
 		for i, et := range x.Elems {
-			s.Fields = append(s.Fields, it.decode(b[li.Fields[i]:], et))
+			s.Fields[i] = it.decode(b[li.Fields[i]:], et)
 		}
 		return s
 	case *resolve.Named:
@@ -278,9 +278,9 @@ func (it *Interp) decode(b []byte, t resolve.Type) Value {
 		switch x.Decl.Kind {
 		case resolve.KindStruct:
 			li := layout.Of(t)
-			s := &Struct{}
+			s := newStruct(len(x.Decl.Fields))
 			for i, f := range x.Decl.Fields {
-				s.Fields = append(s.Fields, it.decode(b[li.Fields[i]:], resolve.Subst(f.Type, args)))
+				s.Fields[i] = it.decode(b[li.Fields[i]:], resolve.Subst(f.Type, args))
 			}
 			return s
 		case resolve.KindUnion:
@@ -292,9 +292,9 @@ func (it *Interp) decode(b []byte, t resolve.Type) Value {
 			vd := x.Decl.Variants[tag]
 			offs := layout.VariantLayout(x, vd)
 			fts := resolve.VariantFieldTypes(x, vd)
-			u := &Union{Tag: tag}
+			u := newUnion(tag, len(vd.Fields))
 			for i := range vd.Fields {
-				u.Fields = append(u.Fields, it.decode(b[offs[i]:], fts[i]))
+				u.Fields[i] = it.decode(b[offs[i]:], fts[i])
 			}
 			return u
 		}
@@ -302,13 +302,37 @@ func (it *Interp) decode(b []byte, t resolve.Type) Value {
 	return zeroOf(t)
 }
 
+// putInt and getInt store and load a little-endian integer of size bytes:
+// one load or store for the integer widths (a byte loop cost a quarter of
+// the interpreter's time on raw-memory programs), a loop for any other size.
 func putInt(b []byte, v uint64, size int) {
-	for i := 0; i < size; i++ {
-		b[i] = byte(v >> (8 * i))
+	switch size {
+	case 8:
+		binary.LittleEndian.PutUint64(b, v)
+	case 4:
+		binary.LittleEndian.PutUint32(b, uint32(v))
+	case 2:
+		binary.LittleEndian.PutUint16(b, uint16(v))
+	case 1:
+		b[0] = byte(v)
+	default:
+		for i := 0; i < size; i++ {
+			b[i] = byte(v >> (8 * i))
+		}
 	}
 }
 
 func getInt(b []byte, size int) uint64 {
+	switch size {
+	case 8:
+		return binary.LittleEndian.Uint64(b)
+	case 4:
+		return uint64(binary.LittleEndian.Uint32(b))
+	case 2:
+		return uint64(binary.LittleEndian.Uint16(b))
+	case 1:
+		return uint64(b[0])
+	}
 	var v uint64
 	for i := 0; i < size; i++ {
 		v |= uint64(b[i]) << (8 * i)

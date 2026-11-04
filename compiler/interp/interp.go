@@ -55,6 +55,11 @@ type Interp struct {
 	// buffer per thread serves every call, recursive ones included
 	// (specs/interp-call-path); a child thread starts its own.
 	argBuf []Value
+	// intrBuf carries a compiled call's arguments to a fastIntrinsic, which
+	// keeps no reference to it and runs no kern code; the call clears it
+	// when the intrinsic returns (one trapping leaves its arguments until
+	// the next call, as argBuf does)
+	intrBuf []Value
 }
 
 // New creates an interpreter for a module. out receives program output,
@@ -113,6 +118,7 @@ func (it *Interp) child() *Interp {
 	c.cur = nil
 	c.plans = nil
 	c.argBuf = nil
+	c.intrBuf = nil
 	it.sh.mu.Lock()
 	it.sh.nextTid++
 	c.tid = it.sh.nextTid
@@ -440,7 +446,9 @@ type frame struct {
 	file string
 	// span is set for a library (std/core) activation: the position of the
 	// user-level call that entered the library, which every trap inside
-	// reports in place of its own position.
+	// reports in place of its own position. It is never written through,
+	// so call sites pass stable pointers (spanAt) rather than a copy that
+	// would cost an allocation per library call.
 	span *ast.Pos
 	// block is the one being executed: a trap in a block the inliner
 	// copied from a callee in another file reports that file
@@ -526,6 +534,19 @@ func (fr *frame) at(pos ast.Pos) ast.Pos {
 	return pos
 }
 
+// spanAt is a stable pointer to the position a library call at *pos
+// reports: the caller's own span inside the library, else the call site,
+// whose position is fixed (pos points into the IR or a compiled op).
+func (fr *frame) spanAt(pos *ast.Pos) *ast.Pos {
+	if fr.span != nil {
+		return fr.span
+	}
+	return pos
+}
+
+// noSpan is the span of a library activation entered without a call site.
+var noSpan ast.Pos
+
 func (it *Interp) callNamed(name string, args []Value) []Value {
 	f := it.mod.Func(name)
 	if f == nil {
@@ -603,7 +624,7 @@ func (it *Interp) callWith(f *ir.Func, fi *funcInfo, args []Value, span *ast.Pos
 		// program's file, as natively
 		fr.file = ""
 		if span == nil {
-			span = &ast.Pos{}
+			span = &noSpan
 		} else if prev != nil {
 			// the effective file of the caller's current block, as the
 			// hidden file argument is natively: a copied block names the
@@ -823,8 +844,7 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 			switch callee := target.callee; {
 			case callee != nil && callee.Library:
 				// entering (or staying in) the library: traps report this call
-				pos := fr.at(i.Pos)
-				rets = it.callAt(callee, args, &pos)
+				rets = it.callAt(callee, args, fr.spanAt(&i.Pos))
 			case callee != nil:
 				rets = it.callAt(callee, args, nil)
 			default:
@@ -875,13 +895,13 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 	case *ir.Len:
 		fr.vals[i.Dst.ID] = mkInt(tyUsize, uint64(it.length(fr, i.Place)))
 	case *ir.MakeStruct:
-		s := &Struct{Fields: make([]Value, len(i.Fields))}
+		s := newStruct(len(i.Fields))
 		for k, f := range i.Fields {
 			s.Fields[k] = fr.vals[f.ID]
 		}
 		fr.vals[i.Dst.ID] = s
 	case *ir.MakeUnion:
-		u := &Union{Tag: i.Tag, Fields: make([]Value, len(i.Fields))}
+		u := newUnion(i.Tag, len(i.Fields))
 		for k, f := range i.Fields {
 			u.Fields[k] = fr.vals[f.ID]
 		}
