@@ -172,37 +172,6 @@ impl P {
         t := self.tok(self.pos - 1usize)
         return t.e
     }
-    // span_nn spans n from a's start to b's end; span_tn from s to b's
-    // end; span_nt from a's start to e; setpe_n ends n where b ends,
-    // setpe_kid where kid i of a ends, setpe_prev at prev_end. Each reads
-    // the nodes itself, since an argument may not read self while the call
-    // edits it.
-    func span_nn(edit self, n: usize, a: usize, b: usize) {
-        s := self.pstart(a)
-        e := self.pend(b)
-        self.setp(n, s, e)
-    }
-    func span_tn(edit self, n: usize, s: usize, b: usize) {
-        e := self.pend(b)
-        self.setp(n, s, e)
-    }
-    func span_nt(edit self, n: usize, a: usize, e: usize) {
-        s := self.pstart(a)
-        self.setp(n, s, e)
-    }
-    func setpe_n(edit self, n: usize, b: usize) {
-        e := self.pend(b)
-        self.setpe(n, e)
-    }
-    func setpe_kid(edit self, n: usize, a: usize, i: usize) {
-        k := self.kid(a, i)
-        e := self.pend(k)
-        self.setpe(n, e)
-    }
-    func setpe_prev(edit self, n: usize) {
-        e := self.prev_end()
-        self.setpe(n, e)
-    }
     func add(edit self, n: usize, c: usize) {
         if n == 0usize { return }
         with x := self.nodes.at(n) { x.kids.push(c) }
@@ -351,7 +320,7 @@ impl P {
         while true {
             c := self.parse_tname()
             self.add(l, c)
-            self.setpe_n(tp, c)
+            self.setpe(tp, self.pend(c))
             if !self.accept(PLUS) { break }
         }
     }
@@ -397,7 +366,7 @@ impl P {
             c := self.expect(COLON)
             ty := self.parse_type()
             f := self.mk(N_FIELD, fname.s, fname.e)
-            self.span_tn(f, fname.s, ty)
+            self.setp(f, fname.s, self.pend(ty))
             self.add(f, ty)
             self.add(fl, f)
             self.stmt_end()
@@ -435,12 +404,12 @@ impl P {
                         c := self.next()
                         ty := self.parse_type()
                         fld = self.mk(N_FIELD, fname.s, fname.e)
-                        self.span_tn(fld, fname.s, ty)
+                        self.setp(fld, fname.s, self.pend(ty))
                         self.add(fld, ty)
                     } else {
                         ty := self.parse_type()
                         fld = self.mk(N_FIELD, 0usize, 0usize)
-                        self.span_nn(fld, ty, ty)
+                        self.setp(fld, self.pstart(ty), self.pend(ty))
                         self.add(fld, ty)
                     }
                     self.add(fl, fld)
@@ -508,7 +477,7 @@ impl P {
                 r := self.expect(RPAREN)
                 body := self.parse_block()
                 dtor = self.mk(N_DESTRUCTOR, 0usize, 0usize)
-                self.span_tn(dtor, u.s, body)
+                self.setp(dtor, u.s, self.pend(body))
                 self.add(dtor, body)
             } else {
                 f := self.parse_func(true)
@@ -611,9 +580,9 @@ impl P {
         n := self.expect(IDENT)
         d := self.mk(N_FUNC, n.s, n.e)
         if con != 0usize {
-            self.span_nn(d, con, con)
+            self.setp(d, self.pstart(con), self.pend(con))
         } else if bud != 0usize {
-            self.span_nn(d, bud, bud)
+            self.setp(d, self.pstart(bud), self.pend(bud))
         } else {
             self.setp(d, t.s, t.e)
         }
@@ -643,9 +612,9 @@ impl P {
         var body: usize = 0usize
         if with_body && (!self.bodyless || self.at(LBRACE)) {
             body = self.parse_block()
-            self.setpe_n(d, body)
+            self.setpe(d, self.pend(body))
         } else {
-            self.setpe_prev(d)
+            self.setpe(d, self.prev_end())
         }
         self.add(d, con)
         self.add(d, tps)
@@ -691,7 +660,7 @@ impl P {
         p := self.mk(N_PARAM, n.s, n.e)
         self.parse_param_type(p)
         self.setps(p, n.s)
-        self.setpe_kid(p, p, 0usize)
+        self.setpe(p, self.pend(self.kid(p, 0usize)))
         return p
     }
 
@@ -748,11 +717,11 @@ impl P {
         self.setp(d, t.s, t.e)
         ps := self.parse_params()
         ret := self.parse_ret()
-        self.setpe_prev(d)
+        self.setpe(d, self.prev_end())
         var body: usize = 0usize
         if self.at(LBRACE) {
             body = self.parse_block()
-            self.setpe_prev(d)
+            self.setpe(d, self.prev_end())
         } else {
             self.stmt_end()
         }
@@ -778,7 +747,7 @@ impl P {
         ty := self.parse_type()
         a := self.expect(ASSIGN)
         v := self.parse_expr()
-        self.span_tn(d, t.s, v)
+        self.setp(d, t.s, self.pend(v))
         self.add(d, ty)
         self.add(d, v)
         self.stmt_end()
@@ -793,7 +762,7 @@ impl P {
         tn := self.parse_tname()
         self.stmt_end()
         d := self.mk(N_ASSERT, m.s, m.e)
-        self.span_tn(d, t.s, tn)
+        self.setp(d, t.s, self.pend(tn))
         self.add(d, tn)
         return d
     }

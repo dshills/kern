@@ -16,7 +16,7 @@ impl P {
     // binary: operator token in s..e, kids left and right
     func binary(edit self, op: Tok, l: usize, r: usize) -> usize {
         b := self.mk(N_BINARY, op.s, op.e)
-        self.span_nn(b, l, r)
+        self.setp(b, self.pstart(l), self.pend(r))
         self.add(b, l)
         self.add(b, r)
         return b
@@ -56,7 +56,7 @@ impl P {
             u := self.next()
             r := self.parse_add()
             g := self.mk(N_RANGE, 0usize, 0usize)
-            self.span_nn(g, l, r)
+            self.setp(g, self.pstart(l), self.pend(r))
             self.add(g, l)
             self.add(g, r)
             return g
@@ -101,7 +101,7 @@ impl P {
                 return x
             }
             n := self.mk(N_UNARY, t.s, t.e)
-            self.span_tn(n, t.s, x)
+            self.setp(n, t.s, self.pend(x))
             self.add(n, x)
             return n
         }
@@ -123,7 +123,7 @@ impl P {
                 self.setp(p, n.s, n.e)
                 if self.accept(COLON) {
                     self.parse_param_type(p)
-                    self.setpe_kid(p, p, 0usize)
+                    self.setpe(p, self.pend(self.kid(p, 0usize)))
                 } else {
                     self.add(p, 0usize)
                 }
@@ -135,13 +135,13 @@ impl P {
         }
         if self.at(LBRACE) {
             body := self.parse_block()
-            self.setpe_n(c, body)
+            self.setpe(c, self.pend(body))
             self.add(c, 0usize)
             self.add(c, body)
             return c
         }
         x := self.parse_expr()
-        self.setpe_n(c, x)
+        self.setpe(c, self.pend(x))
         self.add(c, x)
         self.add(c, 0usize)
         return c
@@ -157,7 +157,7 @@ impl P {
                 u := self.next()
                 n := self.expect(IDENT)
                 f := self.mk(N_FIELDX, n.s, n.e)
-                self.span_nt(f, x, n.e)
+                self.setp(f, self.pstart(x), n.e)
                 self.add(f, x)
                 x = f
             } else if k == LBRACK {
@@ -170,7 +170,7 @@ impl P {
                     if !self.at(RBRACK) { hi = self.parse_expr() }
                     self.nest = self.nest - 1u32
                     r := self.expect(RBRACK)
-                    self.span_nt(s, x, r.e)
+                    self.setp(s, self.pstart(x), r.e)
                     self.add(s, x)
                     self.add(s, 0usize)
                     self.add(s, hi)
@@ -185,7 +185,7 @@ impl P {
                     if !self.at(RBRACK) { hi = self.parse_expr() }
                     self.nest = self.nest - 1u32
                     r := self.expect(RBRACK)
-                    self.span_nt(s, x, r.e)
+                    self.setp(s, self.pstart(x), r.e)
                     self.add(s, x)
                     self.add(s, first)
                     self.add(s, hi)
@@ -203,7 +203,7 @@ impl P {
                 }
                 self.nest = self.nest - 1u32
                 r := self.expect(RBRACK)
-                self.span_nt(ix, x, r.e)
+                self.setp(ix, self.pstart(x), r.e)
                 x = ix
             } else if k == LPAREN {
                 u := self.next()
@@ -219,7 +219,7 @@ impl P {
                     a := self.mk(N_ARG, 0usize, 0usize)
                     if self.accept(KW_OUT) { self.flag(a, F_VIEW) }
                     ax := self.parse_expr()
-                    self.span_tn(a, at.s, ax)
+                    self.setp(a, at.s, self.pend(ax))
                     self.add(a, ax)
                     self.add(args, a)
                     if !self.accept(COMMA) { break }
@@ -227,12 +227,12 @@ impl P {
                 self.nest = self.nest - 1u32
                 self.nolit = saved
                 r := self.expect(RPAREN)
-                self.span_nt(c, x, r.e)
+                self.setp(c, self.pstart(x), r.e)
                 x = c
             } else if k == QUESTION {
                 u := self.next()
                 q := self.mk(N_TRY, 0usize, 0usize)
-                self.span_nt(q, x, t.e)
+                self.setp(q, self.pstart(x), t.e)
                 self.add(q, x)
                 x = q
             } else if k == LBRACE {
@@ -265,7 +265,7 @@ impl P {
         t := self.expect(LBRACE)
         self.nest = self.nest + 1u32
         lit := self.mk(N_STRUCTLIT, 0usize, 0usize)
-        self.span_nt(lit, x, t.e)
+        self.setp(lit, self.pstart(x), t.e)
         fs := self.list()
         self.add(lit, tn)
         self.add(lit, fs)
@@ -274,7 +274,7 @@ impl P {
             c := self.expect(COLON)
             v := self.parse_expr()
             fi := self.mk(N_FINIT, n.s, n.e)
-            self.span_tn(fi, n.s, v)
+            self.setp(fi, n.s, self.pend(v))
             self.add(fi, v)
             self.add(fs, fi)
             if !self.accept(COMMA) { break }
@@ -286,15 +286,13 @@ impl P {
     }
 
     // same_span gives n the span of x, as Go's Pos: e.Pos.
-    func same_span(edit self, n: usize, x: usize) { self.span_nn(n, x, x) }
+    func same_span(edit self, n: usize, x: usize) { self.setp(n, self.pstart(x), self.pend(x)) }
 
     // expr_to_tname is exprToTypeName.
     func expr_to_tname(edit self, x: usize) -> usize {
         k := self.nk(x)
         if k == N_IDENT {
-            s := self.ns(x)
-            e := self.ne(x)
-            tn := self.mk(N_TNAME, s, e)
+            tn := self.mk(N_TNAME, self.ns(x), self.ne(x))
             self.same_span(tn, x)
             l := self.list()
             self.add(tn, l)
@@ -306,13 +304,9 @@ impl P {
                 self.fail_cur("expected a module-qualified type name before '{'")
                 return 0usize
             }
-            s := self.ns(x)
-            e := self.ne(x)
-            tn := self.mk(N_TNAME, s, e)
+            tn := self.mk(N_TNAME, self.ns(x), self.ne(x))
             self.same_span(tn, x)
-            bs := self.ns(b)
-            be := self.ne(b)
-            self.set2(tn, bs, be)
+            self.set2(tn, self.ns(b), self.ne(b))
             l := self.list()
             self.add(tn, l)
             return tn
@@ -326,8 +320,7 @@ impl P {
             n := self.nlen(al)
             i := 0usize
             while i < n && !self.failed {
-                a := self.kid(al, i)
-                ty := self.expr_to_type(a)
+                ty := self.expr_to_type(self.kid(al, i))
                 self.add(args, ty)
                 i = i + 1usize
             }
@@ -358,13 +351,9 @@ impl P {
         if k == N_FIELDX {
             b := self.kid(x, 0usize)
             if self.nk(b) == N_IDENT {
-                s := self.ns(x)
-                e := self.ne(x)
-                tn := self.mk(N_TNAME, s, e)
+                tn := self.mk(N_TNAME, self.ns(x), self.ne(x))
                 self.same_span(tn, x)
-                bs := self.ns(b)
-                be := self.ne(b)
-                self.set2(tn, bs, be)
+                self.set2(tn, self.ns(b), self.ne(b))
                 l := self.list()
                 self.add(tn, l)
                 return tn
@@ -550,7 +539,7 @@ impl P {
             if k == KW_TAKE { nk = N_TAKE }
             c := self.mk(nk, 0usize, 0usize)
             self.setps(c, t.s)
-            self.setpe_prev(c)
+            self.setpe(c, self.prev_end())
             self.add(c, x)
             return c
         }

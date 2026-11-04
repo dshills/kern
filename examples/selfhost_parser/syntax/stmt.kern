@@ -13,7 +13,7 @@ impl P {
             p := self.mk(N_PARAM, 0usize, 0usize)
             self.parse_param_type(p)
             ty := self.kid(p, 0usize)
-            self.span_nn(p, ty, ty)
+            self.setp(p, self.pstart(ty), self.pend(ty))
             self.add(ps, p)
             if !self.accept(COMMA) { break }
         }
@@ -21,7 +21,7 @@ impl P {
         r := self.expect(RPAREN)
         ret := self.parse_ret()
         self.add(ft, ret)
-        self.setpe_prev(ft)
+        self.setpe(ft, self.prev_end())
     }
 
     func parse_type(edit self) -> usize {
@@ -43,7 +43,7 @@ impl P {
                 v := self.next()
                 elem := self.parse_type()
                 s := self.mk(N_SLICE, 0usize, 0usize)
-                self.span_tn(s, t.s, elem)
+                self.setp(s, t.s, self.pend(elem))
                 self.add(s, elem)
                 return s
             }
@@ -52,7 +52,7 @@ impl P {
             r := self.expect(RBRACK)
             elem := self.parse_type()
             a := self.mk(N_ARRAY, 0usize, 0usize)
-            self.span_tn(a, t.s, elem)
+            self.setp(a, t.s, self.pend(elem))
             self.add(a, elem)
             // Atoi of the text without underscores: decimal digits only,
             // within i64
@@ -102,7 +102,7 @@ impl P {
                 self.nest = self.nest - 1u32
                 r := self.expect(RBRACK)
             }
-            self.setpe_kid(a, a, 0usize)
+            self.setpe(a, self.pend(self.kid(a, 0usize)))
             return a
         }
         if t.k == KW_FUNC {
@@ -209,12 +209,12 @@ impl P {
             c := self.expect(COLON)
             ty := self.parse_type()
             d := self.mk(N_VAR, n.s, n.e)
-            self.span_tn(d, t.s, ty)
+            self.setp(d, t.s, self.pend(ty))
             self.add(d, ty)
             var init: usize = 0usize
             if self.accept(ASSIGN) {
                 init = self.parse_expr()
-                self.setpe_n(d, init)
+                self.setpe(d, self.pend(init))
             }
             self.add(d, init)
             self.stmt_end()
@@ -233,7 +233,7 @@ impl P {
             i := self.expect(KW_IN)
             iter := self.parse_expr_nolit()
             body := self.parse_block()
-            self.span_tn(f, t.s, body)
+            self.setp(f, t.s, self.pend(body))
             self.add(f, iter)
             self.add(f, body)
             return f
@@ -243,7 +243,7 @@ impl P {
             c := self.parse_expr_nolit()
             body := self.parse_block()
             w := self.mk(N_WHILE, 0usize, 0usize)
-            self.span_tn(w, t.s, body)
+            self.setp(w, t.s, self.pend(body))
             self.add(w, c)
             self.add(w, body)
             return w
@@ -256,7 +256,7 @@ impl P {
             var v: usize = 0usize
             if !self.at(NL) && !self.at(SEMI) && !self.at(RBRACE) {
                 v = self.parse_expr()
-                self.setpe_n(r, v)
+                self.setpe(r, self.pend(v))
             }
             self.add(r, v)
             self.stmt_end()
@@ -274,7 +274,7 @@ impl P {
             u := self.next()
             body := self.parse_block()
             s := self.mk(N_UNSAFE, 0usize, 0usize)
-            self.span_tn(s, t.s, body)
+            self.setp(s, t.s, self.pend(body))
             self.add(s, body)
             return s
         }
@@ -285,7 +285,7 @@ impl P {
             x := self.parse_expr()
             self.stmt_end()
             d := self.mk(N_SHORT, t.s, t.e)
-            self.span_tn(d, t.s, x)
+            self.setp(d, t.s, self.pend(x))
             self.add(d, x)
             return d
         }
@@ -294,14 +294,14 @@ impl P {
             v := self.parse_expr()
             self.stmt_end()
             a := self.mk(N_ASSIGN, 0usize, 0usize)
-            self.span_nn(a, e, v)
+            self.setp(a, self.pstart(e), self.pend(v))
             self.add(a, e)
             self.add(a, v)
             return a
         }
         self.stmt_end()
         s := self.mk(N_EXPR, 0usize, 0usize)
-        self.span_nn(s, e, e)
+        self.setp(s, self.pstart(e), self.pend(e))
         self.add(s, e)
         return s
     }
@@ -321,7 +321,7 @@ impl P {
         c := self.expect(COLONEQ)
         subj := self.parse_expr_nolit()
         body := self.parse_block()
-        self.setpe_n(w, body)
+        self.setpe(w, self.pend(body))
         self.add(w, names)
         self.add(w, subj)
         self.add(w, body)
@@ -382,9 +382,7 @@ impl P {
                     self.add(qual, l)
                 } else {
                     // Qual.Pkg, Qual.Name = Qual.Name, Variant
-                    qs := self.ns(qual)
-                    qe := self.ne(qual)
-                    self.set2(qual, qs, qe)
+                    self.set2(qual, self.ns(qual), self.ne(qual))
                     self.set1(qual, vs, ve)
                 }
                 vs = m.s
@@ -410,14 +408,14 @@ impl P {
         if self.at(LBRACE) {
             body := self.parse_block()
             self.add(a, body)
-            self.setpe_n(a, body)
+            self.setpe(a, self.pend(body))
             self.stmt_end()
             return a
         }
         s := self.parse_stmt()
         body := self.mk(N_BLOCK, 0usize, 0usize)
-        self.span_nn(body, s, s)
-        self.setpe_n(a, s)
+        self.setp(body, self.pstart(s), self.pend(s))
+        self.setpe(a, self.pend(s))
         ss := self.list()
         self.add(ss, s)
         self.add(body, ss)
@@ -431,11 +429,11 @@ impl P {
         self.setp(s, t.s, t.e)
         c := self.parse_expr_nolit()
         th := self.parse_block()
-        self.setpe_n(s, th)
+        self.setpe(s, self.pend(th))
         var el: usize = 0usize
         if self.accept(KW_ELSE) {
             if self.at(KW_IF) { el = self.parse_if() } else { el = self.parse_block() }
-            self.setpe_n(s, el)
+            self.setpe(s, self.pend(el))
         }
         self.add(s, c)
         self.add(s, th)

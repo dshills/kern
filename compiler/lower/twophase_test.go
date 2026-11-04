@@ -3,6 +3,8 @@ package lower
 import (
 	"testing"
 
+	"github.com/dshills/kern/compiler/ast"
+
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/resolve"
@@ -33,8 +35,26 @@ func plain(c: edit[C], k: u64) {
 	if ds := check.Check(prog); len(ds) > 0 {
 		t.Fatalf("check: %s", ds[0].Message)
 	}
-	if n := len(prog.Info.TwoPhase); n != 1 {
-		t.Fatalf("expected one recorded two-phase argument, got %d", n)
+	// the records for each of this module's functions (the prelude, checked
+	// with every program, has records of its own)
+	recorded := map[string]int{}
+	for decl, fd := range prog.Info.Funcs {
+		if fd.Module != "m" {
+			continue
+		}
+		ast.Walk(decl, func(n any) bool {
+			if c, ok := n.(*ast.CallExpr); ok {
+				for k := range prog.Info.TwoPhase {
+					if k.Call == c {
+						recorded[fd.Name]++
+					}
+				}
+			}
+			return false
+		})
+	}
+	if recorded["rec"] != 1 || recorded["plain"] != 0 {
+		t.Fatalf("expected one recorded argument in rec and none in plain, got %v", recorded)
 	}
 	mod, ds := Lower(prog)
 	if len(ds) > 0 {

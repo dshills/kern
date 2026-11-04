@@ -51,7 +51,8 @@ The two-phase argument gap again. `self.a.alloc(bytes, self.slot_align())`
 is `ACC_CONFLICT` (5.4.4), because the call edits `self.a` while its
 argument reads all of `self`. The method reads are hoisted into locals.
 Field reads such as `self.data` are disjoint from `self.a` and are
-accepted.
+accepted. (Since ADR-016's two-phase arguments the reads are inline
+again: `docs/reports/two-phase-edit.md`.)
 
 ## Still open
 

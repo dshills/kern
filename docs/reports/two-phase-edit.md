@@ -123,12 +123,23 @@ The two conflict tasks are v1 t04 and v2 t05.
 
 No task's calibration moves.
 
+## Uses simplified
+
+The workarounds the old rule forced are gone:
+- **The kern-written parser** (`examples/selfhost_parser/syntax`). The
+  six span helpers (`span_nn`, `span_tn`, `span_nt`, `setpe_n`,
+  `setpe_kid`, `setpe_prev`) are removed, and their 51 call sites now
+  call `setp` or `setpe` with the reads inline:
+  `self.setp(n, self.pstart(a), self.pend(b))`. Seven more hoisted reads
+  were inlined (`set2(tn, self.ns(b), self.ne(b))`,
+  `mk(N_TNAME, self.ns(x), self.ne(x))`). Reads of methods that take
+  `edit self` (`expr_to_type`, `list`, `cur`) stay hoisted: an edit in a
+  later argument still conflicts. `TestSelfhostSpans`,
+  `TestSelfhostParser` and `TestSelfhostDiags` pass unchanged.
+- **The prelude** (`PoolIn.try_grow` and `PoolIn.release`, in both
+  mirrors): `self.a.alloc(bytes, self.slot_align())` and the matching
+  `free` calls read `slot_align()` and `stride()` inline.
+
 ## What remains
 
-- The kern-written parser's helpers that exist only because of the old
-  rule (`span_nn`, `span_tn`, `span_nt`, `setpe_n`, `setpe_kid`,
-  `setpe_prev`, `docs/reports/selfhost-spans.md`) can now be written
-  inline. They are left as they are; that is a follow-up.
-- `PoolIn.try_grow`'s hoisted `slot_align()` and `stride()` can also go
-  back inline.
 - Two-phase projections are not attempted (see above).
