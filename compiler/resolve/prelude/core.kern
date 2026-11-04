@@ -1471,6 +1471,52 @@ impl[T, A: Allocator] ArenaIn[T, A] {
         self.size = self.size + 1usize
         return Ok(id)
     }
+    // try_alloc_with constructs the value in the next slot
+    // (specs/in-forms §1.1): Err(Alloc(e)) with the allocator's error when
+    // the arena cannot grow, before init runs; Err(Init(e)) when init
+    // fails, after which init has destroyed what it had initialized and
+    // the arena holds what it held (a growth already made is kept).
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func try_alloc_with[E](edit self, init: func(out T) -> Result[(), E]) -> Result[ArenaId[T], AllocOrInit[E]] {
+        if self.size == self.cap {
+            match self.try_grow() {
+                Ok(u) => { }
+                Err(e) => return Err(Alloc(e))
+            }
+        }
+        unsafe {
+            match ptr_init(ptr_offset(self.data, truncate[isize](self.size)), init) {
+                Ok(u) => { }
+                Err(e) => return Err(Init(e))
+            }
+        }
+        id := ArenaId[T] { index: truncate[u32](self.size), phantom_tag: self.identity } //@debug
+        id := ArenaId[T] { index: truncate[u32](self.size) } //@release
+        self.size = self.size + 1usize
+        return Ok(id)
+    }
+    // try_alloc_with_ctx is try_alloc_with with a context: init is called
+    // with the storage as its out parameter and ctx, unchanged, as its
+    // second argument.
+    contract { requires "data addresses cap elements allocated from a, of which the first size are live; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func try_alloc_with_ctx[C, E](edit self, init: func(out T, view[C]) -> Result[(), E], ctx: view[C]) -> Result[ArenaId[T], AllocOrInit[E]] {
+        if self.size == self.cap {
+            match self.try_grow() {
+                Ok(u) => { }
+                Err(e) => return Err(Alloc(e))
+            }
+        }
+        unsafe {
+            match ptr_init_ctx(ptr_offset(self.data, truncate[isize](self.size)), init, ctx) {
+                Ok(u) => { }
+                Err(e) => return Err(Init(e))
+            }
+        }
+        id := ArenaId[T] { index: truncate[u32](self.size), phantom_tag: self.identity } //@debug
+        id := ArenaId[T] { index: truncate[u32](self.size) } //@release
+        self.size = self.size + 1usize
+        return Ok(id)
+    }
     // check validates a handle (bounds, then identity) and returns its index.
     func check(view self, id: ArenaId[T]) -> usize {
         idx := usize(id.index)
@@ -1628,6 +1674,91 @@ impl[T, A: Allocator] PoolIn[T, A] {
         return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen, phantom_tag: self.identity }) //@debug
         return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen }) //@release
     }
+    // try_alloc_with constructs the value in its slot (specs/in-forms
+    // §1.2), the slot chosen as try_alloc chooses it: Err(Alloc(e)) with
+    // the allocator's error when the pool cannot grow, before init runs;
+    // Err(Init(e)) when init fails, after which init has destroyed what it
+    // had initialized and the slot is back on top of the free list,
+    // vacant, its generation unchanged (a growth already made is kept).
+    contract { requires "the two buffers hold cap entries allocated from a; the first count slots are initialized; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func try_alloc_with[E](edit self, init: func(out T) -> Result[(), E]) -> Result[PoolId[T], AllocOrInit[E]] {
+        if self.nfree == 0usize && self.count == self.cap {
+            match self.try_grow() {
+                Ok(u) => { }
+                Err(e) => return Err(Alloc(e))
+            }
+        }
+        var idx: usize = 0usize
+        var gen: u32 = 0u32
+        unsafe {
+            if self.nfree > 0usize {
+                self.nfree = self.nfree - 1usize
+                idx = usize(ptr_load(ptr_offset(self.free_list, truncate[isize](self.nfree))))
+                gen = ptr_load(self.meta_at(idx)).gen
+            } else {
+                idx = self.count
+                self.count = self.count + 1usize
+                ptr_store(self.meta_at(idx), PoolSlotMeta { gen: 0u32, live: false, retired: false })
+            }
+            match ptr_init(self.elem_at(idx), init) {
+                Ok(u) => {
+                    mp := self.meta_at(idx)
+                    m := ptr_load(mp)
+                    m.live = true
+                    ptr_store(mp, m)
+                }
+                Err(e) => {
+                    ptr_store(ptr_offset(self.free_list, truncate[isize](self.nfree)), truncate[u32](idx))
+                    self.nfree = self.nfree + 1usize
+                    return Err(Init(e))
+                }
+            }
+        }
+        self.live = self.live + 1usize
+        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen, phantom_tag: self.identity }) //@debug
+        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen }) //@release
+    }
+    // try_alloc_with_ctx is try_alloc_with with a context: init is called
+    // with the storage as its out parameter and ctx, unchanged, as its
+    // second argument.
+    contract { requires "the two buffers hold cap entries allocated from a; the first count slots are initialized; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" }
+    func try_alloc_with_ctx[C, E](edit self, init: func(out T, view[C]) -> Result[(), E], ctx: view[C]) -> Result[PoolId[T], AllocOrInit[E]] {
+        if self.nfree == 0usize && self.count == self.cap {
+            match self.try_grow() {
+                Ok(u) => { }
+                Err(e) => return Err(Alloc(e))
+            }
+        }
+        var idx: usize = 0usize
+        var gen: u32 = 0u32
+        unsafe {
+            if self.nfree > 0usize {
+                self.nfree = self.nfree - 1usize
+                idx = usize(ptr_load(ptr_offset(self.free_list, truncate[isize](self.nfree))))
+                gen = ptr_load(self.meta_at(idx)).gen
+            } else {
+                idx = self.count
+                self.count = self.count + 1usize
+                ptr_store(self.meta_at(idx), PoolSlotMeta { gen: 0u32, live: false, retired: false })
+            }
+            match ptr_init_ctx(self.elem_at(idx), init, ctx) {
+                Ok(u) => {
+                    mp := self.meta_at(idx)
+                    m := ptr_load(mp)
+                    m.live = true
+                    ptr_store(mp, m)
+                }
+                Err(e) => {
+                    ptr_store(ptr_offset(self.free_list, truncate[isize](self.nfree)), truncate[u32](idx))
+                    self.nfree = self.nfree + 1usize
+                    return Err(Init(e))
+                }
+            }
+        }
+        self.live = self.live + 1usize
+        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen, phantom_tag: self.identity }) //@debug
+        return Ok(PoolId[T] { index: truncate[u32](idx), gen: gen }) //@release
+    }
     contract { requires "the two buffers hold cap entries; the first count slots are initialized" }
     func check(view self, id: PoolId[T]) -> usize {
         idx := usize(id.index)
@@ -1649,6 +1780,16 @@ impl[T, A: Allocator] PoolIn[T, A] {
     func at(edit self, id: PoolId[T]) -> edit[T] {
         idx := self.check(id)
         unsafe { return ptr_edit(self.elem_at(idx)) }
+    }
+    // get2 lends two distinct live elements at once (specs/in-forms §1.3):
+    // a is checked, then b, each as get checks it; one slot named twice
+    // traps disjoint.
+    contract { invariant "a != b is checked at runtime; the two accesses are disjoint" }
+    func get2(edit self, a: PoolId[T], b: PoolId[T]) -> (edit[T], edit[T]) {
+        ia := self.check(a)
+        ib := self.check(b)
+        if ia == ib { trap_kind(disjoint) }
+        unsafe { return ptr_edit2(self.elem_at(ia), self.elem_at(ib)) }
     }
     // free validates the handle, destroys the element and bumps the slot's
     // generation; a slot whose generation would wrap is retired.

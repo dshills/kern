@@ -1,0 +1,224 @@
+//! phase: 3
+//! expect: output in_alloc_with
+// ArenaIn and PoolIn construct in place over the allocator they hold
+// (specs/in-forms R1, R2, R4): each of the four _with forms succeeds
+// across a growth and the values read back; a failing initializer gives
+// Init, destroys only the field it had set, and (pool) leaves its slot to
+// the next allocation at the same generation; a budget refused at growth
+// gives Alloc(OutOfMemory) without calling the initializer; after release
+// the budget reports nothing live.
+module run
+// Budget is the allocator of tests/run/arenain_poolin.kern: it serves
+// requests from the system allocator until its byte budget is spent, then
+// returns Err(OutOfMemory), and traps on a free that names no live
+// allocation of the same size and alignment.
+struct Budget nocopy { left: usize; calls: usize; live: usize; bytes: usize; n: usize; ptrs: [64]usize; sizes: [64]usize; aligns: [64]usize }
+func budget(left: usize) -> Budget {
+    return Budget { left: left, calls: 0usize, live: 0usize, bytes: 0usize, n: 0usize, ptrs: zero(), sizes: zero(), aligns: zero() }
+}
+impl Allocator for Budget {
+    contract { requires "size and align meet the allocator obligations of spec §6" }
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] {
+        self.calls = self.calls + 1usize
+        if size > self.left { return Err(OutOfMemory) }
+        if self.n == 64usize { trap() }
+        sys := SystemAllocator.new()
+        unsafe {
+            match sys.alloc(size, align) {
+                Ok(p) => {
+                    self.ptrs[self.n] = ptr_addr(p)
+                    self.sizes[self.n] = size
+                    self.aligns[self.n] = align
+                    self.n = self.n + 1usize
+                    self.left = self.left - size
+                    self.live = self.live + 1usize
+                    self.bytes = self.bytes + size
+                    return Ok(p)
+                }
+                Err(e) => return Err(OutOfMemory)
+            }
+        }
+    }
+    contract { requires "ptr, size and align are those of one live allocation of this Budget" }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) {
+        unsafe {
+            a := ptr_addr(ptr)
+            i := 0usize
+            while i < self.n && self.ptrs[i] != a { i = i + 1usize }
+            if i == self.n || self.sizes[i] != size || self.aligns[i] != align { trap() }
+            self.n = self.n - 1usize
+            self.ptrs[i] = self.ptrs[self.n]
+            self.sizes[i] = self.sizes[self.n]
+            self.aligns[i] = self.aligns[self.n]
+            self.left = self.left + size
+            self.live = self.live - 1usize
+            self.bytes = self.bytes - size
+            sys := SystemAllocator.new()
+            sys.free(ptr, size, align)
+        }
+    }
+}
+func counters(b: view[Budget]) {
+    print_str("  budget live "); print_u64(u64(b.live)); print_str(" bytes "); print_u64(u64(b.bytes))
+    print_str(" calls "); print_u64(u64(b.calls)); println()
+}
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("  drop tok "); print_u64(self.id); println() }
+}
+struct Node nocopy { key: u64; tok: Tok }
+impl Node {
+    destructor(edit self) { print_str("  drop node "); print_u64(self.key); println() }
+}
+union E { Bad }
+// Seed is the context of the _ctx forms: the key and token id to build.
+struct Seed { key: u64; id: u64 }
+func init_n(n: out Node) -> Result[(), E] {
+    n.key = 7u64
+    n.tok = Tok { id: 70u64 }
+    return Ok(())
+}
+func init_c(n: out Node, s: view[Seed]) -> Result[(), E] {
+    n.key = s.key
+    n.tok = Tok { id: s.id }
+    return Ok(())
+}
+func init_fail(n: out Node) -> Result[(), E] {
+    n.tok = Tok { id: 99u64 }
+    return Err(Bad)
+}
+func init_fail_c(n: out Node, s: view[Seed]) -> Result[(), E] {
+    n.tok = Tok { id: s.id }
+    return Err(Bad)
+}
+func init_loud(n: out Node) -> Result[(), E] {
+    print_str("  init called"); println()
+    n.key = 1u64
+    n.tok = Tok { id: 1u64 }
+    return Ok(())
+}
+func init_loud_c(n: out Node, s: view[Seed]) -> Result[(), E] {
+    print_str("  init called"); println()
+    n.key = s.key
+    n.tok = Tok { id: s.id }
+    return Ok(())
+}
+func report[I](r: view[Result[I, AllocOrInit[E]]]) {
+    match r {
+        Ok(id) => { print_str("  ok"); println() }
+        Err(e) => {
+            match e {
+                Alloc(a) => { print_str("  alloc error"); println() }
+                Init(i) => { print_str("  init error"); println() }
+            }
+        }
+    }
+}
+// arena_run fills an arena past its first buffer (8 slots) with both
+// forms, then fails an initializer of each form.
+func arena_run(a: edit[ArenaIn[Node, Budget]]) -> Result[u64, AllocOrInit[E]] {
+    var ids: [10]ArenaId[Node] = zero()
+    for i in 0usize..5usize {
+        ids[i] = a.try_alloc_with(init_n)?
+    }
+    for i in 5usize..10usize {
+        s := Seed { key: u64(i), id: u64(i) * 100u64 }
+        ids[i] = a.try_alloc_with_ctx(init_c, s)?
+    }
+    print_str("  len "); print_u64(u64(a.len())); println()
+    r := a.try_alloc_with(init_fail)
+    report(r)
+    s := Seed { key: 0u64, id: 98u64 }
+    r2 := a.try_alloc_with_ctx(init_fail_c, s)
+    report(r2)
+    print_str("  len after failures "); print_u64(u64(a.len())); println()
+    sum := 0u64
+    for i in 0usize..10usize {
+        with g := a.get(ids[i]) { sum = sum + g.key * 1000u64 + g.tok.id }
+    }
+    return Ok(sum)
+}
+func arena() {
+    print_str("arena"); println()
+    a := ArenaIn[Node, Budget].new_in(budget(100000usize))
+    match arena_run(a) {
+        Ok(sum) => { print_str("  sum "); print_u64(sum); println() }
+        Err(e) => { print_str("unexpected"); println() }
+    }
+    a.release()
+    print_str("released"); println()
+    with b := a.allocator() { counters(b) }
+}
+// pool_run fills a pool past its first buffer with both forms, frees two
+// slots, and fails an initializer of each form: each failed slot is the
+// next one taken, at the generation it had.
+func pool_run(p: edit[PoolIn[Node, Budget]]) -> Result[u64, AllocOrInit[E]] {
+    var ids: [10]PoolId[Node] = zero()
+    for i in 0usize..5usize {
+        ids[i] = p.try_alloc_with(init_n)?
+    }
+    for i in 5usize..10usize {
+        s := Seed { key: u64(i), id: u64(i) * 100u64 }
+        ids[i] = p.try_alloc_with_ctx(init_c, s)?
+    }
+    p.free(ids[2])
+    p.free(ids[6])
+    print_str("  len after two frees "); print_u64(u64(p.len())); println()
+    r := p.try_alloc_with(init_fail)
+    report(r)
+    print_str("  len "); print_u64(u64(p.len())); println()
+    x := p.try_alloc_with(init_n)?
+    print_str("  reused slot "); print_u64(u64(x.index)); print_str(" gen "); print_u64(u64(x.gen)); println()
+    s := Seed { key: 0u64, id: 97u64 }
+    r2 := p.try_alloc_with_ctx(init_fail_c, s)
+    report(r2)
+    s2 := Seed { key: 11u64, id: 1100u64 }
+    y := p.try_alloc_with_ctx(init_c, s2)?
+    print_str("  reused slot "); print_u64(u64(y.index)); print_str(" gen "); print_u64(u64(y.gen)); println()
+    ids[6] = x
+    ids[2] = y
+    sum := 0u64
+    for i in 0usize..10usize {
+        with g := p.get(ids[i]) { sum = sum + g.key * 1000u64 + g.tok.id }
+    }
+    print_str("  len "); print_u64(u64(p.len())); println()
+    return Ok(sum)
+}
+func pool() {
+    print_str("pool"); println()
+    p := PoolIn[Node, Budget].new_in(budget(100000usize))
+    match pool_run(p) {
+        Ok(sum) => { print_str("  sum "); print_u64(sum); println() }
+        Err(e) => { print_str("unexpected"); println() }
+    }
+    p.release()
+    print_str("released"); println()
+    with b := p.allocator() { counters(b) }
+}
+// refused: a budget too small for any buffer refuses the first growth;
+// the initializer is not called and nothing is allocated.
+func refused() {
+    print_str("arena refused"); println()
+    a := ArenaIn[Node, Budget].new_in(budget(8usize))
+    r := a.try_alloc_with(init_loud)
+    report(r)
+    s := Seed { key: 3u64, id: 3u64 }
+    r2 := a.try_alloc_with_ctx(init_loud_c, s)
+    report(r2)
+    print_str("  len "); print_u64(u64(a.len())); println()
+    with b := a.allocator() { counters(b) }
+    print_str("pool refused"); println()
+    p := PoolIn[Node, Budget].new_in(budget(8usize))
+    r3 := p.try_alloc_with(init_loud)
+    report(r3)
+    r4 := p.try_alloc_with_ctx(init_loud_c, s)
+    report(r4)
+    print_str("  len "); print_u64(u64(p.len())); println()
+    with b := p.allocator() { counters(b) }
+}
+func main() -> i32 {
+    arena()
+    pool()
+    refused()
+    return 0i32
+}

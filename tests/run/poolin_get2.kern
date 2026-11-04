@@ -1,0 +1,31 @@
+//! phase: 3
+//! expect: output poolin_get2
+// PoolIn.get2 lends two distinct live elements at once: a swap through
+// the two edits changes both (specs/in-forms R3).
+module run
+struct C { v: u64 }
+func run() -> Result[u64, AllocErr] {
+    p := PoolIn[C, SystemAllocator].new_in(SystemAllocator.new())
+    var ids: [12]PoolId[C] = zero()
+    for i in 0usize..12usize {
+        ids[i] = p.try_alloc(C { v: u64(i) * 10u64 })?
+    }
+    with x, y := p.get2(ids[1], ids[10]) {
+        t := x.v
+        x.v = y.v
+        y.v = t
+    }
+    with x, y := p.get2(ids[11], ids[0]) { x.v = x.v + y.v + 5u64 }
+    for i in 0usize..12usize {
+        with g := p.get(ids[i]) { print_u64(g.v); print_str(" ") }
+    }
+    println()
+    return Ok(0u64)
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => { }
+        Err(e) => { print_str("out of memory") }
+    }
+    return 0i32
+}

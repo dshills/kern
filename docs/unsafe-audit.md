@@ -27,7 +27,9 @@ from `Pool.alloc`/`Arena.alloc` and the `try_` forms of `Box` and `Vec`,
 helpers, which `compiler/analysis/try_alloc_test.go` checks). Fields of a nocopy core struct are private
 to the prelude (`NAME_PRIVATE`), so the invariants named in the contracts
 cannot be broken from safe user code. `BoxIn` and `VecIn`
-(`specs/alloc-containers`) call their held allocator `a` instead of the
+(`specs/alloc-containers`), `ArenaIn` and `PoolIn`
+(`specs/alloc-containers-more`, `specs/in-forms`) and `map.MapIn`
+(`specs/map-in`) call their held allocator `a` instead of the
 `heap_*` helpers, with the same obligations: every request is
 `n * size_of[T]()` bytes at `align_of[T]()`, and every `free` passes the
 pointer, size and alignment of one earlier `alloc` of the same container.
@@ -40,11 +42,11 @@ Returning an access opened on raw memory (`ptr_view`, `ptr_edit`,
 rule (Rule 6.6); the resolver classifies these intrinsics as unsafe
 operations like every `ptr_*` function.
 
-67 functions, 71 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
+86 functions, 90 unsafe blocks. Every block is exercised by `tests/run/containers.kern` (nested vectors,
 pool and arena elements with destructors, `Box.into`, `copy` of a vector,
 `pop`, `clear`), `tests/run/vec_resize.kern`, `tests/run/vec_extend.kern`, `tests/run/pool_handles.kern`, `tests/run/hello.kern`,
 the in-place fixtures (`tests/run/{box,pool,arena}_*alloc_with*.kern`, `box_new_with*.kern`),
-the allocator-generic fixtures (`tests/run/vecin_*.kern`, `tests/trap/{boxin_released,vecin_bounds}.kern`, `tests/freestanding/vecin.kern`, each with a budget allocator that traps on a `free` naming no live allocation), the fallible-allocation fixtures (`tests/run/{box_try_new,vec_try,vec_try_size,vec_reserved_append,string_try}*.kern`,
+the allocator-generic fixtures (`tests/run/vecin_*.kern`, `tests/run/{arenain_poolin,in_alloc_with,poolin_get2}.kern`, `tests/trap/{boxin_released,vecin_bounds,poolin_stale,poolin_get2_same,poolin_get2_stale}.kern`, `tests/freestanding/vecin.kern`, each with a budget allocator that traps on a `free` naming no live allocation), the fallible-allocation fixtures (`tests/run/{box_try_new,vec_try,vec_try_size,vec_reserved_append,string_try}*.kern`,
 `tests/freestanding/try_alloc.kern`), the
 examples and the container benchmarks; the failure paths are the trap
 fixtures `tests/trap/{bounds,vacant,generation,identity,disjoint,oom}.kern`, the `_oom` fixtures
@@ -103,6 +105,25 @@ executions of every fixture compare the containers' behaviour directly.
 | `VecIn.as_edit` | 1 | `ptr_edit_seq` | requires "data addresses cap elements allocated from a, of which the first size are live" |
 | `VecIn.clear` | 1 | `ptr_offset`, `ptr_take` | requires "data addresses cap elements allocated from a, of which the first size are live" |
 | `VecIn.release` | 1 | `ptr_cast`, `self.a.free` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `ArenaIn.try_grow` | 1 | `ptr_cast`, `ptr_copy`, `self.a.alloc`, `self.a.free` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `ArenaIn.try_alloc` | 1 | `ptr_offset`, `ptr_store` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `ArenaIn.try_alloc_with` | 1 | `ptr_init`, `ptr_offset` | requires "data addresses cap elements allocated from a, of which the first size are live; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" |
+| `ArenaIn.try_alloc_with_ctx` | 1 | `ptr_init_ctx`, `ptr_offset` | requires "data addresses cap elements allocated from a, of which the first size are live; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" |
+| `ArenaIn.get` | 1 | `ptr_offset`, `ptr_view` | requires "data addresses cap elements of which the first size are live" |
+| `ArenaIn.at` | 1 | `ptr_edit`, `ptr_offset` | requires "data addresses cap elements of which the first size are live" |
+| `ArenaIn.release` | 1 | `ptr_cast`, `ptr_offset`, `ptr_take`, `self.a.free` | requires "data addresses cap elements allocated from a, of which the first size are live" |
+| `PoolIn.meta_at` | 1 | `ptr_cast`, `ptr_offset` | requires "i < cap" |
+| `PoolIn.elem_at` | 1 | `ptr_cast`, `ptr_offset` | requires "i < cap" |
+| `PoolIn.try_grow` | 1 | `ptr_cast`, `ptr_copy`, `self.a.alloc`, `self.a.free` | requires "the two buffers hold cap entries allocated from a; the first count slots are initialized" |
+| `PoolIn.try_alloc` | 1 | `ptr_load`, `ptr_offset`, `ptr_store` | requires "the two buffers hold cap entries allocated from a; the first count slots are initialized" |
+| `PoolIn.try_alloc_with` | 1 | `ptr_init`, `ptr_load`, `ptr_offset`, `ptr_store` | requires "the two buffers hold cap entries allocated from a; the first count slots are initialized; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" |
+| `PoolIn.try_alloc_with_ctx` | 1 | `ptr_init_ctx`, `ptr_load`, `ptr_offset`, `ptr_store` | requires "the two buffers hold cap entries allocated from a; the first count slots are initialized; init initializes the whole T through out on Ok and leaves the storage uninitialized on Err" |
+| `PoolIn.check` | 1 | `ptr_load` | requires "the two buffers hold cap entries; the first count slots are initialized" |
+| `PoolIn.get` | 1 | `ptr_view` | requires "data addresses cap slots; slot idx holds a live element after check" |
+| `PoolIn.at` | 1 | `ptr_edit` | requires "data addresses cap slots; slot idx holds a live element after check" |
+| `PoolIn.get2` | 1 | `ptr_edit2` | invariant "a != b is checked at runtime; the two accesses are disjoint" |
+| `PoolIn.free` | 1 | `ptr_load`, `ptr_offset`, `ptr_store`, `ptr_take` | requires "data addresses cap slots; slot idx holds a live element after check" |
+| `PoolIn.release` | 1 | `ptr_cast`, `ptr_load`, `ptr_take`, `self.a.free` | requires "the two buffers hold cap entries allocated from a; the first count slots are initialized" |
 | `Pool.meta_at` | 1 | `ptr_cast`, `ptr_offset` | requires "i < cap" |
 | `Pool.elem_at` | 1 | `ptr_cast`, `ptr_offset` | requires "i < cap" |
 | `Pool.grow` | 1 | `heap_free`, `heap_try_alloc`, `heap_try_realloc`, `ptr_addr`, `ptr_cast`, `ptr_copy` | requires "the two buffers hold cap entries; the first count slots are initialized" |
@@ -133,8 +154,8 @@ are met by the C runtime (`runtime/hosted/src/kern_rt.c`) and the interpreter:
 | `unsafe assert Interior for Mutex` | `lock` is runtime-exclusive escalation (Rule 5.3.6): one holder at a time, recursive acquisition traps `explicit` (natively the runtime's own parking lock, whose owner word only the holder writes and which a thread finding its own id in traps before any wait, `docs/reports/perf-gaps.md`; the owner thread identifier in the interpreter) | `tests/concurrency/mutex_counter.kern`, `tests/concurrency/mutex_parked.kern`, `tests/trap/mutex_recursive.kern`, `tests/native_test.go` (`TestNativeStackTrapUnderMutexWithHandler`) |
 | `unsafe assert Interior for Shared` | clones and drops update the count atomically (compare-exchange loop natively); overflow traps `overflow` | `tests/trap/overflow.kern` family (`testing.seed_shared_count`), `tests/concurrency/shared_handoff.kern` |
 
-`std/map` (`std/map.kern`) has two unsafe blocks, both for the cursor
-protocol's two-name `for` (spec/types.md §7):
+`std/map` (`std/map.kern`) has two unsafe blocks in `Map`, both for the
+cursor protocol's two-name `for` (spec/types.md §7):
 
 | Function | Blocks | Raw operations | Contract |
 |---|---|---|---|
@@ -147,6 +168,36 @@ layout (the tag at offset 0, the payload at its alignment); `Option[T]`
 has no other variant with a payload, so the payload alignment is `T`'s.
 Exercised by `tests/run/for_cursor.kern` (Copy and `String` keys and
 values, an edit of each value, tombstones, an empty map) in both engines.
+
+`map.MapIn` (`specs/map-in`) keeps its table in three buffers from its
+allocator, so its slot accessors, rebuild and release are raw-memory code
+(21 unsafe blocks in `std/map.kern` in all, counting the two above):
+
+| Function | Blocks | Raw operations | Contract |
+|---|---|---|---|
+| `map.probe_in` | 1 | `ptr_load`, `ptr_offset`, `ptr_view` | requires "states and keys address 2^bits slots; a full slot holds an initialized key; some slot is empty" |
+| `MapIn.state` | 1 | `ptr_load`, `ptr_offset` | requires "i < cap; states addresses cap bytes" |
+| `MapIn.key_ptr` | 1 | `ptr_offset` | requires "i < cap; keys addresses cap keys" |
+| `MapIn.val_ptr` | 1 | `ptr_offset` | requires "i < cap; vals addresses cap values" |
+| `MapIn.slot` | 1 | `map.probe_in` | requires "cap > 0: the three buffers address cap slots and some slot is empty" |
+| `MapIn.try_rebuild` | 1 | `ptr_cast`, `ptr_offset`, `ptr_store`, `ptr_take`, `self.a.alloc`, `self.a.free` | requires "the three buffers address cap slots allocated from a; full slots hold initialized entries" |
+| `MapIn.free_table` | 1 | `ptr_cast`, `self.a.free` | requires "the three buffers address cap slots allocated from a; no slot holds a live entry the caller still needs" |
+| `MapIn.place` | 1 | `ptr_offset`, `ptr_store`, `ptr_take` | requires "cap > 0 and the table has a free slot within its 3/4 load" |
+| `MapIn.get` | 1 | `ptr_view` | requires "a full slot holds an initialized value" |
+| `MapIn.at` | 1 | `ptr_edit` | requires "a full slot holds an initialized value" |
+| `MapIn.key_at` | 1 | `ptr_view` | requires "a full slot holds an initialized key" |
+| `MapIn.value_at` | 1 | `ptr_view` | requires "a full slot holds an initialized value" |
+| `MapIn.value_at_mut` | 1 | `ptr_edit` | requires "a full slot holds an initialized value" |
+| `MapIn.remove` | 1 | `ptr_offset`, `ptr_store`, `ptr_take` | requires "a full slot holds an initialized entry" |
+| `MapIn.cursor_entry` | 1 | `ptr_view2` | invariant "the position is checked live, so the key and the value are initialized; they are in distinct buffers, so the accesses are disjoint" |
+| `MapIn.cursor_entry_mut` | 1 | `ptr_view_edit` | invariant "the position is checked live, so the key and the value are initialized; they are in distinct buffers, so the accesses are disjoint" |
+| `MapIn.each` | 1 | `ptr_view2` | requires "full slots hold initialized entries" |
+| `MapIn.each_mut` | 1 | `ptr_view_edit` | requires "full slots hold initialized entries" |
+| `MapIn.release` | 1 | `ptr_take` | requires "the three buffers address cap slots allocated from a; full slots hold initialized entries" |
+
+Exercised by `tests/run/{map_in,map_in_diff}.kern` and
+`tests/freestanding/map_in.kern`, over budget allocators that trap on a
+`free` naming no live allocation, in both engines.
 
 ## Benchmarks (`bench/kern/`)
 

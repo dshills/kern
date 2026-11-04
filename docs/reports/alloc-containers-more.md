@@ -59,7 +59,8 @@ again: `docs/reports/two-phase-edit.md`.)
 These are recorded in `docs/reports/alloc-containers.md`:
 - **More `In` forms:** the `alloc_with` forms and `get2`, and
   allocator-generic `String` and `Map` (`Map`: `map.MapIn` since
-  `docs/reports/map-in.md`).
+  `docs/reports/map-in.md`; the `try_alloc_with` forms and `get2` since
+  `docs/reports/in-forms.md`).
 - **`realloc` in the interface:** a new interface method breaks every
   user allocator, which is the owner's decision.
 - **Sharing one allocator** between containers.

@@ -97,6 +97,19 @@ func mapins() -> Result[(), AllocErr] {
     m.release()
     return Ok(())
 }
+// informs calls the construct-in-place forms and get2 of ArenaIn and
+// PoolIn (specs/in-forms R5)
+func informs() -> Result[(), AllocOrInit[()]] {
+    c := 3u64
+    a := ArenaIn[u64, SystemAllocator].new_in(SystemAllocator.new())
+    x := a.try_alloc_with(init_n)?
+    y := a.try_alloc_with_ctx(init_c, c)?
+    p := PoolIn[u64, SystemAllocator].new_in(SystemAllocator.new())
+    i := p.try_alloc_with(init_n)?
+    j := p.try_alloc_with_ctx(init_c, c)?
+    with g, h := p.get2(i, j) { g = h }
+    return Ok(())
+}
 func controls() {
     b := Box.new(1u64)
     m := map.Map[u64, u64].new()
@@ -129,6 +142,7 @@ func main() -> i32 {
     use(with_cap())
     use(boxes())
     use_with(boxes_with())
+    use_with(informs())
     use(strings())
     use(allocin())
     use(maps())
@@ -144,7 +158,8 @@ func main() -> i32 {
 // apart) whose effect summaries, reach no oom trap: the try_ forms
 // (specs/fallible-alloc), every BoxIn and VecIn method except the
 // destructors, which only call release, and the seed_len test hook
-// (specs/alloc-containers R5), and the Map forms (specs/effect-trap-kinds).
+// (specs/alloc-containers R5), the Map forms (specs/effect-trap-kinds),
+// every MapIn method (specs/map-in) and PoolIn.get2 (specs/in-forms).
 var fallibleForms = []string{
 	"Box.try_new",
 	"Vec.try_with_capacity", "Vec.try_reserve", "Vec.try_push", "Vec.try_extend", "Vec.try_resize",
@@ -163,6 +178,17 @@ var fallibleForms = []string{
 	"MapIn.key_at", "MapIn.value_at", "MapIn.value_at_mut", "MapIn.remove", "MapIn.live_from",
 	"MapIn.cursor_first", "MapIn.cursor_next", "MapIn.cursor_end", "MapIn.cursor_entry",
 	"MapIn.cursor_entry_mut", "MapIn.release", "map.probe_in",
+	"PoolIn.get2",
+}
+
+// withForms call the caller's initializer through a function value, so
+// their effect summaries are element code's (label unknown) and only their
+// own code is checked for oom: Box's (specs/fallible-alloc) and the In
+// containers' (specs/in-forms R5).
+var withForms = []string{
+	"Box.try_new_with", "Box.try_new_with_ctx",
+	"ArenaIn.try_alloc_with", "ArenaIn.try_alloc_with_ctx",
+	"PoolIn.try_alloc_with", "PoolIn.try_alloc_with_ctx",
 }
 
 // plainName drops the type-argument lists of a lowered function's name, so
@@ -250,7 +276,7 @@ func TestTryFormsReachNoOOMTrap(t *testing.T) {
 			t.Errorf("control: no oom trap reached from %s", name)
 		}
 	}
-	want := append([]string{"Box.try_new_with", "Box.try_new_with_ctx"}, fallibleForms...)
+	want := append(append([]string{}, withForms...), fallibleForms...)
 	for _, w := range want {
 		if len(roots[w]) == 0 {
 			var names []string
@@ -313,10 +339,23 @@ func TestFallibleFormsListNoOOM(t *testing.T) {
 	// the _with forms call the caller's initializer through a function
 	// value, so their summaries are every kind with label unknown (element
 	// code); their own code is TestTryFormsReachNoOOMTrap's
+	isWith := map[string]bool{}
+	for _, w := range withForms {
+		isWith[w] = true
+	}
+	seenWith := map[string]bool{}
 	for _, f := range analysis.Effects(mod, "").Functions {
 		n := plainName(f.Name)
-		if (n == "Box.try_new_with" || n == "Box.try_new_with_ctx") && f.Label != diag.LabelUnknown {
-			t.Errorf("%s: label %s, want unknown", n, f.Label)
+		if isWith[n] {
+			seenWith[n] = true
+			if f.Label != diag.LabelUnknown {
+				t.Errorf("%s: label %s, want unknown", n, f.Label)
+			}
+		}
+	}
+	for _, w := range withForms {
+		if !seenWith[w] {
+			t.Errorf("%s has no effect summary", w)
 		}
 	}
 	for _, w := range []string{"Box.new", "Vec.push", "Map.insert", "Map.reserve"} {

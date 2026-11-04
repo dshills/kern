@@ -1,0 +1,77 @@
+arena
+  len 10
+  drop tok 99
+  init error
+  drop tok 98
+  init error
+  len after failures 10
+  sum 73850
+  drop node 9
+  drop tok 900
+  drop node 8
+  drop tok 800
+  drop node 7
+  drop tok 700
+  drop node 6
+  drop tok 600
+  drop node 5
+  drop tok 500
+  drop node 7
+  drop tok 70
+  drop node 7
+  drop tok 70
+  drop node 7
+  drop tok 70
+  drop node 7
+  drop tok 70
+  drop node 7
+  drop tok 70
+released
+  budget live 0 bytes 0 calls 2
+pool
+  drop node 7
+  drop tok 70
+  drop node 6
+  drop tok 600
+  len after two frees 8
+  drop tok 99
+  init error
+  len 8
+  reused slot 6 gen 1
+  drop tok 97
+  init error
+  reused slot 2 gen 1
+  len 10
+  sum 79350
+  drop node 9
+  drop tok 900
+  drop node 8
+  drop tok 800
+  drop node 7
+  drop tok 700
+  drop node 7
+  drop tok 70
+  drop node 5
+  drop tok 500
+  drop node 7
+  drop tok 70
+  drop node 7
+  drop tok 70
+  drop node 11
+  drop tok 1100
+  drop node 7
+  drop tok 70
+  drop node 7
+  drop tok 70
+released
+  budget live 0 bytes 0 calls 4
+arena refused
+  alloc error
+  alloc error
+  len 0
+  budget live 0 bytes 0 calls 2
+pool refused
+  alloc error
+  alloc error
+  len 0
+  budget live 0 bytes 0 calls 2
