@@ -1,0 +1,157 @@
+//! phase: 3
+//! expect: output arenain_poolin
+// ArenaIn and PoolIn allocate only through the allocator they hold, free
+// each allocation once with its own size and alignment, and are fallible
+// throughout (specs/alloc-containers-more R1-R3): an arena and a pool
+// grown through several reallocations and released end with no live
+// allocation; a pool reuses freed slots, the most recently freed first;
+// an exhausted budget gives Err with the value destroyed once and the
+// container intact; a pool whose slot buffer is refused after its free
+// list was granted frees the free list (growth is transactional).
+module run
+// Budget is the fixture's user allocator: it serves requests from the
+// system allocator until its byte budget is spent, then returns
+// Err(OutOfMemory). It counts alloc calls, live allocations and live
+// bytes, and checks that each free names a live allocation with the same
+// size and alignment (an explicit trap otherwise). With trace set it
+// prints every alloc and free.
+struct Budget nocopy { left: usize; calls: usize; live: usize; bytes: usize; trace: bool; n: usize; ptrs: [64]usize; sizes: [64]usize; aligns: [64]usize }
+func budget(left: usize, trace: bool) -> Budget {
+    return Budget { left: left, calls: 0usize, live: 0usize, bytes: 0usize, trace: trace, n: 0usize, ptrs: zero(), sizes: zero(), aligns: zero() }
+}
+impl Allocator for Budget {
+    contract { requires "size and align meet the allocator obligations of spec §6" }
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] {
+        self.calls = self.calls + 1usize
+        if size > self.left {
+            if self.trace { print_str("  alloc "); print_u64(u64(size)); print_str(" refused"); println() }
+            return Err(OutOfMemory)
+        }
+        if self.n == 64usize { trap() }
+        sys := SystemAllocator.new()
+        unsafe {
+            match sys.alloc(size, align) {
+                Ok(p) => {
+                    self.ptrs[self.n] = ptr_addr(p)
+                    self.sizes[self.n] = size
+                    self.aligns[self.n] = align
+                    self.n = self.n + 1usize
+                    self.left = self.left - size
+                    self.live = self.live + 1usize
+                    self.bytes = self.bytes + size
+                    if self.trace { print_str("  alloc "); print_u64(u64(size)); print_str(" align "); print_u64(u64(align)); println() }
+                    return Ok(p)
+                }
+                Err(e) => return Err(OutOfMemory)
+            }
+        }
+    }
+    contract { requires "ptr, size and align are those of one live allocation of this Budget" }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) {
+        unsafe {
+            a := ptr_addr(ptr)
+            i := 0usize
+            while i < self.n && self.ptrs[i] != a { i = i + 1usize }
+            if i == self.n || self.sizes[i] != size || self.aligns[i] != align { trap() }
+            self.n = self.n - 1usize
+            self.ptrs[i] = self.ptrs[self.n]
+            self.sizes[i] = self.sizes[self.n]
+            self.aligns[i] = self.aligns[self.n]
+            self.left = self.left + size
+            self.live = self.live - 1usize
+            self.bytes = self.bytes - size
+            if self.trace { print_str("  free "); print_u64(u64(size)); print_str(" align "); print_u64(u64(align)); println() }
+            sys := SystemAllocator.new()
+            sys.free(ptr, size, align)
+        }
+    }
+}
+func counters(b: view[Budget]) {
+    print_str("  budget live "); print_u64(u64(b.live)); print_str(" bytes "); print_u64(u64(b.bytes))
+    print_str(" calls "); print_u64(u64(b.calls)); println()
+}
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("  drop tok "); print_u64(self.id); println() }
+}
+func arena() {
+    print_str("arena"); println()
+    a := ArenaIn[u64, Budget].new_in(budget(100000usize, true))
+    var ids: [20]ArenaId[u64] = zero()
+    for i in 0usize..20usize {
+        match a.try_alloc(u64(i) * 5u64) {
+            Ok(id) => ids[i] = id
+            Err(e) => { print_str("unexpected"); println() }
+        }
+    }
+    sum := 0u64
+    for i in 0usize..20usize {
+        with g := a.get(ids[i]) { sum = sum + g }
+    }
+    with g := a.at(ids[3]) { g = 1000u64 }
+    with g := a.get(ids[3]) { sum = sum + g }
+    print_str("  len "); print_u64(u64(a.len())); print_str(" sum "); print_u64(sum); println()
+    a.release()
+    print_str("released"); println()
+    with b := a.allocator() { counters(b) }
+}
+func pool() {
+    print_str("pool"); println()
+    p := PoolIn[u64, Budget].new_in(budget(100000usize, true))
+    var ids: [20]PoolId[u64] = zero()
+    for i in 0usize..20usize {
+        match p.try_alloc(u64(i)) {
+            Ok(id) => ids[i] = id
+            Err(e) => { print_str("unexpected"); println() }
+        }
+    }
+    p.free(ids[4])
+    p.free(ids[9])
+    print_str("  len after two frees "); print_u64(u64(p.len())); println()
+    // the most recently freed slot is reused first, with a new generation
+    match p.try_alloc(900u64) {
+        Ok(id) => {
+            print_str("  reused slot "); print_u64(u64(id.index)); print_str(" gen "); print_u64(u64(id.gen)); println()
+            with g := p.get(id) { print_str("  value "); print_u64(g); println() }
+        }
+        Err(e) => { print_str("unexpected"); println() }
+    }
+    sum := 0u64
+    for i in 0usize..20usize {
+        if i != 4usize && i != 9usize {
+            with g := p.get(ids[i]) { sum = sum + g }
+        }
+    }
+    print_str("  len "); print_u64(u64(p.len())); print_str(" sum "); print_u64(sum); println()
+    p.release()
+    print_str("released"); println()
+    with b := p.allocator() { counters(b) }
+}
+func exhausted() {
+    print_str("arena exhausted"); println()
+    // 8 Toks fit the first buffer (64 bytes); growing to 16 needs 128
+    a := ArenaIn[Tok, Budget].new_in(budget(100usize, true))
+    for i in 0u64..9u64 {
+        match a.try_alloc(Tok { id: i }) {
+            Ok(id) => { }
+            Err(e) => { print_str("  out of memory at "); print_u64(i); println() }
+        }
+    }
+    print_str("  len "); print_u64(u64(a.len())); println()
+    a.release()
+    with b := a.allocator() { counters(b) }
+    print_str("pool exhausted"); println()
+    // the free list (32 bytes) is granted, the slot buffer (128) refused
+    p := PoolIn[Tok, Budget].new_in(budget(100usize, true))
+    match p.try_alloc(Tok { id: 50u64 }) {
+        Ok(id) => { print_str("unexpected"); println() }
+        Err(e) => { print_str("  out of memory"); println() }
+    }
+    with b := p.allocator() { counters(b) }
+}
+func main() -> i32 {
+    arena()
+    pool()
+    exhausted()
+    return 0i32
+}

@@ -1,0 +1,23 @@
+//! phase: 3
+//! expect: trap generation
+// A PoolIn slot freed and reused has a new generation: the old handle
+// traps generation, as Pool's does (specs/alloc-containers-more R2).
+module t
+func run() -> Result[u64, AllocErr] {
+    p := PoolIn[u64, SystemAllocator].new_in(SystemAllocator.new())
+    a := p.try_alloc(1u64)?
+    p.free(a)
+    b := p.try_alloc(2u64)?
+    with g := p.get(b) { print_u64(g) }
+    println()
+    with g := p.get(a) { print_u64(g) }
+    print_str("after the trap")
+    return Ok(0u64)
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => { }
+        Err(e) => { print_str("out of memory") }
+    }
+    return 0i32
+}

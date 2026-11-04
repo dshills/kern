@@ -1,0 +1,52 @@
+arena
+  alloc 64 align 8
+  alloc 128 align 8
+  free 64 align 8
+  alloc 256 align 8
+  free 128 align 8
+  len 20 sum 1950
+  free 256 align 8
+released
+  budget live 0 bytes 0 calls 3
+pool
+  alloc 32 align 4
+  alloc 128 align 8
+  alloc 64 align 4
+  alloc 256 align 8
+  free 128 align 8
+  free 32 align 4
+  alloc 128 align 4
+  alloc 512 align 8
+  free 256 align 8
+  free 64 align 4
+  len after two frees 18
+  reused slot 9 gen 1
+  value 900
+  len 19 sum 177
+  free 512 align 8
+  free 128 align 4
+released
+  budget live 0 bytes 0 calls 6
+arena exhausted
+  alloc 64 align 8
+  alloc 128 refused
+  drop tok 8
+  out of memory at 8
+  len 8
+  drop tok 7
+  drop tok 6
+  drop tok 5
+  drop tok 4
+  drop tok 3
+  drop tok 2
+  drop tok 1
+  drop tok 0
+  free 64 align 8
+  budget live 0 bytes 0 calls 2
+pool exhausted
+  alloc 32 align 4
+  alloc 128 refused
+  free 32 align 4
+  drop tok 50
+  out of memory
+  budget live 0 bytes 0 calls 2

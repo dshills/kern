@@ -74,7 +74,9 @@ raw count of blocks in `std/core.kern` is 71, up from 57).
 
 ## Open items
 
-- `PoolIn`, `ArenaIn`, an allocator-generic `String` and `Map`.
+- `PoolIn`, `ArenaIn`, an allocator-generic `String` and `Map`. *(2026-11-04:
+  `PoolIn` and `ArenaIn` exist, `docs/reports/alloc-containers-more.md`;
+  their `alloc_with` forms, `get2`, `String` and `Map` remain.)*
 - Sharing one allocator between containers: today through a handle type;
   an `impl Allocator for Shared[Mutex[A]]` would make it a library type.
 - A failed `BoxIn.try_new_in` destroys the allocator it was given; with
