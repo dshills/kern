@@ -70,12 +70,38 @@ func allocin() -> Result[(), AllocErr] {
 func maps() -> Result[(), AllocErr] {
     m := map.Map[u64, u64].try_new()?
     o := m.try_insert(1u64, 2u64)?
+    m.try_reserve(4usize)?
+    return Ok(())
+}
+func mapins() -> Result[(), AllocErr] {
+    m := map.MapIn[u64, u64, SystemAllocator].new_in(SystemAllocator.new())
+    m.try_reserve(4usize)?
+    o := m.try_insert(1u64, 2u64)?
+    k := 1u64
+    n := m.len()
+    with a := m.allocator() { }
+    b := m.contains(1u64)
+    with g := m.get(1u64) { x := g }
+    with g := m.at(1u64) { g = 3u64 }
+    match m.find(k) {
+        Some(s) => {
+            with g := m.key_at(s) { x := g }
+            with g := m.value_at(s) { x := g }
+            with g := m.value_at_mut(s) { g = 4u64 }
+        }
+        None => { }
+    }
+    for kk, vv in m { x := kk }
+    with kk, vv := m.cursor_entry_mut(m.cursor_first()) { vv = 5u64 }
+    r := m.remove(1u64)
+    m.release()
     return Ok(())
 }
 func controls() {
     b := Box.new(1u64)
     m := map.Map[u64, u64].new()
     o := m.insert(1u64, 2u64)
+    m.reserve(8usize)
 }
 func use_with(r: Result[(), AllocOrInit[()]]) {
     match r {
@@ -106,6 +132,7 @@ func main() -> i32 {
     use(strings())
     use(allocin())
     use(maps())
+    use(mapins())
     controls()
     v.push(3u64)
     return 0i32
@@ -126,7 +153,16 @@ var fallibleForms = []string{
 	"VecIn.new_in", "VecIn.len", "VecIn.capacity", "VecIn.allocator", "VecIn.try_reserve",
 	"VecIn.try_push", "VecIn.try_extend", "VecIn.pop", "VecIn.get", "VecIn.at",
 	"VecIn.as_view", "VecIn.as_edit", "VecIn.clear", "VecIn.release",
-	"Map.try_new", "Map.try_insert",
+	"Map.try_new", "Map.try_insert", "Map.try_reserve",
+	// every MapIn method but the destructor (specs/map-in R6): each and
+	// each_mut call the caller's closure, so their summaries are element
+	// code's and are left out as the _with constructors' are
+	"MapIn.new_in", "MapIn.len", "MapIn.allocator", "MapIn.state", "MapIn.key_ptr", "MapIn.val_ptr",
+	"MapIn.slot", "MapIn.try_rebuild", "MapIn.free_table", "MapIn.try_reserve", "MapIn.try_insert",
+	"MapIn.place", "MapIn.contains", "MapIn.get", "MapIn.at", "MapIn.find", "MapIn.check_slot",
+	"MapIn.key_at", "MapIn.value_at", "MapIn.value_at_mut", "MapIn.remove", "MapIn.live_from",
+	"MapIn.cursor_first", "MapIn.cursor_next", "MapIn.cursor_end", "MapIn.cursor_entry",
+	"MapIn.cursor_entry_mut", "MapIn.release", "map.probe_in",
 }
 
 // plainName drops the type-argument lists of a lowered function's name, so
@@ -283,7 +319,7 @@ func TestFallibleFormsListNoOOM(t *testing.T) {
 			t.Errorf("%s: label %s, want unknown", n, f.Label)
 		}
 	}
-	for _, w := range []string{"Box.new", "Vec.push", "Map.insert"} {
+	for _, w := range []string{"Box.new", "Vec.push", "Map.insert", "Map.reserve"} {
 		all := find(w)
 		if len(all) == 0 {
 			t.Errorf("control %s has no effect summary", w)

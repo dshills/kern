@@ -1,0 +1,220 @@
+//! phase: 6
+//! expect: output map_in
+// MapIn allocates its table only through the allocator it holds, three
+// allocations per table (states, keys, values, each with its own size and
+// alignment), frees each once with its own size and alignment, and is
+// fallible throughout (specs/map-in R2, R3). The Budget allocator traps
+// on any free that does not match a live allocation.
+// - growth through three rebuilds, removes, tombstone reuse and a
+//   same-size rebuild, then release: no live allocation;
+// - keys and values destroyed once each: remove destroys the key and
+//   returns the value; release destroys key then value; a map destroyed
+//   with entries releases them, then its allocator;
+// - a try_insert whose rebuild is refused at the states, the keys or the
+//   values: the granted allocations are freed in reverse order, key and
+//   then value are destroyed, and the map is as it was; the same for a
+//   try_reserve, and try_reserve(2^62) makes no allocation call.
+module run
+import "std/map"
+// Budget is the fixture's user allocator: it serves requests from the
+// system allocator until its byte budget is spent, then returns
+// Err(OutOfMemory). It counts alloc calls, live allocations and live
+// bytes, and checks that each free names a live allocation with the same
+// size and alignment (an explicit trap otherwise). With trace set it
+// prints every alloc and free.
+struct Budget nocopy { left: usize; calls: usize; live: usize; bytes: usize; trace: bool; n: usize; ptrs: [64]usize; sizes: [64]usize; aligns: [64]usize }
+func budget(left: usize, trace: bool) -> Budget {
+    return Budget { left: left, calls: 0usize, live: 0usize, bytes: 0usize, trace: trace, n: 0usize, ptrs: zero(), sizes: zero(), aligns: zero() }
+}
+impl Allocator for Budget {
+    contract { requires "size and align meet the allocator obligations of spec §6" }
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] {
+        self.calls = self.calls + 1usize
+        if size > self.left {
+            if self.trace { print_str("  alloc "); print_u64(u64(size)); print_str(" refused"); println() }
+            return Err(OutOfMemory)
+        }
+        if self.n == 64usize { trap() }
+        sys := SystemAllocator.new()
+        unsafe {
+            match sys.alloc(size, align) {
+                Ok(p) => {
+                    self.ptrs[self.n] = ptr_addr(p)
+                    self.sizes[self.n] = size
+                    self.aligns[self.n] = align
+                    self.n = self.n + 1usize
+                    self.left = self.left - size
+                    self.live = self.live + 1usize
+                    self.bytes = self.bytes + size
+                    if self.trace { print_str("  alloc "); print_u64(u64(size)); print_str(" align "); print_u64(u64(align)); println() }
+                    return Ok(p)
+                }
+                Err(e) => return Err(OutOfMemory)
+            }
+        }
+    }
+    contract { requires "ptr, size and align are those of one live allocation of this Budget" }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) {
+        unsafe {
+            a := ptr_addr(ptr)
+            i := 0usize
+            while i < self.n && self.ptrs[i] != a { i = i + 1usize }
+            if i == self.n || self.sizes[i] != size || self.aligns[i] != align { trap() }
+            self.n = self.n - 1usize
+            self.ptrs[i] = self.ptrs[self.n]
+            self.sizes[i] = self.sizes[self.n]
+            self.aligns[i] = self.aligns[self.n]
+            self.left = self.left + size
+            self.live = self.live - 1usize
+            self.bytes = self.bytes - size
+            if self.trace { print_str("  free "); print_u64(u64(size)); print_str(" align "); print_u64(u64(align)); println() }
+            sys := SystemAllocator.new()
+            sys.free(ptr, size, align)
+        }
+    }
+}
+impl Budget {
+    // the budget's own destruction shows what is still allocated when the
+    // map holding it is destroyed
+    destructor(edit self) {
+        print_str("  budget destroyed live "); print_u64(u64(self.live)); print_str(" bytes "); print_u64(u64(self.bytes)); println()
+    }
+}
+func counters(b: view[Budget]) {
+    print_str("  budget live "); print_u64(u64(b.live)); print_str(" bytes "); print_u64(u64(b.bytes))
+    print_str(" calls "); print_u64(u64(b.calls)); println()
+}
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("  drop tok "); print_u64(self.id); println() }
+}
+impl map.Hashable for Tok {
+    func hash(view self) -> u64 { return map.mix(self.id) }
+    func eq(view self, other: view[Tok]) -> bool { return self.id == other.id }
+}
+// sum is a checksum of the entries in slot order.
+func sum(m: view[map.MapIn[u64, u64, Budget]]) -> u64 {
+    h := 0u64
+    for k, v in m { h = wrapping_add(wrapping_mul(h, 1000003u64), k * 7u64 + v) }
+    return h
+}
+func show(m: view[map.MapIn[u64, u64, Budget]]) {
+    print_str("  len "); print_u64(u64(m.len())); print_str(" sum "); print_u64(sum(m)); println()
+    with b := m.allocator() { counters(b) }
+}
+func put(m: edit[map.MapIn[u64, u64, Budget]], k: u64, v: u64) {
+    match m.try_insert(k, v) {
+        Ok(o) => { }
+        Err(e) => { print_str("  unexpected out of memory"); println() }
+    }
+}
+// tput inserts Tok keys and values: the Result is consumed by ?, since an
+// owned Option[Tok] cannot be matched in place.
+func tput(m: edit[map.MapIn[Tok, Tok, Budget]], k: u64, v: u64) -> Result[(), AllocErr] {
+    o := m.try_insert(Tok { id: k }, Tok { id: v })?
+    return Ok(())
+}
+func report(r: Result[(), AllocErr]) {
+    match r {
+        Ok(u) => { print_str("  ok"); println() }
+        Err(e) => { print_str("  err out of memory"); println() }
+    }
+}
+func grow() {
+    print_str("growth"); println()
+    m := map.MapIn[u64, u64, Budget].new_in(budget(1000000usize, true))
+    print_str(" 60 inserts"); println()
+    for k in 0u64..60u64 { put(m, k, k * k) }
+    show(m)
+    print_str(" 50 removes, a removed key put back"); println()
+    for k in 0u64..50u64 {
+        match m.remove(k) {
+            Some(v) => { }
+            None => { print_str("  missing"); println() }
+        }
+    }
+    put(m, 3u64, 33u64)
+    show(m)
+    print_str(" fresh keys inserted and removed until a same-size rebuild"); println()
+    // each fresh key takes an empty slot or a tombstone, so the slots in
+    // use grow while the entries stay at 11: the rebuild keeps 128 slots
+    for k in 1000u64..1200u64 {
+        put(m, k, k)
+        match m.remove(k) {
+            Some(v) => { }
+            None => { print_str("  missing"); println() }
+        }
+    }
+    show(m)
+    print_str(" new keys"); println()
+    for k in 100u64..140u64 { put(m, k, k) }
+    show(m)
+    three := 3u64
+    match m.find(three) {
+        Some(s) => { with v := m.value_at(s) { print_str("  value of 3 "); print_u64(v); println() } }
+        None => { print_str("  3 missing"); println() }
+    }
+    with v := m.at(105u64) { v = 1u64 }
+    with v := m.get(105u64) { print_str("  value of 105 "); print_u64(v); println() }
+    print_str(" release"); println()
+    m.release()
+    show(m)
+}
+func lifecycle() {
+    print_str("lifecycle"); println()
+    m := map.MapIn[Tok, Tok, Budget].new_in(budget(1000000usize, false))
+    for i in 1u64..4u64 { report(tput(m, i, i * 100u64)) }
+    // remove takes its key by value: the key passed is destroyed after
+    // the lookup, then the stored key, and the value is returned
+    print_str(" remove 2"); println()
+    got := m.remove(Tok { id: 2u64 })
+    match got {
+        Some(v) => { print_str("  got "); print_u64(v.id); println() }
+        None => { print_str("  missing"); println() }
+    }
+    print_str(" release"); println()
+    m.release()
+    with b := m.allocator() { counters(b) }
+    print_str(" a map destroyed with entries"); println()
+    n := map.MapIn[Tok, Tok, Budget].new_in(budget(1000000usize, false))
+    report(tput(n, 7u64, 700u64))
+}
+// refused fills a map of Tok to Tok to 11 entries (one table of 16 slots:
+// 16 + 128 + 128 bytes) with a budget extra bytes larger, then inserts a
+// twelfth entry, whose rebuild to 32 slots needs 32 + 256 + 256 bytes.
+func refused(name: view[]u8, extra: usize) {
+    print_str("try_insert refused at the "); print_str(name); println()
+    m := map.MapIn[Tok, Tok, Budget].new_in(budget(272usize + extra, true))
+    for i in 0u64..11u64 {
+        match tput(m, i, i + 1000u64) {
+            Ok(u) => { }
+            Err(e) => { print_str("  unexpected"); println() }
+        }
+    }
+    with b := m.allocator() { counters(b) }
+    report(tput(m, 50u64, 1050u64))
+    print_str("  len "); print_u64(u64(m.len())); println()
+    with b := m.allocator() { counters(b) }
+    if extra == 400usize {
+        print_str(" try_reserve 20 refused at the keys"); println()
+        report(m.try_reserve(20usize))
+        with b := m.allocator() { counters(b) }
+        print_str(" try_reserve 2^62"); println()
+        report(m.try_reserve(4611686018427387904usize))
+        with b := m.allocator() { counters(b) }
+        sum := 0u64
+        for k, v in m { sum = sum + k.id * 3u64 + v.id }
+        print_str("  entries "); print_u64(sum); println()
+    }
+    print_str(" release"); println()
+    m.release()
+    with b := m.allocator() { counters(b) }
+}
+func main() -> i32 {
+    grow()
+    lifecycle()
+    refused("states", 20usize)
+    refused("keys", 100usize)
+    refused("values", 400usize)
+    return 0i32
+}

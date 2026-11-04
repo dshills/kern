@@ -1,0 +1,7 @@
+refused at insert 96
+len 95
+found 95 sum 13395
+len after removes 47
+  budget live 3 bytes 2176 calls 14
+  budget live 0 bytes 0 calls 14
+{"halt":{"code":0}}

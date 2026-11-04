@@ -1,6 +1,10 @@
 package resolve
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/dshills/kern/compiler/source"
+)
 
 func TestIdenticalAndSubst(t *testing.T) {
 	u64 := &Prim{Name: "u64"}
@@ -108,7 +112,7 @@ func TestAllocContainerMarkers(t *testing.T) {
 		{"Share", IsShare, u64, raw},
 		{"Interior", IsInterior, atomic, u64},
 	}
-	for _, cname := range []string{"BoxIn", "VecIn"} {
+	for _, cname := range []string{"BoxIn", "VecIn", "ArenaIn", "PoolIn"} {
 		decl := prog.Core.Types[cname]
 		if decl == nil {
 			t.Fatalf("%s not declared", cname)
@@ -129,6 +133,57 @@ func TestAllocContainerMarkers(t *testing.T) {
 				if IsCopy(n) {
 					t.Errorf("%s with %s is Copy", cname, pair.label)
 				}
+			}
+		}
+	}
+}
+
+// MapIn holds its keys and values out of line and its allocator inline
+// (specs/map-in): Send and Share hold iff the key, the value and the
+// allocator all have them, Interior iff any has it, and it is never Copy.
+func TestMapInMarkers(t *testing.T) {
+	src := &source.File{Name: "m.kern", Bytes: []byte("module m\nimport \"std/map\"\nfunc main() -> i32 { return 0i32 }\n")}
+	prog := Resolve([]*source.File{src})
+	if len(prog.Diags) > 0 {
+		t.Fatalf("resolve: %s", prog.Diags[0].Message)
+	}
+	var decl *TypeDecl
+	for _, m := range prog.Modules {
+		if d := m.Types["MapIn"]; d != nil {
+			decl = d
+		}
+	}
+	if decl == nil {
+		t.Fatal("MapIn not declared")
+	}
+	u64 := &Prim{Name: "u64"}
+	raw := &RawPtr{Elem: &Prim{Name: "u8"}}
+	atomic := &Named{Decl: prog.Core.Types["Atomic"], Args: []Type{u64}}
+	for _, c := range []struct {
+		name       string
+		is         func(Type) bool
+		have, lack Type
+	}{{"Send", IsSend, u64, raw}, {"Share", IsShare, u64, raw}, {"Interior", IsInterior, atomic, u64}} {
+		for mask := 0; mask < 8; mask++ {
+			args := make([]Type, 3)
+			n := 0
+			for i := range args {
+				args[i] = c.lack
+				if mask&(1<<i) != 0 {
+					args[i] = c.have
+					n++
+				}
+			}
+			want := n == 3
+			if c.name == "Interior" {
+				want = n > 0
+			}
+			mt := &Named{Decl: decl, Args: args}
+			if got := c.is(mt); got != want {
+				t.Errorf("MapIn %s with %d of 3 having it (mask %03b): got %v, want %v", c.name, n, mask, got, want)
+			}
+			if IsCopy(mt) {
+				t.Errorf("MapIn is Copy (mask %03b)", mask)
 			}
 		}
 	}

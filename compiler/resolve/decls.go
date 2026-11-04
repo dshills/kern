@@ -1721,15 +1721,28 @@ func namedMarker(n *Named, mk marker, visiting map[string]bool) bool {
 		case markerCopy:
 			return false
 		}
-	case "core.BoxIn", "core.VecIn":
+	case "core.BoxIn", "core.VecIn", "core.ArenaIn", "core.PoolIn":
 		// the same, and they hold their allocator inline: Send and Share
 		// hold iff both the element and the allocator have them, Interior
-		// iff either has it, as for a field (specs/alloc-containers §2)
+		// iff either has it, as for a field (specs/alloc-containers §2,
+		// specs/alloc-containers-more)
 		switch mk {
 		case markerSend, markerShare:
 			return markerOf(arg(0), mk, visiting) && markerOf(arg(1), mk, visiting)
 		case markerInterior:
 			return markerOf(arg(0), mk, visiting) || markerOf(arg(1), mk, visiting)
+		case markerCopy:
+			return false
+		}
+	case "map.MapIn":
+		// keys and values out of line, the allocator inline: Send and Share
+		// iff the key, the value and the allocator all have them, Interior
+		// iff any has it (specs/map-in)
+		switch mk {
+		case markerSend, markerShare:
+			return markerOf(arg(0), mk, visiting) && markerOf(arg(1), mk, visiting) && markerOf(arg(2), mk, visiting)
+		case markerInterior:
+			return markerOf(arg(0), mk, visiting) || markerOf(arg(1), mk, visiting) || markerOf(arg(2), mk, visiting)
 		case markerCopy:
 			return false
 		}

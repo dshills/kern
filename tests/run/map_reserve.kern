@@ -1,0 +1,79 @@
+//! phase: 6
+//! expect: output map_reserve
+//! test-hooks: true
+// Map.reserve and Map.try_reserve (specs/map-in R1): after try_reserve(40)
+// on an empty map, 40 inserts each made with the next allocation armed to
+// fail never allocate (insert traps oom if it rebuilds); a reserve with
+// room makes no allocation call, so the hook is still armed afterwards and
+// the first insert that must rebuild fails; a reserve that must rebuild
+// and is refused, or that asks past usize, leaves the map as it was; and
+// reserve leaves the same table as try_reserve, so the same inserts give
+// the same slot order.
+module t
+import "std/map"
+// order is a checksum of the keys in slot order and of the values.
+func order(m: view[map.Map[u64, u64]]) -> u64 {
+    h := 0u64
+    for k, v in m { h = wrapping_add(wrapping_mul(h, 1000003u64), k * 7u64 + v) }
+    return h
+}
+func show(m: view[map.Map[u64, u64]]) {
+    print_str("  len "); print_u64(u64(m.len())); print_str(" order "); print_u64(order(m)); println()
+}
+func report(r: Result[(), AllocErr]) {
+    match r {
+        Ok(u) => { print_str("  ok"); println() }
+        Err(e) => { print_str("  err out of memory"); println() }
+    }
+}
+func ins(m: edit[map.Map[u64, u64]], k: u64, v: u64) -> Result[(), AllocErr] {
+    o := m.try_insert(k, v)?
+    return Ok(())
+}
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    print_str("try_reserve 40 on an empty map"); println()
+    report(m.try_reserve(40usize))
+    print_str("40 inserts, each with the next allocation armed to fail"); println()
+    i := 0u64
+    while i < 40u64 {
+        testing.fail_next_alloc()
+        m.insert(i, i * i)
+        i = i + 1u64
+    }
+    show(m)
+    print_str("try_reserve 5 with room: no allocation, the hook stays armed"); println()
+    report(m.try_reserve(5usize))
+    print_str("inserts until one must rebuild"); println()
+    var stop: u64 = 0u64
+    i = 40u64
+    while stop == 0u64 {
+        match ins(m, i, i * i) {
+            Ok(u) => { i = i + 1u64 }
+            Err(e) => { stop = i }
+        }
+    }
+    print_str("  refused at key "); print_u64(stop); println()
+    show(m)
+    print_str("try_reserve 10 that must rebuild, refused"); println()
+    testing.fail_next_alloc()
+    report(m.try_reserve(10usize))
+    show(m)
+    print_str("try_reserve 2^62"); println()
+    report(m.try_reserve(4611686018427387904usize))
+    show(m)
+    print_str("the same request through reserve and try_reserve"); println()
+    a := map.Map[u64, u64].new()
+    b := map.Map[u64, u64].new()
+    a.reserve(100usize)
+    report(b.try_reserve(100usize))
+    i = 0u64
+    while i < 100u64 {
+        a.insert(i * 13u64, i)
+        b.insert(i * 13u64, i)
+        i = i + 1u64
+    }
+    show(a)
+    show(b)
+    return 0i32
+}

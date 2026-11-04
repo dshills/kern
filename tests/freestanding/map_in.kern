@@ -1,0 +1,112 @@
+//! phase: 3
+//! expect: output map_in
+//! env: freestanding
+// MapIn over a user allocator on bare metal (specs/map-in R5): the budget
+// allocator of vecin.kern draws on the freestanding SystemAllocator with
+// a 4,096-byte budget. Tables of 16, 32, 64 and 128 slots fit (each needs
+// its old table alive while it is built); the 256-slot table does not, so
+// the 96th insert fails at its keys, in the emulation and on both QEMU
+// targets alike. Every entry is still found, removes work, and release
+// leaves no live allocation.
+module fs
+import "std/map"
+// Budget is the fixture's user allocator: it serves requests from the
+// system allocator until its byte budget is spent, then returns
+// Err(OutOfMemory). It counts alloc calls, live allocations and live
+// bytes, and checks that each free names a live allocation with the same
+// size and alignment (an explicit trap otherwise). With trace set it
+// prints every alloc and free.
+struct Budget nocopy { left: usize; calls: usize; live: usize; bytes: usize; trace: bool; n: usize; ptrs: [64]usize; sizes: [64]usize; aligns: [64]usize }
+func budget(left: usize, trace: bool) -> Budget {
+    return Budget { left: left, calls: 0usize, live: 0usize, bytes: 0usize, trace: trace, n: 0usize, ptrs: zero(), sizes: zero(), aligns: zero() }
+}
+impl Allocator for Budget {
+    contract { requires "size and align meet the allocator obligations of spec §6" }
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] {
+        self.calls = self.calls + 1usize
+        if size > self.left {
+            if self.trace { print_str("  alloc "); print_u64(u64(size)); print_str(" refused"); println() }
+            return Err(OutOfMemory)
+        }
+        if self.n == 64usize { trap() }
+        sys := SystemAllocator.new()
+        unsafe {
+            match sys.alloc(size, align) {
+                Ok(p) => {
+                    self.ptrs[self.n] = ptr_addr(p)
+                    self.sizes[self.n] = size
+                    self.aligns[self.n] = align
+                    self.n = self.n + 1usize
+                    self.left = self.left - size
+                    self.live = self.live + 1usize
+                    self.bytes = self.bytes + size
+                    if self.trace { print_str("  alloc "); print_u64(u64(size)); print_str(" align "); print_u64(u64(align)); println() }
+                    return Ok(p)
+                }
+                Err(e) => return Err(OutOfMemory)
+            }
+        }
+    }
+    contract { requires "ptr, size and align are those of one live allocation of this Budget" }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) {
+        unsafe {
+            a := ptr_addr(ptr)
+            i := 0usize
+            while i < self.n && self.ptrs[i] != a { i = i + 1usize }
+            if i == self.n || self.sizes[i] != size || self.aligns[i] != align { trap() }
+            self.n = self.n - 1usize
+            self.ptrs[i] = self.ptrs[self.n]
+            self.sizes[i] = self.sizes[self.n]
+            self.aligns[i] = self.aligns[self.n]
+            self.left = self.left + size
+            self.live = self.live - 1usize
+            self.bytes = self.bytes - size
+            if self.trace { print_str("  free "); print_u64(u64(size)); print_str(" align "); print_u64(u64(align)); println() }
+            sys := SystemAllocator.new()
+            sys.free(ptr, size, align)
+        }
+    }
+}
+func counters(b: view[Budget]) {
+    print_str("  budget live "); print_u64(u64(b.live)); print_str(" bytes "); print_u64(u64(b.bytes))
+    print_str(" calls "); print_u64(u64(b.calls)); println()
+}
+func main() -> i32 {
+    m := map.MapIn[u64, u64, Budget].new_in(budget(4096usize, false))
+    var stop: u64 = 0u64
+    k := 0u64
+    while stop == 0u64 {
+        match m.try_insert(k, k * 3u64) {
+            Ok(o) => { k = k + 1u64 }
+            Err(e) => { stop = k + 1u64 }
+        }
+    }
+    print_str("refused at insert "); print_u64(stop); println()
+    print_str("len "); print_u64(u64(m.len())); println()
+    found := 0u64
+    sum := 0u64
+    i := 0u64
+    while i < k {
+        if m.contains(i) {
+            found = found + 1u64
+            with v := m.get(i) { sum = sum + v }
+        }
+        i = i + 1u64
+    }
+    print_str("found "); print_u64(found); print_str(" sum "); print_u64(sum); println()
+    i = 0u64
+    while i < k {
+        if i % 2u64 == 0u64 {
+            match m.remove(i) {
+                Some(v) => { }
+                None => { print_str("missing"); println() }
+            }
+        }
+        i = i + 1u64
+    }
+    print_str("len after removes "); print_u64(u64(m.len())); println()
+    with b := m.allocator() { counters(b) }
+    m.release()
+    with b := m.allocator() { counters(b) }
+    return 0i32
+}

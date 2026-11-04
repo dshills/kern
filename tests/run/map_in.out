@@ -1,0 +1,209 @@
+growth
+ 60 inserts
+  alloc 16 align 1
+  alloc 128 align 8
+  alloc 128 align 8
+  alloc 32 align 1
+  alloc 256 align 8
+  alloc 256 align 8
+  free 128 align 8
+  free 128 align 8
+  free 16 align 1
+  alloc 64 align 1
+  alloc 512 align 8
+  alloc 512 align 8
+  free 256 align 8
+  free 256 align 8
+  free 32 align 1
+  alloc 128 align 1
+  alloc 1024 align 8
+  alloc 1024 align 8
+  free 512 align 8
+  free 512 align 8
+  free 64 align 1
+  len 60 sum 5469093971819662352
+  budget live 3 bytes 2176 calls 12
+ 50 removes, a removed key put back
+  len 11 sum 6123535685453698858
+  budget live 3 bytes 2176 calls 12
+ fresh keys inserted and removed until a same-size rebuild
+  alloc 128 align 1
+  alloc 1024 align 8
+  alloc 1024 align 8
+  free 1024 align 8
+  free 1024 align 8
+  free 128 align 1
+  alloc 128 align 1
+  alloc 1024 align 8
+  alloc 1024 align 8
+  free 1024 align 8
+  free 1024 align 8
+  free 128 align 1
+  len 11 sum 6123535685453698858
+  budget live 3 bytes 2176 calls 18
+ new keys
+  len 51 sum 14513038181205155334
+  budget live 3 bytes 2176 calls 18
+  value of 3 33
+  value of 105 1
+ release
+  free 1024 align 8
+  free 1024 align 8
+  free 128 align 1
+  len 0 sum 0
+  budget live 0 bytes 0 calls 18
+  budget destroyed live 0 bytes 0
+lifecycle
+  ok
+  ok
+  ok
+ remove 2
+  drop tok 2
+  drop tok 2
+  got 200
+ release
+  drop tok 1
+  drop tok 100
+  drop tok 3
+  drop tok 300
+  budget live 0 bytes 0 calls 3
+ a map destroyed with entries
+  ok
+  drop tok 7
+  drop tok 700
+  budget destroyed live 0 bytes 0
+  drop tok 200
+  budget destroyed live 0 bytes 0
+try_insert refused at the states
+  alloc 16 align 1
+  alloc 128 align 8
+  alloc 128 align 8
+  budget live 3 bytes 272 calls 3
+  alloc 32 refused
+  drop tok 50
+  drop tok 1050
+  err out of memory
+  len 11
+  budget live 3 bytes 272 calls 4
+ release
+  drop tok 0
+  drop tok 1000
+  drop tok 5
+  drop tok 1005
+  drop tok 10
+  drop tok 1010
+  drop tok 2
+  drop tok 1002
+  drop tok 7
+  drop tok 1007
+  drop tok 4
+  drop tok 1004
+  drop tok 9
+  drop tok 1009
+  drop tok 1
+  drop tok 1001
+  drop tok 6
+  drop tok 1006
+  drop tok 3
+  drop tok 1003
+  drop tok 8
+  drop tok 1008
+  free 128 align 8
+  free 128 align 8
+  free 16 align 1
+  budget live 0 bytes 0 calls 4
+  budget destroyed live 0 bytes 0
+try_insert refused at the keys
+  alloc 16 align 1
+  alloc 128 align 8
+  alloc 128 align 8
+  budget live 3 bytes 272 calls 3
+  alloc 32 align 1
+  alloc 256 refused
+  free 32 align 1
+  drop tok 50
+  drop tok 1050
+  err out of memory
+  len 11
+  budget live 3 bytes 272 calls 5
+ release
+  drop tok 0
+  drop tok 1000
+  drop tok 5
+  drop tok 1005
+  drop tok 10
+  drop tok 1010
+  drop tok 2
+  drop tok 1002
+  drop tok 7
+  drop tok 1007
+  drop tok 4
+  drop tok 1004
+  drop tok 9
+  drop tok 1009
+  drop tok 1
+  drop tok 1001
+  drop tok 6
+  drop tok 1006
+  drop tok 3
+  drop tok 1003
+  drop tok 8
+  drop tok 1008
+  free 128 align 8
+  free 128 align 8
+  free 16 align 1
+  budget live 0 bytes 0 calls 5
+  budget destroyed live 0 bytes 0
+try_insert refused at the values
+  alloc 16 align 1
+  alloc 128 align 8
+  alloc 128 align 8
+  budget live 3 bytes 272 calls 3
+  alloc 32 align 1
+  alloc 256 align 8
+  alloc 256 refused
+  free 256 align 8
+  free 32 align 1
+  drop tok 50
+  drop tok 1050
+  err out of memory
+  len 11
+  budget live 3 bytes 272 calls 6
+ try_reserve 20 refused at the keys
+  alloc 64 align 1
+  alloc 512 refused
+  free 64 align 1
+  err out of memory
+  budget live 3 bytes 272 calls 8
+ try_reserve 2^62
+  err out of memory
+  budget live 3 bytes 272 calls 8
+  entries 11220
+ release
+  drop tok 0
+  drop tok 1000
+  drop tok 5
+  drop tok 1005
+  drop tok 10
+  drop tok 1010
+  drop tok 2
+  drop tok 1002
+  drop tok 7
+  drop tok 1007
+  drop tok 4
+  drop tok 1004
+  drop tok 9
+  drop tok 1009
+  drop tok 1
+  drop tok 1001
+  drop tok 6
+  drop tok 1006
+  drop tok 3
+  drop tok 1003
+  drop tok 8
+  drop tok 1008
+  free 128 align 8
+  free 128 align 8
+  free 16 align 1
+  budget live 0 bytes 0 calls 8
+  budget destroyed live 0 bytes 0

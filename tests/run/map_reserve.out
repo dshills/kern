@@ -1,0 +1,19 @@
+try_reserve 40 on an empty map
+  ok
+40 inserts, each with the next allocation armed to fail
+  len 40 order 7616575746587150676
+try_reserve 5 with room: no allocation, the hook stays armed
+  ok
+inserts until one must rebuild
+  refused at key 47
+  len 47 order 446011295766827570
+try_reserve 10 that must rebuild, refused
+  err out of memory
+  len 47 order 446011295766827570
+try_reserve 2^62
+  err out of memory
+  len 47 order 446011295766827570
+the same request through reserve and try_reserve
+  ok
+  len 100 order 14704492915052810296
+  len 100 order 14704492915052810296

@@ -1,0 +1,78 @@
+//! phase: 6
+//! expect: output map_in_diff
+// MapIn and Map agree (specs/map-in R4): 2,000 pseudo-random inserts and
+// removes over 300 keys, applied to a Map[u64, u64] and to a
+// MapIn[u64, u64, SystemAllocator], give the same return value and len()
+// after every step (a difference traps), and at the end the same entries
+// in the same slot order. The MapIn is then moved to another thread,
+// which it may be since its key, value and allocator are Send, and summed
+// there.
+module run
+import "std/map"
+// total sums a map's keys and values in the thread it was moved to.
+func total(m: own map.MapIn[u64, u64, SystemAllocator]) -> u64 {
+    t := 0u64
+    for k, v in m { t = t + k + v }
+    return t
+}
+func in_thread(m: own map.MapIn[u64, u64, SystemAllocator]) -> Result[u64, SpawnErr] {
+    t := thread.spawn(total, m)?
+    return Ok(t.join())
+}
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    n := map.MapIn[u64, u64, SystemAllocator].new_in(SystemAllocator.new())
+    x := 88172645463325252u64
+    var inserts: u64 = 0u64
+    var removes: u64 = 0u64
+    step := 0u64
+    while step < 2000u64 {
+        x = x ^ wrapping_shl(x, 13u32)
+        x = x ^ (x >> 7u32)
+        x = x ^ wrapping_shl(x, 17u32)
+        k := x % 300u64
+        if x % 3u64 == 0u64 {
+            a := m.remove(k)
+            b := n.remove(k)
+            if a != b { trap() }
+            removes = removes + 1u64
+        } else {
+            a := m.insert(k, step)
+            var b: Option[u64] = None
+            match n.try_insert(k, step) {
+                Ok(o) => b = o
+                Err(e) => trap()
+            }
+            if a != b { trap() }
+            inserts = inserts + 1u64
+        }
+        if m.len() != n.len() { trap() }
+        step = step + 1u64
+    }
+    // the slot order: both cursors visit the same keys and values in turn
+    i := m.cursor_first()
+    j := n.cursor_first()
+    h := 0u64
+    while i != m.cursor_end() {
+        if j == n.cursor_end() { trap() }
+        if i != j { trap() }
+        ka := m.key_at(i)
+        kb := n.key_at(j)
+        va := m.value_at(i)
+        vb := n.value_at(j)
+        if ka != kb || va != vb { trap() }
+        h = wrapping_add(wrapping_mul(h, 1000003u64), ka * 7u64 + va)
+        i = m.cursor_next(i)
+        j = n.cursor_next(j)
+    }
+    if j != n.cursor_end() { trap() }
+    print_str("equal len "); print_u64(u64(m.len())); print_str(" inserts "); print_u64(inserts)
+    print_str(" removes "); print_u64(removes); print_str(" order "); print_u64(h); println()
+    here := 0u64
+    for k, v in m { here = here + k + v }
+    match in_thread(n) {
+        Ok(t) => { print_str("moved to a thread: sum equal "); print_bool(t == here); println() }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+    return 0i32
+}
