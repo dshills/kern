@@ -1,5 +1,6 @@
 // The tree dumper (specs/selfhost-parser): the format of ast.Dump
-// (compiler/ast/dump.go), byte for byte.
+// (compiler/ast/dump.go), byte for byte, or with spans that of
+// ast.DumpSpans (specs/selfhost-spans).
 module syntax
 import "std/str"
 
@@ -42,9 +43,18 @@ impl P {
         o.push(32u8)
         self.str_value(self.ns(n), self.ne(n), o)
     }
-    func open(view self, name: view[]u8, o: edit[str.String]) {
+    func open(view self, n: usize, name: view[]u8, o: edit[str.String]) {
         o.push(40u8)
         o.push_str(name)
+        self.put_at(self.pstart(n), self.pend(n), o)
+    }
+    // put_at writes a position as @s:e when the dump has spans.
+    func put_at(view self, s: usize, e: usize, o: edit[str.String]) {
+        if !self.spans { return }
+        o.push(64u8)
+        o.push_u64(u64(s))
+        o.push(58u8)
+        o.push_u64(u64(e))
     }
     func child(view self, n: usize, o: edit[str.String]) {
         o.push(32u8)
@@ -75,6 +85,7 @@ impl P {
             s := self.ns(c)
             e := self.ne(c)
             with src := self.src.as_view() { o.push_str(src[s:e]) }
+            self.put_at(s, e, o)
             i = i + 1usize
         }
         o.push(93u8)
@@ -129,23 +140,23 @@ impl P {
             return
         }
         if k == N_FILE {
-            self.open("file", o)
+            self.open(n, "file", o)
             self.name(n, o)
             self.items(self.kid(n, 0usize), o)
             self.items(self.kid(n, 1usize), o)
         } else if k == N_IMPORT {
-            self.open("import", o)
+            self.open(n, "import", o)
             self.strv(n, o)
         } else if k == N_TP {
-            self.open("tp", o)
+            self.open(n, "tp", o)
             self.name(n, o)
             self.items(self.kid(n, 0usize), o)
         } else if k == N_FIELD {
-            self.open("field", o)
+            self.open(n, "field", o)
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_STRUCT {
-            self.open("struct", o)
+            self.open(n, "struct", o)
             self.name(n, o)
             self.items(self.kid(n, 0usize), o)
             self.items(self.kid(n, 1usize), o)
@@ -153,49 +164,50 @@ impl P {
             self.flag_word(self.has(n, F_NOCOPY), o)
             self.flag_word(self.has(n, F_PACKED), o)
         } else if k == N_VARIANT {
-            self.open("variant", o)
+            self.open(n, "variant", o)
             self.name(n, o)
             self.items(self.kid(n, 0usize), o)
         } else if k == N_UNION {
-            self.open("union", o)
+            self.open(n, "union", o)
             self.name(n, o)
             self.items(self.kid(n, 0usize), o)
             self.items(self.kid(n, 1usize), o)
         } else if k == N_INTERFACE {
-            self.open("interface", o)
+            self.open(n, "interface", o)
             self.name(n, o)
             self.items(self.kid(n, 0usize), o)
             self.items(self.kid(n, 1usize), o)
         } else if k == N_IMPL {
-            self.open("impl", o)
+            self.open(n, "impl", o)
             self.items(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
             self.child(self.kid(n, 2usize), o)
             self.items(self.kid(n, 3usize), o)
             self.child(self.kid(n, 4usize), o)
         } else if k == N_DESTRUCTOR {
-            self.open("destructor", o)
+            self.open(n, "destructor", o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_PARAM {
-            self.open("param", o)
+            self.open(n, "param", o)
             self.name(n, o)
             self.conv(self.nv(n), o)
             self.child(self.kid(n, 0usize), o)
             self.flag_word(self.has(n, F_VIEW), o)
         } else if k == N_CONTRACT {
-            self.open("contract", o)
+            self.open(n, "contract", o)
             self.strs(self.kid(n, 0usize), o)
             self.strs(self.kid(n, 1usize), o)
             self.strs(self.kid(n, 2usize), o)
         } else if k == N_BUDGET {
-            self.open("budget", o)
+            self.open(n, "budget", o)
             self.items(self.kid(n, 0usize), o)
         } else if k == N_BITEM {
-            self.open("item", o)
+            self.open(n, "item", o)
             self.name(n, o)
+            self.put_at(self.ns(n), self.ne(n), o)
             self.name2(n, o)
         } else if k == N_FUNC {
-            self.open("func", o)
+            self.open(n, "func", o)
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
             // a budget is dumped only when present, as ast.Dump does
@@ -210,210 +222,218 @@ impl P {
             ext := self.kid(n, 6usize)
             if ext == 0usize { o.push_str(" _") } else { self.strv(ext, o) }
         } else if k == N_CONST || k == N_GLOBAL {
-            if k == N_CONST { self.open("const", o) } else { self.open("global", o) }
+            if k == N_CONST { self.open(n, "const", o) } else { self.open(n, "global", o) }
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
         } else if k == N_ASSERT {
-            self.open("assert", o)
+            self.open(n, "assert", o)
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_PRIM {
-            self.open("prim", o)
+            self.open(n, "prim", o)
             self.name(n, o)
         } else if k == N_TNAME {
-            self.open("tname", o)
+            self.open(n, "tname", o)
             self.name2(n, o)
             self.name(n, o)
             self.items(self.kid(n, 0usize), o)
         } else if k == N_ARRAY {
-            self.open("array", o)
+            self.open(n, "array", o)
             self.num(self.nv(n), o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_SLICE {
-            self.open("slice", o)
+            self.open(n, "slice", o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_ACCESS {
-            self.open("access", o)
+            self.open(n, "access", o)
             self.flag_word(self.has(n, F_EDIT), o)
             self.flag_word(self.has(n, F_SEQ), o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_RAWPTR {
-            self.open("rawptr", o)
+            self.open(n, "rawptr", o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_FUNCTYPE {
-            self.open("functype", o)
+            self.open(n, "functype", o)
             self.items(self.kid(n, 0usize), o)
             self.items(self.kid(n, 1usize), o)
             self.flag_word(self.has(n, F_VIEW), o)
         } else if k == N_UNIT {
-            self.open("unit", o)
+            self.open(n, "unit", o)
         } else if k == N_BLOCK {
-            self.open("block", o)
+            self.open(n, "block", o)
             self.items(self.kid(n, 0usize), o)
         } else if k == N_VAR {
-            self.open("var", o)
+            self.open(n, "var", o)
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
         } else if k == N_SHORT {
-            self.open("short", o)
+            self.open(n, "short", o)
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_ASSIGN {
-            self.open("assign", o)
+            self.open(n, "assign", o)
             self.child(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
         } else if k == N_WITH {
-            self.open("with", o)
+            self.open(n, "with", o)
             self.names(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
             self.child(self.kid(n, 2usize), o)
         } else if k == N_ARM {
-            self.open("arm", o)
+            self.open(n, "arm", o)
             self.flag_word(self.has(n, F_VIEW), o)
             self.child(self.kid(n, 0usize), o)
             self.name(n, o)
             self.names(self.kid(n, 1usize), o)
             self.child(self.kid(n, 2usize), o)
         } else if k == N_MATCH {
-            self.open("match", o)
+            self.open(n, "match", o)
             self.child(self.kid(n, 0usize), o)
             self.flag_word(self.has(n, F_VIEW), o)
             self.items(self.kid(n, 1usize), o)
         } else if k == N_FOR {
-            self.open("for", o)
+            self.open(n, "for", o)
             self.name(n, o)
+            self.put_at(self.ns(n), self.ne(n), o)
             self.name2(n, o)
+            var s2: usize = 0usize
+            var e2: usize = 0usize
+            with x := self.nodes.get(n) {
+                s2 = x.s2
+                e2 = x.e2
+            }
+            if e2 > s2 { self.put_at(s2, e2, o) }
             self.child(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
         } else if k == N_WHILE {
-            self.open("while", o)
+            self.open(n, "while", o)
             self.child(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
         } else if k == N_IF {
-            self.open("if", o)
+            self.open(n, "if", o)
             self.child(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
             self.child(self.kid(n, 2usize), o)
         } else if k == N_RETURN {
-            self.open("return", o)
+            self.open(n, "return", o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_BREAK {
-            self.open("break", o)
+            self.open(n, "break", o)
         } else if k == N_CONTINUE {
-            self.open("continue", o)
+            self.open(n, "continue", o)
         } else if k == N_UNSAFE {
-            self.open("unsafe", o)
+            self.open(n, "unsafe", o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_EXPR {
-            self.open("expr", o)
+            self.open(n, "expr", o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_INT {
-            self.open("int", o)
+            self.open(n, "int", o)
             self.name(n, o)
             self.num(self.nv(n), o)
             self.suffix(n, o)
             self.flag_word(self.has(n, F_VIEW), o)
         } else if k == N_FLOAT {
-            self.open("float", o)
+            self.open(n, "float", o)
             self.name(n, o)
             self.suffix(n, o)
         } else if k == N_STRING {
-            self.open("string", o)
+            self.open(n, "string", o)
             self.strv(n, o)
         } else if k == N_BOOL {
-            self.open("bool", o)
+            self.open(n, "bool", o)
             self.flag_word(self.has(n, F_VIEW), o)
         } else if k == N_IDENT {
-            self.open("ident", o)
+            self.open(n, "ident", o)
             self.name(n, o)
         } else if k == N_FIELDX {
-            self.open("fieldx", o)
+            self.open(n, "fieldx", o)
             self.child(self.kid(n, 0usize), o)
             self.name(n, o)
         } else if k == N_INDEX {
-            self.open("index", o)
+            self.open(n, "index", o)
             self.child(self.kid(n, 0usize), o)
             self.items(self.kid(n, 1usize), o)
         } else if k == N_TYPEARG {
-            self.open("typearg", o)
+            self.open(n, "typearg", o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_SLICEX {
-            self.open("slicex", o)
+            self.open(n, "slicex", o)
             self.child(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
             self.child(self.kid(n, 2usize), o)
         } else if k == N_ARG {
-            self.open("arg", o)
+            self.open(n, "arg", o)
             self.flag_word(self.has(n, F_VIEW), o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_CALL {
-            self.open("call", o)
+            self.open(n, "call", o)
             self.child(self.kid(n, 0usize), o)
             self.items(self.kid(n, 1usize), o)
         } else if k == N_BINARY {
-            self.open("binary", o)
+            self.open(n, "binary", o)
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
         } else if k == N_UNARY {
-            self.open("unary", o)
+            self.open(n, "unary", o)
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_TRY {
-            self.open("try", o)
+            self.open(n, "try", o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_MOVE {
-            self.open("move", o)
+            self.open(n, "move", o)
             self.name(n, o)
         } else if k == N_CLOSURE {
-            self.open("closure", o)
+            self.open(n, "closure", o)
             self.items(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
             self.child(self.kid(n, 2usize), o)
         } else if k == N_COPY {
-            self.open("copy", o)
+            self.open(n, "copy", o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_TAKE {
-            self.open("take", o)
+            self.open(n, "take", o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_REPLACE {
-            self.open("replace", o)
+            self.open(n, "replace", o)
             self.child(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
         } else if k == N_DROP {
-            self.open("drop", o)
+            self.open(n, "drop", o)
             self.name(n, o)
         } else if k == N_TRAP {
-            self.open("trap", o)
+            self.open(n, "trap", o)
         } else if k == N_CONV {
-            self.open("conv", o)
+            self.open(n, "conv", o)
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
             self.flag_word(self.has(n, F_VIEW), o)
         } else if k == N_FINIT {
-            self.open("finit", o)
+            self.open(n, "finit", o)
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
         } else if k == N_STRUCTLIT {
-            self.open("structlit", o)
+            self.open(n, "structlit", o)
             self.child(self.kid(n, 0usize), o)
             self.items(self.kid(n, 1usize), o)
         } else if k == N_ARRAYLIT {
-            self.open("arraylit", o)
+            self.open(n, "arraylit", o)
             self.items(self.kid(n, 0usize), o)
         } else if k == N_RANGE {
-            self.open("range", o)
+            self.open(n, "range", o)
             self.child(self.kid(n, 0usize), o)
             self.child(self.kid(n, 1usize), o)
         } else if k == N_UNITLIT {
-            self.open("unitlit", o)
+            self.open(n, "unitlit", o)
         } else if k == N_PAREN {
-            self.open("paren", o)
+            self.open(n, "paren", o)
             self.child(self.kid(n, 0usize), o)
         } else {
-            self.open("unknown", o)
+            self.open(n, "unknown", o)
         }
         o.push(41u8)
     }
@@ -427,13 +447,15 @@ func hex_byte(c: u8, o: edit[str.String]) {
 }
 
 // Parse lexes and parses src (bodyless for the standard library and the
-// prelude) and writes its dump into out; it reports whether src parsed.
-func Parse(src: own Vec[u8], bodyless: bool, o: edit[str.String]) -> bool {
+// prelude) and writes its dump into out, with spans when spans is set; it
+// reports whether src parsed.
+func Parse(src: own Vec[u8], bodyless: bool, spans: bool, o: edit[str.String]) -> bool {
     toks := Vec[Tok].new()
     var ok: bool = false
     with s := src.as_view() { ok = lex(s, toks) }
     if !ok { return false }
     p := new_parser(src, toks, bodyless)
+    p.spans = spans
     f := p.parse_file()
     if p.failed { return false }
     p.node(f, o)

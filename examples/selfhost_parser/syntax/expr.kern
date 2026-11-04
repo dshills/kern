@@ -15,6 +15,7 @@ impl P {
     // binary: operator token in s..e, kids left and right
     func binary(edit self, op: Tok, l: usize, r: usize) -> usize {
         b := self.mk(N_BINARY, op.s, op.e)
+        self.span_nn(b, l, r)
         self.add(b, l)
         self.add(b, r)
         return b
@@ -54,6 +55,7 @@ impl P {
             u := self.next()
             r := self.parse_add()
             g := self.mk(N_RANGE, 0usize, 0usize)
+            self.span_nn(g, l, r)
             self.add(g, l)
             self.add(g, r)
             return g
@@ -94,9 +96,11 @@ impl P {
             x := self.parse_unary()
             if t.k == MINUS && self.nk(x) == N_INT && self.nf(x) & F_VIEW == 0u32 {
                 self.flag(x, F_VIEW)
+                self.setps(x, t.s)
                 return x
             }
             n := self.mk(N_UNARY, t.s, t.e)
+            self.span_tn(n, t.s, x)
             self.add(n, x)
             return n
         }
@@ -107,6 +111,7 @@ impl P {
     func parse_closure(edit self) -> usize {
         t := self.next()
         c := self.mk(N_CLOSURE, 0usize, 0usize)
+        self.setp(c, t.s, t.e)
         ps := self.list()
         self.add(c, ps)
         if t.k == PIPE {
@@ -114,8 +119,10 @@ impl P {
             while self.more(PIPE) {
                 n := self.expect(IDENT)
                 p := self.mk(N_PARAM, n.s, n.e)
+                self.setp(p, n.s, n.e)
                 if self.accept(COLON) {
                     self.parse_param_type(p)
+                    self.setpe_kid(p, p, 0usize)
                 } else {
                     self.add(p, 0usize)
                 }
@@ -127,11 +134,13 @@ impl P {
         }
         if self.at(LBRACE) {
             body := self.parse_block()
+            self.setpe_n(c, body)
             self.add(c, 0usize)
             self.add(c, body)
             return c
         }
         x := self.parse_expr()
+        self.setpe_n(c, x)
         self.add(c, x)
         self.add(c, 0usize)
         return c
@@ -147,6 +156,7 @@ impl P {
                 u := self.next()
                 n := self.expect(IDENT)
                 f := self.mk(N_FIELDX, n.s, n.e)
+                self.span_nt(f, x, n.e)
                 self.add(f, x)
                 x = f
             } else if k == LBRACK {
@@ -159,6 +169,7 @@ impl P {
                     if !self.at(RBRACK) { hi = self.parse_expr() }
                     self.nest = self.nest - 1u32
                     r := self.expect(RBRACK)
+                    self.span_nt(s, x, r.e)
                     self.add(s, x)
                     self.add(s, 0usize)
                     self.add(s, hi)
@@ -173,6 +184,7 @@ impl P {
                     if !self.at(RBRACK) { hi = self.parse_expr() }
                     self.nest = self.nest - 1u32
                     r := self.expect(RBRACK)
+                    self.span_nt(s, x, r.e)
                     self.add(s, x)
                     self.add(s, first)
                     self.add(s, hi)
@@ -190,6 +202,7 @@ impl P {
                 }
                 self.nest = self.nest - 1u32
                 r := self.expect(RBRACK)
+                self.span_nt(ix, x, r.e)
                 x = ix
             } else if k == LPAREN {
                 u := self.next()
@@ -201,9 +214,11 @@ impl P {
                 self.add(c, x)
                 self.add(c, args)
                 while self.more(RPAREN) {
+                    at := self.cur()
                     a := self.mk(N_ARG, 0usize, 0usize)
                     if self.accept(KW_OUT) { self.flag(a, F_VIEW) }
                     ax := self.parse_expr()
+                    self.span_tn(a, at.s, ax)
                     self.add(a, ax)
                     self.add(args, a)
                     if !self.accept(COMMA) { break }
@@ -211,10 +226,12 @@ impl P {
                 self.nest = self.nest - 1u32
                 self.nolit = saved
                 r := self.expect(RPAREN)
+                self.span_nt(c, x, r.e)
                 x = c
             } else if k == QUESTION {
                 u := self.next()
                 q := self.mk(N_TRY, 0usize, 0usize)
+                self.span_nt(q, x, t.e)
                 self.add(q, x)
                 x = q
             } else if k == LBRACE {
@@ -247,6 +264,7 @@ impl P {
         t := self.expect(LBRACE)
         self.nest = self.nest + 1u32
         lit := self.mk(N_STRUCTLIT, 0usize, 0usize)
+        self.span_nt(lit, x, t.e)
         fs := self.list()
         self.add(lit, tn)
         self.add(lit, fs)
@@ -255,14 +273,19 @@ impl P {
             c := self.expect(COLON)
             v := self.parse_expr()
             fi := self.mk(N_FINIT, n.s, n.e)
+            self.span_tn(fi, n.s, v)
             self.add(fi, v)
             self.add(fs, fi)
             if !self.accept(COMMA) { break }
         }
         self.nest = self.nest - 1u32
         e := self.expect(RBRACE)
+        self.setpe(lit, e.e)
         return lit
     }
+
+    // same_span gives n the span of x, as Go's Pos: e.Pos.
+    func same_span(edit self, n: usize, x: usize) { self.span_nn(n, x, x) }
 
     // expr_to_tname is exprToTypeName.
     func expr_to_tname(edit self, x: usize) -> usize {
@@ -271,6 +294,7 @@ impl P {
             s := self.ns(x)
             e := self.ne(x)
             tn := self.mk(N_TNAME, s, e)
+            self.same_span(tn, x)
             l := self.list()
             self.add(tn, l)
             return tn
@@ -284,6 +308,7 @@ impl P {
             s := self.ns(x)
             e := self.ne(x)
             tn := self.mk(N_TNAME, s, e)
+            self.same_span(tn, x)
             bs := self.ns(b)
             be := self.ne(b)
             self.set2(tn, bs, be)
@@ -294,6 +319,7 @@ impl P {
         if k == N_INDEX {
             b := self.kid(x, 0usize)
             tn := self.expr_to_tname(b)
+            self.same_span(tn, x)
             args := self.kid(tn, 0usize)
             al := self.kid(x, 1usize)
             n := self.nlen(al)
@@ -317,8 +343,13 @@ impl P {
         if k == N_IDENT {
             s := self.ns(x)
             e := self.ne(x)
-            if self.is_prim(s, e) { return self.mk(N_PRIM, s, e) }
+            if self.is_prim(s, e) {
+                pr := self.mk(N_PRIM, s, e)
+                self.same_span(pr, x)
+                return pr
+            }
             tn := self.mk(N_TNAME, s, e)
+            self.same_span(tn, x)
             l := self.list()
             self.add(tn, l)
             return tn
@@ -329,6 +360,7 @@ impl P {
                 s := self.ns(x)
                 e := self.ne(x)
                 tn := self.mk(N_TNAME, s, e)
+                self.same_span(tn, x)
                 bs := self.ns(b)
                 be := self.ne(b)
                 self.set2(tn, bs, be)
@@ -346,12 +378,17 @@ impl P {
                 a := self.kid(al, 0usize)
                 el := self.expr_to_type(a)
                 rp := self.mk(N_RAWPTR, 0usize, 0usize)
+                self.same_span(rp, x)
                 self.add(rp, el)
                 return rp
             }
             return self.expr_to_tname(x)
         }
-        if k == N_UNITLIT { return self.mk(N_UNIT, 0usize, 0usize) }
+        if k == N_UNITLIT {
+            un := self.mk(N_UNIT, 0usize, 0usize)
+            self.same_span(un, x)
+            return un
+        }
         self.fail()
         return 0usize
     }
@@ -392,6 +429,7 @@ impl P {
         }
         if !ok { self.fail() }
         n := self.mk(N_INT, t.s, t.e)
+        self.setp(n, t.s, t.e)
         self.setv(n, v)
         return n
     }
@@ -406,16 +444,21 @@ impl P {
         }
         if k == FLOAT {
             u := self.next()
-            return self.mk(N_FLOAT, t.s, t.e)
+            fl := self.mk(N_FLOAT, t.s, t.e)
+            self.setp(fl, t.s, t.e)
+            return fl
         }
         if k == STR {
             u := self.next()
-            return self.mk(N_STRING, t.s, t.e)
+            st := self.mk(N_STRING, t.s, t.e)
+            self.setp(st, t.s, t.e)
+            return st
         }
         if k == LBRACK {
             u := self.next()
             self.nest = self.nest + 1u32
             lit := self.mk(N_ARRAYLIT, 0usize, 0usize)
+            self.setp(lit, t.s, t.e)
             es := self.list()
             self.add(lit, es)
             saved := self.nolit
@@ -430,25 +473,31 @@ impl P {
             }
             self.nest = self.nest - 1u32
             e := self.expect(RBRACK)
+            self.setpe(lit, e.e)
             self.nolit = saved
             return lit
         }
         if k == KW_TRUE || k == KW_FALSE {
             u := self.next()
             b := self.mk(N_BOOL, 0usize, 0usize)
+            self.setp(b, t.s, t.e)
             if k == KW_TRUE { self.flag(b, F_VIEW) }
             return b
         }
         if k == KW_SELF {
             u := self.next()
-            return self.mk(N_IDENT, t.s, t.e)
+            sf := self.mk(N_IDENT, t.s, t.e)
+            self.setp(sf, t.s, t.e)
+            return sf
         }
         if k == IDENT {
             u := self.next()
             if self.tis(t, "trap") && self.at(LPAREN) && self.peek(1usize) == RPAREN {
                 v := self.next()
                 w := self.next()
-                return self.mk(N_TRAP, 0usize, 0usize)
+                tr := self.mk(N_TRAP, 0usize, 0usize)
+                self.setp(tr, t.s, w.e)
+                return tr
             }
             if self.is_prim(t.s, t.e) && self.at(LPAREN) {
                 v := self.next()
@@ -460,10 +509,13 @@ impl P {
                 self.nest = self.nest - 1u32
                 e := self.expect(RPAREN)
                 c := self.mk(N_CONV, t.s, t.e)
+                self.setp(c, t.s, e.e)
                 self.add(c, x)
                 return c
             }
-            return self.mk(N_IDENT, t.s, t.e)
+            id := self.mk(N_IDENT, t.s, t.e)
+            self.setp(id, t.s, t.e)
+            return id
         }
         if k == KW_TRUNCATE {
             u := self.next()
@@ -477,6 +529,7 @@ impl P {
             self.nest = self.nest - 1u32
             e := self.expect(RPAREN)
             c := self.mk(N_CONV, to.s, to.e)
+            self.setp(c, t.s, e.e)
             self.add(c, x)
             self.flag(c, F_VIEW)
             return c
@@ -484,7 +537,9 @@ impl P {
         if k == KW_MOVE {
             u := self.next()
             n := self.expect(IDENT)
-            return self.mk(N_MOVE, n.s, n.e)
+            mv := self.mk(N_MOVE, n.s, n.e)
+            self.setp(mv, t.s, n.e)
+            return mv
         }
         if k == KW_COPY || k == KW_TAKE {
             u := self.next()
@@ -492,6 +547,8 @@ impl P {
             var nk: u32 = N_COPY
             if k == KW_TAKE { nk = N_TAKE }
             c := self.mk(nk, 0usize, 0usize)
+            self.setps(c, t.s)
+            self.setpe_prev(c)
             self.add(c, x)
             return c
         }
@@ -508,6 +565,7 @@ impl P {
             self.nest = self.nest - 1u32
             e := self.expect(RPAREN)
             r := self.mk(N_REPLACE, 0usize, 0usize)
+            self.setp(r, t.s, e.e)
             self.add(r, pl)
             self.add(r, v)
             return r
@@ -517,13 +575,17 @@ impl P {
             l := self.expect(LPAREN)
             n := self.expect(IDENT)
             e := self.expect(RPAREN)
-            return self.mk(N_DROP, n.s, n.e)
+            dr := self.mk(N_DROP, n.s, n.e)
+            self.setp(dr, t.s, e.e)
+            return dr
         }
         if k == LPAREN {
             u := self.next()
             if self.at(RPAREN) {
                 e := self.next()
-                return self.mk(N_UNITLIT, 0usize, 0usize)
+                ul := self.mk(N_UNITLIT, 0usize, 0usize)
+                self.setp(ul, t.s, e.e)
+                return ul
             }
             self.nest = self.nest + 1u32
             saved := self.nolit
@@ -533,6 +595,7 @@ impl P {
             self.nest = self.nest - 1u32
             e := self.expect(RPAREN)
             p := self.mk(N_PAREN, 0usize, 0usize)
+            self.setp(p, t.s, e.e)
             self.add(p, x)
             return p
         }
@@ -559,6 +622,7 @@ impl P {
         if k == LBRACK || k == KW_VIEW || k == KW_EDIT || k == KW_FUNC || (k == LPAREN && self.peek(1usize) == RPAREN) {
             ty := self.parse_type()
             a := self.mk(N_TYPEARG, 0usize, 0usize)
+            self.same_span(a, ty)
             self.add(a, ty)
             return a
         }

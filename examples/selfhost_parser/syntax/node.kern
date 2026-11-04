@@ -86,4 +86,5 @@ const F_PACKED: u32 = 4u32
 const F_EDIT: u32 = 1u32
 const F_SEQ: u32 = 2u32
 
-struct Node nocopy { k: u32; s: usize; e: usize; s2: usize; e2: usize; v: u64; f: u32; kids: Vec[usize] }
+// ps..pe is the node's span, as the Go parser's Pos (specs/selfhost-spans).
+struct Node nocopy { k: u32; s: usize; e: usize; s2: usize; e2: usize; v: u64; f: u32; kids: Vec[usize]; ps: usize; pe: usize }

@@ -70,7 +70,9 @@ were found by the type checker before the program ran.
 
 Spans (every node's byte range, which the dump omits), diagnostics
 (message and position parity), and then the resolver's first pass over
-the same node table.
+the same node table. *Since 2026-11-04* spans are done
+(`docs/reports/selfhost-spans.md`): the kern parser's span dumps match
+`ast.DumpSpans` on all 513 accepted corpus files; diagnostics are next.
 
 ## Review
 

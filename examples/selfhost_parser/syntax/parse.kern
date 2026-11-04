@@ -5,10 +5,10 @@
 // list ends (more() is false) and every parse function returns.
 module syntax
 
-struct P nocopy { src: Vec[u8]; toks: Vec[Tok]; pos: usize; nest: u32; nolit: bool; bodyless: bool; failed: bool; nodes: Vec[Node] }
+struct P nocopy { src: Vec[u8]; toks: Vec[Tok]; pos: usize; nest: u32; nolit: bool; bodyless: bool; failed: bool; nodes: Vec[Node]; spans: bool }
 
 func new_parser(src: own Vec[u8], toks: own Vec[Tok], bodyless: bool) -> P {
-    p := P { src: src, toks: toks, pos: 0usize, nest: 0u32, nolit: false, bodyless: bodyless, failed: false, nodes: Vec[Node].new() }
+    p := P { src: src, toks: toks, pos: 0usize, nest: 0u32, nolit: false, bodyless: bodyless, failed: false, nodes: Vec[Node].new(), spans: false }
     n := p.mk(N_NIL, 0usize, 0usize)
     return p
 }
@@ -93,10 +93,71 @@ impl P {
     // ---- nodes ----
 
     func mk(edit self, k: u32, s: usize, e: usize) -> usize {
-        self.nodes.push(Node { k: k, s: s, e: e, s2: 0usize, e2: 0usize, v: 0u64, f: 0u32, kids: Vec[usize].new() })
+        self.nodes.push(Node { k: k, s: s, e: e, s2: 0usize, e2: 0usize, v: 0u64, f: 0u32, kids: Vec[usize].new(), ps: 0usize, pe: 0usize })
         return self.nodes.len() - 1usize
     }
     func list(edit self) -> usize { return self.mk(N_LIST, 0usize, 0usize) }
+    // spans (specs/selfhost-spans): setp sets a node's span, setps and
+    // setpe one end; pstart and pend read them; prev_end is the end of the
+    // token before the current position, Go's p.toks[p.pos-1].End
+    func setp(edit self, n: usize, s: usize, e: usize) {
+        if n == 0usize { return }
+        with x := self.nodes.at(n) { x.ps = s; x.pe = e }
+    }
+    func setps(edit self, n: usize, s: usize) {
+        if n == 0usize { return }
+        with x := self.nodes.at(n) { x.ps = s }
+    }
+    func setpe(edit self, n: usize, e: usize) {
+        if n == 0usize { return }
+        with x := self.nodes.at(n) { x.pe = e }
+    }
+    func pstart(view self, n: usize) -> usize {
+        var r: usize = 0usize
+        with x := self.nodes.get(n) { r = x.ps }
+        return r
+    }
+    func pend(view self, n: usize) -> usize {
+        var r: usize = 0usize
+        with x := self.nodes.get(n) { r = x.pe }
+        return r
+    }
+    func prev_end(view self) -> usize {
+        if self.pos == 0usize { return 0usize }
+        t := self.tok(self.pos - 1usize)
+        return t.e
+    }
+    // span_nn spans n from a's start to b's end; span_tn from s to b's
+    // end; span_nt from a's start to e; setpe_n ends n where b ends,
+    // setpe_kid where kid i of a ends, setpe_prev at prev_end. Each reads
+    // the nodes itself, since an argument may not read self while the call
+    // edits it.
+    func span_nn(edit self, n: usize, a: usize, b: usize) {
+        s := self.pstart(a)
+        e := self.pend(b)
+        self.setp(n, s, e)
+    }
+    func span_tn(edit self, n: usize, s: usize, b: usize) {
+        e := self.pend(b)
+        self.setp(n, s, e)
+    }
+    func span_nt(edit self, n: usize, a: usize, e: usize) {
+        s := self.pstart(a)
+        self.setp(n, s, e)
+    }
+    func setpe_n(edit self, n: usize, b: usize) {
+        e := self.pend(b)
+        self.setpe(n, e)
+    }
+    func setpe_kid(edit self, n: usize, a: usize, i: usize) {
+        k := self.kid(a, i)
+        e := self.pend(k)
+        self.setpe(n, e)
+    }
+    func setpe_prev(edit self, n: usize) {
+        e := self.prev_end()
+        self.setpe(n, e)
+    }
     func add(edit self, n: usize, c: usize) {
         if n == 0usize { return }
         with x := self.nodes.at(n) { x.kids.push(c) }
@@ -170,6 +231,7 @@ impl P {
 
     func parse_file(edit self) -> usize {
         self.skip_nl()
+        start := self.cur()
         t := self.expect(KW_MODULE)
         m := self.expect(IDENT)
         f := self.mk(N_FILE, m.s, m.e)
@@ -183,6 +245,7 @@ impl P {
             u := self.next()
             s := self.expect(STR)
             im := self.mk(N_IMPORT, s.s, s.e)
+            self.setp(im, u.s, s.e)
             self.add(imps, im)
             self.stmt_end()
             self.skip_nl()
@@ -192,6 +255,8 @@ impl P {
             self.add(decls, d)
             self.skip_nl()
         }
+        last := self.cur()
+        self.setp(f, start.s, last.e)
         return f
     }
 
@@ -202,6 +267,7 @@ impl P {
                 u := self.next()
                 d := self.parse_struct()
                 self.flag(d, F_VIEW)
+                self.setps(d, u.s)
                 return d
             }
         } else if k == KW_STRUCT {
@@ -233,11 +299,13 @@ impl P {
         return 0usize
     }
 
-    // parse_constraints parses `C1 + C2 ...` into the list l.
-    func parse_constraints(edit self, l: usize) {
+    // parse_constraints parses `C1 + C2 ...` into the list l and ends
+    // tp's span at the last one.
+    func parse_constraints(edit self, l: usize, tp: usize) {
         while true {
             c := self.parse_tname()
             self.add(l, c)
+            self.setpe_n(tp, c)
             if !self.accept(PLUS) { break }
         }
     }
@@ -250,9 +318,10 @@ impl P {
         while true {
             n := self.expect(IDENT)
             tp := self.mk(N_TP, n.s, n.e)
+            self.setp(tp, n.s, n.e)
             cs := self.list()
             self.add(tp, cs)
-            if self.accept(COLON) { self.parse_constraints(cs) }
+            if self.accept(COLON) { self.parse_constraints(cs, tp) }
             self.add(l, tp)
             if !self.accept(COMMA) { break }
         }
@@ -265,6 +334,7 @@ impl P {
         t := self.expect(KW_STRUCT)
         n := self.expect(IDENT)
         d := self.mk(N_STRUCT, n.s, n.e)
+        self.setp(d, t.s, t.e)
         tps := self.parse_tps()
         self.add(d, tps)
         fl := self.list()
@@ -281,12 +351,14 @@ impl P {
             c := self.expect(COLON)
             ty := self.parse_type()
             f := self.mk(N_FIELD, fname.s, fname.e)
+            self.span_tn(f, fname.s, ty)
             self.add(f, ty)
             self.add(fl, f)
             self.stmt_end()
             self.skip_nl()
         }
         e := self.expect(RBRACE)
+        self.setpe(d, e.e)
         return d
     }
 
@@ -294,6 +366,7 @@ impl P {
         t := self.expect(KW_UNION)
         n := self.expect(IDENT)
         d := self.mk(N_UNION, n.s, n.e)
+        self.setp(d, t.s, t.e)
         tps := self.parse_tps()
         self.add(d, tps)
         vs := self.list()
@@ -303,6 +376,7 @@ impl P {
         while self.more(RBRACE) {
             vn := self.expect(IDENT)
             v := self.mk(N_VARIANT, vn.s, vn.e)
+            self.setp(v, vn.s, vn.e)
             fl := self.list()
             self.add(v, fl)
             if self.at(LPAREN) {
@@ -315,10 +389,12 @@ impl P {
                         c := self.next()
                         ty := self.parse_type()
                         fld = self.mk(N_FIELD, fname.s, fname.e)
+                        self.span_tn(fld, fname.s, ty)
                         self.add(fld, ty)
                     } else {
                         ty := self.parse_type()
                         fld = self.mk(N_FIELD, 0usize, 0usize)
+                        self.span_nn(fld, ty, ty)
                         self.add(fld, ty)
                     }
                     self.add(fl, fld)
@@ -326,12 +402,14 @@ impl P {
                 }
                 self.nest = self.nest - 1u32
                 r := self.expect(RPAREN)
+                self.setpe(v, r.e)
             }
             self.add(vs, v)
             self.stmt_end()
             self.skip_nl()
         }
         e := self.expect(RBRACE)
+        self.setpe(d, e.e)
         return d
     }
 
@@ -339,6 +417,7 @@ impl P {
         t := self.expect(KW_INTERFACE)
         n := self.expect(IDENT)
         d := self.mk(N_INTERFACE, n.s, n.e)
+        self.setp(d, t.s, t.e)
         tps := self.parse_tps()
         self.add(d, tps)
         ms := self.list()
@@ -352,6 +431,7 @@ impl P {
             self.skip_nl()
         }
         e := self.expect(RBRACE)
+        self.setpe(d, e.e)
         return d
     }
 
@@ -359,6 +439,7 @@ impl P {
     func parse_impl(edit self) -> usize {
         t := self.expect(KW_IMPL)
         d := self.mk(N_IMPL, 0usize, 0usize)
+        self.setp(d, t.s, t.e)
         tps := self.parse_tps()
         first := self.parse_type()
         var iface: usize = 0usize
@@ -381,6 +462,7 @@ impl P {
                 r := self.expect(RPAREN)
                 body := self.parse_block()
                 dtor = self.mk(N_DESTRUCTOR, 0usize, 0usize)
+                self.span_tn(dtor, u.s, body)
                 self.add(dtor, body)
             } else {
                 f := self.parse_func(true)
@@ -390,6 +472,7 @@ impl P {
             self.skip_nl()
         }
         e := self.expect(RBRACE)
+        self.setpe(d, e.e)
         self.add(d, tps)
         self.add(d, iface)
         self.add(d, target)
@@ -402,6 +485,7 @@ impl P {
     func parse_contract(edit self) -> usize {
         t := self.expect(KW_CONTRACT)
         c := self.mk(N_CONTRACT, 0usize, 0usize)
+        self.setp(c, t.s, t.e)
         inv := self.list()
         req := self.list()
         ens := self.list()
@@ -427,6 +511,7 @@ impl P {
             self.skip_nl()
         }
         e := self.expect(RBRACE)
+        self.setpe(c, e.e)
         self.skip_nl()
         return c
     }
@@ -444,6 +529,7 @@ impl P {
     func parse_budget(edit self) -> usize {
         t := self.expect(IDENT)
         b := self.mk(N_BUDGET, 0usize, 0usize)
+        self.setp(b, t.s, t.e)
         items := self.list()
         self.add(b, items)
         l := self.expect(LBRACE)
@@ -453,11 +539,13 @@ impl P {
             v := self.expect(INT)
             it := self.mk(N_BITEM, n.s, n.e)
             self.set2(it, v.s, v.e)
+            self.setp(it, n.s, v.e)
             self.add(items, it)
             self.stmt_end()
             self.skip_nl()
         }
         e := self.expect(RBRACE)
+        self.setpe(b, e.e)
         self.skip_nl()
         if !self.at(KW_FUNC) { self.fail() }
         return b
@@ -473,6 +561,13 @@ impl P {
         t := self.expect(KW_FUNC)
         n := self.expect(IDENT)
         d := self.mk(N_FUNC, n.s, n.e)
+        if con != 0usize {
+            self.span_nn(d, con, con)
+        } else if bud != 0usize {
+            self.span_nn(d, bud, bud)
+        } else {
+            self.setp(d, t.s, t.e)
+        }
         tps := self.parse_tps()
         ps := self.parse_params()
         ret := self.parse_ret()
@@ -482,10 +577,11 @@ impl P {
             while true {
                 wn := self.expect(IDENT)
                 tp := self.mk(N_TP, wn.s, wn.e)
+                self.setp(tp, wn.s, wn.e)
                 cs := self.list()
                 self.add(tp, cs)
                 c := self.expect(COLON)
-                self.parse_constraints(cs)
+                self.parse_constraints(cs, tp)
                 self.add(wh, tp)
                 if !self.accept(COMMA) { break }
             }
@@ -496,7 +592,12 @@ impl P {
             self.set2(d, r.s, r.e)
         }
         var body: usize = 0usize
-        if with_body && (!self.bodyless || self.at(LBRACE)) { body = self.parse_block() }
+        if with_body && (!self.bodyless || self.at(LBRACE)) {
+            body = self.parse_block()
+            self.setpe_n(d, body)
+        } else {
+            self.setpe_prev(d)
+        }
         self.add(d, con)
         self.add(d, tps)
         self.add(d, ps)
@@ -530,6 +631,7 @@ impl P {
             u := self.next()
             s := self.next()
             p := self.mk(N_PARAM, s.s, s.e)
+            self.setp(p, u.s, s.e)
             if t.k == KW_VIEW { self.setv(p, 1u64) } else if t.k == KW_EDIT { self.setv(p, 2u64) } else { self.setv(p, 3u64) }
             self.add(p, 0usize)
             self.flag(p, F_VIEW)
@@ -539,6 +641,8 @@ impl P {
         c := self.expect(COLON)
         p := self.mk(N_PARAM, n.s, n.e)
         self.parse_param_type(p)
+        self.setps(p, n.s)
+        self.setpe_kid(p, p, 0usize)
         return p
     }
 
@@ -592,11 +696,14 @@ impl P {
         f := self.expect(KW_FUNC)
         n := self.expect(IDENT)
         d := self.mk(N_FUNC, n.s, n.e)
+        self.setp(d, t.s, t.e)
         ps := self.parse_params()
         ret := self.parse_ret()
+        self.setpe_prev(d)
         var body: usize = 0usize
         if self.at(LBRACE) {
             body = self.parse_block()
+            self.setpe_prev(d)
         } else {
             self.stmt_end()
         }
@@ -622,6 +729,7 @@ impl P {
         ty := self.parse_type()
         a := self.expect(ASSIGN)
         v := self.parse_expr()
+        self.span_tn(d, t.s, v)
         self.add(d, ty)
         self.add(d, v)
         self.stmt_end()
@@ -636,6 +744,7 @@ impl P {
         tn := self.parse_tname()
         self.stmt_end()
         d := self.mk(N_ASSERT, m.s, m.e)
+        self.span_tn(d, t.s, tn)
         self.add(d, tn)
         return d
     }

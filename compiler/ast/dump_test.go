@@ -3,6 +3,7 @@ package ast_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -83,5 +84,83 @@ func TestDumpCorpus(t *testing.T) {
 	}
 	if n < 400 {
 		t.Errorf("only %d corpus files dumped", n)
+	}
+}
+
+// spanRE is one position in a span dump.
+var spanRE = regexp.MustCompile(`@[0-9]+:[0-9]+`)
+
+// DumpSpans of testdata/all_nodes.kern, every node type, is pinned in
+// testdata/all_nodes.spans (specs/selfhost-spans R1); KERN_UPDATE_DUMP
+// rewrites it.
+func TestDumpSpansAllNodes(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("testdata", "all_nodes.kern"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, ds := parser.Parse(&source.File{Name: "all_nodes.kern", Bytes: src})
+	if len(ds) > 0 {
+		t.Fatalf("parse: %s", ds[0].Message)
+	}
+	got := ast.DumpSpans(f)
+	if os.Getenv("KERN_UPDATE_DUMP") != "" {
+		if err := os.WriteFile(filepath.Join("testdata", "all_nodes.spans"), []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(filepath.Join("testdata", "all_nodes.spans"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != string(want) {
+		t.Errorf("span dump changed:\ngot  %s\nwant %s", got, want)
+	}
+	if spanRE.ReplaceAllString(got, "") != ast.Dump(f) {
+		t.Error("all_nodes: the span dump without its positions is not Dump")
+	}
+}
+
+// Removing every position from DumpSpans gives Dump, for every corpus file
+// the Go parser accepts, and for a file whose string and comment hold
+// annotation-like text (R1).
+func TestDumpSpansStrips(t *testing.T) {
+	odd := "module m\n// @1:2\nfunc f() -> u64 {\n    s := \"@1:2\"\n    return 0u64\n}\n"
+	f, ds := parser.Parse(&source.File{Name: "odd.kern", Bytes: []byte(odd)})
+	if len(ds) > 0 {
+		t.Fatal(ds[0].Message)
+	}
+	if spanRE.ReplaceAllString(ast.DumpSpans(f), "") != ast.Dump(f) {
+		t.Error("odd.kern: the span dump without its positions is not Dump")
+	}
+	n := 0
+	for _, dir := range []string{"tests", "std", "examples", filepath.Join("bench", "kern"), filepath.Join("compiler", "resolve", "prelude")} {
+		werr := filepath.Walk(filepath.Join("..", "..", dir), func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() || !strings.HasSuffix(path, ".kern") {
+				return nil
+			}
+			src, rerr := os.ReadFile(path)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			bodyless := dir == "std" || strings.Contains(dir, "prelude")
+			f, ds := parser.ParseWith(&source.File{Name: path, Bytes: src}, parser.Options{AllowBodyless: bodyless})
+			if len(ds) > 0 {
+				return nil
+			}
+			if spanRE.ReplaceAllString(ast.DumpSpans(f), "") != ast.Dump(f) {
+				t.Errorf("%s: the span dump without its positions is not Dump", path)
+			}
+			n++
+			return nil
+		})
+		if werr != nil {
+			t.Fatalf("walking %s: %v", dir, werr)
+		}
+	}
+	if n < 400 {
+		t.Errorf("only %d corpus files compared", n)
 	}
 }

@@ -100,11 +100,70 @@ func Dump(f *File) string {
 	return d.b.String()
 }
 
-type dumper struct{ b strings.Builder }
+// DumpSpans is Dump with positions (specs/selfhost-spans): each node's
+// name is followed by its span as @Start:End, so (ident x) is
+// (ident@12:13 x), and the extra positions follow their names in the
+// same form: a BudgetItem's name, a With's names, an Arm's binds and a
+// For's Var and Var2 (an absent Var2 is _ with no position). Removing
+// every @Start:End gives Dump: a string value is hex and no name or
+// literal text contains @.
+func DumpSpans(f *File) string {
+	d := dumper{spans: true}
+	d.node(f)
+	d.b.WriteByte('\n')
+	return d.b.String()
+}
 
-func (d *dumper) open(name string) { d.b.WriteByte('('); d.b.WriteString(name) }
-func (d *dumper) close()           { d.b.WriteByte(')') }
-func (d *dumper) sp()              { d.b.WriteByte(' ') }
+type dumper struct {
+	b     strings.Builder
+	spans bool
+	pos   Pos // the node being opened
+}
+
+func (d *dumper) open(name string) {
+	d.b.WriteByte('(')
+	d.b.WriteString(name)
+	d.at(d.pos)
+}
+
+// at writes a position when the dump has spans.
+func (d *dumper) at(p Pos) {
+	if d.spans {
+		d.b.WriteByte('@')
+		d.b.WriteString(strconv.Itoa(p.Start))
+		d.b.WriteByte(':')
+		d.b.WriteString(strconv.Itoa(p.End))
+	}
+}
+
+// named writes a name and, with spans, its position; an empty name is _
+// with no position.
+func (d *dumper) named(s string, p Pos) {
+	d.word(s)
+	if s != "" {
+		d.at(p)
+	}
+}
+
+// nameds writes a list of names, each with its position when the dump has
+// spans.
+func (d *dumper) nameds(ss []string, ps []Pos) {
+	d.sp()
+	d.b.WriteByte('[')
+	for i, s := range ss {
+		if i > 0 {
+			d.sp()
+		}
+		d.b.WriteString(s)
+		if i < len(ps) {
+			d.at(ps[i])
+		}
+	}
+	d.b.WriteByte(']')
+}
+
+func (d *dumper) close() { d.b.WriteByte(')') }
+func (d *dumper) sp()    { d.b.WriteByte(' ') }
 
 // word writes a name or literal text, or _ when it is empty.
 func (d *dumper) word(s string) {
@@ -147,18 +206,6 @@ func (d *dumper) strs(ss []string) {
 	d.b.WriteByte(']')
 }
 
-func (d *dumper) words(ss []string) {
-	d.sp()
-	d.b.WriteByte('[')
-	for i, s := range ss {
-		if i > 0 {
-			d.sp()
-		}
-		d.b.WriteString(s)
-	}
-	d.b.WriteByte(']')
-}
-
 // child writes one optional child node.
 func (d *dumper) child(n Node) {
 	d.sp()
@@ -195,6 +242,7 @@ func (d *dumper) node(n Node) {
 		d.b.WriteByte('_')
 		return
 	}
+	d.pos = n.Span()
 	switch x := n.(type) {
 	case *File:
 		d.open("file")
@@ -260,7 +308,7 @@ func (d *dumper) node(n Node) {
 		list(d, x.Items)
 	case *BudgetItem:
 		d.open("item")
-		d.word(x.Name)
+		d.named(x.Name, x.NamePos)
 		d.word(x.Value)
 	case *FuncDecl:
 		d.open("func")
@@ -342,7 +390,7 @@ func (d *dumper) node(n Node) {
 		d.child(x.Value)
 	case *With:
 		d.open("with")
-		d.words(x.Names)
+		d.nameds(x.Names, x.NamePos)
 		d.child(x.Subject)
 		d.child(x.Body)
 	case *Arm:
@@ -350,7 +398,7 @@ func (d *dumper) node(n Node) {
 		d.flag(x.Wild)
 		d.child(x.Qual)
 		d.word(x.Variant)
-		d.words(x.Binds)
+		d.nameds(x.Binds, x.BindPos)
 		d.child(x.Body)
 	case *Match:
 		d.open("match")
@@ -359,8 +407,8 @@ func (d *dumper) node(n Node) {
 		list(d, x.Arms)
 	case *For:
 		d.open("for")
-		d.word(x.Var)
-		d.word(x.Var2)
+		d.named(x.Var, x.VarPos)
+		d.named(x.Var2, x.Var2Pos)
 		d.child(x.Iter)
 		d.child(x.Body)
 	case *While:

@@ -1,8 +1,9 @@
 //! phase: 6
 //! expect: output selfhost_parser
 // A kern parser written in kern (specs/selfhost-parser): given a path (and
-// optionally `bodyless`, the mode for std/ and the prelude) it prints the
-// file's parse tree in ast.Dump's format, `error` (exit 1) on a lexical
+// optionally `bodyless`, the mode for std/ and the prelude, and `spans`,
+// specs/selfhost-spans) it prints the file's parse tree in ast.Dump's
+// format, or ast.DumpSpans's with `spans`, `error` (exit 1) on a lexical
 // or syntax error, or `cannot read` and the path (exit 2). With no
 // arguments it parses the embedded sample, so the example runs as a
 // fixture; tests/selfhost_parser_test.go compares it with the Go parser
@@ -12,9 +13,9 @@ import "std/io"
 import "std/str"
 import "syntax"
 
-func run_on(src: own Vec[u8], bodyless: bool) -> i32 {
+func run_on(src: own Vec[u8], bodyless: bool, spans: bool) -> i32 {
     o := str.String.new()
-    if !syntax.Parse(src, bodyless, o) {
+    if !syntax.Parse(src, bodyless, spans, o) {
         print_str("error")
         println()
         return 1i32
@@ -25,9 +26,9 @@ func run_on(src: own Vec[u8], bodyless: bool) -> i32 {
 
 // read_and_run reads path (an owned Result holding a Vec is unwrapped with
 // ?, not matched) and parses it.
-func read_and_run(path: view[]u8, bodyless: bool) -> Result[i32, io.IoErr] {
+func read_and_run(path: view[]u8, bodyless: bool, spans: bool) -> Result[i32, io.IoErr] {
     data := io.read_file(path)?
-    return Ok(run_on(data, bodyless))
+    return Ok(run_on(data, bodyless, spans))
 }
 
 func main() -> i32 {
@@ -35,17 +36,24 @@ func main() -> i32 {
     if args.len() < 2usize {
         sample := Vec[u8].new()
         sample.extend("module sample\nimport \"std/str\"\nstruct P[T: Copy] nocopy { x: u64; y: [4]T }\nunion U { A; B(u64) }\nimpl P[u64] {\n    func get(view self) -> u64 { return self.x }\n}\nfunc start() -> i32 {\n    p := P[u64] { x: 1_000u64, y: [1, 2, 3, 4] }\n    match u {\n        B(n) => { return -1 }\n        _ => { }\n    }\n    for i in 0usize..4usize { s := \"a\\tb\" }\n    return i32(p.get() % 7u64)\n}\n")
-        return run_on(sample, false)
+        return run_on(sample, false, false)
     }
+    // the words after the path: bodyless, spans
     bodyless := false
-    if args.len() > 2usize {
-        with a := args.get(2usize) {
-            with b := a.as_view() { bodyless = len(b) == 8usize && b[0usize] == 98u8 }
+    spans := false
+    var i: usize = 2usize
+    while i < args.len() {
+        with a := args.get(i) {
+            with b := a.as_view() {
+                if str.equal(b, "bodyless") { bodyless = true }
+                if str.equal(b, "spans") { spans = true }
+            }
         }
+        i = i + 1usize
     }
     var path: Vec[u8] = Vec[u8].new()
     with a := args.get(1usize) { path.extend(a.as_view()) }
-    match read_and_run(path.as_view(), bodyless) {
+    match read_and_run(path.as_view(), bodyless, spans) {
         Ok(code) => return code
         Err(e) => {
             print_str("cannot read ")

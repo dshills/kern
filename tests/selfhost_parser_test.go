@@ -52,14 +52,7 @@ func TestSelfhostParser(t *testing.T) {
 		t.Skip("clang not available")
 	}
 	dir := filepath.Join("..", "examples", "selfhost_parser")
-	pr := project.Load(dir, []string{"main.kern"})
-	if len(pr.Diags) > 0 {
-		t.Fatalf("project: %s", pr.Diags[0].Message)
-	}
-	bin := filepath.Join(t.TempDir(), "selfhost_parser")
-	if ds, err := native.Build(pr.Files, bin, native.Options{Opt: "release"}); err != nil || len(ds) > 0 {
-		t.Fatalf("build: %v %v", err, ds)
-	}
+	bin := selfhostBin(t, dir)
 	run := func(path string, bodyless bool) (bool, string) {
 		args := []string{path}
 		if bodyless {
@@ -170,6 +163,75 @@ func TestSelfhostParser(t *testing.T) {
 		t.Errorf("selfhost_parser.out is not the Go parser's dump of the sample")
 	}
 	t.Logf("compared %d files (%d accepted, %d rejected), skipped %d with non-ASCII identifiers", compared, accepted, compared-accepted, skipped)
+	if compared < 400 {
+		t.Errorf("only %d corpus files compared", compared)
+	}
+}
+
+// selfhostBin builds examples/selfhost_parser natively at release.
+func selfhostBin(t *testing.T, dir string) string {
+	t.Helper()
+	pr := project.Load(dir, []string{"main.kern"})
+	if len(pr.Diags) > 0 {
+		t.Fatalf("project: %s", pr.Diags[0].Message)
+	}
+	bin := filepath.Join(t.TempDir(), "selfhost_parser")
+	if ds, err := native.Build(pr.Files, bin, native.Options{Opt: "release"}); err != nil || len(ds) > 0 {
+		t.Fatalf("build: %v %v", err, ds)
+	}
+	return bin
+}
+
+// With spans, the kern parser prints ast.DumpSpans of the Go parser's tree
+// for every corpus file the Go parser accepts: every node's span and every
+// extra position, byte for byte (specs/selfhost-spans R3). No file is
+// skipped.
+func TestSelfhostSpans(t *testing.T) {
+	if !native.Available() {
+		t.Skip("clang not available")
+	}
+	bin := selfhostBin(t, filepath.Join("..", "examples", "selfhost_parser"))
+	compared, rejected := 0, 0
+	for _, d := range []string{"tests", "std", "examples", filepath.Join("bench", "kern"), filepath.Join("compiler", "resolve", "prelude")} {
+		bodyless := d == "std" || strings.Contains(d, "prelude")
+		werr := filepath.Walk(filepath.Join("..", d), func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() || !strings.HasSuffix(path, ".kern") {
+				return nil
+			}
+			src, rerr := os.ReadFile(path)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			f, ds := parser.ParseWith(&source.File{Name: path, Bytes: src}, parser.Options{AllowBodyless: bodyless})
+			if len(ds) > 0 {
+				rejected++
+				return nil
+			}
+			args := []string{path, "spans"}
+			if bodyless {
+				args = append(args, "bodyless")
+			}
+			out, xerr := exec.Command(bin, args...).Output()
+			if xerr != nil {
+				t.Errorf("%s: kern parser: %v", path, xerr)
+				return nil
+			}
+			compared++
+			want, got := ast.DumpSpans(f), string(out)
+			if want != got {
+				i := firstDiff(want, got)
+				t.Errorf("%s: span dumps differ at byte %d:\n go   %s\n kern %s", path, i, around(want, i), around(got, i))
+			}
+			return nil
+		})
+		if werr != nil {
+			t.Fatalf("walking %s: %v", d, werr)
+		}
+	}
+	t.Logf("compared the span dumps of %d files (%d rejected by the Go parser, not compared)", compared, rejected)
 	if compared < 400 {
 		t.Errorf("only %d corpus files compared", compared)
 	}
