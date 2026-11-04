@@ -1,0 +1,51 @@
+//! phase: 3
+//! expect: output runtime_try_new_oom
+//! test-hooks: true
+// When the runtime cannot allocate the object, the try_new forms return
+// Err(OutOfMemory) instead of trapping, after destroying the value given
+// once (its destructor's line appears once, before the result); the next
+// allocation succeeds (specs/fallible-runtime-objects R2).
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop tok "); print_u64(self.id); println() }
+}
+func say(ok: bool, what: view[]u8) {
+    print_str(what)
+    if ok { print_str(": ok") } else { print_str(": out of memory") }
+    println()
+}
+func main() -> i32 {
+    testing.fail_next_alloc()
+    with r := Shared[Tok].try_new(Tok { id: 1u64 }) {
+        match r {
+            Ok(s) => say(true, "shared")
+            Err(e) => say(false, "shared")
+        }
+    }
+    testing.fail_next_alloc()
+    with r := Mutex[Tok].try_new(Tok { id: 2u64 }) {
+        match r {
+            Ok(m) => say(true, "mutex")
+            Err(e) => say(false, "mutex")
+        }
+    }
+    testing.fail_next_alloc()
+    with r := Condvar.try_new() {
+        match r {
+            Ok(c) => say(true, "condvar")
+            Err(e) => say(false, "condvar")
+        }
+    }
+    // the hook is spent: the next one succeeds, and its value lives on in
+    // the object until the object is dropped
+    with r := Shared[Tok].try_new(Tok { id: 3u64 }) {
+        match r {
+            Ok(s) => say(true, "shared again")
+            Err(e) => say(false, "shared again")
+        }
+    }
+    print_str("end")
+    println()
+    return 0i32
+}

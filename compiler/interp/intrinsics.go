@@ -383,6 +383,29 @@ func init() {
 			it.runtimeAlloc(c.pos)
 			return []Value{&Shared{Val: a[0], Count: 1}}
 		},
+		// the try_new forms (specs/fallible-runtime-objects): Err(OutOfMemory)
+		// when the allocation fails, after destroying the moved value; the
+		// interpreter's allocation fails only through the test hook
+		"Shared.try_new": func(it *Interp, a []Value, c callCtx) []Value {
+			if it.takeFailNextAlloc() {
+				it.destroy(a[0], c.targ(0))
+				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}}
+			}
+			return []Value{&Union{Tag: 0, Fields: []Value{&Shared{Val: a[0], Count: 1}}}}
+		},
+		"Mutex.try_new": func(it *Interp, a []Value, c callCtx) []Value {
+			if it.takeFailNextAlloc() {
+				it.destroy(a[0], c.targ(0))
+				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}}
+			}
+			return []Value{&Union{Tag: 0, Fields: []Value{&Mutex{Val: a[0], lock: make(chan struct{}, 1)}}}}
+		},
+		"Condvar.try_new": func(it *Interp, a []Value, c callCtx) []Value {
+			if it.takeFailNextAlloc() {
+				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}}
+			}
+			return []Value{&Union{Tag: 0, Fields: []Value{&Condvar{gen: make(chan struct{})}}}}
+		},
 		"Shared.get": func(it *Interp, a []Value, _ callCtx) []Value {
 			s := acc(a[0]).Ref.get().(*Shared)
 			return []Value{&Access{Ref: slotRef{&s.Val}}}

@@ -111,7 +111,9 @@ too, so its table again matches the prelude: 53 functions, 57 blocks.
   needs a fallible rehash: a design of its own.
 - **Runtime objects.** `Shared.new`, `Mutex.new`, `Condvar.new` and the
   spawns allocate in the C runtime (`kern_alloc`, which traps); fallible
-  forms are a runtime ABI change.
+  forms are a runtime ABI change. *(2026-11-04,
+  `specs/fallible-runtime-objects`: `Shared.try_new`, `Mutex.try_new` and
+  `Condvar.try_new` exist; the spawns still trap, by decision.)*
 - **Merging the bodies.** The trapping operations could be rewritten over
   the `try_` forms to remove the duplication, if a new R8 comparison shows
   no change in generated code. Until then `vec_try`'s paired lines are

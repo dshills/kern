@@ -66,6 +66,9 @@ func TestTrapKindsPerSource(t *testing.T) {
 		{"Shared.new", "func f() { s := Shared.new(1u64) }", []string{"oom"}},
 		{"Mutex.new", "func f() { m := Mutex.new(1u64) }", []string{"oom"}},
 		{"Condvar.new", "func f() { c := Condvar.new() }", []string{"oom"}},
+		{"Shared.try_new", "func f() { s := Shared.try_new(1u64) }", []string{}},
+		{"Mutex.try_new", "func f() { m := Mutex.try_new(1u64) }", []string{}},
+		{"Condvar.try_new", "func f() { c := Condvar.try_new() }", []string{}},
 		{"thread.spawn", "func w(x: u64) -> u64 { return x }\nfunc f() -> Result[u64, SpawnErr] {\n    t := thread.spawn(w, 1u64)?\n    return Ok(t.join())\n}", []string{"oom"}},
 		{"thread.scope", "func f() {\n    with s := thread.scope() { }\n}", []string{"oom"}},
 		{"scope.spawn", "func w(x: u64) -> u64 { return x }\nfunc f() -> Result[u64, SpawnErr] {\n    with s := thread.scope() {\n        j := s.spawn(w, 1u64)?\n        return Ok(j.get())\n    }\n}", []string{"oom"}},
@@ -91,5 +94,20 @@ func TestTrapKindsPerSource(t *testing.T) {
 	um := &ir.Module{Funcs: []*ir.Func{{Name: "u", Blocks: []*ir.Block{{Term: &ir.Unreachable{}}}}}}
 	if got := effectsOf(t, um, "u").TrapKinds; strings.Join(got, " ") != "unreachable" {
 		t.Errorf("unreachable: %v", got)
+	}
+}
+
+// The try_new forms of the runtime objects allocate as new does, and list
+// no oom (specs/fallible-runtime-objects R4).
+func TestRuntimeTryNewAllocates(t *testing.T) {
+	for _, body := range []string{
+		"func f() { s := Shared.try_new(1u64) }",
+		"func f() { m := Mutex.try_new(1u64) }",
+		"func f() { c := Condvar.try_new() }",
+	} {
+		e := effectsOf(t, lowerPlain(t, "module m\n"+body+"\n"), "m.f")
+		if !e.Allocates || e.Traps {
+			t.Errorf("%s: allocates %v traps %v, want an allocation and no trap", body, e.Allocates, e.Traps)
+		}
 	}
 }

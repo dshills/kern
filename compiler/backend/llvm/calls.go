@@ -847,6 +847,23 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	// Shared / Mutex / Atomic
 	case "Shared.new":
 		setDst(fe.rt("kern_shared_new", "ptr (i64, ptr, ptr)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])+", ptr "+fe.loc(c.Pos)))
+	// the try_new forms (specs/fallible-runtime-objects): the runtime
+	// writes the Result, and on failure destroys the spilled value with its
+	// drop glue
+	case "Shared.try_new", "Mutex.try_new":
+		d := dst()
+		out, off := fe.unionOut(d)
+		sym := "kern_shared_try_new"
+		if c.Intrinsic == "Mutex.try_new" {
+			sym = "kern_mutex_try_new"
+		}
+		fe.rt(sym, "void (i64, ptr, ptr, ptr, i64)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])+", ptr "+fe.e.glueFor(a[0].Type)+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.loadResult(d, out)
+	case "Condvar.try_new":
+		d := dst()
+		out, off := fe.unionOut(d)
+		fe.rt("kern_condvar_try_new", "void (ptr, i64)", "ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.loadResult(d, out)
 	case "Shared.get":
 		setDst(fe.rt("kern_shared_get", "ptr (ptr)", "ptr "+fe.handle(a[0])))
 	case "Shared.clone":

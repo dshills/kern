@@ -261,3 +261,25 @@ func main() -> i32 {
 		}
 	}
 }
+
+// The runtime objects' try_new forms need the hosted runtime, as their new
+// forms do (specs/fallible-runtime-objects R5).
+func TestHostedOnlyRuntimeTryNew(t *testing.T) {
+	src := `module m
+func main() -> i32 {
+    s := Shared.try_new(1u64)
+    m := Mutex.try_new(2u64)
+    c := Condvar.try_new()
+    return 0i32
+}
+`
+	for _, level := range []string{"debug", "release"} {
+		_, got := hosted(t, src, level)
+		joined := strings.Join(got, "\n")
+		for _, call := range []string{"Shared.try_new(1u64)", "Mutex.try_new(2u64)", "Condvar.try_new()"} {
+			if !strings.Contains(joined, call) {
+				t.Errorf("%s: no ENV_HOSTED_ONLY at %s\n%s", level, call, joined)
+			}
+		}
+	}
+}

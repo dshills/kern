@@ -1,0 +1,8 @@
+drop tok 1
+shared: out of memory
+drop tok 2
+mutex: out of memory
+condvar: out of memory
+shared again: ok
+drop tok 3
+end

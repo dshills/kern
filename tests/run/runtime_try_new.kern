@@ -1,0 +1,40 @@
+//! phase: 3
+//! expect: output runtime_try_new
+// When the allocation succeeds, the try_new forms of the runtime objects
+// give objects that work as the new forms' do (specs/fallible-runtime-objects
+// R1): a Shared read and cloned, a Mutex locked and changed, a Condvar
+// notified with no waiter.
+module t
+func main() -> i32 {
+    with r := Shared[u64].try_new(41u64) {
+        match r {
+            Ok(s) => {
+                c := s.clone()
+                v := c.get()
+                print_u64(v + 1u64)
+                println()
+            }
+            Err(e) => { print_str("shared failed"); println() }
+        }
+    }
+    with r := Mutex[u64].try_new(5u64) {
+        match r {
+            Ok(m) => {
+                with g := m.lock() { g = g * 2u64 }
+                with g := m.lock() { print_u64(g); println() }
+            }
+            Err(e) => { print_str("mutex failed"); println() }
+        }
+    }
+    with r := Condvar.try_new() {
+        match r {
+            Ok(cv) => {
+                cv.notify_one()
+                print_str("condvar ok")
+                println()
+            }
+            Err(e) => { print_str("condvar failed"); println() }
+        }
+    }
+    return 0i32
+}

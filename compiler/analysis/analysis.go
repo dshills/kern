@@ -146,6 +146,7 @@ func isAggregateCopy(t resolve.Type) bool {
 var allocating = map[string]bool{
 	"Box.new": true, "Vec.with_capacity": false,
 	"Shared.new": true, "Mutex.new": true, "Condvar.new": true, "thread.scope": true,
+	"Shared.try_new": true, "Mutex.try_new": true, "Condvar.try_new": true,
 	"Vec.push": false, "Pool.alloc": false, "Arena.alloc": false, "thread.spawn": false, "scope.spawn": false,
 	"SystemAllocator.alloc": false, "SystemAllocator.realloc": false, "SystemAllocator.alloc_zeroed": false, "clone": false,
 }

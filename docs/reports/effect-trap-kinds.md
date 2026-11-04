@@ -66,6 +66,8 @@ the key and then the value are destroyed and the map is unchanged.
 ## Open items
 
 - `kern_alloc` still traps; fallible runtime objects are a C ABI change.
+  *(2026-11-04: the `try_new` forms of `Shared`, `Mutex` and `Condvar`
+  allocate without it, `docs/reports/fallible-runtime-objects.md`.)*
 - `Map.try_reserve` and an allocator-generic `Map`.
 - Per-call-site kinds (today a function's kinds are the union over its
   body).

@@ -1016,6 +1016,19 @@ static void *kern_alloc(size_t n, const kern_loc *at) {
     if (p == NULL) kern_trap_loc(9, at);
     return p;
 }
+// kern_try_alloc is kern_alloc returning NULL instead of trapping (the
+// try_new forms, specs/fallible-runtime-objects); the armed failure of
+// testing.fail_next_alloc makes it fail.
+static void *kern_try_alloc(size_t n) {
+    if (atomic_exchange(&kern_fail_next, 0)) return NULL;
+    return malloc(n ? n : 1);
+}
+// kern_try_failed writes Err(OutOfMemory) into a try_new's result and
+// destroys the value the caller moved in, which no object took.
+static void kern_try_failed(void (*glue)(void *), void *src, char *out) {
+    if (glue != NULL) glue(src);
+    out[0] = 1;
+}
 
 // ---- std/time (specs/std-time) ----
 
@@ -1104,6 +1117,14 @@ void *kern_shared_new(int64_t size, const void *src, const kern_loc *at) {
     memcpy(s->data, src, (size_t)size);
     return s;
 }
+void kern_shared_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off) {
+    kern_shared *s = kern_try_alloc(sizeof *s + (size_t)size);
+    if (s == NULL) { kern_try_failed(glue, src, out); return; }
+    atomic_store(&s->count, 1); s->size = size;
+    memcpy(s->data, src, (size_t)size);
+    out[0] = 0;
+    memcpy(out + off, &s, sizeof s);
+}
 void *kern_shared_get(kern_shared *s) { return s->data; }
 void *kern_shared_clone(kern_shared *s, const kern_loc *at) {
     uint64_t c = atomic_load(&s->count);
@@ -1179,6 +1200,16 @@ void *kern_mutex_new(int64_t size, const void *src, const kern_loc *at) {
     memcpy(mx->data, src, (size_t)size);
     return mx;
 }
+void kern_mutex_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off) {
+    kern_mutex *mx = kern_try_alloc(sizeof *mx + (size_t)size);
+    if (mx == NULL) { kern_try_failed(glue, src, out); return; }
+    atomic_init(&mx->state, 0);
+    atomic_init(&mx->owner, 0);
+    mx->size = size;
+    memcpy(mx->data, src, (size_t)size);
+    out[0] = 0;
+    memcpy(out + off, &mx, sizeof mx);
+}
 // kern_mutex_acquire takes a lock whose fast path failed: it exchanges
 // the state to 2 (acquiring at once when it was free) and parks while it
 // is 2. A thread that parked cannot know whether another is parked, so it
@@ -1223,6 +1254,14 @@ void *kern_condvar_new(const kern_loc *at) {
     atomic_init(&cv->seq, 0);
     atomic_init(&cv->mutex, 0);
     return cv;
+}
+void kern_condvar_try_new(char *out, int64_t off) {
+    kern_condvar *cv = kern_try_alloc(sizeof *cv);
+    if (cv == NULL) { out[0] = 1; return; }
+    atomic_init(&cv->seq, 0);
+    atomic_init(&cv->mutex, 0);
+    out[0] = 0;
+    memcpy(out + off, &cv, sizeof cv);
 }
 void kern_condvar_wait(kern_condvar *cv, void *data, const kern_loc *at) {
     kern_mutex *mx = (kern_mutex *)((char *)data - offsetof(kern_mutex, data));

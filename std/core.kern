@@ -1408,6 +1408,9 @@ impl Arena[T] {
 struct Shared[T] nocopy { inner: T }
 impl Shared[T] {
     func new(v: own T) -> Shared[T]
+    // try_new is new returning Err(OutOfMemory) when the runtime cannot
+    // allocate the object, after destroying v (specs/fallible-runtime-objects).
+    func try_new(v: own T) -> Result[Shared[T], AllocErr]
     func get(view self) -> view[T]
     func clone(view self) -> Shared[T]
     destructor(edit self) { }
@@ -1417,6 +1420,9 @@ unsafe assert Interior for Shared
 struct Mutex[T] nocopy { inner: T }
 impl Mutex[T] {
     func new(v: own T) -> Mutex[T]
+    // try_new is new returning Err(OutOfMemory) when the runtime cannot
+    // allocate the lock, after destroying v.
+    func try_new(v: own T) -> Result[Mutex[T], AllocErr]
     contract { invariant "the lock guarantees exclusivity of the returned edit while it is live" }
     func lock(view self) -> edit[T] release unlock
     func unlock(view self)
@@ -1434,6 +1440,9 @@ unsafe assert Interior for Mutex
 struct Condvar nocopy { phantom: u8 }
 impl Condvar {
     func new() -> Condvar
+    // try_new is new returning Err(OutOfMemory) when the runtime cannot
+    // allocate the condition variable.
+    func try_new() -> Result[Condvar, AllocErr]
     func wait[T](view self, g: edit[T])
     func notify_one(view self)
     func notify_all(view self)
