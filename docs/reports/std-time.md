@@ -52,8 +52,11 @@ build durations with checked arithmetic (past `u64` nanoseconds is an
 
 ## Open items
 
-- Timeouts in `std/process` (`wait` with a deadline) and `std/io`.
-- A clock for freestanding mode (a timer device per target).
+- Timeouts in `std/process` (`wait` with a deadline) and `std/io`. *(Resolved 2026-11-04,
+  `specs/std-timeouts`.)*
+- A clock for freestanding mode (a timer device per target). *(Resolved
+  2026-11-04, `specs/freestanding-clock`: the generic timer on AArch64, the
+  TSC calibrated against the PIT on x86-64; the wall clock stays hosted.)*
 - A diagnostic, not a link error, for a hosted-only module in a
   freestanding build. *(Resolved 2026-11-03, `specs/freestanding-availability`:
   `ENV_HOSTED_ONLY` from `check`, `build` and `run`, Rule 6.8.)*

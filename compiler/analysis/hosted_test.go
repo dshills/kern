@@ -49,25 +49,26 @@ func TestHostedOnlyR1(t *testing.T) {
 		{`module m
 import "std/time"
 func main() -> i32 {
-    t := time.now()
-    print_u64(t.ns)
+    t := time.wall_nanos()
+    print_u64(t)
     return 0i32
 }
-`, []string{msg("time.now()", "time.now", "kern_now_ns")}},
+`, []string{msg("time.wall_nanos()", "time.wall_nanos", "kern_time_wall_ns")}},
 		{`module m
+import "std/io"
 func main() -> i32 {
-    print_u64(now_ns())
+    print_u64(u64(io.io_argc()))
     return 0i32
 }
-`, []string{msg("now_ns()", "now_ns", "kern_now_ns")}},
+`, []string{msg("io.io_argc()", "io_argc", "kern_io_argc")}},
 		{`module m
 import "std/time"
-func nap() { time.sleep(time.nanos(5u64)) }
+func nap() { print_u64(time.wall_nanos()) }
 func main() -> i32 {
     nap()
     return 0i32
 }
-`, []string{msg("time.sleep(time.nanos(5u64))", "time.sleep", "kern_time_sleep_ns")}},
+`, []string{msg("time.wall_nanos()", "time.wall_nanos", "kern_time_wall_ns")}},
 	} {
 		for _, level := range []string{"debug", "release"} {
 			if _, got := hosted(t, tc.src, level); !reflect.DeepEqual(got, tc.want) {
@@ -115,51 +116,51 @@ func TestHostedOnlyReaching(t *testing.T) {
 	}{
 		{"reference", `module m
 import "std/time"
-func call(f: func() -> time.Instant) -> u64 { return f().ns }
+func call(f: func() -> u64) -> u64 { return f() }
 func main() -> i32 {
-    print_u64(call(time.now))
+    print_u64(call(time.wall_nanos))
     return 0i32
 }
-`, []string{msg("time.now", "time.now", "kern_now_ns")}},
+`, []string{msg("time.wall_nanos", "time.wall_nanos", "kern_time_wall_ns")}},
 		{"closure", `module m
 import "std/time"
 func run(g: closure() -> u64) -> u64 { return g() }
 func main() -> i32 {
-    print_u64(run(|| time.now().ns))
+    print_u64(run(|| time.wall_nanos()))
     return 0i32
 }
-`, []string{msg("time.now()", "time.now", "kern_now_ns")}},
+`, []string{msg("time.wall_nanos()", "time.wall_nanos", "kern_time_wall_ns")}},
 		{"uncalled", `module m
 import "std/time"
-func unused() -> u64 { return time.now().ns }
+func unused() -> u64 { return time.wall_nanos() }
 func main() -> i32 { return 0i32 }
-`, []string{msg("time.now()", "time.now", "kern_now_ns")}},
+`, []string{msg("time.wall_nanos()", "time.wall_nanos", "kern_time_wall_ns")}},
 		{"destructor", `module m
 import "std/time"
 struct Tok nocopy { id: u64 }
 impl Tok {
-    destructor(edit self) { print_u64(time.now().ns) }
+    destructor(edit self) { print_u64(time.wall_nanos()) }
 }
 func main() -> i32 {
     t := Tok { id: 1u64 }
     return 0i32
 }
-`, []string{msg("time.now()", "time.now", "kern_now_ns")}},
+`, []string{msg("time.wall_nanos()", "time.wall_nanos", "kern_time_wall_ns")}},
 		{"dead", `module m
 import "std/time"
 func main() -> i32 {
-    if false { print_u64(time.now().ns) }
+    if false { print_u64(time.wall_nanos()) }
     return 0i32
 }
-`, []string{msg("time.now()", "time.now", "kern_now_ns")}},
+`, []string{msg("time.wall_nanos()", "time.wall_nanos", "kern_time_wall_ns")}},
 		{"instantiations", `module m
 import "std/time"
-func stamp[T](x: own T) -> u64 { return time.now().ns }
+func stamp[T](x: own T) -> u64 { return time.wall_nanos() }
 func main() -> i32 {
     print_u64(stamp(1u64) + stamp(2u8))
     return 0i32
 }
-`, []string{msg("time.now()", "time.now", "kern_now_ns")}},
+`, []string{msg("time.wall_nanos()", "time.wall_nanos", "kern_time_wall_ns")}},
 	} {
 		for _, level := range []string{"debug", "release"} {
 			if _, got := hosted(t, tc.src, level); !reflect.DeepEqual(got, tc.want) {
@@ -175,7 +176,8 @@ func main() -> i32 {
 // program's functions as library ones.
 func TestHostedOnlyLibraryCycle(t *testing.T) {
 	src := `module m
-func ping(n: u64) -> u64 { if n == 0u64 { return now_ns() } return pong(n - 1u64) }
+import "std/io"
+func ping(n: u64) -> u64 { if n == 0u64 { return u64(io.io_argc()) } return pong(n - 1u64) }
 func pong(n: u64) -> u64 { return ping(n) }
 func main() -> i32 {
     print_u64(pong(3u64))
@@ -187,11 +189,11 @@ func main() -> i32 {
 		mod.Func(name).Library = true
 	}
 	res, got := hostedMod(t, src, mod)
-	if want := []string{msg("pong(3u64)", "m.pong", "kern_now_ns")}; !reflect.DeepEqual(got, want) {
+	if want := []string{msg("pong(3u64)", "m.pong", "kern_io_argc")}; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 	for _, name := range []string{"m.ping", "m.pong"} {
-		if !reflect.DeepEqual(res.Library[name], []string{"kern_now_ns"}) {
+		if !reflect.DeepEqual(res.Library[name], []string{"kern_io_argc"}) {
 			t.Errorf("Library[%s] = %v", name, res.Library[name])
 		}
 	}
@@ -203,7 +205,7 @@ func TestHostedOnlyNoPosition(t *testing.T) {
 	src := `module m
 import "std/time"
 func main() -> i32 {
-    print_u64(time.now().ns)
+    print_u64(time.wall_nanos())
     return 0i32
 }
 `
@@ -211,7 +213,7 @@ func main() -> i32 {
 	main := mod.Func("m.main")
 	for _, b := range main.Blocks {
 		for _, in := range b.Instrs {
-			if c, ok := in.(*ir.Call); ok && strings.HasPrefix(c.Callee, "time.now") {
+			if c, ok := in.(*ir.Call); ok && strings.HasPrefix(c.Callee, "time.wall_nanos") {
 				c.Pos = ast.Pos{}
 			}
 		}

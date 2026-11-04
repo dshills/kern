@@ -157,7 +157,7 @@ func println()
 // eprint_str writes bytes to standard error at once, unbuffered (hosted;
 // the console in the freestanding mode).
 func eprint_str(s: view[]u8)
-// now_ns is a monotonic clock in nanoseconds (hosted; benchmarks).
+// now_ns is a monotonic clock in nanoseconds (hosted and freestanding).
 func now_ns() -> u64
 
 // Test hooks (PLAN.md 2.3): available only under --test-hooks.

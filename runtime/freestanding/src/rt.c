@@ -322,3 +322,64 @@ void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align, 
     kern_check_block(p, n, at);
     kern_heap_release(p, n);
 }
+
+// ---- clock (specs/freestanding-clock) ----
+// kern_now_ns is a monotonic clock in nanoseconds: the generic timer on
+// AArch64, the TSC calibrated once against the PIT on x86-64. The split
+// conversion (c / f) * 10^9 + (c % f) * 10^9 / f cannot overflow for a
+// frequency under 18 GHz.
+static uint64_t kern_ticks_to_ns(uint64_t c, uint64_t f) {
+    if (f == 0) return c; // no frequency known: ticks as nanoseconds
+    return (c / f) * 1000000000ull + (c % f) * 1000000000ull / f;
+}
+#if defined(__aarch64__)
+uint64_t kern_now_ns(void) {
+    uint64_t c, f;
+    __asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(c) : : "memory");
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return kern_ticks_to_ns(c, f);
+}
+#elif defined(__x86_64__)
+static uint64_t kern_rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("lfence\n\trdtsc" : "=a"(lo), "=d"(hi) : : "memory");
+    return ((uint64_t)hi << 32) | lo;
+}
+static uint64_t kern_tsc_hz = 0;   // 0 until calibrated
+static uint64_t kern_tsc_base = 0; // the TSC at calibration
+// kern_tsc_calibrate measures the TSC over 11,932 PIT ticks (10 ms):
+// channel 2 in one-shot mode with its gate high, polling its output on
+// port 0x61 (Linux's pit_calibrate_tsc). A PIT that never fires is given
+// up after 2^32 TSC ticks, and 1 GHz is assumed.
+static void kern_tsc_calibrate(void) {
+    const uint32_t latch = 11932;
+    kern_outb(0x61, (uint8_t)((kern_inb(0x61) & ~0x02) | 0x01)); // gate on, speaker off
+    kern_outb(0x43, 0xb0); // channel 2, lobyte/hibyte, mode 0, binary
+    kern_outb(0x42, (uint8_t)(latch & 0xff));
+    kern_outb(0x42, (uint8_t)(latch >> 8));
+    uint64_t t1 = kern_rdtsc(), t2 = t1;
+    while ((kern_inb(0x61) & 0x20) == 0) {
+        t2 = kern_rdtsc();
+        if (t2 - t1 > 0xffffffffull) break;
+    }
+    uint64_t d = t2 - t1;
+    uint64_t hz = (kern_inb(0x61) & 0x20) != 0 && d > 0 ? d * 1193182ull / latch : 1000000000ull;
+    kern_tsc_base = t2;
+    kern_tsc_hz = hz;
+}
+uint64_t kern_now_ns(void) {
+    if (kern_tsc_hz == 0) kern_tsc_calibrate();
+    return kern_ticks_to_ns(kern_rdtsc() - kern_tsc_base, kern_tsc_hz);
+}
+#else
+uint64_t kern_now_ns(void) { return 0; }
+#endif
+// kern_time_sleep_ns waits until the clock has advanced by at least ns
+// (busy-waiting: no interrupts are enabled); at is unused, since nothing
+// here can fail.
+void kern_time_sleep_ns(uint64_t ns, const void *at) {
+    (void)at;
+    if (ns == 0) return;
+    uint64_t start = kern_now_ns();
+    while (kern_now_ns() - start < ns) { }
+}

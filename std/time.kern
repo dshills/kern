@@ -1,11 +1,13 @@
 // std/time: a monotonic clock, durations, deadlines, sleep and the wall
-// clock, for hosted programs (a freestanding image has no runtime behind
-// these). Imported with `import "std/time"` (specs/std-time).
+// clock. Imported with `import "std/time"` (specs/std-time). A freestanding
+// image has the monotonic clock and sleep (the generic timer, or the TSC
+// calibrated against the PIT; specs/freestanding-clock) but no wall clock.
 module time
 
-// Runtime intrinsics (hosted). Both trap explicit on a failure of the
+// Runtime intrinsics. Hosted, both trap explicit on a failure of the
 // underlying call, which cannot happen for the arguments the runtime
-// passes; sleep resumes after a signal interrupts it.
+// passes; sleep resumes after a signal interrupts it. Freestanding, sleep
+// busy-waits on the monotonic clock and wall_ns does not exist.
 func time_sleep_ns(ns: u64)
 func time_wall_ns() -> u64
 

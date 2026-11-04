@@ -31,18 +31,19 @@ func TestHostedOnlyMatchesLinker(t *testing.T) {
 	progs := []string{`module m
 import "std/time"
 func main() -> i32 {
-    t := time.now()
-    print_u64(t.ns)
+    t := time.wall_nanos()
+    print_u64(t)
     return 0i32
 }
 `, `module m
+import "std/io"
 func main() -> i32 {
-    print_u64(now_ns())
+    print_u64(u64(io.io_argc()))
     return 0i32
 }
 `, `module m
 import "std/time"
-func nap() { time.sleep(time.nanos(5u64)) }
+func nap() { print_u64(time.wall_nanos()) }
 func main() -> i32 {
     nap()
     return 0i32

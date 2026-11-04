@@ -120,17 +120,14 @@ The two freestanding targets give the same list.
 | `Child.terminate` | `kern_proc_signal` |
 | `Child.try_wait` | `kern_proc_wait` |
 | `Child.wait` | `kern_proc_close`, `kern_proc_flush_inherited`, `kern_proc_wait` |
-| `Child.wait_timeout` | `kern_now_ns`, `kern_proc_close`, `kern_proc_flush_inherited`, `kern_proc_wait`, `kern_time_sleep_ns` |
+| `Child.wait_timeout` | `kern_proc_close`, `kern_proc_flush_inherited`, `kern_proc_wait` |
 | `Command.check` | `kern_proc_errno` |
 | `Command.child_env` | `kern_proc_env_at`, `kern_proc_env_count` |
 | `Command.output` | `kern_join_drop`, `kern_join_get`, `kern_proc_close`, `kern_proc_env_at`, `kern_proc_env_count`, `kern_proc_errno`, `kern_proc_fault_take`, `kern_proc_flush_inherited`, `kern_proc_read`, `kern_proc_spawn`, `kern_proc_wait`, `kern_proc_write`, `kern_scope_drop`, `kern_scope_new`, `kern_scope_spawn` |
-| `Command.output_timeout` | `kern_join_drop`, `kern_join_get`, `kern_now_ns`, `kern_proc_close`, `kern_proc_env_at`, `kern_proc_env_count`, `kern_proc_errno`, `kern_proc_fault_take`, `kern_proc_flush_inherited`, `kern_proc_read`, `kern_proc_signal`, `kern_proc_spawn`, `kern_proc_wait`, `kern_proc_write`, `kern_scope_drop`, `kern_scope_new`, `kern_scope_spawn`, `kern_time_sleep_ns` |
+| `Command.output_timeout` | `kern_join_drop`, `kern_join_get`, `kern_proc_close`, `kern_proc_env_at`, `kern_proc_env_count`, `kern_proc_errno`, `kern_proc_fault_take`, `kern_proc_flush_inherited`, `kern_proc_read`, `kern_proc_signal`, `kern_proc_spawn`, `kern_proc_wait`, `kern_proc_write`, `kern_scope_drop`, `kern_scope_new`, `kern_scope_spawn` |
 | `Command.spawn` | `kern_proc_env_at`, `kern_proc_env_count`, `kern_proc_errno`, `kern_proc_spawn` |
 | `Command.spawn_modes` | `kern_proc_env_at`, `kern_proc_env_count`, `kern_proc_errno`, `kern_proc_spawn` |
 | `Command.status` | `kern_proc_close`, `kern_proc_env_at`, `kern_proc_env_count`, `kern_proc_errno`, `kern_proc_flush_inherited`, `kern_proc_spawn`, `kern_proc_wait` |
-| `Deadline.expired` | `kern_now_ns` |
-| `Deadline.remaining` | `kern_now_ns` |
-| `Instant.elapsed` | `kern_now_ns` |
 | `Pipe.destructor` | `kern_proc_close` |
 | `Pipe.read` | `kern_proc_errno`, `kern_proc_fault_take`, `kern_proc_read` |
 | `Pipe.read_all` | `kern_proc_errno`, `kern_proc_fault_take`, `kern_proc_read` |
@@ -150,19 +147,15 @@ The two freestanding targets give the same list.
 | `io.temp_path` | `kern_io_temp` |
 | `io.write_all` | `kern_io_write` |
 | `io.write_file` | `kern_io_close`, `kern_io_open`, `kern_io_write` |
-| `process.deadline_of` | `kern_now_ns` |
 | `process.env` | `kern_proc_env_at`, `kern_proc_env_count` |
 | `process.env_entry` | `kern_proc_env_at` |
 | `process.errno_err` | `kern_proc_errno` |
 | `process.fail_next_io` | `kern_proc_fault_arm` |
 | `process.gather` | `kern_join_drop`, `kern_join_get`, `kern_proc_errno`, `kern_proc_fault_take`, `kern_proc_read`, `kern_proc_write`, `kern_scope_drop`, `kern_scope_new`, `kern_scope_spawn` |
-| `process.gather_timed` | `kern_join_drop`, `kern_join_get`, `kern_now_ns`, `kern_proc_close`, `kern_proc_errno`, `kern_proc_fault_take`, `kern_proc_flush_inherited`, `kern_proc_read`, `kern_proc_signal`, `kern_proc_wait`, `kern_proc_write`, `kern_scope_drop`, `kern_scope_new`, `kern_scope_spawn`, `kern_time_sleep_ns` |
+| `process.gather_timed` | `kern_join_drop`, `kern_join_get`, `kern_proc_close`, `kern_proc_errno`, `kern_proc_fault_take`, `kern_proc_flush_inherited`, `kern_proc_read`, `kern_proc_signal`, `kern_proc_wait`, `kern_proc_write`, `kern_scope_drop`, `kern_scope_new`, `kern_scope_spawn` |
 | `process.is_epipe` | `kern_proc_errno` |
 | `process.read_end` | `kern_proc_errno`, `kern_proc_fault_take`, `kern_proc_read` |
-| `process.stop` | `kern_now_ns`, `kern_proc_close`, `kern_proc_flush_inherited`, `kern_proc_signal`, `kern_proc_wait`, `kern_time_sleep_ns` |
+| `process.stop` | `kern_proc_close`, `kern_proc_flush_inherited`, `kern_proc_signal`, `kern_proc_wait` |
 | `process.write_end` | `kern_proc_errno`, `kern_proc_fault_take`, `kern_proc_write` |
-| `time.after` | `kern_now_ns` |
-| `time.now` | `kern_now_ns` |
-| `time.sleep` | `kern_time_sleep_ns` |
 | `time.wall_nanos` | `kern_time_wall_ns` |
 <!-- end of the hosted-only inventory -->

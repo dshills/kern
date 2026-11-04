@@ -24,25 +24,26 @@ var hostedPrograms = []struct{ src, call, message string }{
 	{`module m
 import "std/time"
 func main() -> i32 {
-    t := time.now()
-    print_u64(t.ns)
+    t := time.wall_nanos()
+    print_u64(t)
     return 0i32
 }
-`, "time.now()", "call to `time.now` needs the hosted runtime (`kern_now_ns`), which a freestanding image does not have"},
+`, "time.wall_nanos()", "call to `time.wall_nanos` needs the hosted runtime (`kern_time_wall_ns`), which a freestanding image does not have"},
 	{`module m
+import "std/io"
 func main() -> i32 {
-    print_u64(now_ns())
+    print_u64(u64(io.io_argc()))
     return 0i32
 }
-`, "now_ns()", "call to `now_ns` needs the hosted runtime (`kern_now_ns`), which a freestanding image does not have"},
+`, "io.io_argc()", "call to `io_argc` needs the hosted runtime (`kern_io_argc`), which a freestanding image does not have"},
 	{`module m
 import "std/time"
-func nap() { time.sleep(time.nanos(5u64)) }
+func nap() { print_u64(time.wall_nanos()) }
 func main() -> i32 {
     nap()
     return 0i32
 }
-`, "time.sleep(time.nanos(5u64))", "call to `time.sleep` needs the hosted runtime (`kern_time_sleep_ns`), which a freestanding image does not have"},
+`, "time.wall_nanos()", "call to `time.wall_nanos` needs the hosted runtime (`kern_time_wall_ns`), which a freestanding image does not have"},
 }
 
 func writeProgram(t *testing.T, src string) string {
@@ -155,7 +156,7 @@ func TestHostedOnlyManifestAndErrors(t *testing.T) {
 	bad := writeProgram(t, `module m
 import "std/time"
 func main() -> i32 {
-    t := time.now()
+    t := time.wall_nanos()
     x: u64 = true
     return 0i32
 }

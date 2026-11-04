@@ -1,0 +1,34 @@
+//! phase: 3
+//! expect: output clock
+//! env: freestanding
+// The monotonic clock on bare metal (specs/freestanding-clock R1, R2): the
+// generic timer on AArch64, the TSC calibrated against the PIT on x86-64.
+// 1,000 readings never decrease, and a 20 ms sleep measures at least 20 ms
+// (no upper bound: an emulator may be paused). The output is booleans and
+// counts only, the same in the interpreter's emulation and under QEMU.
+module fs
+import "std/time"
+func main() -> i32 {
+    var prev: u64 = now_ns()
+    var back: u64 = 0u64
+    for i in 0u64..1000u64 {
+        t := now_ns()
+        if t < prev { back = back + 1u64 }
+        prev = t
+    }
+    print_str("decreases ")
+    print_u64(back)
+    println()
+    t0 := time.now()
+    time.sleep(time.millis(20u64))
+    d := t0.elapsed()
+    print_str("slept at least 20 ms ")
+    print_bool(d.as_millis() >= 20u64)
+    println()
+    z := time.now()
+    time.sleep(time.nanos(0u64))
+    print_str("zero sleep returns ")
+    print_bool(z.elapsed().as_nanos() < 1000000000u64)
+    println()
+    return 0i32
+}
