@@ -166,7 +166,8 @@ func emitWith(mod *ir.Module, opts Options) (*emitter, string, []error) {
 
 // fnAttrs is the attribute group every function carries. Hosted builds probe
 // every frame page by page so a large frame cannot skip the guard page
-// (PLAN.md 2.2); ThreadSanitizer builds instrument every function. A
+// (PLAN.md 2.2) and keep frame pointers;
+// ThreadSanitizer builds instrument every function. A
 // freestanding build without ThreadSanitizer needs neither, and LLVM rejects
 // an empty attribute group, so the group is then omitted altogether.
 func (e *emitter) fnAttrs() string {
@@ -176,6 +177,15 @@ func (e *emitter) fnAttrs() string {
 	}
 	if e.opts.TSan {
 		attrs += " sanitize_thread"
+	}
+	if !e.opts.Freestanding {
+		// hosted code keeps the frame-pointer chain, as
+		// -fno-omit-frame-pointer does for the C runtime: the fault handler
+		// walks it to name a stack overflow that lands in a library frame
+		// or in C called from one (specs/x86-frame-pointers); without the
+		// attribute LLVM leaves kern functions frameless on x86-64 and on
+		// arm64 alike
+		attrs += " \"frame-pointer\"=\"all\""
 	}
 	return attrs
 }

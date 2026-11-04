@@ -44,6 +44,53 @@ func emit(t *testing.T, src string) string {
 	return text
 }
 
+// emitWith lowers src and emits it with opts.
+func emitWith(t *testing.T, src string, opts llvm.Options) string {
+	t.Helper()
+	f := &source.File{Name: "t.kern", Bytes: []byte(src)}
+	prog := resolve.Resolve([]*source.File{f})
+	if len(prog.Diags) > 0 {
+		t.Fatalf("resolve: %s", prog.Diags[0].Message)
+	}
+	mod, ds := lower.Lower(prog)
+	if len(ds) > 0 {
+		t.Fatalf("lower: %s", ds[0].Message)
+	}
+	text, errs := llvm.EmitWith(mod, opts)
+	if len(errs) > 0 {
+		t.Fatalf("emit: %v", errs[0])
+	}
+	return text
+}
+
+// Hosted builds keep frame pointers in every function, on x86-64 and
+// arm64; freestanding builds carry no frame-pointer attribute
+// (specs/x86-frame-pointers R1).
+func TestEmitFramePointers(t *testing.T) {
+	src := "module t\nfunc f(x: u64) -> u64 { return x + 1u64 }\nfunc main() -> i32 { return i32(f(1u64)) }\n"
+	for _, tc := range []struct {
+		opts  llvm.Options
+		group string
+	}{
+		{llvm.Options{Triple: "x86_64-unknown-linux-gnu"}, "attributes #0 = { \"probe-stack\"=\"inline-asm\" \"frame-pointer\"=\"all\" }"},
+		{llvm.Options{Triple: "x86_64-apple-macosx"}, "attributes #0 = { \"probe-stack\"=\"inline-asm\" \"frame-pointer\"=\"all\" }"},
+		{llvm.Options{Triple: "aarch64-unknown-linux-gnu"}, "attributes #0 = { \"probe-stack\"=\"inline-asm\" \"frame-pointer\"=\"all\" }"},
+		{llvm.Options{Triple: "aarch64-apple-macosx"}, "attributes #0 = { \"probe-stack\"=\"inline-asm\" \"frame-pointer\"=\"all\" }"},
+		{llvm.Options{Triple: "x86_64-unknown-none-elf", Freestanding: true, StackCheck: true}, ""},
+	} {
+		text := emitWith(t, src, tc.opts)
+		var got string
+		for _, l := range strings.Split(text, "\n") {
+			if strings.HasPrefix(l, "attributes #0") {
+				got = l
+			}
+		}
+		if got != tc.group {
+			t.Errorf("%s (freestanding %v): attribute group %q, want %q", tc.opts.Triple, tc.opts.Freestanding, got, tc.group)
+		}
+	}
+}
+
 // TestEmitShapes checks the backend's contract-bearing output shapes: the
 // aliasing attributes of §5.4, sequence accesses as two scalars, stack probes
 // on every function, thread-local globals, strict floating point (no
@@ -67,7 +114,7 @@ func main() -> i32 { return 0i32 }
 		"ptr noalias readonly %p1",              // view of a plain struct
 		"ptr noalias %p2",                       // edit
 		"ptr %p3",                               // view of an Interior type: no attributes
-		"attributes #0 = { \"probe-stack\"=\"inline-asm\" }",
+		"attributes #0 = { \"probe-stack\"=\"inline-asm\" \"frame-pointer\"=\"all\" }",
 		"thread_local global i32 0",
 		"define i64 @kern_entry(i64 %p0) #0",
 		"fmul double",

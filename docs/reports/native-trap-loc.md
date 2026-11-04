@@ -138,6 +138,9 @@ Two changes followed:
 - **Kern code on x86-64 keeps no frame pointer.** An overflow in a
   frameless library function called from kern code may be found only
   through the next C frame. One whose whole chain is frameless falls back
-  to 0-0.
+  to 0-0. *(Resolved 2026-11-04, `specs/x86-frame-pointers`: arm64
+  had the same gap. Every hosted kern function now keeps the frame
+  pointer, and the library-probe overflow names its caller in every
+  layout tried, `docs/reports/x86-frame-pointers.md`.)*
 - **Real x86-64 Linux hardware** was not available; the x86-64 runs are
   emulated.

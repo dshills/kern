@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -140,6 +141,21 @@ func main() -> i32 {
     return 0i32
 }
 `, "stack", []string{"down"}},
+		// the overflow lands in io.read_from's stack probe or in the read
+		// it calls; before specs/x86-frame-pointers kern frames kept no
+		// frame pointer and the record was often 0-0. Standard input is
+		// /dev/null. TestNativeTrapLibraryProbe varies the stack layout.
+		{"library_probe.kern", `module t
+import "std/io"
+func down(n: u64) -> u64 {
+    with r := io.read_stdin() { }
+    return down(n + 1u64) + 1u64
+}
+func main() -> i32 {
+    print_u64(down(0u64))
+    return 0i32
+}
+`, "stack", []string{"down"}},
 		{"fault.kern", `module t
 contract { requires "nothing: the program faults on purpose" }
 func peek(a: usize) -> u64 {
@@ -213,6 +229,64 @@ func main() -> i32 {
 			want := fmt.Sprintf(`"span":{"start":%d,"end":%d}`, start, end)
 			if !strings.Contains(eb.String(), want) {
 				t.Fatalf("%s run %d: record %q does not name down (%s)", opt, i, eb.String(), want)
+			}
+		}
+	}
+}
+
+// The overflow of library_probe.kern names down whatever the stack layout:
+// the executable's name shifts the initial stack, which moves the fault
+// between the library's probe and the read it calls. Before kern code kept
+// frame pointers, three of eight names failed on arm64 and all eight on
+// x86-64 at debug (specs/x86-frame-pointers R2).
+func TestNativeTrapLibraryProbe(t *testing.T) {
+	if !native.Available() {
+		t.Skip("clang not available")
+	}
+	src := `module t
+import "std/io"
+func down(n: u64) -> u64 {
+    with r := io.read_stdin() { }
+    return down(n + 1u64) + 1u64
+}
+func main() -> i32 {
+    print_u64(down(0u64))
+    return 0i32
+}
+`
+	start, end := declSpan(src, "down")
+	want := fmt.Sprintf(`"span":{"start":%d,"end":%d}`, start, end)
+	for _, opt := range []string{"debug", "release"} {
+		dir := t.TempDir()
+		exe := filepath.Join(dir, "p")
+		ds, err := native.Build([]*source.File{{Name: "probe.kern", Bytes: []byte(src)}}, exe, native.Options{Opt: opt})
+		if err != nil || len(ds) > 0 {
+			t.Fatalf("native build: %v %v", err, ds)
+		}
+		bin, err := os.ReadFile(exe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"a", "ab", "abc", "abcd", "abcde", "abcdef", "abcdefg", "abcdefgh"} {
+			p := filepath.Join(dir, name)
+			if err := os.WriteFile(p, bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			cmd := exec.CommandContext(ctx, p)
+			var eb bytes.Buffer
+			cmd.Stderr = &eb
+			err := cmd.Run()
+			cancel()
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				t.Fatalf("%s as %s: the program did not fail: %v", opt, name, err)
+			}
+			if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGABRT {
+				t.Errorf("%s as %s: died by %v, not SIGABRT", opt, name, err)
+			}
+			if !strings.Contains(eb.String(), want) {
+				t.Errorf("%s as %s: record %q does not name down (%s)", opt, name, eb.String(), want)
 			}
 		}
 	}
