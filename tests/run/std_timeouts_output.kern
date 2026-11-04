@@ -1,0 +1,64 @@
+//! phase: 6
+//! expect: output
+// Command.output_timeout (specs/std-timeouts R4): a child that sleeps is
+// None within the bound and stopped; one that writes both streams and
+// exits 4 is Some with them; cat returns 1 MiB of input whole; a program
+// that does not exist is NotFound, as output reports it.
+module t
+import "std/io"
+import "std/process"
+import "std/time"
+func show(c: view[process.Command], input: view[]u8, d: time.Duration) {
+    t0 := time.now()
+    with r := c.output_timeout(input, d) {
+        match r {
+            Ok(x) => {
+                match x {
+                    Some(o) => {
+                        print_str("some stdout ")
+                        print_u64(u64(o.stdout.len()))
+                        if o.stdout.len() < 10usize {
+                            print_str(" [")
+                            print_str(o.stdout.as_view())
+                            print_str("]")
+                        }
+                        print_str(" stderr [")
+                        print_str(o.stderr.as_view())
+                        print_str("]")
+                        match o.status {
+                            Exited(code) => { print_str(" exited "); print_i64(i64(code)) }
+                            Signaled(g) => { print_str(" signaled "); print_i64(i64(g)) }
+                        }
+                    }
+                    None => print_str("none")
+                }
+            }
+            Err(e) => {
+                match e {
+                    NotFound => print_str("not found")
+                    Permission => print_str("permission")
+                    Exists => print_str("exists")
+                    Other(code) => print_str("other")
+                }
+            }
+        }
+    }
+    if t0.elapsed().as_millis() < 3000u64 { print_str(" in time") }
+    println()
+}
+func main() -> i32 {
+    a := process.Command.new("sleep")
+    a.arg("5")
+    show(a, "", time.millis(200u64))
+    b := process.Command.new("sh")
+    b.arg("-c")
+    b.arg("printf hi; printf err >&2; exit 4")
+    show(b, "", time.seconds(10u64))
+    big := Vec[u8].new()
+    for i in 0usize..1048576usize { big.push(97u8 + truncate[u8](i % 26usize)) }
+    k := process.Command.new("cat")
+    show(k, big.as_view(), time.seconds(10u64))
+    n := process.Command.new("no-such-program-kern-timeouts")
+    show(n, "", time.seconds(10u64))
+    return 0i32
+}

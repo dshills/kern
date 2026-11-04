@@ -1,0 +1,4 @@
+none in time
+some stdout 2 [hi] stderr [err] exited 4 in time
+some stdout 1048576 stderr [] exited 0 in time
+not found in time

@@ -1,0 +1,148 @@
+//! phase: 6
+//! expect: output
+//! test-hooks: true
+// Pipe.read_timeout and io_read_timeout (specs/std-timeouts R1, R2, R5a):
+// a child that prints after sleeping, read with 200 ms (None, nothing
+// consumed), then with 10 s (its bytes), then end of file; an empty buf
+// is Some(0); an armed fault is returned once, and a stdin pipe end is
+// EBADF before an armed fault is looked at (the stdin slot stays armed
+// for the write); the largest duration is no timeout; the raw entry's
+// empty-buffer and closed-descriptor results; ready data wins over a
+// zero timeout. Times are bounded only above, loosely,
+// for a loaded host.
+module t
+import "std/io"
+import "std/process"
+import "std/time"
+func say(s: view[]u8) { print_str(s); println() }
+func err_name(e: view[io.IoErr]) {
+    match e {
+        Other(c) => {
+            if c == process.proc_errno(2u8) {
+                say("ebadf")
+            } else if c == process.proc_errno(4u8) {
+                say("eio")
+            } else {
+                say("other")
+            }
+        }
+        NotFound => say("not found")
+        Permission => say("permission")
+        Exists => say("exists")
+    }
+}
+func read_once(p: edit[process.Pipe], d: time.Duration) {
+    var buf: [16]u8 = zero()
+    t0 := time.now()
+    r := p.read_timeout(buf, d)
+    match r {
+        Ok(x) => {
+            match x {
+                Some(n) => {
+                    print_str("some ")
+                    print_u64(u64(n))
+                    print_str(" [")
+                    print_str(buf[0usize : n])
+                    print_str("]")
+                }
+                None => print_str("none")
+            }
+        }
+        Err(e) => {
+            print_str("err ")
+            err_name(e)
+            return
+        }
+    }
+    if t0.elapsed().as_millis() < 3000u64 { print_str(" in time") }
+    println()
+}
+func late(script: view[]u8) -> process.Command {
+    c := process.Command.new("sh")
+    c.arg("-c")
+    c.arg(script)
+    c.stdout(process.Stdio.Piped)
+    c.stdin(process.Stdio.Piped)
+    return c
+}
+func waited(c: own process.Child) {
+    st := c.wait()
+    match st {
+        Ok(s) => say("waited")
+        Err(e) => err_name(e)
+    }
+}
+func sleeper() -> Result[(), io.IoErr] {
+    cmd := late("sleep 1; printf late")
+    c := cmd.spawn()?
+    p := c.take_stdout()?
+    read_once(p, time.millis(200u64))
+    read_once(p, time.seconds(10u64))
+    read_once(p, time.seconds(10u64))
+    var empty: [0]u8 = zero()
+    e := p.read_timeout(empty, time.seconds(10u64))?
+    match e {
+        Some(n) => { print_str("empty: some "); print_u64(u64(n)); println() }
+        None => say("empty: none")
+    }
+    process.fail_next_io(1u8, process.proc_errno(4u8))
+    read_once(p, time.seconds(10u64))
+    read_once(p, time.nanos(0u64))
+    w := c.take_stdin()?
+    process.fail_next_io(0u8, process.proc_errno(4u8))
+    read_once(w, time.millis(10u64))
+    x := w.write_all("x")
+    match x {
+        Ok(u) => say("stdin write: ok, the fault was taken")
+        Err(e) => { print_str("stdin write: "); err_name(e) }
+    }
+    waited(c)
+    return Ok(())
+}
+// raw is the entry itself: an empty buffer is 0 before the descriptor is
+// looked at; a closed descriptor is EBADF.
+func raw() {
+    var empty: [0]u8 = zero()
+    var one: [1]u8 = zero()
+    print_i64(io.io_read_timeout(999i32, empty, 1000000u64))
+    println()
+    r := io.io_read_timeout(999i32, one, 1000000u64)
+    if r == i64(0i32 - process.proc_errno(2u8)) { say("ebadf") } else { print_i64(r); println() }
+}
+// ready data wins over a zero timeout
+func ready_now() -> Result[(), io.IoErr] {
+    cmd := late("printf now; sleep 1")
+    c := cmd.spawn()?
+    p := c.take_stdout()?
+    time.sleep(time.millis(300u64))
+    read_once(p, time.nanos(0u64))
+    waited(c)
+    return Ok(())
+}
+func forever() -> Result[(), io.IoErr] {
+    cmd := late("sleep 0.1; printf x")
+    c := cmd.spawn()?
+    p := c.take_stdout()?
+    read_once(p, time.nanos(18446744073709551615u64))
+    waited(c)
+    return Ok(())
+}
+func main() -> i32 {
+    r := sleeper()
+    match r {
+        Ok(u) => { }
+        Err(e) => err_name(e)
+    }
+    f := forever()
+    match f {
+        Ok(u) => { }
+        Err(e) => err_name(e)
+    }
+    raw()
+    n := ready_now()
+    match n {
+        Ok(u) => { }
+        Err(e) => err_name(e)
+    }
+    return 0i32
+}

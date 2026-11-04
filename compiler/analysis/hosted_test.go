@@ -221,3 +221,43 @@ func main() -> i32 {
 		t.Errorf("got %q, want one diagnostic at main's declaration", got)
 	}
 }
+
+// The timeout functions of specs/std-timeouts reach the hosted runtime, so
+// a freestanding call to each is ENV_HOSTED_ONLY at the call (R6).
+func TestHostedOnlyTimeouts(t *testing.T) {
+	src := `module m
+import "std/io"
+import "std/process"
+import "std/time"
+func main() -> i32 {
+    var buf: [4]u8 = zero()
+    r := io.read_stdin_timeout(buf, time.millis(1u64))
+    c := process.Command.new("true")
+    with o := c.output_timeout("", time.millis(1u64)) { }
+    with s := c.spawn() {
+        match s {
+            Ok(ch) => {
+                w := ch.wait_timeout(time.millis(1u64))
+                with p := ch.take_stdout() {
+                    match p {
+                        Ok(pipe) => { x := pipe.read_timeout(buf, time.millis(1u64)) }
+                        Err(e) => { }
+                    }
+                }
+            }
+            Err(e) => { }
+        }
+    }
+    return 0i32
+}
+`
+	for _, level := range []string{"debug", "release"} {
+		_, got := hosted(t, src, level)
+		joined := strings.Join(got, "\n")
+		for _, call := range []string{"io.read_stdin_timeout(", "c.output_timeout(", "ch.wait_timeout(", "pipe.read_timeout("} {
+			if !strings.Contains(joined, call) {
+				t.Errorf("%s: no ENV_HOSTED_ONLY at %s…\n%s", level, call, joined)
+			}
+		}
+	}
+}

@@ -519,6 +519,9 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	case "io_read", "io_write":
 		p, l := fe.seqParts(a[1])
 		setDst(fe.rt("kern_"+c.Intrinsic, "i64 (i32, ptr, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l))
+	case "io_read_timeout":
+		p, l := fe.seqParts(a[1])
+		setDst(fe.rt("kern_io_read_timeout", "i64 (i32, ptr, i64, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l+", i64 "+fe.v(a[2])))
 	case "io_close":
 		setDst(fe.rt("kern_io_close", "i32 (i32)", "i32 "+fe.v(a[0])))
 	case "io_remove", "io_mkdir", "io_rmdir", "io_kind":

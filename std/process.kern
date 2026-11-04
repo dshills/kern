@@ -6,6 +6,7 @@
 // library's interface.
 module process
 import "std/io"
+import "std/time"
 
 // Stdio is what a child's standard stream is connected to.
 union Stdio { Inherit; Null; Piped }
@@ -400,6 +401,47 @@ impl Command {
         return Err(errno_err(5u8))
     }
 
+    // output_timeout is output with a deadline (specs/std-timeouts): Some
+    // of what output returns when the child ends within d; None when it
+    // does not, after killing (SIGKILL) and reaping it, with what it wrote
+    // discarded. The writer and both readers run on scoped threads while
+    // the calling thread waits. A failure of the timed wait, the kill or
+    // the reap is returned, after the child was stopped and the threads
+    // joined. A descendant holding one of the child's pipes open keeps
+    // the threads, and so the call, waiting past d.
+    func output_timeout(view self, input: view[]u8, d: time.Duration) -> Result[Option[Output], io.IoErr] {
+        end := deadline_of(d)
+        c := self.spawn_modes([2u8, 2u8, 2u8])?
+        w := c.take_stdin()?
+        o := c.take_stdout()?
+        e := c.take_stderr()?
+        with g := gather_timed(c, w, o, e, input, end) {
+            match g {
+                Ok(got) => {
+                    match got.failed {
+                        Some(x) => return Err(x)
+                        None => { }
+                    }
+                    match got.status {
+                        None => return Ok(None)
+                        Some(st) => {
+                            first := first_err(got.wrote, err_in(got.read_out), err_in(got.read_err), None)
+                            match first {
+                                Some(x) => return Err(x)
+                                None => { }
+                            }
+                            so := replace(got.read_out, Ok(Vec[u8].new()))
+                            se := replace(got.read_err, Ok(Vec[u8].new()))
+                            return Ok(Some(Output { status: st, stdout: so?, stderr: se? }))
+                        }
+                    }
+                }
+                Err(x) => return Err(errno_err(5u8))
+            }
+        }
+        return Err(errno_err(5u8))
+    }
+
     // status runs the child to its end with the stream settings, a Piped
     // stream treated as Null, and returns how it ended.
     func status(view self) -> Result[ExitStatus, io.IoErr] {
@@ -454,6 +496,39 @@ impl Child {
         self.st = st
         self.reaped = true
         return Ok(Some(status_from(self.st)))
+    }
+
+    // wait_timeout waits at most d for the child to end (specs/std-timeouts):
+    // Some of its status once it has ended (reaping it, as try_wait does),
+    // None when d passes first; the child keeps running after None. It
+    // closes the stdin pipe it still holds first, as wait does. It checks
+    // with try_wait, sleeping 1 ms between checks and doubling up to 10 ms,
+    // never past the deadline; a d of zero checks once.
+    func wait_timeout(edit self, d: time.Duration) -> Result[Option[ExitStatus], io.IoErr] {
+        if self.fds[0usize] >= 0i32 {
+            c := proc_close(self.fds[0usize])
+            self.fds[0usize] = -1i32
+        }
+        end := deadline_of(d)
+        var pause: u64 = 1000000u64
+        while true {
+            r := self.try_wait()?
+            match r {
+                Some(st) => {
+                    proc_flush_inherited(self.h)
+                    return Ok(Some(st))
+                }
+                None => { }
+            }
+            t := now_ns()
+            if t >= end { return Ok(None) }
+            var p: u64 = pause
+            if p > end - t { p = end - t }
+            time.sleep(time.nanos(p))
+            pause = pause * 2u64
+            if pause > 10000000u64 { pause = 10000000u64 }
+        }
+        return Ok(None)
     }
 
     // wait blocks until the child ends and returns its status. It closes
@@ -512,6 +587,19 @@ impl Pipe {
         n := proc_read(self.fd, buf)
         if n < 0i64 { return Err(neg_err(n)) }
         return Ok(usize(n))
+    }
+
+    // read_timeout is read waiting at most d for data (specs/std-timeouts):
+    // Some(n) for n bytes (0 at end of file or for an empty buf), None
+    // when none arrived in time, with nothing read.
+    func read_timeout(edit self, buf: edit[]u8, d: time.Duration) -> Result[Option[usize], io.IoErr] {
+        if self.kind == 0u8 { return Err(errno_err(2u8)) }
+        f := proc_fault_take(self.kind)
+        if f != 0i32 { return Err(io.err_of(f)) }
+        n := io.io_read_timeout(self.fd, buf, d.ns)
+        if n == io.timed_out() { return Ok(None) }
+        if n < 0i64 { return Err(neg_err(n)) }
+        return Ok(Some(usize(n)))
     }
 
     // read_all reads to end of file.
@@ -589,6 +677,98 @@ func gather(w: own Pipe, o: own Pipe, e: own Pipe, input: view[]u8) -> Result[Ga
         je := r2?
         return Ok(Gathered { wrote: wrote, read_out: jo.get(), read_err: je.get() })
     }
+}
+
+// deadline_of is now_ns() plus d, saturating at the largest u64 (a
+// deadline that never passes).
+func deadline_of(d: time.Duration) -> u64 {
+    t := now_ns()
+    if d.ns > 18446744073709551615u64 - t { return 18446744073709551615u64 }
+    return t + d.ns
+}
+
+// Timed is what gather_timed produced: the threads' results, as in
+// Gathered; the child's status when it ended within the deadline (None
+// when it was killed); and a failure of the timed wait, the kill or the
+// reap.
+struct Timed { wrote: Option[io.IoErr]; read_out: Result[Vec[u8], io.IoErr]; read_err: Result[Vec[u8], io.IoErr]; status: Option[ExitStatus]; failed: Option[io.IoErr] }
+
+// gather_timed runs output_timeout's operations: the two readers and the
+// writer on scoped threads, and the wait for c on the calling thread
+// until end, the deadline output_timeout took at its call (spawning and
+// starting the threads count against it). When the deadline passes or
+// the wait fails, c is stopped, which closes its pipe ends, so the
+// threads end and the scope can join them. A thread that cannot start
+// stops c too.
+func gather_timed(c: edit[Child], w: own Pipe, o: own Pipe, e: own Pipe, input: view[]u8, end: u64) -> Result[Timed, SpawnErr] {
+    with s := thread.scope() {
+        r1 := s.spawn(read_end, o)
+        r2 := s.spawn(read_end, e)
+        r3 := s.spawn(write_end, w, input)
+        var failed: bool = false
+        match r1 {
+            Ok(t) => { }
+            Err(x) => failed = true
+        }
+        match r2 {
+            Ok(t) => { }
+            Err(x) => failed = true
+        }
+        match r3 {
+            Ok(t) => { }
+            Err(x) => failed = true
+        }
+        if failed {
+            // a pipe end whose thread did not start was dropped with it;
+            // stopping the child ends the threads that did start
+            f := stop(c)
+            return Err(ResourceExhausted)
+        }
+        var status: Option[ExitStatus] = None
+        var bad: Option[io.IoErr] = None
+        t := now_ns()
+        var left: u64 = 0u64
+        if end > t { left = end - t }
+        match c.wait_timeout(time.nanos(left)) {
+            Ok(st) => status = st
+            Err(x) => bad = Some(x)
+        }
+        var ended: bool = false
+        match status {
+            Some(st) => ended = true
+            None => { }
+        }
+        if !ended {
+            f := stop(c)
+            var none: bool = false
+            match bad {
+                Some(x) => { }
+                None => none = true
+            }
+            if none { bad = f }
+        }
+        jo := r1?
+        je := r2?
+        jw := r3?
+        return Ok(Timed { wrote: jw.get(), read_out: jo.get(), read_err: je.get(), status: status, failed: bad })
+    }
+}
+
+// stop kills a child that has not ended (SIGKILL) and reaps it: None, or
+// the kill's failure (after waiting for the child to end anyway) or else
+// the reap's.
+func stop(c: edit[Child]) -> Option[io.IoErr] {
+    k := c.kill()
+    r := c.wait_timeout(time.nanos(18446744073709551615u64))
+    match k {
+        Err(x) => return Some(x)
+        Ok(u) => { }
+    }
+    match r {
+        Err(x) => return Some(x)
+        Ok(st) => { }
+    }
+    return None
 }
 
 // read_end reads a pipe end to its end of file, then closes it.

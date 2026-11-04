@@ -4,6 +4,7 @@
 // descriptor level and report errors as negative errno values; the
 // functions after them are the library's interface.
 module io
+import "std/time"
 
 // IoErr is why an operation failed.
 union IoErr { NotFound; Permission; Exists; Other(code: i32) }
@@ -11,6 +12,10 @@ union IoErr { NotFound; Permission; Exists; Other(code: i32) }
 // Runtime intrinsics (hosted).
 func io_open(path: view[]u8, write: bool) -> i32
 func io_read(fd: i32, buf: edit[]u8) -> i64
+// io_read_timeout waits at most ns nanoseconds for fd to be ready, then
+// reads once: bytes, 0 at end of file or for an empty buf, timed_out when
+// fd was not ready in time (nothing read), or -errno (specs/std-timeouts).
+func io_read_timeout(fd: i32, buf: edit[]u8, ns: u64) -> i64
 func io_write(fd: i32, data: view[]u8) -> i64
 func io_close(fd: i32) -> i32
 func io_remove(path: view[]u8) -> i32
@@ -53,6 +58,20 @@ func read_file(path: view[]u8) -> Result[Vec[u8], IoErr] {
 
 // read_stdin reads standard input to its end.
 func read_stdin() -> Result[Vec[u8], IoErr] { return read_from(0i32) }
+
+// timed_out is io_read_timeout's result when nothing arrived in time:
+// -2^32, outside every errno value.
+func timed_out() -> i64 { return 0i64 - 4294967296i64 }
+
+// read_stdin_timeout reads at most len(buf) bytes of standard input,
+// waiting at most d for some: Some(n) for n bytes (0 at end of file or for
+// an empty buf), None when none arrived in time (specs/std-timeouts).
+func read_stdin_timeout(buf: edit[]u8, d: time.Duration) -> Result[Option[usize], IoErr] {
+    n := io_read_timeout(0i32, buf, d.ns)
+    if n == timed_out() { return Ok(None) }
+    if n < 0i64 { return Err(err_of(truncate[i32](0i64 - n))) }
+    return Ok(Some(usize(n)))
+}
 
 // write_all writes data to a descriptor, retrying short writes.
 func write_all(fd: i32, data: view[]u8) -> Result[(), IoErr] {

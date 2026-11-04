@@ -21,6 +21,8 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <poll.h>
+#include <limits.h>
 #include <spawn.h>
 #if defined(__linux__)
 #include <features.h>
@@ -153,6 +155,40 @@ int32_t kern_io_open(const char *p, int64_t n, uint8_t write) {
 }
 int64_t kern_io_read(int32_t fd, char *buf, int64_t n) {
     ssize_t r = read(fd, buf, (size_t)n);
+    return r < 0 ? -errno : (int64_t)r;
+}
+// kern_io_read_timeout waits up to ns nanoseconds for fd to be ready
+// (data, end of file or a pending error), then reads once: the bytes read,
+// 0 at end of file or for an empty buf, KERN_TIMED_OUT (-2^32, outside
+// every errno) when fd was not ready in time (nothing is read), or -errno
+// (specs/std-timeouts). poll waits whole
+// milliseconds, rounded up; EINTR is retried with the time left.
+uint64_t kern_now_ns(void);
+#define KERN_TIMED_OUT (-((int64_t)1 << 32))
+int64_t kern_io_read_timeout(int32_t fd, char *buf, int64_t n, uint64_t ns) {
+    if (n <= 0) return 0;
+    if (fd < 0) return -EBADF;
+    uint64_t start = kern_now_ns();
+    for (;;) {
+        uint64_t spent = kern_now_ns() - start;
+        uint64_t left = spent >= ns ? 0 : ns - spent;
+        uint64_t ms = left / 1000000u + (left % 1000000u != 0);
+        if (ms > INT_MAX) ms = INT_MAX;
+        struct pollfd p = {fd, POLLIN, 0};
+        int r = poll(&p, 1, (int)ms);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -errno;
+        }
+        if (r == 0) {
+            if (kern_now_ns() - start >= ns) return KERN_TIMED_OUT;
+            continue; // woke early (a timeout clamped to INT_MAX ms)
+        }
+        if (p.revents & POLLNVAL) return -EBADF;
+        break;
+    }
+    ssize_t r;
+    do r = read(fd, buf, (size_t)n); while (r < 0 && errno == EINTR);
     return r < 0 ? -errno : (int64_t)r;
 }
 int64_t kern_io_write(int32_t fd, const char *p, int64_t n) {

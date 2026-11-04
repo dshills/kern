@@ -1,0 +1,77 @@
+//! phase: 6
+//! expect: output
+// Child.wait_timeout (specs/std-timeouts R3, R5a): a sleeping child is
+// None within the bound, then killed and reaped with signal 9; a child
+// that exits 3 is Some(3), again after the reap; a zero duration checks
+// once; a child reading its stdin to end of file ends because the stdin
+// pipe it holds is closed; the largest duration is no timeout.
+module t
+import "std/io"
+import "std/process"
+import "std/time"
+func say(s: view[]u8) { print_str(s); println() }
+func show(r: view[Result[Option[process.ExitStatus], io.IoErr]], t0: view[time.Instant]) {
+    match r {
+        Ok(x) => {
+            match x {
+                Some(s) => {
+                    match s {
+                        Exited(code) => { print_str("exited "); print_i64(i64(code)) }
+                        Signaled(g) => { print_str("signaled "); print_i64(i64(g)) }
+                    }
+                }
+                None => print_str("none")
+            }
+        }
+        Err(e) => print_str("error")
+    }
+    if t0.elapsed().as_millis() < 3000u64 { print_str(" in time") }
+    println()
+}
+func sh(script: view[]u8) -> process.Command {
+    c := process.Command.new("sh")
+    c.arg("-c")
+    c.arg(script)
+    return c
+}
+func run() -> Result[(), io.IoErr] {
+    a := sh("sleep 5")
+    c := a.spawn()?
+    t0 := time.now()
+    r := c.wait_timeout(time.millis(200u64))
+    show(r, t0)
+    t1 := time.now()
+    z := c.wait_timeout(time.nanos(0u64))
+    show(z, t1)
+    c.kill()?
+    t2 := time.now()
+    k := c.wait_timeout(time.seconds(10u64))
+    show(k, t2)
+    b := sh("exit 3")
+    d := b.spawn()?
+    t3 := time.now()
+    e := d.wait_timeout(time.seconds(10u64))
+    show(e, t3)
+    f := d.wait_timeout(time.seconds(10u64))
+    show(f, t3)
+    g := process.Command.new("cat")
+    g.stdin(process.Stdio.Piped)
+    h := g.spawn()?
+    t4 := time.now()
+    i := h.wait_timeout(time.seconds(10u64))
+    show(i, t4)
+    j := sh("sleep 0.1")
+    l := j.spawn()?
+    t5 := time.now()
+    m := l.wait_timeout(time.nanos(18446744073709551615u64))
+    show(m, t5)
+    return Ok(())
+}
+func main() -> i32 {
+    r := run()
+    match r {
+        Ok(u) => { }
+        Err(e) => say("failed")
+    }
+    return 0i32
+}

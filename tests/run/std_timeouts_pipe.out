@@ -1,0 +1,15 @@
+none in time
+some 4 [late] in time
+some 0 [] in time
+empty: some 0
+err eio
+some 0 [] in time
+err ebadf
+stdin write: eio
+waited
+some 1 [x] in time
+waited
+0
+ebadf
+some 3 [now] in time
+waited

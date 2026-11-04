@@ -122,6 +122,15 @@ func init() {
 			var n int
 			var err error
 			if fd == 0 {
+				if p := it.pumpIfStarted(); p != nil {
+					r := p.read(buf, 0, false)
+					if r > 0 {
+						for i := 0; i < int(r); i++ {
+							seq.at(i).set(mkInt(tyU8, uint64(buf[i])))
+						}
+					}
+					return []Value{mkInt(tyI64, uint64(r))}
+				}
 				n, err = os.Stdin.Read(buf)
 			} else {
 				it.sh.mu.Lock()
@@ -142,6 +151,41 @@ func init() {
 				seq.at(i).set(mkInt(tyU8, uint64(buf[i])))
 			}
 			return []Value{mkInt(tyI64, uint64(n))}
+		},
+		// io_read_timeout (specs/std-timeouts): one read, waiting at most
+		// the given nanoseconds for the descriptor to be ready
+		"io_read_timeout": func(it *Interp, a []Value, _ callCtx) []Value {
+			fd := int64(int32(a[0].(Int).Bits))
+			seq := byteSeq(acc(a[1]))
+			if seq.length() == 0 {
+				return []Value{mkInt(tyI64, 0)}
+			}
+			timeout := time.Duration(min(a[2].(Int).Bits, uint64(1<<63-1)))
+			buf := make([]byte, seq.length())
+			var r int64
+			if fd == 0 {
+				r = it.stdinPump().read(buf, timeout, true)
+			} else {
+				f := it.openFile(fd)
+				if f == nil {
+					return []Value{mkInt(tyI64, ^uint64(8))} // EBADF, -9
+				}
+				n, err := readTimeout(f, buf, timeout)
+				switch {
+				case n > 0 || err == nil:
+					r = int64(n)
+				case errors.Is(err, io.EOF):
+					r = 0
+				case errors.Is(err, os.ErrDeadlineExceeded):
+					r = timedOut
+				default:
+					r = -int64(errnoOf(err))
+				}
+			}
+			for i := 0; i < int(r); i++ {
+				seq.at(i).set(mkInt(tyU8, uint64(buf[i])))
+			}
+			return []Value{mkInt(tyI64, uint64(r))}
 		},
 		"io_write": func(it *Interp, a []Value, _ callCtx) []Value {
 			fd := int64(int32(a[0].(Int).Bits))
