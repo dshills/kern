@@ -50,6 +50,11 @@ type Interp struct {
 	// plans caches destroy's per-type work for this thread
 	// (specs/interp-destroy-plans); a child thread starts its own.
 	plans map[resolve.Type]*destroyPlan
+	// argBuf carries a direct call's arguments to callAt, which copies
+	// them into the callee's locals before anything else runs, so one
+	// buffer per thread serves every call, recursive ones included
+	// (specs/interp-call-path); a child thread starts its own.
+	argBuf []Value
 }
 
 // New creates an interpreter for a module. out receives program output,
@@ -107,6 +112,7 @@ func (it *Interp) child() *Interp {
 	c.inTrap = false
 	c.cur = nil
 	c.plans = nil
+	c.argBuf = nil
 	it.sh.mu.Lock()
 	it.sh.nextTid++
 	c.tid = it.sh.nextTid
@@ -441,6 +447,20 @@ type frame struct {
 	// (specs/cross-file-inlining/SPEC.md R6).
 	block *ir.Block
 	info  *funcInfo
+	// retTo and retIDs, set by a direct call, are where its return values
+	// go: the caller's frame and value slots, written by the return
+	// itself instead of through a slice (specs/interp-call-path)
+	retTo  *frame
+	retIDs []int
+}
+
+// smallSlots is the most locals and values an activation keeps inline with
+// its frame; smallFrame is that frame and its slots in one object.
+const smallSlots = 14
+
+type smallFrame struct {
+	fr    frame
+	slots [smallSlots]Value
 }
 
 // funcInfo is what a call needs that depends on the function alone,
@@ -538,6 +558,18 @@ func (it *Interp) call(f *ir.Func, args []Value) []Value { return it.callAt(f, a
 // traps at (nil for user code, and for library code reached without a call
 // site, such as a destructor run by drop glue).
 func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
+	return it.callInto(f, args, span, nil, nil)
+}
+
+// callInto is callAt that, with into set, writes the return values into
+// into's value slots ids and returns nil.
+func (it *Interp) callInto(f *ir.Func, args []Value, span *ast.Pos, into *frame, ids []int) []Value {
+	return it.callWith(f, nil, args, span, into, ids)
+}
+
+// callWith is callInto with the callee's funcInfo when the caller holds it
+// (nil to look it up).
+func (it *Interp) callWith(f *ir.Func, fi *funcInfo, args []Value, span *ast.Pos, into *frame, ids []int) []Value {
 	if f.Intrinsic {
 		name := intrinsicOf(f.Name)
 		if fn, ok := intrinsics[name]; ok {
@@ -545,9 +577,23 @@ func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
 		}
 		panic(fmt.Sprintf("interp: no intrinsic for %s", f.Name))
 	}
-	fi := it.info(f)
+	if fi == nil {
+		fi = it.info(f)
+	}
 	frameBytes := fi.frame
-	fr := &frame{f: f, file: f.File, info: fi}
+	// a small activation's frame and slots come from one allocation
+	// (specs/interp-call-path)
+	n := len(f.Locals) + f.NumValues
+	var fr *frame
+	var slots []Value
+	if n <= smallSlots {
+		sf := &smallFrame{}
+		fr, slots = &sf.fr, sf.slots[:n:n]
+	} else {
+		fr, slots = &frame{}, make([]Value, n)
+	}
+	fr.f, fr.file, fr.info = f, f.File, fi
+	fr.retTo, fr.retIDs = into, ids
 	prev := it.cur
 	it.cur = fr
 	defer func() { it.cur = prev }()
@@ -574,8 +620,6 @@ func (it *Interp) callAt(f *ir.Func, args []Value, span *ast.Pos) []Value {
 	}
 	it.stackUsed += frameBytes
 	defer func() { it.stackUsed -= frameBytes }()
-	// locals and values in one allocation
-	slots := make([]Value, len(f.Locals)+f.NumValues)
 	fr.locals, fr.vals = slots[:len(f.Locals):len(f.Locals)], slots[len(f.Locals):]
 	for i, p := range f.Params {
 		if i < len(args) {

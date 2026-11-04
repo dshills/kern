@@ -11,6 +11,7 @@ import (
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/ir"
 	"github.com/dshills/kern/compiler/resolve"
+	"sync/atomic"
 )
 
 // op is one compiled instruction.
@@ -330,14 +331,46 @@ func compileCall(fi *funcInfo, i *ir.Call) op {
 		return func(it *Interp, fr *frame) {
 			store(fr, fn(it, args(fr), callCtx{pos: fr.at(pos), targs: typeArgs}))
 		}
-	case callee != nil && callee.Library:
-		// entering (or staying in) the library: traps report this call
+	case callee != nil && !callee.Intrinsic:
+		// the arguments go through the thread's buffer: callAt copies them
+		// into the callee's locals first (specs/interp-call-path)
+		buf := func(it *Interp, fr *frame) []Value {
+			if cap(it.argBuf) < len(argIDs) {
+				it.argBuf = make([]Value, len(argIDs), 2*len(argIDs)+4)
+			}
+			out := it.argBuf[:len(argIDs)]
+			for k, a := range argIDs {
+				out[k] = fr.vals[a]
+			}
+			return out
+		}
+		// the callee's funcInfo is held once known, sparing the shared
+		// map's lookup on every call
+		var held atomic.Pointer[funcInfo]
+		infoOf := func(it *Interp) *funcInfo {
+			if p := held.Load(); p != nil {
+				return p
+			}
+			p := it.info(callee)
+			held.Store(p)
+			return p
+		}
+		// the return values go straight into the caller's slots; the
+		// generic path (genericExec) still returns a slice, stored here
+		if callee.Library {
+			// entering (or staying in) the library: traps report this call
+			return func(it *Interp, fr *frame) {
+				a := buf(it, fr)
+				p := fr.at(pos)
+				store(fr, it.callWith(callee, infoOf(it), a, &p, fr, dsts))
+			}
+		}
 		return func(it *Interp, fr *frame) {
-			a := args(fr)
-			p := fr.at(pos)
-			store(fr, it.callAt(callee, a, &p))
+			store(fr, it.callWith(callee, infoOf(it), buf(it, fr), nil, fr, dsts))
 		}
 	case callee != nil:
+		// a function declared without a body (Intrinsic): callAt dispatches
+		// it, and an intrinsic ignores the call site
 		return func(it *Interp, fr *frame) { store(fr, it.callAt(callee, args(fr), nil)) }
 	}
 	return func(it *Interp, fr *frame) { store(fr, it.callNamed(name, args(fr))) }
@@ -468,6 +501,15 @@ func (it *Interp) run(fr *frame, code []*cblock, entry *ir.Block) []Value {
 				cb = cb.def
 			}
 		case termRet:
+			if fr.retTo != nil {
+				// a direct call's destination: no slice
+				for i, v := range cb.rets {
+					if i < len(fr.retIDs) {
+						fr.retTo.vals[fr.retIDs[i]] = fr.vals[v]
+					}
+				}
+				return nil
+			}
 			out := make([]Value, len(cb.rets))
 			for i, v := range cb.rets {
 				out[i] = fr.vals[v]

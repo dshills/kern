@@ -77,5 +77,7 @@ Over the day, the interpreter went from 6.4 s to 2.3 s on arena_ast,
 The generic path is left with index and slice places, and with the
 instructions too rare to specialise. The larger costs now are:
 - allocation: boxed integers, `Access` objects and frames;
-- the call path (`callAt`'s per-call setup);
+- the call path (`callAt`'s per-call setup), since reduced for direct
+  calls (`docs/reports/interp-call-path.md`: −31% instructions on
+  `fib(29)`);
 - `copyValue` on loads.
