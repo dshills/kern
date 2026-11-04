@@ -1,0 +1,14 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: raw_access_conflict_ok
+// Accesses opened on raw memory by separate ptr_view and ptr_edit calls
+// are not known to be disjoint, so passing both to one call conflicts;
+// ptr_view_edit opens the two at once under the caller's disjointness
+// obligation (twin). The diagnostic names the place as raw memory: the
+// checker used to dereference the access's missing root and fail with an
+// internal error.
+module m
+func both(a: view[u64], b: edit[u64]) { }
+contract { requires "p and q address distinct live u64 values" }
+func f(p: RawPtr[u64], q: RawPtr[u64]) {
+    unsafe { both(ptr_view(p), ptr_edit(q)) }   // ACC_CONFLICT
+}

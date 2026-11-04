@@ -209,6 +209,11 @@ func describeOther(a *access) string {
 }
 
 func describePlace(p place) string {
+	if p.root == nil {
+		// an access a call opened on raw memory or a literal (ptr_view,
+		// ptr_edit): it has no root variable to name
+		return "raw memory"
+	}
 	s := p.root.Name
 	for _, e := range p.path {
 		switch e.kind {

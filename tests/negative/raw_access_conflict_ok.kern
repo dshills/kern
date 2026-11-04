@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: accept
+//! twin: raw_access_conflict
+module m
+func both(a: view[u64], b: edit[u64]) { }
+contract { requires "p and q address distinct live u64 values" }
+func f(p: RawPtr[u64], q: RawPtr[u64]) {
+    unsafe {
+        with a, b := ptr_view_edit(p, q) { both(a, b) }
+    }
+}
