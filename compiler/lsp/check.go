@@ -128,15 +128,18 @@ func absName(dir, name string) string {
 }
 
 // load loads the program of a kern document (spec §2).
-func (s *Server) load(d *document) program {
-	dir := filepath.Dir(d.path)
-	entries := []string{d.path}
-	pro, pds := parser.ParsePrologue(&source.File{Name: d.path, Bytes: s.textOf(d.path)})
+func (s *Server) load(d *document) program { return s.loadPath(d.path) }
+
+// loadPath loads the program of the kern file at path, open or not.
+func (s *Server) loadPath(path string) program {
+	dir := filepath.Dir(path)
+	entries := []string{path}
+	pro, pds := parser.ParsePrologue(&source.File{Name: path, Bytes: s.textOf(path)})
 	if len(pds) == 0 {
 		if listing, err := os.ReadDir(dir); err == nil {
 			for _, e := range listing {
 				p := filepath.Join(dir, e.Name())
-				if p == d.path || !strings.HasSuffix(e.Name(), ".kern") || project.TestFile(p) {
+				if p == path || !strings.HasSuffix(e.Name(), ".kern") || project.TestFile(p) {
 					continue
 				}
 				if st, err := os.Stat(p); err != nil || !st.Mode().IsRegular() {

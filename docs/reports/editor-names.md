@@ -76,6 +76,8 @@ the "Not done" of `docs/reports/editor-nav.md`.
 ## Not done
 
 - **Rename does not reach other programs** importing a renamed exported
-  name. They are outside what the server loads.
+  name. They are outside what the server loads. *(Resolved 2026-11-04,
+  `docs/reports/editor-workspace.md`: with a workspace root, every
+  program that loads the declaring file is renamed and checked.)*
 - **Resolution still covers the whole program** on a partial miss. Only
   checking is per module.

@@ -8,6 +8,8 @@ package lsp
 // cursor.
 
 import (
+	"bytes"
+	"slices"
 	"sort"
 	"strings"
 
@@ -49,6 +51,42 @@ type CompletionList struct {
 // after it yet, so that the text parses and the receiver resolves.
 const placeholder = "kern_complete_"
 
+// withPlaceholders inserts the placeholder member after every unfinished
+// dot of src (a dot token that ends its line or the file) and, when atCursor
+// is set, at off; it returns the text and pos moved past the placeholders
+// inserted before it. Dots in strings and comments are not tokens, and a
+// `..` is another token, so neither is touched.
+func withPlaceholders(src []byte, off, pos int, atCursor bool) ([]byte, int) {
+	toks, _ := lexer.Lex(src)
+	var at []int
+	for i, t := range toks {
+		if t.Kind != lexer.Dot || i+1 >= len(toks) {
+			continue
+		}
+		next := toks[i+1]
+		if next.Kind == lexer.EOF || bytes.IndexByte(src[t.End:next.Start], '\n') >= 0 {
+			at = append(at, t.End)
+		}
+	}
+	if atCursor && !slices.Contains(at, off) {
+		at = append(at, off)
+	}
+	if len(at) == 0 {
+		return src, pos
+	}
+	sort.Ints(at)
+	out := make([]byte, 0, len(src)+len(at)*len(placeholder))
+	prev, moved := 0, pos
+	for _, a := range at {
+		out = append(append(out, src[prev:a]...), placeholder...)
+		prev = a
+		if a < pos {
+			moved += len(placeholder)
+		}
+	}
+	return append(out, src[prev:]...), moved
+}
+
 // completion answers textDocument/completion (R1-R4).
 func (s *Server) completion(p textDocumentPositionParams) (any, *rpcError) {
 	out := CompletionList{Items: []CompletionItem{}}
@@ -73,12 +111,11 @@ func (s *Server) completion(p textDocumentPositionParams) (any, *rpcError) {
 	}
 	prefix := string(src[start:off])
 	member := start > 0 && src[start-1] == '.'
-	// the text as resolved: with a placeholder member when nothing follows
-	// the dot yet
-	text := src
-	if member && prefix == "" {
-		text = append(append(append([]byte(nil), src[:off]...), placeholder...), src[off:]...)
-	}
+	// the text as resolved: with a placeholder member after the cursor's
+	// dot when nothing follows it yet, and after every other dot that ends
+	// its line (specs/editor-workspace R5), so that each parses alone;
+	// start moves by the placeholders inserted before it
+	text, start := withPlaceholders(src, off, start, member && prefix == "")
 	var files []*source.File
 	for _, f := range pg.files {
 		if f.Name == d.path {

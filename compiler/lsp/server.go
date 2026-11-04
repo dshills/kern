@@ -86,7 +86,8 @@ type Server struct {
 
 	state   int
 	enc     Encoding
-	literal bool // the client declared codeActionLiteralSupport
+	literal bool   // the client declared codeActionLiteralSupport
+	root    string // the workspace root's path, "" for none (specs/editor-workspace)
 
 	cacheDir    string // the incremental cache; "" when it could not be made
 	cacheOwned  bool   // the server made cacheDir and removes it
@@ -393,6 +394,18 @@ func (s *Server) initialize(params json.RawMessage) (any, *rpcError) {
 	for _, e := range p.Capabilities.General.PositionEncodings {
 		if e == "utf-8" {
 			s.enc = UTF8
+		}
+	}
+	// the workspace root: the first workspace folder, else rootUri
+	for _, f := range p.WorkspaceFolders {
+		if path, ok := PathOf(f.URI); ok {
+			s.root = path
+			break
+		}
+	}
+	if s.root == "" && p.RootURI != "" {
+		if path, ok := PathOf(p.RootURI); ok {
+			s.root = path
 		}
 	}
 	lit := p.Capabilities.TextDocument.CodeAction.CodeActionLiteralSupport

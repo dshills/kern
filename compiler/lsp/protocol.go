@@ -64,6 +64,10 @@ type PublishDiagnosticsParams struct {
 
 // initializeParams holds the fields of initialize the server reads.
 type initializeParams struct {
+	RootURI          string `json:"rootUri"`
+	WorkspaceFolders []struct {
+		URI string `json:"uri"`
+	} `json:"workspaceFolders"`
 	Capabilities struct {
 		General struct {
 			PositionEncodings []string `json:"positionEncodings"`

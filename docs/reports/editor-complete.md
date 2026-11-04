@@ -44,7 +44,9 @@
 
 - **Several unfinished dots at once.** A document holding more than one
   can mis-parse (`p.` followed by `lib.` reads as `p.lib`); editing
-  normally leaves one.
+  normally leaves one. *(Resolved 2026-11-04,
+  `docs/reports/editor-workspace.md`: every unfinished dot gets a
+  placeholder.)*
 
 Constrained type parameters and loop variables after their loop were
 closed on 2026-11-01 (`docs/reports/editor-complete-gaps.md`).
