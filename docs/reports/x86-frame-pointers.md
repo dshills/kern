@@ -58,9 +58,42 @@ Freestanding builds have no fault-handler lookup and are unchanged.
   byte-identical to the baseline 3626bb0's. Hosted images change, since
   every function now saves and sets its frame pointer.
 
-## Not done
+## The speed cost (measured 2026-11-04)
 
-**The speed cost is not measured.** Keeping the frame pointer takes a
-register and a store and a load per call. The owner reserved timing for
-a quiet host, so the cost is to be measured then, by instructions
-retired and by time on the bench suite.
+Keeping the frame pointer takes a register, and a store and a load per
+call. It was measured on the 13 `bench/kern` workloads at `--opt=release`,
+built by two compilers from `dd16b89`: as committed, and with the
+attribute removed by hand. The host was given over to timing, but
+Spotlight was indexing, so the one-minute load was 19 to 30 throughout.
+
+The method: 10 rounds, each running every workload once with each build,
+alternating which build ran first. Round 1 is dropped, because Rosetta
+translates each x86-64 binary on its first run. That leaves nine paired
+samples. Instructions retired come from `/usr/bin/time -l`, and time is
+the workload's own `ns`. Every run of a workload gave the same checksum.
+
+**arm64 macOS (native).** There is no measurable cost.
+- The kern text section changes by −4 to +8 instructions per program,
+  since Apple's arm64 ABI already keeps the frame chain in non-leaf
+  functions.
+- Instructions retired are within ±0.3% on 11 of 13 workloads.
+  `arena_ast` is +1.8% and `hash_table` +0.9%.
+- Time, as the geometric mean of the per-workload medians of paired
+  ratios, is 0.994. That is inside the noise; the per-workload medians
+  range from 0.86 to 1.05 at this load.
+
+**x86-64 macOS (Rosetta).** The cost is about 1%.
+- The kern text section grows by 17 to 39 instructions per program,
+  1.5% to 7%: `rbp` is saved, set and restored in every function.
+- Rosetta's instruction counts vary from run to run by more than the
+  effect (`arena_ast` gave 0.78), so only the static count and time
+  count here.
+- Time, as the same geometric mean, is 1.009. The per-workload medians
+  range from 0.96 to 1.04; `vector` (+2.4%) and `lock_protected_map`
+  (+3.6%) are the largest.
+
+**What this leaves.** Native x86-64 Linux is not measured: this host
+runs x86-64 only under Rosetta, and the Linux containers are emulated
+too. Rosetta's figure is an estimate of the order of the cost, about 1%,
+and not a bound on it. The frame pointer stays on: about 1% on x86-64
+buys a named stack-overflow trap from any depth.
