@@ -8,7 +8,9 @@
 #
 # Each argument names a test the current phase owns, as `go test -json`
 # reports it (TestProcessSpawnOrder, TestFixtures/run/std_process_env.kern).
-# The fixtures run are tests/run/std_process* and tests/ffi/process*.
+# The fixtures run are tests/run/std_process*, tests/run/std_timeouts*
+# (specs/std-timeouts) and tests/ffi/process*, with the cmd/kern
+# subprocess tests of the timeouts.
 # The gate fails when a `go test` command fails, when any test fails, or
 # when a named test has no pass event (it was skipped or never ran).
 set -euo pipefail
@@ -43,6 +45,8 @@ run() {
   [ "$code" -eq 0 ] || { echo "go test $* exited $code"; status=1; }
 }
 run ./tests -run "^TestFixtures\$/run/std_process"
+run ./tests -run "^TestFixtures\$/run/std_timeouts"
+run ./cmd/kern -run "^Test(ReadStdinTimeout|OutputTimeoutReaps)\$"
 run ./tests -run "^TestFixtures\$/ffi/process"
 run ./tests -run "^TestProcess"
 run ./compiler/interp -run "^TestProc"

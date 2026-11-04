@@ -100,11 +100,15 @@ What remains past 200 ms is the kill and the reap.
   failing timed wait, kill or reap) have no test. A real child cannot
   produce them, and the library has no fault hook for them.
 
-## Not run
+## Linux
 
-`scripts/linux-check.sh`, the Linux gate for `std/process`, needs Docker,
-which was not running on the host. The native entry uses only POSIX
-`poll` and `read`, but it has not been compiled or run on Linux.
+`scripts/linux-check.sh`, the local Linux gate, needs Docker, which was
+not running on the host when this landed. CI ran the whole suite at
+f8e906e on x86-64 Linux, arm64 Linux and macOS (`.github/workflows/ci.yml`,
+with QEMU required), and all three passed. That includes the three
+fixtures and both `cmd/kern` tests in both engines. The gate script now
+runs them as well: `tests/run/std_timeouts*`, `TestReadStdinTimeout` and
+`TestOutputTimeoutReaps`.
 
 ## Not done
 
