@@ -6,14 +6,17 @@ import (
 )
 
 // Provided is the set of external symbols the freestanding runtime defines:
-// the non-static file-scope functions and objects of rt.c and the global
+// the non-static file-scope functions and objects of rt.c and f64text.c
+// (the second linked only when an image calls it) and the global
 // labels of the startup code (specs/freestanding-availability §1). The
 // compiler reports a program that needs any other runtime entry before it
 // links (Rule 6.8).
 func Provided() map[string]bool {
 	out := map[string]bool{}
-	for name := range cDefinitions(RuntimeC) {
-		out[name] = true
+	for _, src := range []string{RuntimeC, F64TextC} {
+		for name := range cDefinitions(src) {
+			out[name] = true
+		}
 	}
 	for _, s := range []string{StartAArch64, StartX8664} {
 		for name := range asmGlobals(s) {

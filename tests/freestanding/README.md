@@ -11,7 +11,9 @@ trap record's `file` is the path the harness loads the fixture by, relative
 to `tests/` (`freestanding/stack.kern`), and QEMU must print the same.
 
 Native: `kern build --env freestanding -o image file.kern` compiles the
-program, `runtime/freestanding/src/rt.c` and the startup code for
+program, `runtime/freestanding/src/rt.c`, `f64text.c` (the floating-point
+text entries, linked only into an image that calls them) and the startup
+code for
 `aarch64-unknown-none-elf` (default; `--target=x86_64-unknown-none-elf` for
 the 16550 console at port `0x3F8`). With `ld.lld` on the PATH the result is
 a linked image: on AArch64 an ELF laid out by
@@ -19,7 +21,7 @@ a linked image: on AArch64 an ELF laid out by
 by `q35.ld` and rewritten to the 32-bit ELF class with `llvm-objcopy`, which
 QEMU's Multiboot loader requires (`start_x86_64.S` carries the header and
 the protected-mode stub that identity-maps the first 1 GiB and enters long
-mode). Without `ld.lld` the result is an archive of the three objects to
+mode). Without `ld.lld` the result is an archive of the four objects to
 link with the matching script:
 
 ```

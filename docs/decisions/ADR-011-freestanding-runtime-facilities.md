@@ -136,7 +136,7 @@ final list.
 
 ## Decision (Phase 3 closing entry, 2026-10-26)
 
-*Since 2026-11-03* (`specs/freestanding-availability`): the compiler reads this set from the embedded runtime sources (`freestanding.Provided`, checked against the compiled objects with `llvm-nm`), and a freestanding program that needs any other runtime entry is rejected with `ENV_HOSTED_ONLY` (Rule 6.8) before it links.
+*Since 2026-11-03* (`specs/freestanding-availability`): the compiler reads this set from the embedded runtime sources (`freestanding.Provided`, checked against the compiled objects with `llvm-nm`), and a freestanding program that needs any other runtime entry is rejected with `ENV_HOSTED_ONLY` (Rule 6.8) before it links. *Since 2026-11-04* (`specs/freestanding-float`): the runtime also defines the two floating-point text entries, `kern_str_f64_digits` and `kern_str_parse_f64`, in `runtime/freestanding/src/f64text.c`, exact big-integer conversions with no libc; that file is its own object, linked only into an image that calls it.
 
 The mandatory freestanding runtime is the symbol set that `runtime/freestanding/src/rt.c`
 and the startup code provide, and nothing else:

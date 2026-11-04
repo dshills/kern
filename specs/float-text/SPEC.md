@@ -34,7 +34,11 @@ kern programs can write a float as text that reads back exactly, read
 decimal text as a float, and use JSON numbers with fractions or
 exponents, with the same output in both engines. Non-goals: `f32`
 formatting, a precision or fixed-point argument, hexadecimal floats,
-locales, and a freestanding implementation.
+locales, and a freestanding implementation. (*Note, 2026-11-04:* the freestanding
+implementation now exists, `specs/freestanding-float`; its differential
+test also found that `strconv.ParseFloat` misreads two shapes of long
+text, so the interpreter's parse rewrites the text first, that spec's
+R9.)
 
 ## 1. Background
 

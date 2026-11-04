@@ -101,7 +101,7 @@ func TestProvidedMatchesObjects(t *testing.T) {
 		t.Skip("llvm-nm not on PATH")
 	}
 	dir := t.TempDir()
-	files := map[string]string{"rt.c": RuntimeC, "start_aarch64.S": StartAArch64, "start_x86_64.S": StartX8664}
+	files := map[string]string{"rt.c": RuntimeC, "f64text.c": F64TextC, "start_aarch64.S": StartAArch64, "start_x86_64.S": StartX8664}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -109,7 +109,7 @@ func TestProvidedMatchesObjects(t *testing.T) {
 	}
 	got := map[string]bool{}
 	for _, tc := range []struct{ triple, start string }{{"aarch64-unknown-none-elf", "start_aarch64.S"}, {"x86_64-unknown-none-elf", "start_x86_64.S"}} {
-		for _, src := range []string{"rt.c", tc.start} {
+		for _, src := range []string{"rt.c", "f64text.c", tc.start} {
 			obj := filepath.Join(dir, tc.triple+"-"+src+".o")
 			args := []string{"-target", tc.triple, "-ffreestanding", "-nostdlib", "-fno-builtin", "-O1", "-c", "-o", obj, filepath.Join(dir, src)}
 			if out, err := exec.Command(clang, args...).CombinedOutput(); err != nil {

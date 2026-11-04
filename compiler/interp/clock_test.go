@@ -90,3 +90,74 @@ func TestF64DigitsLongerCase(t *testing.T) {
 		t.Errorf("2^-24: %s", got)
 	}
 }
+
+// parseF64 reads a long digit run that cancels a large exponent as the
+// native runtimes do, and agrees with strconv wherever strconv reads the
+// exponent whole (specs/freestanding-float R9).
+func TestParseF64Canonical(t *testing.T) {
+	long := map[string]float64{
+		"0." + strings.Repeat("0", 100001) + "1e100002":   1,
+		strings.Repeat("1", 100001) + "e-100001":          1.0 / 9,
+		"1" + strings.Repeat("0", 100001) + "e-100001":    1,
+		"-0." + strings.Repeat("0", 100001) + "25e100002": -2.5,
+		// strconv's slow path reads this 801-digit integer 10 times too small
+		"100000000000000011102230246251565404236316680908203125" + strings.Repeat("0", 746) + "1e-800": math.Nextafter(1, 2),
+		"1e99999999999":     math.Inf(1),
+		"-1e99999999999":    math.Inf(-1),
+		"1e-99999999999":    0,
+		"-0.0e-99999999999": math.Copysign(0, -1),
+		"0":                 0,
+		"-0":                math.Copysign(0, -1),
+	}
+	for s, want := range long {
+		if got := parseF64([]byte(s)); math.Float64bits(got) != math.Float64bits(want) {
+			t.Errorf("%.40s…: %v, want %v", s, got, want)
+		}
+	}
+	// a halfway point between 1 and the next double: ties to even, and a
+	// nonzero digit 2,000 places later rounds up
+	half := "1.00000000000000011102230246251565404236316680908203125"
+	if got := parseF64([]byte(half + strings.Repeat("0", 2000))); got != 1 {
+		t.Errorf("tie: %v", got)
+	}
+	if got := parseF64([]byte(half + strings.Repeat("0", 2000) + "1")); got != math.Nextafter(1, 2) {
+		t.Errorf("above the tie: %v", got)
+	}
+	seed := uint64(20261104)
+	next := func(n uint64) uint64 {
+		seed = seed*6364136223846793005 + 1442695040888963407
+		return (seed >> 33) % n
+	}
+	for i := 0; i < 50000; i++ {
+		var b strings.Builder
+		if next(2) == 0 {
+			b.WriteByte('-')
+		}
+		b.WriteByte(byte('1' + next(9)))
+		for j, n := uint64(0), next(30); j < n; j++ {
+			b.WriteByte(byte('0' + next(10)))
+		}
+		if next(2) == 0 {
+			b.WriteByte('.')
+			for j, n := uint64(0), 1+next(20); j < n; j++ {
+				b.WriteByte(byte('0' + next(10)))
+			}
+		}
+		if next(3) != 0 {
+			b.WriteString("e")
+			if next(2) == 0 {
+				b.WriteByte('-')
+			}
+			b.WriteString(strconv.FormatUint(next(400), 10))
+		}
+		s := b.String()
+		want, _ := strconv.ParseFloat(s, 64)
+		if got := parseF64([]byte(s)); math.Float64bits(got) != math.Float64bits(want) {
+			t.Fatalf("%s: %v, strconv %v", s, got, want)
+		}
+		// the rewrite itself, which short texts skip
+		if got, _ := strconv.ParseFloat(canonicalNumber([]byte(s)), 64); math.Float64bits(got) != math.Float64bits(want) {
+			t.Fatalf("%s: rewritten %s reads %v, strconv %v", s, canonicalNumber([]byte(s)), got, want)
+		}
+	}
+}

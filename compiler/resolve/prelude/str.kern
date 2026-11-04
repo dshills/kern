@@ -116,7 +116,7 @@ impl String {
     // (specs/float-text): NaN, Infinity, -Infinity; 0 or -0; otherwise
     // the round-trip digits laid out by ECMAScript's Number::toString
     // rule (plain up to 21 integer digits, 0.000ddd down to 1e-6, else
-    // d.ddde+X). Hosted only.
+    // d.ddde+X).
     func push_f64(edit self, v: f64) {
         if v != v {
             self.push_str("NaN")
@@ -204,18 +204,19 @@ impl String {
     func equals(view self, s: view[]u8) -> bool { return equal(self.bytes.as_view(), s) }
 }
 
-// Runtime intrinsics for floating-point text (hosted; specs/float-text):
+// Runtime intrinsics for floating-point text (specs/float-text; the
+// freestanding runtime's are specs/freestanding-float):
 // str_f64_digits writes a finite v's round-trip digits in exponent form,
 // [-]d[.ddd]e+XX, and returns the length; str_parse_f64 is the correctly
 // rounded value of text already checked to be one JSON number, +-Inf when
-// it overflows (it traps oom only if text over 1,023 bytes cannot be
-// copied for the C call).
+// it overflows (the hosted runtime traps oom only if text over 1,023
+// bytes cannot be copied for the C call; the freestanding one never
+// traps).
 func str_f64_digits(v: f64, buf: edit[]u8) -> usize
 func str_parse_f64(s: view[]u8) -> f64
 
 // parse_f64 is the correctly rounded value of s when s is exactly one JSON
 // number (RFC 8259) whose value is finite, else None (specs/float-text).
-// Hosted only.
 func parse_f64(s: view[]u8) -> Option[f64] {
     if !json_number(s) { return None }
     v := str_parse_f64(s)

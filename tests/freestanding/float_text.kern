@@ -1,0 +1,105 @@
+//! phase: 3
+//! expect: output float_text
+//! env: freestanding
+// Floating-point text on bare metal (specs/freestanding-float R6): push_f64
+// through each of its layout branches, parse_f64 of accepted, rejected and
+// overflowing text, the JSON float functions, and two long texts that
+// strconv alone reads wrong (R9). The interpreter's emulation and both
+// QEMU targets, which run runtime/freestanding/src/f64text.c, must print
+// the same.
+module fs
+import "std/json"
+import "std/str"
+func show(v: f64) {
+    s := str.String.new()
+    s.push_f64(v)
+    print_str(s.as_view())
+    println()
+}
+func try_parse(s: view[]u8) {
+    match str.parse_f64(s) {
+        Some(v) => show(v)
+        None => { print_str("none"); println() }
+    }
+}
+func main() -> i32 {
+    z := 0.0f64
+    show(0.0f64)
+    show(-0.0f64)
+    show(100.0f64)
+    show(0.1f64)
+    show(1.0f64 / 3.0f64)
+    show(0.000001f64)
+    show(123456789012345680000.0f64)
+    show(z / z)
+    show(-1.0f64 / z)
+    try_parse("1e21")
+    try_parse("1.5e-7")
+    try_parse("5e-324")
+    try_parse("2.2250738585072009e-308")
+    try_parse("1.7976931348623157e308")
+    try_parse("-2.4703282292062328e-324")
+    try_parse("1e400")
+    try_parse("01")
+    // 0. then 20,000 zeros then 1e20002 is exactly 10
+    a := str.String.new()
+    a.push_str("0.")
+    for i in 0u64..20000u64 { a.push(48u8) }
+    a.push_str("1e20002")
+    try_parse(a.as_view())
+    // an 801-digit integer just above a halfway point, scaled to near 1
+    b := str.String.new()
+    b.push_str("100000000000000011102230246251565404236316680908203125")
+    for i in 0u64..746u64 { b.push(48u8) }
+    b.push_str("1e-800")
+    try_parse(b.as_view())
+    // a checksum of 500 written texts, each read back
+    seed := 12345u64
+    sum := 0u64
+    bad := 0u64
+    for i in 0u64..500u64 {
+        seed = wrapping_add(wrapping_mul(seed, 6364136223846793005u64), 1442695040888963407u64)
+        v := f64(seed >> 11u32) / f64((seed >> 40u32) + 1u64)
+        k := (seed >> 20u32) % 30u64
+        for j in 0u64..k {
+            if seed & 1u64 == 0u64 { v = v * 1000.0f64 } else { v = v / 1000.0f64 }
+        }
+        s := str.String.new()
+        s.push_f64(v)
+        with t := s.as_view() {
+            for c in t { sum = wrapping_add(wrapping_mul(sum, 31u64), u64(c)) }
+            match str.parse_f64(t) {
+                Some(r) => { if r != v { bad = bad + 1u64 } }
+                None => { bad = bad + 1u64 }
+            }
+        }
+    }
+    print_u64(sum)
+    print_str(" ")
+    print_u64(bad)
+    println()
+    with r := json.parse("[2.5, -1e-3, true]") {
+        match r {
+            Ok(v) => {
+                match v {
+                    Array(items) => {
+                        for it in items.as_view() {
+                            match json.as_f64(it) {
+                                Some(f) => show(f)
+                                None => { print_str("none"); println() }
+                            }
+                        }
+                    }
+                    _ => { print_str("not an array"); println() }
+                }
+            }
+            Err(e) => { print_str("syntax"); println() }
+        }
+    }
+    d := str.String.new()
+    q := json.number_f64(0.0625f64)
+    json.write(q, d)
+    print_str(d.as_view())
+    println()
+    return 0i32
+}

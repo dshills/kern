@@ -10,6 +10,13 @@ import _ "embed"
 //go:embed src/rt.c
 var RuntimeC string
 
+// F64TextC is the runtime's floating-point text entries
+// (specs/freestanding-float), compiled as their own object and linked only
+// into an image that calls them, so other images are unchanged.
+//
+//go:embed src/f64text.c
+var F64TextC string
+
 // StartAArch64 is the AArch64 startup assembly.
 //
 //go:embed src/start_aarch64.S

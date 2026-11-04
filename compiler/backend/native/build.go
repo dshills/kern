@@ -515,8 +515,9 @@ func EmitAsm(srcs []*source.File, triple string) (string, []diag.Diagnostic, err
 // on x86-64 a Multiboot 1 image for q35 laid out by q35.ld and rewritten to
 // the 32-bit ELF class with llvm-objcopy, since QEMU's Multiboot loader
 // rejects a 64-bit ELF. Without ld.lld the result is an archive of the
-// three objects, which the user links with the script shipped in
-// runtime/freestanding/src.
+// four objects (the program, rt.c, the startup code and f64text.c), which
+// the user links with the script shipped in runtime/freestanding/src; an
+// archive's members are linked only when needed, as f64text.c always is.
 func buildFreestanding(text, out, triple string, release bool) error {
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -531,7 +532,7 @@ func buildFreestanding(text, out, triple string, release bool) error {
 	if strings.HasPrefix(triple, "x86_64") {
 		start, script, x86 = freestanding.StartX8664, freestanding.Q35LinkerScript, true
 	}
-	files := map[string]string{"prog.ll": text, "rt.c": freestanding.RuntimeC, "start.S": start, "image.ld": script}
+	files := map[string]string{"prog.ll": text, "rt.c": freestanding.RuntimeC, "f64text.c": freestanding.F64TextC, "start.S": start, "image.ld": script}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			return err
@@ -547,17 +548,26 @@ func buildFreestanding(text, out, triple string, release bool) error {
 		// loads and stores
 		common = append(common, "-mstrict-align")
 	}
+	// f64text.c (the floating-point text entries) is linked lazily, as an
+	// archive member is: only an image that calls it gets it, so the others
+	// are what they were before it existed (specs/freestanding-float R7)
 	var objs []string
-	for _, src := range []string{"prog.ll", "rt.c", "start.S"} {
+	lazy := ""
+	for _, src := range []string{"prog.ll", "rt.c", "start.S", "f64text.c"} {
 		obj := filepath.Join(dir, src+".o")
 		cmd := exec.Command(clang, append(append([]string{}, common...), "-o", obj, filepath.Join(dir, src))...)
 		if msg, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("clang %s: %v: %s", src, err, msg)
 		}
+		if src == "f64text.c" {
+			lazy = obj
+			continue
+		}
 		objs = append(objs, obj)
 	}
 	if lld, err := exec.LookPath("ld.lld"); err == nil {
 		args := append([]string{"-nostdlib", "-static", "-T", filepath.Join(dir, "image.ld"), "-o", out}, objs...)
+		args = append(args, "--start-lib", lazy, "--end-lib")
 		if msg, err := exec.Command(lld, args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("ld.lld: %v: %s", err, msg)
 		}
@@ -582,7 +592,7 @@ func buildFreestanding(text, out, triple string, release bool) error {
 		ar = "ar"
 	}
 	_ = os.Remove(out)
-	if msg, err := exec.Command(ar, append([]string{"rcs", out}, objs...)...).CombinedOutput(); err != nil {
+	if msg, err := exec.Command(ar, append([]string{"rcs", out}, append(objs, lazy)...)...).CombinedOutput(); err != nil {
 		return fmt.Errorf("ar: %v: %s", err, msg)
 	}
 	return nil

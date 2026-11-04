@@ -1,0 +1,38 @@
+//! phase: 6
+//! expect: output float_text_long
+// Two JSON numbers strconv.ParseFloat alone reads wrong, which the
+// interpreter rewrites before parsing (specs/freestanding-float R9): a long
+// zero run that cancels an exponent strconv stops reading near 10000, and
+// an 801-digit integer just above a halfway point, which strconv's slow
+// path reads 10 times too small. Native builds call strtod; both engines
+// must print the correctly rounded values.
+module t
+import "std/str"
+func show(s: view[]u8) {
+    match str.parse_f64(s) {
+        Some(v) => {
+            o := str.String.new()
+            o.push_f64(v)
+            print_str(o.as_view())
+        }
+        None => print_str("none")
+    }
+    println()
+}
+func main() -> i32 {
+    a := str.String.new()
+    a.push_str("0.")
+    for i in 0u64..20000u64 { a.push(48u8) }
+    a.push_str("1e20002")
+    show(a.as_view())
+    b := str.String.new()
+    b.push_str("100000000000000011102230246251565404236316680908203125")
+    for i in 0u64..746u64 { b.push(48u8) }
+    b.push_str("1e-800")
+    show(b.as_view())
+    c := str.String.new()
+    for i in 0u64..20001u64 { c.push(49u8) }
+    c.push_str("e-20001")
+    show(c.as_view())
+    return 0i32
+}
