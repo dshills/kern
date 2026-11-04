@@ -578,7 +578,7 @@ func (c *fnCtx) cursorFor(sc *scope, s *ast.For, t Type) bool {
 	}
 	ip, sp := s.Iter.Span(), s.Pos
 	it := s.Iter
-	wrap := !fieldPath(s.Iter)
+	wrap := !FieldPath(s.Iter)
 	if wrap {
 		it = &ast.Ident{Pos: ip, Name: "#it"}
 	}
@@ -624,15 +624,15 @@ func (c *fnCtx) cursorFor(sc *scope, s *ast.For, t Type) bool {
 	return true
 }
 
-// fieldPath reports a name or a path of field accesses from a name.
-func fieldPath(e ast.Expr) bool {
+// FieldPath reports a name or a path of field accesses from a name.
+func FieldPath(e ast.Expr) bool {
 	switch x := e.(type) {
 	case *ast.Ident:
 		return true
 	case *ast.FieldExpr:
-		return fieldPath(x.X)
+		return FieldPath(x.X)
 	case *ast.Paren:
-		return fieldPath(x.X)
+		return FieldPath(x.X)
 	}
 	return false
 }

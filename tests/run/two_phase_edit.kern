@@ -1,0 +1,117 @@
+//! phase: 3
+//! expect: output two_phase_edit
+// A two-phase edit argument (Rule 5.4.3, specs/two-phase-edit R1): an
+// edit argument written as a field path is reserved until every argument
+// is evaluated, so later arguments may read the same place when the read
+// ends before the call. Each callee prints what it was given, which is
+// what the arguments held before the call.
+module m
+
+struct Spans { s: [4]u64; e: [4]u64; count: u64 }
+struct Stride { size: u64; align: u64 }
+struct Alloc { used: u64 }
+struct Pool2 { a: Alloc; st: Stride }
+struct Pair { l: u64; r: u64 }
+
+impl Spans {
+    func pstart(view self, i: usize) -> u64 { return self.s[i] }
+    func pend(view self, i: usize) -> u64 { return self.e[i] }
+    func setp(edit self, i: usize, s: u64, e: u64) {
+        self.s[i] = s
+        self.e[i] = e
+        print_u64(s)
+        println()
+        print_u64(e)
+        println()
+    }
+    func set(edit self, n: u64) {
+        print_u64(n)
+        println()
+        self.count = n + 1u64
+    }
+}
+
+impl Stride {
+    func bytes(view self) -> u64 { return self.size * self.align }
+}
+
+impl Alloc {
+    func alloc(edit self, n: u64) -> u64 {
+        self.used = self.used + n
+        return self.used
+    }
+}
+
+impl Pool2 {
+    func grow(edit self) -> u64 { return self.a.alloc(self.st.bytes()) }
+}
+
+impl Pair {
+    func len(view self) -> u64 { return self.l + self.r }
+    func put(edit self, n: u64) { self.l = n }
+}
+
+func bump(x: edit[u64], by: u64) { x = x + by }
+
+func via(b: edit[Pair]) { b.put(b.len()) }
+
+func both(l: edit[u64], r: edit[u64], n: u64) {
+    l = n
+    r = n + 1u64
+}
+
+func main() -> i32 {
+    sp := Spans { s: [1u64, 2u64, 3u64, 4u64], e: [5u64, 6u64, 7u64, 8u64], count: 3u64 }
+    // a view self method's Copy result as an argument of an edit self call
+    sp.setp(0usize, sp.pstart(2usize), sp.pend(3usize))
+    // a Copy field read of the edited place
+    sp.set(sp.count)
+    print_u64(sp.count)
+    println()
+    // a field receiver, the argument read from a sibling field
+    p := Pool2 { a: Alloc { used: 1u64 }, st: Stride { size: 4u64, align: 2u64 } }
+    print_u64(p.grow())
+    println()
+    print_u64(p.a.alloc(p.st.bytes() + p.a.used))
+    println()
+    // a projection's Copy read
+    v := Vec[u64].new()
+    v.push(7u64)
+    v.push(v.get(0usize))
+    print_u64(v.get(1usize))
+    println()
+    // a plain function's edit parameter
+    x := 10u64
+    bump(x, x + 1u64)
+    print_u64(x)
+    println()
+    // through an edit parameter
+    q := Pair { l: 2u64, r: 3u64 }
+    via(q)
+    print_u64(q.l)
+    println()
+    // through a with binding
+    ps := Vec[Pair].new()
+    ps.push(Pair { l: 4u64, r: 6u64 })
+    with b := ps.at(0usize) {
+        b.put(b.len())
+    }
+    print_u64(ps.get(0usize).l)
+    println()
+    // the byte-order stores, which the lowering builds on a path of their
+    // own: the stored value read from the same buffer
+    buf := [0u8, 0u8, 0u8, 0u8, 1u8, 2u8, 3u8, 4u8]
+    store_be[u32](buf, 0usize, load_be[u32](buf, 4usize))
+    print_u64(u64(load_be[u32](buf, 0usize)))
+    println()
+    store_le[u16](buf, 2usize, u16(buf[7usize]) + u16(len(buf)))
+    print_u64(u64(buf[2usize]))
+    println()
+    // two two-phase arguments on disjoint fields of one root
+    both(q.l, q.r, q.len())
+    print_u64(q.l)
+    println()
+    print_u64(q.r)
+    println()
+    return 0i32
+}

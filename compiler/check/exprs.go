@@ -458,6 +458,10 @@ func (f *fn) call(st *flow, x *ast.CallExpr) *result {
 				continue
 			}
 			acc := &access{pl: r.pl, kind: kind, start: f.tick(), end: forever, pos: a.Pos}
+			if kind == accEdit && resolve.FieldPath(a.X) {
+				// a two-phase argument: reserved until the call (Rule 5.4.3)
+				acc.reserved, acc.call, acc.arg = true, x, i
+			}
 			f.accs = append(f.accs, acc)
 			argAccs = append(argAccs, acc)
 			sourceAcc, sourcePlace, srcResult = acc, &r.pl, r
@@ -496,6 +500,9 @@ func (f *fn) call(st *flow, x *ast.CallExpr) *result {
 	for _, a := range argAccs {
 		if a.end == forever {
 			a.end = end
+		}
+		if a.reserved {
+			a.active = end
 		}
 		a.cursor = cursor
 	}

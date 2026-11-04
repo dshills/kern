@@ -149,6 +149,11 @@ func (f *fn) finish(st *flow, s ast.Node) {
 			if !conflicts(a, b) || a.twin == b || b.twin == a {
 				continue
 			}
+			if r := twoPhaseExcused(a, b); r != nil {
+				// the lowering begins this argument's access at the call
+				f.c.info.TwoPhase[resolve.TwoPhaseArg{Call: r.call, Arg: r.arg}] = true
+				continue
+			}
 			// report on the statement's own access
 			own := b
 			other := a

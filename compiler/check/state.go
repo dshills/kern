@@ -129,6 +129,14 @@ type access struct {
 	// access does not conflict with a view freeze, so loops over one place
 	// nest as loops over one sequence do (specs/nested-cursor-loops)
 	cursor, cursorView bool
+	// reserved marks a two-phase edit argument (Rule 5.4.3,
+	// specs/two-phase-edit): its access is active only from tick active,
+	// when every argument of call has been evaluated; arg is its index
+	// there, a method's receiver being 0
+	reserved bool
+	active   int
+	call     *ast.CallExpr
+	arg      int
 }
 
 const forever = math.MaxInt32
@@ -201,6 +209,19 @@ func bounds(e pathElem) (int64, int64, bool) {
 		return e.lo, e.hi, true
 	}
 	return 0, 0, false
+}
+
+// twoPhaseExcused returns the reserved access of a conflicting pair when
+// the other is a view that ended before the reserved access became active
+// (Rule 5.4.3), and nil otherwise. A binding's freeze is not a view.
+func twoPhaseExcused(a, b *access) *access {
+	for _, p := range [2][2]*access{{a, b}, {b, a}} {
+		r, o := p[0], p[1]
+		if r.reserved && o.kind == accView && o.end < r.active {
+			return r
+		}
+	}
+	return nil
 }
 
 func conflicts(a, b *access) bool {

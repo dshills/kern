@@ -1,0 +1,14 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: two_phase_ok
+// An edit of the reserved place in a later argument conflicts: only reads
+// that end before the call are permitted (Rule 5.4.3, specs/two-phase-edit
+// R2).
+module m
+struct C { n: u64 }
+impl C {
+    func bump(edit self) -> u64 { self.n = self.n + 1u64; return self.n }
+    func set(edit self, n: u64) { self.n = n }
+}
+func f(c: edit[C]) {
+    c.set(c.bump())   // ACC_CONFLICT
+}

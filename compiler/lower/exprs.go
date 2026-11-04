@@ -689,6 +689,14 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 		fnVal = fl.value(x.Fn, nil)
 	}
 	var outLocals []*ir.Local
+	// two-phase edit arguments the checker relied on begin their access
+	// after the other arguments (Rule 5.4.3, specs/two-phase-edit)
+	type deferred struct {
+		acc *ir.Value
+		pl  ir.Place
+		pos ast.Pos
+	}
+	var late []deferred
 	for i, a := range argExprs {
 		if i >= len(info.Params) {
 			break
@@ -705,6 +713,14 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 				if r.ownsAccess {
 					argAccs = append(argAccs, acc)
 				}
+			case fl.l.info.TwoPhase[resolve.TwoPhaseArg{Call: x, Arg: i}]:
+				// the checker records only a field path, which lowers to a
+				// place with no access of its own to end
+				if !r.isPlace() || p.Conv != ast.ConvEdit || r.access != nil && r.ownsAccess {
+					fl.fail(a.Pos, "two-phase argument is not a plain place")
+				}
+				acc = fl.newValue(pt)
+				late = append(late, deferred{acc: acc, pl: r.pl, pos: a.Pos})
 			case r.isPlace():
 				if r.access != nil && r.ownsAccess {
 					argAccs = append(argAccs, r.access) // the parent ends after its child
@@ -738,6 +754,10 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 			argAccs = append(argAccs, fl.closureAccs[n:]...)
 			fl.closureAccs = fl.closureAccs[:n]
 		}
+	}
+	for _, d := range late {
+		fl.emit(&ir.AccessBegin{Dst: d.acc, Edit: true, Place: d.pl, Pos: d.pos})
+		argAccs = append(argAccs, d.acc)
 	}
 	var dsts []*ir.Value
 	for _, rt := range info.Ret {
@@ -902,7 +922,18 @@ func (fl *fnLower) wideAccess(x *ast.CallExpr, name string, t resolve.Type, edit
 	var acc *ir.Value
 	var opened []*ir.Value
 	pt := &resolve.Access{Seq: true, Elem: &resolve.Prim{Name: "u8"}, Edit: edit}
+	// a two-phase edit argument the checker relied on (Rule 5.4.3,
+	// specs/two-phase-edit): the length is read from the place itself and
+	// the access begins after the value argument, at the call
+	late := fl.l.info.TwoPhase[resolve.TwoPhaseArg{Call: x, Arg: 0}]
+	if late && (!edit || !r.isPlace() || r.access != nil && r.ownsAccess) {
+		fl.fail(x.Args[0].Pos, "two-phase argument is not a plain place")
+	}
+	lenOf := ir.Place{}
 	switch {
+	case late:
+		acc = fl.newValue(pt)
+		lenOf = r.pl
 	case r.access != nil && !r.isPlace():
 		acc = r.access
 		if r.ownsAccess {
@@ -932,7 +963,10 @@ func (fl *fnLower) wideAccess(x *ast.CallExpr, name string, t resolve.Type, edit
 		fl.emit(&ir.Binary{Dst: last, Op: "+", L: idx, R: k})
 	}
 	ln := fl.newValue(usize)
-	fl.emit(&ir.Len{Dst: ln, Place: ir.Place{Access: acc}})
+	if !late {
+		lenOf = ir.Place{Access: acc}
+	}
+	fl.emit(&ir.Len{Dst: ln, Place: lenOf})
 	fl.emit(&ir.CheckBounds{Index: last, Len: ln, Prov: ir.RuntimeChecked, Pos: x.Pos})
 	end := func() {
 		for i := len(opened) - 1; i >= 0; i-- {
@@ -941,6 +975,10 @@ func (fl *fnLower) wideAccess(x *ast.CallExpr, name string, t resolve.Type, edit
 	}
 	if edit {
 		val := fl.value(x.Args[2].X, t)
+		if late {
+			fl.emit(&ir.AccessBegin{Dst: acc, Edit: true, Place: r.pl, Pos: x.Args[0].Pos})
+			opened = append(opened, acc)
+		}
 		fl.emit(&ir.Call{Intrinsic: name, Args: []*ir.Value{acc, idx, val}, Pos: x.Pos, TypeArgs: []resolve.Type{t}})
 		return nil, end
 	}

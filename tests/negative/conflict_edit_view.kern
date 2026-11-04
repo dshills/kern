@@ -1,6 +1,12 @@
 //! expect: reject ACC_CONFLICT rule=5.4.4
 //! twin: conflict_edit_view_ok
+// A view argument of the place an edit argument names is live for the
+// whole call, so it conflicts even though the edit is two-phase
+// (Rule 5.4.3, specs/two-phase-edit R2). v.push(v.get(0usize)), this
+// fixture's earlier form, is accepted: the get's view ends before the
+// call (tests/run/two_phase_edit.kern).
 module m
+func both(a: edit[Vec[u64]], b: view[Vec[u64]]) { }
 func f(v: edit[Vec[u64]]) {
-    v.push(v.get(0usize))   // ACC_CONFLICT: view of v live while v is edited
+    both(v, v)   // ACC_CONFLICT: view of v live while v is edited
 }

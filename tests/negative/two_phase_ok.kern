@@ -1,0 +1,31 @@
+//! phase: 1
+//! expect: accept
+//! twin: two_phase_write
+// The two_phase_* negative fixtures with their reads hoisted, and the
+// field-path forms the rule accepts (specs/two-phase-edit R2).
+module m
+struct C { n: u64 }
+struct H { items: [2]C; k: u64 }
+impl C {
+    func bump(edit self) -> u64 { self.n = self.n + 1u64; return self.n }
+    func set(edit self, n: u64) { self.n = n }
+}
+func write(c: edit[C]) {
+    n := c.bump()
+    c.set(n)
+}
+func repl(c: edit[C]) {
+    old := replace(c.n, 0u64)
+    c.set(old)
+}
+func proj(cs: edit[Vec[C]]) {
+    n := u64(cs.len())
+    cs.at(0usize).set(n)
+}
+func index(h: edit[H], i: usize) {
+    k := h.items[0usize].n
+    h.items[i].set(k)
+}
+func field(c: edit[C]) {
+    c.set(c.n + 1u64)
+}

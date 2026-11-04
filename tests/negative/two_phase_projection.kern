@@ -1,0 +1,13 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: two_phase_ok
+// A receiver that is a call's projection is not a field path, so it is
+// not two-phase: the read of the vector in the argument still conflicts
+// (Rule 5.4.3, specs/two-phase-edit R2).
+module m
+struct C { n: u64 }
+impl C {
+    func set(edit self, n: u64) { self.n = n }
+}
+func f(cs: edit[Vec[C]]) {
+    cs.at(0usize).set(u64(cs.len()))   // ACC_CONFLICT
+}

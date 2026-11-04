@@ -1,0 +1,12 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+//! twin: two_phase_ok
+// replace is an edit access, so it conflicts with a reserved edit of an
+// overlapping place (Rule 5.4.3, specs/two-phase-edit R2).
+module m
+struct C { n: u64 }
+impl C {
+    func set(edit self, n: u64) { self.n = n }
+}
+func f(c: edit[C]) {
+    c.set(replace(c.n, 0u64))   // ACC_CONFLICT
+}

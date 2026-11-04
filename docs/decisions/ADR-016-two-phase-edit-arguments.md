@@ -1,7 +1,7 @@
 # ADR-016: Two-phase `edit` arguments
 
-**Status:** Proposed (2026-11-04). Nothing is implemented; rule 5.4.3 and 5.4.4 stand
-unchanged until the owner decides.
+**Status:** Accepted (2026-11-04): alternative B, implemented as
+`specs/two-phase-edit/SPEC.md` (report `docs/reports/two-phase-edit.md`).
 **Date:** 2026-11-04
 **Spec:** `docs/ownership.md` rules 5.4.3 (access lifetimes within a statement) and 5.4.4
 (conflict); §4 evaluation order.
@@ -107,4 +107,15 @@ ownership rule and possibly the suites' calibration.
 
 ## Decision
 
-Pending.
+B, accepted by the owner on 2026-11-04, with one narrowing found while specifying it.
+Only an `edit` argument written as a *field path* (a name followed only by field
+selections) is two-phase. A projection receiver or an indexed place keeps today's rule.
+Evaluating a projection runs code and may carry a release (`m.lock().set(m.lock().get())`
+would take a second lock while the first is held). A field path's place has no operands,
+so beginning its access at the call cannot be observed.
+
+The lowering begins a two-phase argument's access at the call only when the checker
+relied on the reservation. Every program accepted before the change therefore lowers to
+the same IR: 722 debug and release `emit-ir` comparisons are byte-identical. No starting
+or reference program of the agent suites changes its `kern check` result (120 files), so
+no calibration moves.

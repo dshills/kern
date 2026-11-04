@@ -256,6 +256,17 @@ type Info struct {
 	// (specs/nested-cursor-loops).
 	CursorCalls map[*ast.CallExpr]bool
 	CursorViews map[*ast.With]bool
+	// TwoPhase records the edit arguments of a call, by index with a
+	// method's receiver as 0, whose reserved access the checker relied on
+	// (Rule 5.4.3, specs/two-phase-edit): the lowering begins their access
+	// after the other arguments are evaluated.
+	TwoPhase map[TwoPhaseArg]bool
+}
+
+// TwoPhaseArg names one argument of a call.
+type TwoPhaseArg struct {
+	Call *ast.CallExpr
+	Arg  int
 }
 
 func newInfo() *Info {
@@ -265,7 +276,7 @@ func newInfo() *Info {
 		Fields: map[*ast.FieldExpr]*FieldDecl{}, Variants: map[*ast.Arm]*VariantDecl{}, Closures: map[*ast.ClosureExpr]*ClosureInfo{}, Consumed: map[ast.Expr]*ast.Ident{},
 		Drops: map[any][]*Symbol{}, OutFieldDrops: map[any]map[*Symbol][]string{}, OwnedSubject: map[any]bool{},
 		TypeNames: map[*ast.TypeName]*TypeDecl{}, IfaceNames: map[*ast.TypeName]*InterfaceDecl{},
-		CursorCalls: map[*ast.CallExpr]bool{}, CursorViews: map[*ast.With]bool{},
+		CursorCalls: map[*ast.CallExpr]bool{}, CursorViews: map[*ast.With]bool{}, TwoPhase: map[TwoPhaseArg]bool{},
 	}
 }
 

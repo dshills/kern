@@ -2,7 +2,7 @@
 //! expect: accept
 //! twin: conflict_edit_view
 module m
-func f(v: edit[Vec[u64]]) {
-    x := copy(v.get(0usize))
-    v.push(x)
+func both(a: edit[Vec[u64]], b: view[Vec[u64]]) { }
+func f(v: edit[Vec[u64]], w: view[Vec[u64]]) {
+    both(v, w)
 }
