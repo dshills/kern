@@ -5,10 +5,12 @@
 // list ends (more() is false) and every parse function returns.
 module syntax
 
-struct P nocopy { src: Vec[u8]; toks: Vec[Tok]; pos: usize; nest: u32; nolit: bool; bodyless: bool; failed: bool; nodes: Vec[Node]; spans: bool }
+// es..ee and emsg are the first failure's token span and message, as the
+// Go parser's errorf reports it (specs/selfhost-diags).
+struct P nocopy { src: Vec[u8]; toks: Vec[Tok]; pos: usize; nest: u32; nolit: bool; bodyless: bool; failed: bool; nodes: Vec[Node]; spans: bool; es: usize; ee: usize; emsg: Vec[u8] }
 
 func new_parser(src: own Vec[u8], toks: own Vec[Tok], bodyless: bool) -> P {
-    p := P { src: src, toks: toks, pos: 0usize, nest: 0u32, nolit: false, bodyless: bodyless, failed: false, nodes: Vec[Node].new(), spans: false }
+    p := P { src: src, toks: toks, pos: 0usize, nest: 0u32, nolit: false, bodyless: bodyless, failed: false, nodes: Vec[Node].new(), spans: false, es: 0usize, ee: 0usize, emsg: Vec[u8].new() }
     n := p.mk(N_NIL, 0usize, 0usize)
     return p
 }
@@ -63,12 +65,55 @@ impl P {
         }
         return false
     }
-    func fail(edit self) { self.failed = true }
+    // fail_at records the first failure at t with message m; later ones
+    // are ignored, as the Go parser stops at its first errorf.
+    func fail_at(edit self, t: Tok, m: own Vec[u8]) {
+        if self.failed { return }
+        self.failed = true
+        self.es = t.s
+        self.ee = t.e
+        self.emsg = m
+    }
+    // fail_cur is fail_at the current token with a fixed message.
+    func fail_cur(edit self, m: view[]u8) {
+        t := self.cur()
+        self.fail_text(t, m)
+    }
+    func fail_text(edit self, t: Tok, m: view[]u8) {
+        v := Vec[u8].new()
+        v.extend(m)
+        self.fail_at(t, v)
+    }
+    // fail_found is fail_at t with head followed by describe(t).
+    func fail_found(edit self, t: Tok, head: view[]u8) {
+        v := Vec[u8].new()
+        v.extend(head)
+        self.describe(t, v)
+        self.fail_at(t, v)
+    }
+    // describe is the Go parser's describe: a word token with its text
+    // quoted, a string literal by name, any other token by its kind name.
+    func describe(view self, t: Tok, m: edit[Vec[u8]]) {
+        if t.k == IDENT || t.k == INT || t.k == FLOAT {
+            kind_name(t.k, m)
+            m.push(32u8)
+            m.push(34u8)
+            with s := self.src.as_view() { m.extend(s[t.s:t.e]) }
+            m.push(34u8)
+            return
+        }
+        kind_name(t.k, m)
+    }
     func expect(edit self, k: u32) -> Tok {
         if self.failed { return self.tok(self.pos) }
         t := self.cur()
         if t.k != k {
-            self.failed = true
+            v := Vec[u8].new()
+            v.extend("expected ")
+            kind_name(k, v)
+            v.extend(", found ")
+            self.describe(t, v)
+            self.fail_at(t, v)
             return t
         }
         return self.next()
@@ -82,7 +127,7 @@ impl P {
         if t.k == NL || t.k == SEMI {
             u := self.next()
         } else if t.k != RBRACE && t.k != EOF {
-            self.failed = true
+            self.fail_found(t, "expected end of statement, found ")
         }
     }
     // tis reports whether a token spells w.
@@ -261,6 +306,7 @@ impl P {
     }
 
     func parse_decl(edit self) -> usize {
+        t0 := self.cur()
         k := self.ck()
         if k == KW_VIEW {
             if self.peek(1usize) == KW_STRUCT {
@@ -295,7 +341,7 @@ impl P {
             if self.kid(f, 5usize) == 0usize { self.stmt_end() }
             return f
         }
-        self.fail()
+        self.fail_found(t0, "expected declaration, found ")
         return 0usize
     }
 
@@ -445,7 +491,7 @@ impl P {
         var iface: usize = 0usize
         var target: usize = first
         if self.accept(KW_FOR) {
-            if self.nk(first) != N_TNAME { self.fail() }
+            if self.nk(first) != N_TNAME { self.fail_cur("interface name expected before 'for'") }
             iface = first
             target = self.parse_type()
         }
@@ -505,7 +551,7 @@ impl P {
             } else if k.k == KW_ENSURES {
                 self.add(ens, sv)
             } else {
-                self.fail()
+                self.fail_text(k, "expected invariant, requires or ensures")
             }
             self.stmt_end()
             self.skip_nl()
@@ -547,7 +593,10 @@ impl P {
         e := self.expect(RBRACE)
         self.setpe(b, e.e)
         self.skip_nl()
-        if !self.at(KW_FUNC) { self.fail() }
+        if !self.at(KW_FUNC) {
+            u := self.cur()
+            self.fail_found(u, "a budget block must precede a func declaration, found ")
+        }
         return b
     }
 

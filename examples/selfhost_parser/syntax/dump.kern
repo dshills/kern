@@ -447,18 +447,59 @@ func hex_byte(c: u8, o: edit[str.String]) {
 }
 
 // Parse lexes and parses src (bodyless for the standard library and the
-// prelude) and writes its dump into out, with spans when spans is set; it
-// reports whether src parsed.
-func Parse(src: own Vec[u8], bodyless: bool, spans: bool, o: edit[str.String]) -> bool {
+// prelude). Without diags it writes the dump into o, with spans when spans
+// is set; with diags it writes the diagnostics instead, one `start:end
+// message` line each, as the Go parser reports them (specs/selfhost-diags),
+// and nothing for a file that parses. It returns 0 when src parsed, 1 on
+// a lexical or syntax error, 2 when src has a byte at or above 0x80
+// outside a string or a comment (not supported).
+func Parse(src: own Vec[u8], bodyless: bool, spans: bool, diags: bool, o: edit[str.String]) -> u32 {
     toks := Vec[Tok].new()
+    errs := Vec[LexErr].new()
     var ok: bool = false
-    with s := src.as_view() { ok = lex(s, toks) }
-    if !ok { return false }
+    with s := src.as_view() { ok = lex(s, toks, errs) }
+    if !ok { return 2u32 }
+    if errs.len() > 0usize {
+        if diags {
+            with s := src.as_view() {
+                for e in errs.as_view() {
+                    m := Vec[u8].new()
+                    if e.k == LE_ESCAPE {
+                        m.extend("unknown escape")
+                    } else if e.k == LE_UNTERMINATED {
+                        m.extend("unterminated string")
+                    } else {
+                        m.extend("unexpected character ")
+                        go_quote(s[e.s], m)
+                    }
+                    diag_line(e.s, e.e, m.as_view(), o)
+                }
+            }
+        }
+        return 1u32
+    }
     p := new_parser(src, toks, bodyless)
     p.spans = spans
     f := p.parse_file()
-    if p.failed { return false }
-    p.node(f, o)
+    if p.failed {
+        if diags {
+            with m := p.emsg.as_view() { diag_line(p.es, p.ee, m, o) }
+        }
+        return 1u32
+    }
+    if !diags {
+        p.node(f, o)
+        o.push(10u8)
+    }
+    return 0u32
+}
+
+// diag_line writes one diagnostic as `start:end message` and a newline.
+func diag_line(s: usize, e: usize, m: view[]u8, o: edit[str.String]) {
+    o.push_u64(u64(s))
+    o.push(58u8)
+    o.push_u64(u64(e))
+    o.push(32u8)
+    o.push_str(m)
     o.push(10u8)
-    return true
 }

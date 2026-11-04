@@ -70,4 +70,6 @@ not touch source text, is answered in the plan and tested).
 ## Next stage
 
 Diagnostics: messages and positions that match the Go parser's for
-syntax errors. Then the resolver's first pass over the same node table.
+syntax errors. Then the resolver's first pass over the same node table. *Since 2026-11-04* diagnostics are done
+(`docs/reports/selfhost-diags.md`): 2,601 inputs, including 2,052
+mutants, give the Go parser's diagnostics exactly.

@@ -79,7 +79,7 @@ impl P {
                 }
                 i = i + 1usize
             }
-            if !ok || ln > 9223372036854775807u64 { self.fail() }
+            if !ok || ln > 9223372036854775807u64 { self.fail_text(n, "array length must be a non-negative integer literal") }
             self.setv(a, ln)
             return a
         }
@@ -140,7 +140,7 @@ impl P {
             }
             return self.parse_tname()
         }
-        self.fail()
+        self.fail_found(t, "expected type, found ")
         return 0usize
     }
 
@@ -186,7 +186,7 @@ impl P {
         self.skip_nl()
         while self.more(RBRACE) {
             if self.at(EOF) {
-                self.fail()
+                self.fail_cur("unexpected end of file in block")
                 break
             }
             s := self.parse_stmt()

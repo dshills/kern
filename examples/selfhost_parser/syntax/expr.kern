@@ -1,6 +1,7 @@
 // Expressions of the kern parser (compiler/parser parseExprNoLit ..
 // parseIndexArg), with exprToTypeName and ExprToType.
 module syntax
+import "std/str"
 
 impl P {
     func parse_expr_nolit(edit self) -> usize {
@@ -302,7 +303,7 @@ impl P {
         if k == N_FIELDX {
             b := self.kid(x, 0usize)
             if self.nk(b) != N_IDENT {
-                self.fail()
+                self.fail_cur("expected a module-qualified type name before '{'")
                 return 0usize
             }
             s := self.ns(x)
@@ -332,7 +333,7 @@ impl P {
             }
             return tn
         }
-        self.fail()
+        self.fail_cur("expected type name before '{'")
         return 0usize
     }
 
@@ -368,7 +369,7 @@ impl P {
                 self.add(tn, l)
                 return tn
             }
-            self.fail()
+            self.fail_cur("expected type argument")
             return 0usize
         }
         if k == N_INDEX {
@@ -389,7 +390,7 @@ impl P {
             self.same_span(un, x)
             return un
         }
-        self.fail()
+        self.fail_cur("expected type argument")
         return 0usize
     }
 
@@ -427,7 +428,7 @@ impl P {
             }
             i = i + 1usize
         }
-        if !ok { self.fail() }
+        if !ok { self.fail_text(t, "integer literal out of range") }
         n := self.mk(N_INT, t.s, t.e)
         self.setp(n, t.s, t.e)
         self.setv(n, v)
@@ -444,6 +445,7 @@ impl P {
         }
         if k == FLOAT {
             u := self.next()
+            if !self.float_ok(t) { self.fail_text(t, "invalid float literal") }
             fl := self.mk(N_FLOAT, t.s, t.e)
             self.setp(fl, t.s, t.e)
             return fl
@@ -521,7 +523,7 @@ impl P {
             u := self.next()
             l := self.expect(LBRACK)
             to := self.expect(IDENT)
-            if !self.is_prim(to.s, to.e) { self.fail() }
+            if !self.is_prim(to.s, to.e) { self.fail_text(to, "truncate requires a primitive integer type") }
             r := self.expect(RBRACK)
             p := self.expect(LPAREN)
             self.nest = self.nest + 1u32
@@ -599,8 +601,37 @@ impl P {
             self.add(p, x)
             return p
         }
-        self.fail()
+        self.fail_found(t, "expected expression, found ")
         return 0usize
+    }
+
+    // float_ok reports whether a float literal's value is finite, as Go's
+    // strconv.ParseFloat of its text without the suffix and underscores
+    // accepts it: leading zeros are dropped so the digits are one JSON
+    // number, and str.parse_f64 is None only for a value that overflows.
+    func float_ok(view self, t: Tok) -> bool {
+        var e: usize = t.e
+        with s := self.src.as_view() { e = t.e - suffix_len(s, t.s, t.e) }
+        d := Vec[u8].new()
+        var i: usize = t.s
+        with s := self.src.as_view() {
+            while i < e {
+                c := s[i]
+                if c != 95u8 { d.push(c) }
+                i = i + 1usize
+            }
+        }
+        var ok: bool = false
+        with v := d.as_view() {
+            // drop leading zeros before the integer part's last digit
+            var k: usize = 0usize
+            while k + 1usize < len(v) && v[k] == 48u8 && v[k + 1usize] != 46u8 { k = k + 1usize }
+            match str.parse_f64(v[k:len(v)]) {
+                Some(f) => ok = true
+                None => ok = false
+            }
+        }
+        return ok
     }
 
     func paren_expr(edit self) -> usize {

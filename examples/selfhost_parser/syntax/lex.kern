@@ -94,6 +94,140 @@ const QUESTION: u32 = 94u32
 // Tok is one token: its kind and its byte range in the source.
 struct Tok { k: u32; s: usize; e: usize }
 
+// LexErr is a lexical error the Go lexer reports (specs/selfhost-diags):
+// k is 1 for an unknown escape, 2 for an unterminated string, 3 for an
+// unexpected character; s..e is its span.
+struct LexErr { s: usize; e: usize; k: u32 }
+
+const LE_ESCAPE: u32 = 1u32
+const LE_UNTERMINATED: u32 = 2u32
+const LE_CHAR: u32 = 3u32
+
+// kind_name appends the Go lexer's name for a token kind (Kind.String).
+func kind_name(k: u32, m: edit[Vec[u8]]) {
+    if k == EOF { m.extend("end of file"); return }
+    if k == NL { m.extend("newline"); return }
+    if k == IDENT { m.extend("identifier"); return }
+    if k == INT { m.extend("integer literal"); return }
+    if k == FLOAT { m.extend("float literal"); return }
+    if k == STR { m.extend("string literal"); return }
+    if k == UNDERSCORE { m.extend("_"); return }
+    if k >= KW_MODULE && k <= KW_THREAD_LOCAL {
+        m.push(39u8)
+        keyword_text(k, m)
+        m.push(39u8)
+        return
+    }
+    punct_text(k, m)
+}
+
+// keyword_text appends a keyword kind's spelling.
+func keyword_text(k: u32, m: edit[Vec[u8]]) {
+    if k == KW_MODULE { m.extend("module"); return }
+    if k == KW_IMPORT { m.extend("import"); return }
+    if k == KW_STRUCT { m.extend("struct"); return }
+    if k == KW_UNION { m.extend("union"); return }
+    if k == KW_INTERFACE { m.extend("interface"); return }
+    if k == KW_IMPL { m.extend("impl"); return }
+    if k == KW_FOR { m.extend("for"); return }
+    if k == KW_FUNC { m.extend("func"); return }
+    if k == KW_EXTERN { m.extend("extern"); return }
+    if k == KW_CONST { m.extend("const"); return }
+    if k == KW_DESTRUCTOR { m.extend("destructor"); return }
+    if k == KW_CONTRACT { m.extend("contract"); return }
+    if k == KW_INVARIANT { m.extend("invariant"); return }
+    if k == KW_REQUIRES { m.extend("requires"); return }
+    if k == KW_ENSURES { m.extend("ensures"); return }
+    if k == KW_VIEW { m.extend("view"); return }
+    if k == KW_EDIT { m.extend("edit"); return }
+    if k == KW_OWN { m.extend("own"); return }
+    if k == KW_OUT { m.extend("out"); return }
+    if k == KW_SELF { m.extend("self"); return }
+    if k == KW_VAR { m.extend("var"); return }
+    if k == KW_WITH { m.extend("with"); return }
+    if k == KW_MATCH { m.extend("match"); return }
+    if k == KW_WHILE { m.extend("while"); return }
+    if k == KW_IF { m.extend("if"); return }
+    if k == KW_ELSE { m.extend("else"); return }
+    if k == KW_RETURN { m.extend("return"); return }
+    if k == KW_BREAK { m.extend("break"); return }
+    if k == KW_CONTINUE { m.extend("continue"); return }
+    if k == KW_UNSAFE { m.extend("unsafe"); return }
+    if k == KW_ASSERT { m.extend("assert"); return }
+    if k == KW_IN { m.extend("in"); return }
+    if k == KW_MOVE { m.extend("move"); return }
+    if k == KW_COPY { m.extend("copy"); return }
+    if k == KW_TAKE { m.extend("take"); return }
+    if k == KW_REPLACE { m.extend("replace"); return }
+    if k == KW_DROP { m.extend("drop"); return }
+    if k == KW_TRUNCATE { m.extend("truncate"); return }
+    if k == KW_TRUE { m.extend("true"); return }
+    if k == KW_FALSE { m.extend("false"); return }
+    if k == KW_NOCOPY { m.extend("nocopy"); return }
+    m.extend("thread_local")
+}
+
+// punct_text appends a punctuation kind's spelling, or "token"
+// (Kind.String's fallback) for any other kind.
+func punct_text(k: u32, m: edit[Vec[u8]]) {
+    if k == LPAREN { m.extend("("); return }
+    if k == RPAREN { m.extend(")"); return }
+    if k == LBRACK { m.extend("["); return }
+    if k == RBRACK { m.extend("]"); return }
+    if k == LBRACE { m.extend("{"); return }
+    if k == RBRACE { m.extend("}"); return }
+    if k == COMMA { m.extend(","); return }
+    if k == DOT { m.extend("."); return }
+    if k == DOTDOT { m.extend(".."); return }
+    if k == COLON { m.extend(":"); return }
+    if k == COLONEQ { m.extend(":="); return }
+    if k == SEMI { m.extend(";"); return }
+    if k == ARROW { m.extend("->"); return }
+    if k == FATARROW { m.extend("=>"); return }
+    if k == ASSIGN { m.extend("="); return }
+    if k == EQ { m.extend("=="); return }
+    if k == NE { m.extend("!="); return }
+    if k == LT { m.extend("<"); return }
+    if k == LE { m.extend("<="); return }
+    if k == GT { m.extend(">"); return }
+    if k == GE { m.extend(">="); return }
+    if k == PLUS { m.extend("+"); return }
+    if k == MINUS { m.extend("-"); return }
+    if k == STAR { m.extend("*"); return }
+    if k == SLASH { m.extend("/"); return }
+    if k == PERCENT { m.extend("%"); return }
+    if k == AMP { m.extend("&"); return }
+    if k == PIPE { m.extend("|"); return }
+    if k == CARET { m.extend("^"); return }
+    if k == SHL { m.extend("<<"); return }
+    if k == SHR { m.extend(">>"); return }
+    if k == ANDAND { m.extend("&&"); return }
+    if k == OROR { m.extend("||"); return }
+    if k == BANG { m.extend("!"); return }
+    if k == QUESTION { m.extend("?"); return }
+    m.extend("token")
+}
+
+// go_quote appends an ASCII byte quoted as Go's %q quotes a one-byte
+// string: printable as itself (\\ and \" escaped), the C escapes for
+// their controls, \xNN for the rest.
+func go_quote(c: u8, m: edit[Vec[u8]]) {
+    m.push(34u8)
+    if c == 34u8 || c == 92u8 {
+        m.push(92u8)
+        m.push(c)
+    } else if c >= 32u8 && c < 127u8 {
+        m.push(c)
+    } else if c == 7u8 { m.extend("\\a") } else if c == 8u8 { m.extend("\\b") } else if c == 12u8 { m.extend("\\f") } else if c == 10u8 { m.extend("\\n") } else if c == 13u8 { m.extend("\\r") } else if c == 9u8 { m.extend("\\t") } else if c == 11u8 { m.extend("\\v") } else {
+        m.extend("\\x")
+        hi := c >> 4u32
+        lo := c & 15u8
+        if hi < 10u8 { m.push(48u8 + hi) } else { m.push(87u8 + hi) }
+        if lo < 10u8 { m.push(48u8 + lo) } else { m.push(87u8 + lo) }
+    }
+    m.push(34u8)
+}
+
 func is_digit(c: u8) -> bool { return c >= 48u8 && c <= 57u8 }
 func is_letter(c: u8) -> bool { return (c >= 97u8 && c <= 122u8) || (c >= 65u8 && c <= 90u8) }
 func is_word(c: u8) -> bool { return c == 95u8 || is_digit(c) || is_letter(c) }
@@ -253,8 +387,11 @@ func one(c: u8) -> u32 {
     return 0u32
 }
 
-// lex tokenizes src into toks and reports whether it had no error.
-func lex(src: view[]u8, toks: edit[Vec[Tok]]) -> bool {
+// lex tokenizes src into toks, recording lexical errors in errs with the
+// Go lexer's recovery (specs/selfhost-diags), and reports whether src is
+// supported: false at a byte at or above 0x80 outside a string or a
+// comment, which the Go lexer may read as a letter.
+func lex(src: view[]u8, toks: edit[Vec[Tok]], errs: edit[Vec[LexErr]]) -> bool {
     n := len(src)
     pos := 0usize
     while pos < n {
@@ -270,7 +407,8 @@ func lex(src: view[]u8, toks: edit[Vec[Tok]]) -> bool {
             start := pos
             pos = pos + 1usize
             closed := false
-            while pos < n && !closed {
+            stop := false
+            while pos < n && !closed && !stop {
                 d := src[pos]
                 if d == 34u8 {
                     pos = pos + 1usize
@@ -280,16 +418,18 @@ func lex(src: view[]u8, toks: edit[Vec[Tok]]) -> bool {
                         pos = pos + 1usize
                     } else {
                         e := src[pos + 1usize]
-                        if e != 110u8 && e != 116u8 && e != 34u8 && e != 92u8 && e != 48u8 { return false }
+                        if e != 110u8 && e != 116u8 && e != 34u8 && e != 92u8 && e != 48u8 { errs.push(LexErr { s: pos, e: pos + 2usize, k: LE_ESCAPE }) }
                         pos = pos + 2usize
                     }
                 } else if d == 10u8 {
-                    return false
+                    stop = true
                 } else {
                     pos = pos + 1usize
                 }
             }
-            if !closed { return false }
+            // a newline or the end of the file ends an unterminated string
+            // token there, as the Go lexer does
+            if !closed { errs.push(LexErr { s: start, e: pos, k: LE_UNTERMINATED }) }
             emit(toks, STR, start, pos)
         } else if is_digit(c) {
             start := pos
@@ -317,7 +457,12 @@ func lex(src: view[]u8, toks: edit[Vec[Tok]]) -> bool {
                 }
             }
             k := one(c)
-            if k == 0u32 { return false }
+            if k == 0u32 {
+                if c >= 128u8 { return false }
+                errs.push(LexErr { s: pos, e: pos + 1usize, k: LE_CHAR })
+                pos = pos + 1usize
+                continue
+            }
             emit(toks, k, pos, pos + 1usize)
             pos = pos + 1usize
         }
