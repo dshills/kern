@@ -37,11 +37,17 @@ func main() {
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: kern <check|format|emit-ir|explain-ownership|show-*|run|build|test|lsp> [flags] [files...]")
+		_, _ = fmt.Fprintln(stderr, "usage: kern <check|format|emit-ir|explain-ownership|show-*|run|build|test|lsp|version> [flags] [files...]")
 		_, _ = fmt.Fprintln(stderr, "  files default to the entry of kern.mod, the manifest that marks the project root and may set entry, opt, env, target and output; imports are found under that root")
 		return 2
 	}
 	cmd := args[0]
+	if cmd == "version" {
+		return versionCommand(args[1:], currentIdentity(), stdout)
+	}
+	if cmd == "--version" {
+		return dashVersion(args[1:], stdout)
+	}
 	if cmd == "run" {
 		return runProgram(args[1:], stdout, stderr)
 	}
