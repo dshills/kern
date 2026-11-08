@@ -411,6 +411,11 @@ func RenderSchemaMarkdown() string {
 	r.p("This is the human-readable copy of spec §16; `tools/agent-api/schema.json` is the normative JSON Schema and the two must agree.\n\n")
 	r.p("Every command reads one JSON request on standard input and writes one JSON response on standard output (§7). ")
 	r.p("Failure: `ok=false`, a non-empty `diagnostics` array, and exit code 2 for user errors or 3 for internal errors.\n\n")
+	vs := make([]string, len(Accepted))
+	for i, v := range Accepted {
+		vs[i] = "`" + v + "`"
+	}
+	r.p("This compiler answers requests at `schema_version` %s. `kern version`, a command-line command outside §7, lists them in its result's `schema_versions`, so a client can choose one before sending a request.\n\n", strings.Join(vs, ", "))
 
 	r.p("## Common types\n\n")
 	r.p("- `span`: `{\"start\": int, \"end\": int}`, byte offsets, half-open.\n")

@@ -44,4 +44,17 @@ in writing with its rationale.
 
 - Native programs built from `unsafe` code are as safe as that code; the audit, not the compiler, is the guarantee.
 - The compiler trusts the machine API caller: it is not a service boundary.
-- No cryptographic signing of release artifacts; `scripts/release.sh` produces checksums and reproducible binaries so a build can be verified by rebuilding.
+- No cryptographic signing of release artifacts; `scripts/release.sh` produces checksums and reproducible binaries so a build can be verified by rebuilding. Each release publishes `SHA256SUMS` beside its archives (section 5).
+
+## 5. Release pipeline (added 2026-11-08, v0.1.0)
+
+`.github/workflows/release.yml` publishes a release when a `v*` tag is pushed (`docs/releasing.md`, `specs/release-v0.1/SPEC.md`).
+
+| Item | Finding | Status |
+|---|---|---|
+| Token scope | the workflow's `GITHUB_TOKEN` has `contents: write` (create the release, upload assets) and `actions: read` (find the `ci` run); no other permission and no stored secret | accepted: the minimum the workflow needs |
+| What gets released | the tagged commit must be an ancestor of `main` and have a successful `ci` run on a push; a tag pushed on any other commit stops the workflow before anything is built | closed |
+| Build integrity | the workflow rebuilds every target twice and fails on any difference before building the archives; the archives are byte-identical across runs (`gzip -n`, sorted GNU tar entries, fixed owner and time), so anyone can rebuild a release at its tag and compare against `SHA256SUMS` | closed |
+| Partial publication | the release is created as a draft with every asset and made public only after the uploads succeed; recovery from a failure in between is a fixed table in `docs/releasing.md`, and assets are never uploaded by hand | closed |
+| Third-party actions | `actions/checkout@v4` and `actions/setup-go@v5`, referenced by major-version tag rather than commit hash, as in `ci.yml` | accepted: pinning by hash is open |
+| Signing | as in section 4: checksums, not signatures | accepted |

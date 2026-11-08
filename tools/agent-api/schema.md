@@ -5,6 +5,8 @@ This is the human-readable copy of spec §16; `tools/agent-api/schema.json` is t
 
 Every command reads one JSON request on standard input and writes one JSON response on standard output (§7). Failure: `ok=false`, a non-empty `diagnostics` array, and exit code 2 for user errors or 3 for internal errors.
 
+This compiler answers requests at `schema_version` `0.2`, `0.3`, `0.4`, `0.5`. `kern version`, a command-line command outside §7, lists them in its result's `schema_versions`, so a client can choose one before sending a request.
+
 ## Common types
 
 - `span`: `{"start": int, "end": int}`, byte offsets, half-open.
