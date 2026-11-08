@@ -70,41 +70,76 @@ it (`docs/ownership.md` rule 5.6.4).
 |---|---|---|
 | Specification | `specs/initial/AI_Native_Systems_Language_SPEC.md`, `spec/` | Grammar (`grammar.ebnf`), type system, memory model, formatting, and `rules.lock` freezing every diagnostic code to its rule number |
 | Language reference | `docs/ownership.md` | Normative restatement of the ownership rules, one rule per diagnostic code |
-| Decisions | `docs/decisions/ADR-*.md` | Fifteen architecture decision records with the alternatives considered |
+| Decisions | `docs/decisions/ADR-*.md` | Sixteen architecture decision records with the alternatives considered |
 | Compiler | `compiler/` | Lexer and parser, resolver, ownership checker, lowering to a semantic IR, LLVM text backend, interpreter, formatter, incremental driver |
 | Standard library | `std/core.kern`, `std/str.kern`, `std/map.kern`, `std/io.kern`, `std/json.kern`, `std/process.kern`, `std/time.kern` | The implicitly imported prelude (`Box`, `Vec`, `Pool`, `Arena`, `Mutex`, `Condvar`, `Atomic`, scoped threads, raw pointers; the containers are written in kern over audited `unsafe` blocks, `docs/unsafe-audit.md`, and every allocating operation has a `try_` form that returns `Err(OutOfMemory)` where the convenience form traps, `docs/reports/fallible-alloc.md`), and the modules a program imports as `std/str` (an owned `String` with decimal, signed, hexadecimal, padded and round-trip floating-point formatting, `parse_f64`, fallible `try_` appends, byte-view helpers, and UTF-8 decoding, validation, counting and encoding), `std/map` (a hash map over `Hashable` keys, with lookups that borrow the key, lookup of `String` keys by bytes, `each`/`each_mut` visits by closure, and `for k, v in m` through the cursor protocol), `std/io` (files, directories, temporary files, the standard streams and arguments; hosted only), `std/json` (JSON values, a parser that keeps numbers' text and rejects invalid UTF-8, numbers read and written as integers or floats, and a writer), `std/process` (child processes started with arguments, environment edits, a working directory and inherited, `/dev/null` or piped streams; waiting, polling and signals; `output` with no deadlock for any size; the environment the program started with; hosted only, `docs/reports/std-process.md`) and `std/time` (a monotonic clock, durations, deadlines, sleep and the wall clock; hosted only, `docs/reports/std-time.md`) |
 | Runtimes | `runtime/hosted/`, `runtime/freestanding/` | A small C runtime for Linux/macOS, and a freestanding one for bare-metal x86-64 and AArch64 images that boot under QEMU |
 | Machine API | `tools/agent-api/schema.{json,md}` | JSON request/response schema for every command, with stable diagnostic codes and machine-applicable fixes |
 | Tests | `tests/` | Positive, negative and adversarial fixtures (one rejecting fixture and one accepting twin per rule), trap fixtures, concurrency and FFI fixtures, freestanding images |
 | Benchmarks | `bench/` | Thirteen workloads in C, Rust and kern; `bench/PROTOCOL.md` is the method and `bench/REPORT.md` the latest run |
-| Examples | `examples/` | Vector, B-tree, arena-allocated AST, packet parser, thread hand-off, and a kern lexer written in kern |
+| Examples | `examples/` | Hello, vector, B-tree, arena-allocated AST, packet parser, thread hand-off, and a kern lexer written in kern |
 | Reports | `docs/reports/` | Per-phase engineering reports and the security review |
 
-## Building
+## Installing
 
-Requirements: Go 1.25 or newer. Native builds additionally need `clang`
-(the hosted runtime is compiled and linked with it; the compiled runtime is
-kept under the user cache directory, `kern/runtime`, one object per
-configuration, and `KERN_NO_RUNTIME_CACHE=1` turns that off) and, on Linux,
-glibc 2.34 or newer (`std/process` starts children with its
-`posix_spawn_file_actions_addclosefrom_np`); freestanding images need
-`ld.lld`, and running them needs `qemu-system-x86_64` / `qemu-system-aarch64`.
-The interpreter needs nothing beyond Go.
+The current release is **v0.1.0** (`CHANGELOG.md`). The `kern` binary is
+self-contained: the standard library and both runtimes are built into it.
+Native builds need `clang` (the hosted runtime is compiled and linked with
+it; the compiled runtime is kept under the user cache directory,
+`kern/runtime`, one object per configuration, and `KERN_NO_RUNTIME_CACHE=1`
+turns that off) and, on Linux, glibc 2.34 or newer (`std/process` starts
+children with its `posix_spawn_file_actions_addclosefrom_np`); freestanding
+images need `ld.lld`, and running them needs `qemu-system-x86_64` /
+`qemu-system-aarch64`. The interpreter needs nothing else. Linux and macOS
+are supported, on x86-64 and arm64; Windows is not.
+
+**From a release archive.** Download the archive for your platform and
+`SHA256SUMS` from the
+[releases page](https://github.com/dshills/kern/releases), check it, unpack
+it, and put `kern` on your `PATH`:
+
+```bash
+shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
+```bash
+tar -xzf kern-v0.1.0-darwin-arm64.tar.gz && sudo install kern-v0.1.0-darwin-arm64/kern /usr/local/bin/
+```
+
+**With Go** (1.25 or newer):
+
+```bash
+go install github.com/dshills/kern/cmd/kern@latest
+```
+
+**From source**, in a clone of this repository:
 
 ```bash
 go build ./cmd/kern
 ```
 
-Run a program natively (defaults to the debug configuration):
+`kern --version` prints the version, commit, Go toolchain and platform;
+`kern version` gives the same as one JSON response, with the machine-API
+schema versions the binary answers.
+
+## Building
+
+The examples below run in a clone of this repository, with `kern` on your
+`PATH` (or as `./kern` after building from source). Run a program natively
+(defaults to the debug configuration):
 
 ```bash
-./kern run examples/vector/vector.kern
+kern run examples/hello/hello.kern
 ```
+
+which prints `hello, kern`. A program's `main` may return an integer, which
+becomes the exit status: `kern run examples/vector/vector.kern` prints
+nothing and exits with its result, 21.
 
 Build a release binary:
 
 ```bash
-./kern build --opt=release -o vector examples/vector/vector.kern
+kern build --opt=release -o vector examples/vector/vector.kern
 ```
 
 Name only the entry file: the modules it imports are found under the project
@@ -128,12 +163,12 @@ cd proj && kern run && kern build
 Check a file and read the diagnostics as text rather than JSON:
 
 ```bash
-./kern check --human examples/btree/btree.kern
+kern check --human examples/btree/btree.kern
 ```
 
 ## Commands
 
-Every command other than `run`, `build`, `debug`, `test` and `lsp` reads one JSON request on
+Every command other than `run`, `build`, `debug`, `test`, `lsp` and `version` reads one JSON request on
 standard input (or takes files on the command line) and writes one JSON response
 on standard output; `--human` renders the response as text. The schema is in
 `tools/agent-api/schema.md`. A request names its `schema_version`: 0.5, the
@@ -159,6 +194,7 @@ Files on the command line get 0.5.
 | `debug` | Build with debug info and launch lldb with a `kern-own` command that shows ownership state at the current line |
 | `test` | Run the program's tests in the interpreter and natively, in debug and release, and compare the runs; `--opt=`, `--engine=interp\|native`, `--run=<regexp>`, `--timeout=<seconds>`, `--jobs=<n>`, `--human` |
 | `lsp` | A language server on standard input and output: diagnostics as you type, formatting, the compiler's fixes as quick fixes, ownership facts on hover, go to definition, find references, rename, completion, an outline and signature help; setup for Neovim, Helix and Emacs is in [docs/editors.md](docs/editors.md) |
+| `version` | The version, commit, Go toolchain, platform and the machine-API schema versions this binary answers, as one JSON response; `--human` (or `kern --version`) prints one line |
 
 ### Tests
 
@@ -228,7 +264,9 @@ latency is within the interval of the better of C and Rust on every workload.
 
 ## Status
 
-The implementation went through five planned phases (`specs/initial/PLAN.md`,
+v0.1.0, the first release, packages the state described here; its
+changelog entry (`CHANGELOG.md`) summarizes it by area, with its known
+limitations. The implementation went through five planned phases (`specs/initial/PLAN.md`,
 reports in `docs/reports/`): workload design, the core language and
 interpreter, the native backend and ownership checker, concurrency and
 freestanding targets, tooling and the machine API, and hardening (frozen
@@ -259,6 +297,24 @@ recorded in the reports and ADRs rather than in an issue tracker.
 
 Specification documents, the language reference and the ADRs are the
 authority; where the code disagrees with them, the code is wrong.
+
+## Versioning and stability
+
+Releases are tagged `vMAJOR.MINOR.PATCH` and follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html) in its 0.x form:
+
+- A minor version (0.1 → 0.2) may change the language, the standard
+  library, the CLI and the machine API. A patch version (0.1.0 → 0.1.1)
+  does not intend to. `CHANGELOG.md` lists what changed.
+- Diagnostic codes are frozen to rule numbers in `spec/rules.lock` (checked
+  by `tests/rules_lock_test.go`). A code is never reused for another rule,
+  and any change to the file is listed in the changelog.
+- The machine-API versions a release answers are the `schema_versions` list
+  in the `kern version` result; a request at any of them is answered in
+  that version's shape. A release that drops one says so in the changelog.
+- The language specification is a v1.0 candidate and may still change.
+
+Making a release is described in `docs/releasing.md`.
 
 ## License
 

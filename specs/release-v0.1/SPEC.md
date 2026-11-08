@@ -214,4 +214,6 @@ Each item is a gate (R10).
 - Nothing else changes: `scripts/capture-ll.sh` output is not needed, since
   no compiler package changes; `git diff --stat` lists only `cmd/kern`, the
   scripts, `tests/release_check_test.go`, `.gitignore` (`/dist/`), the workflow, the docs, `CHANGELOG.md`, `README.md`,
-  `examples/hello` and this directory.
+  `examples/hello`, the generated corpus count in
+  `docs/reports/freestanding-availability.md` (which counts the examples)
+  and this directory.

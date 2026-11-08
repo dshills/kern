@@ -1,0 +1,166 @@
+# Changelog
+
+All notable changes to kern are recorded here. The layout follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html) in its 0.x form:
+see "Versioning and stability" in the README. The procedure that turns a
+section of this file into a GitHub release is `docs/releasing.md`.
+
+## [Unreleased]
+
+## [v0.1.0] - 2026-11-08
+
+The first release: a research preview of the language, its compiler, its
+standard library and its tools, as they stand after the six implementation
+phases of `specs/initial/PLAN.md` and the work recorded in `docs/reports/`
+since. The engineering reports, the specifications under `specs/` and the
+ADRs are the detailed record; this section summarizes them.
+
+### Language
+
+- Safe code has no first-class references: access is second-class, through
+  `view`/`edit`/`consume`/`out` parameter conventions and lexically scoped
+  `with` bindings (`docs/ownership.md`, ADR-001, ADR-005).
+- Static moves, single-source elision for returned accesses, and checked
+  multi-access functions such as `get2` (ADR-003, ADR-004).
+- Two-phase `edit` arguments: a call such as `v.push(v.get(0usize))`, whose
+  other arguments only read the edited place, is accepted (ADR-016,
+  `docs/reports/two-phase-edit.md`).
+- Arenas, pools and generation-checked handles as library types (ADR-002,
+  ADR-014).
+- Monomorphized generics with interfaces and `where` clauses, function
+  pointers and non-escaping closures (ADR-009, ADR-010,
+  `docs/reports/closures.md`).
+- `for x in xs`, `for i, x in xs`, and `for k, v in m` over maps through a
+  cursor protocol (`docs/reports/for-index.md`, `docs/reports/for-cursor.md`).
+- Traps instead of panics, checks on by default, and the trap kinds a
+  function may raise visible to callers (ADR-006, ADR-008,
+  `docs/reports/effect-trap-kinds.md`).
+- Threads with `Send`/`Share` and scoped spawn, atomics and a memory model
+  restricted from C++20 (ADR-007, `spec/memory-model.md`).
+- Declared budgets: a function may state how many runtime bounds checks,
+  deep copies and allocations it allows, and `check` and `build` enforce
+  them (`docs/reports/declared-budgets.md`).
+- Multi-module programs found from their imports, with an optional
+  `kern.mod` manifest (`docs/reports/module-discovery.md`).
+- The grammar, type system, memory model and formatting rules are in
+  `spec/`; `spec/rules.lock` freezes every diagnostic code to its rule
+  number.
+
+### Compiler and analyses
+
+- A Go compiler that emits LLVM IR, built and linked through clang, and a
+  reference interpreter that is the backend's behavioural oracle; the test
+  suite runs every fixture in both (`docs/reports/phase-2.md`,
+  `docs/reports/program-differential.md`).
+- An ownership checker with one diagnostic code per rule, and
+  machine-applicable fixes for the mechanical diagnostics
+  (`docs/reports/diagnostic-fixes.md`).
+- A kern-level inliner and a proof pass that removes bounds checks it can
+  prove, including guards through joins and loops, masks, remainders,
+  non-strict guards and slice bounds (`docs/reports/inliner.md`,
+  `docs/reports/prove-guards.md`, `docs/reports/prove-masks.md`,
+  `docs/reports/prove-nonstrict.md`).
+- For each runtime-checked bounds check, a reason it is not proven and a
+  hint naming a rewrite the proof rules accept
+  (`docs/reports/unproven-reasons.md`).
+- DWARF line tables and `kern debug`, an lldb session with ownership state
+  at the current line (`docs/reports/phase-5.md`).
+- Native traps and faults report the kern function, file and span on Linux
+  and macOS (`docs/reports/native-trap-loc.md`,
+  `docs/reports/runtime-trap-file.md`).
+
+### Standard library
+
+- The prelude, `std/core.kern`: `Box`, `Vec`, `String`, `Pool`, `Arena`,
+  `Shared`, `Mutex`, `Condvar`, `Atomic`, scoped threads and the raw-pointer
+  core, written in kern over audited `unsafe` blocks
+  (`docs/reports/containers-in-kern.md`, `docs/unsafe-audit.md`).
+- Fallible allocation: every allocating operation has a `try_` form that
+  returns `Err(OutOfMemory)`, and the effect analysis shows which code cannot
+  trap `oom` (`docs/reports/fallible-alloc.md`,
+  `docs/reports/fallible-runtime-objects.md`).
+- Containers over a caller's allocator: `BoxIn`, `VecIn`, `ArenaIn`,
+  `PoolIn` and `map.MapIn` (`docs/reports/alloc-containers.md`,
+  `docs/reports/alloc-containers-more.md`, `docs/reports/map-in.md`,
+  `docs/reports/in-forms.md`).
+- In-place initialization: `new_with`, `alloc_with` and their `_ctx` forms
+  (`docs/reports/in-place-init.md`, `docs/reports/init-context.md`).
+- Imported modules: `std/str`, `std/map`, `std/io`, `std/json`,
+  `std/process` and `std/time` (`docs/reports/std-library.md`,
+  `docs/reports/std-gaps.md`, `docs/reports/std-files.md`,
+  `docs/reports/std-process.md`, `docs/reports/std-time.md`,
+  `docs/reports/std-timeouts.md`, `docs/reports/float-text.md`).
+
+### Runtimes and targets
+
+- Hosted: Linux (glibc 2.34 or newer) and macOS, on x86-64 and arm64, with a
+  small C runtime compiled by clang and cached between builds
+  (`runtime/hosted/`, `docs/reports/build-time.md`).
+- Freestanding: bare-metal x86-64 and AArch64 images that boot under QEMU,
+  with the library containers, floating-point text and a monotonic clock;
+  using a hosted-only facility is the diagnostic `ENV_HOSTED_ONLY`
+  (ADR-011, ADR-012, ADR-015, `docs/reports/freestanding-availability.md`,
+  `docs/reports/freestanding-float.md`, `docs/reports/freestanding-clock.md`).
+- Hosted kern functions keep the frame pointer; the measured cost is nil on
+  arm64 macOS and about 1% on x86-64 under Rosetta
+  (`docs/reports/x86-frame-pointers.md`).
+
+### Tooling
+
+- `kern version` and `kern --version` report the version, commit, Go
+  toolchain, platform and the machine-API schema versions the binary answers
+  (`specs/release-v0.1/SPEC.md`).
+- The machine API: one JSON request and response per command, at
+  `schema_version` 0.5, with 0.4, 0.3 and 0.2 requests answered in their own
+  shapes (`tools/agent-api/schema.md`).
+- `kern test`: `test_` functions in `*_test.kern` files, run in the
+  interpreter and natively, at debug and release, with the four runs
+  compared (`docs/reports/test-command.md`, `docs/reports/test-runs.md`).
+- `kern lsp`: diagnostics, formatting, quick fixes, hover, definition,
+  references, rename, completion, outline and signature help
+  (`docs/reports/language-server.md`, `docs/editors.md`).
+- `kern format`, idempotent and diagnostic-preserving (`spec/format.md`).
+- Reproducible release builds for Linux and macOS on both architectures,
+  with `SHA256SUMS`, published by `.github/workflows/release.yml` when a tag
+  is pushed (`scripts/release.sh`, `docs/releasing.md`).
+
+### Performance
+
+- In the latest harness measurements, kern meets its throughput target (at
+  least 0.90 of the C or Rust reference row) on all thirteen benchmark
+  workloads and its memory target (at most 1.10) on twelve; btree uses 1.23
+  times the memory, the width of its checked handles
+  (`docs/reports/quiet-host-2026-10-31.md`, `bench/PROTOCOL.md`).
+- The interpreter compiles instructions into ops at a function's first call
+  and avoids most per-call allocations (`docs/reports/interp-compile.md`,
+  `docs/reports/interp-call-path.md`, `docs/reports/interp-alloc.md`).
+
+### Known limitations
+
+- The compiler is written in Go; self-hosting is deferred
+  (ADR-013). A kern lexer and parser written in kern exist as examples
+  (`examples/selfhost`, `examples/selfhost_parser`).
+- No Windows support; native builds need clang, and freestanding images
+  need `ld.lld` and QEMU.
+- Releases are checksummed, not signed (`docs/security-review.md`).
+- The machine API is a local tool with the user's permissions: paths are
+  opened as given and inputs have no size limits
+  (`docs/security-review.md`).
+- The agent experiment has not met its own threshold, and its fourth task
+  suite has not been run (`bench/agent/REPORT.md`,
+  `docs/reports/agent-tasks-v4.md`).
+- The interpreter boxes integers of 256 and above, its largest remaining
+  cost (`docs/reports/interp-alloc.md`).
+
+### Stability
+
+This is a 0.x release. A later minor version may change the language, the
+standard library, the CLI and the machine API; a patch version does not
+intend to. Diagnostic codes stay frozen to their rule numbers in
+`spec/rules.lock`, the `schema_versions` list of `kern version` names the
+machine-API versions a release answers, and any change to either is listed
+here.
+
+[Unreleased]: https://github.com/dshills/kern/compare/v0.1.0...HEAD
+[v0.1.0]: https://github.com/dshills/kern/releases/tag/v0.1.0
