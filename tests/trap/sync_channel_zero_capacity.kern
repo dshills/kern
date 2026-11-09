@@ -1,0 +1,10 @@
+//! phase: 6
+//! expect: trap explicit
+// A Channel of capacity 0 traps explicit (specs/runtime RD5).
+module t
+import "std/sync"
+func main() -> i32 {
+    ch := sync.Channel[u64].new(0usize)
+    print_str("not reached")
+    return 0i32
+}

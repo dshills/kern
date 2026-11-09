@@ -17,6 +17,12 @@ func isUnsafeOp(f *FuncDecl) bool {
 	if f.Receiver == nil {
 		return strings.HasPrefix(f.Name, "ptr_") || f.Name == "asm"
 	}
+	if f.Receiver.Name == "Mutex" && (f.Name == "try_acquire" || f.Name == "held") {
+		// a lock taken, or a guarded value reached, with nothing to
+		// release it: the runtime-exclusive escalation of rule 5.3.6
+		// without its release function (Mutex.try_with is the safe form)
+		return true
+	}
 	return f.Receiver.Name == "SystemAllocator" && (f.Name == "alloc" || f.Name == "realloc" || f.Name == "alloc_zeroed" || f.Name == "free")
 }
 

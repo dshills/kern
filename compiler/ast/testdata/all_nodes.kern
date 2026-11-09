@@ -22,6 +22,7 @@ extern "C" func exported(a: u64) -> u64 { return a }
 const K: u64 = -5i64 + 3
 thread_local T: u32 = 7u32
 unsafe assert Send for P
+unsafe assert Share for P where T: Send + Copy, T: Share
 contract { requires "r" }
 budget { bounds_checks 0; copies 2 }
 func budgeted(xs: view[]u64) -> u64 { return 0u64 }

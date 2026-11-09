@@ -1,0 +1,13 @@
+//! phase: 1
+//! expect: accept
+// The accepting twin: the condition of the assertion holds for u64.
+module m
+struct Cell[T] nocopy { state: Atomic[u32]; data: RawPtr[T] }
+unsafe assert Interior for Cell
+unsafe assert Share for Cell where T: Send
+func look(c: view[Cell[u64]]) -> u64 { return 0u64 }
+func f(c: view[Cell[u64]]) {
+    with s := thread.scope() {
+        j := s.spawn(look, c)
+    }
+}

@@ -1866,6 +1866,26 @@ impl Mutex[T] {
     contract { invariant "the lock guarantees exclusivity of the returned edit while it is live" }
     func lock(view self) -> edit[T] release unlock
     func unlock(view self)
+    // try_acquire takes the lock only if it is free and reports whether it
+    // did; held is the guarded value for a caller that holds the lock.
+    // Both are unsafe operations: nothing releases a lock taken this way
+    // but the caller's own unlock. try_with is their safe form.
+    func try_acquire(view self) -> bool
+    func held(view self) -> edit[T]
+    // try_with calls f with the guarded value if the lock is free, and
+    // reports whether it did: it acquires the lock, calls f, releases the
+    // lock and returns true; when the lock is held, by any thread, the
+    // caller included, it returns false without calling f and without
+    // trapping (specs/runtime RD3).
+    contract { invariant "the lock is held from try_acquire to unlock, so the edit passed to f is exclusive for the call" }
+    func try_with(view self, f: closure(edit[T])) -> bool {
+        unsafe {
+            if !self.try_acquire() { return false }
+            f(self.held())
+        }
+        self.unlock()
+        return true
+    }
     destructor(edit self) { }
 }
 unsafe assert Interior for Mutex
@@ -1884,6 +1904,11 @@ impl Condvar {
     // allocate the condition variable.
     func try_new() -> Result[Condvar, AllocErr]
     func wait[T](view self, g: edit[T])
+    // wait_ns is wait that also returns when ns nanoseconds have passed:
+    // false only when the time elapsed with no wake. The lock is held
+    // again when it returns either way, so the caller re-tests its
+    // condition as after wait. wait's traps apply (specs/runtime RD2).
+    func wait_ns[T](view self, g: edit[T], ns: u64) -> bool
     func notify_one(view self)
     func notify_all(view self)
     destructor(edit self) { }
@@ -1907,6 +1932,20 @@ impl Atomic[T] {
 unsafe assert Interior for Atomic
 union Ordering { relaxed; acquire; release; acq_rel; seq_cst }
 func fence(ord: Ordering)
+
+// Parking: the one blocking primitive under the synchronization types
+// (specs/runtime RD1; hosted only). park blocks the calling thread while
+// the atomic's value equals expect; it may return at any time, so a caller
+// re-checks its condition in a loop. A wake that comes between the
+// caller's last check and its sleep is not lost: the sleep begins only if
+// the value still equals expect. park_ns also returns after ns
+// nanoseconds, and returns false only when the time elapsed. unpark_one
+// and unpark_all wake one or every thread parked on the atomic. std/sync
+// is built on these four and Atomic.
+func park(a: view[Atomic[u32]], expect: u32)
+func park_ns(a: view[Atomic[u32]], expect: u32, ns: u64) -> bool
+func unpark_one(a: view[Atomic[u32]])
+func unpark_all(a: view[Atomic[u32]])
 
 struct Thread[R] nocopy { phantom: R }
 impl Thread[R] {

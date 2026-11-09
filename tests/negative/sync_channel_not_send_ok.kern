@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: accept
+// The accepting twin: a Channel of a Send payload is shared between threads.
+module m
+import "std/sync"
+func drain(ch: view[sync.Channel[u64]]) -> u64 { return 0u64 }
+func f(ch: view[sync.Channel[u64]]) {
+    with s := thread.scope() {
+        j := s.spawn(drain, ch)
+    }
+}

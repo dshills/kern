@@ -1,0 +1,6 @@
+rwlock: 4000 8000, torn reads 0
+once: ran 1
+once: done
+waitgroup: 21
+channel: 600 values, sum 659700
+channel: closed

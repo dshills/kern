@@ -19,7 +19,7 @@ var preludeFS embed.FS
 
 // StdModules are the embedded standard-library modules beyond the prelude,
 // loaded when a file imports "std/<name>" (spec/types.md §1).
-var StdModules = []string{"str", "map", "io", "json", "process", "time"}
+var StdModules = []string{"str", "map", "io", "json", "process", "time", "sync"}
 
 // StdSource returns the text of an embedded std module (std/<name>.kern).
 func StdSource(name string) ([]byte, bool) {
@@ -104,7 +104,19 @@ type TypeDecl struct {
 	Methods                                 map[string]*FuncDecl    // inherent and interface methods by name
 	Impls                                   map[*InterfaceDecl]bool // interfaces implemented
 	AssertSend, AssertShare, AssertInterior bool
-	AST                                     ast.Decl
+	// AssertSendIf and AssertShareIf are the conditions of `unsafe assert
+	// Send for T where P: M, ...`: the asserted marker holds for an
+	// instantiation only when every listed parameter's argument has the
+	// listed marker (rule 5.5.1). Empty: the assertion is unconditional.
+	AssertSendIf, AssertShareIf []AssertCond
+	AST                         ast.Decl
+}
+
+// AssertCond is one condition of a marker assertion: the type's parameter
+// at index Param must have Marker ("Copy", "Send" or "Share").
+type AssertCond struct {
+	Param  int
+	Marker string
 }
 
 // InterfaceDecl is a resolved interface.
@@ -738,12 +750,20 @@ func (r *resolver) collect(m *Module) {
 			r.errorf("NAME_UNRESOLVED", p.file, d.Type.Pos, "assert must name a type declared in this module")
 			continue
 		}
+		conds, ok := r.assertConds(p.file, td, d)
+		if !ok {
+			continue
+		}
 		switch d.Marker {
 		case "Send":
-			td.AssertSend = true
+			td.AssertSend, td.AssertSendIf = true, conds
 		case "Share":
-			td.AssertShare = true
+			td.AssertShare, td.AssertShareIf = true, conds
 		case "Interior":
+			if len(conds) > 0 {
+				r.errorf("NAME_UNRESOLVED", p.file, d.Where[0].Pos, "an Interior assertion takes no where clause: a type either has interior mutability or has not")
+				continue
+			}
 			td.AssertInterior = true
 		default:
 			r.errorf("NAME_UNRESOLVED", p.file, d.Pos, "unknown marker %s", d.Marker)
@@ -1762,11 +1782,11 @@ func namedMarker(n *Named, mk marker, visiting map[string]bool) bool {
 			return false
 		}
 	case markerSend:
-		if d.AssertSend {
+		if d.AssertSend && assertHolds(d.AssertSendIf, n, visiting) {
 			return true
 		}
 	case markerShare:
-		if d.AssertShare {
+		if d.AssertShare && assertHolds(d.AssertShareIf, n, visiting) {
 			return true
 		}
 		if d.AssertInterior {
@@ -1807,6 +1827,61 @@ func namedMarker(n *Named, mk marker, visiting map[string]bool) bool {
 		}
 	}
 	return !mk.existential()
+}
+
+// assertHolds reports whether an instantiation satisfies a marker
+// assertion's conditions (none: always).
+func assertHolds(conds []AssertCond, n *Named, visiting map[string]bool) bool {
+	for _, c := range conds {
+		if c.Param >= len(n.Args) {
+			return false
+		}
+		var mk marker
+		switch c.Marker {
+		case "Copy":
+			mk = markerCopy
+		case "Send":
+			mk = markerSend
+		case "Share":
+			mk = markerShare
+		default:
+			return false
+		}
+		if !markerOf(n.Args[c.Param], mk, visiting) {
+			return false
+		}
+	}
+	return true
+}
+
+// assertConds resolves the where clause of a marker assertion: each name
+// must be a type parameter of the asserted type and each constraint one of
+// the markers Copy, Send and Share.
+func (r *resolver) assertConds(file string, td *TypeDecl, d *ast.AssertDecl) ([]AssertCond, bool) {
+	var out []AssertCond
+	ok := true
+	for _, w := range d.Where {
+		idx := -1
+		for i, tp := range td.TypeParams {
+			if tp.Name == w.Name {
+				idx = i
+			}
+		}
+		if idx < 0 {
+			r.errorf("NAME_UNRESOLVED", file, w.Pos, "%s is not a type parameter of %s", w.Name, td.Name)
+			ok = false
+			continue
+		}
+		for _, c := range w.Constraints {
+			if c.Pkg != "" || len(c.Args) > 0 || (c.Name != "Copy" && c.Name != "Send" && c.Name != "Share") {
+				r.errorf("NAME_UNRESOLVED", file, c.Pos, "a marker assertion's condition is Copy, Send or Share, not %s", c.Name)
+				ok = false
+				continue
+			}
+			out = append(out, AssertCond{Param: idx, Marker: c.Name})
+		}
+	}
+	return out, ok
 }
 
 // typeString is a helper for messages.

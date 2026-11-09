@@ -1,0 +1,7 @@
+//! phase: 1
+//! expect: accept
+// The accepting twin: the safe form.
+module m
+func f(m: view[Mutex[u64]]) -> bool {
+    return m.try_with(|g| { g = g + 1u64 })
+}

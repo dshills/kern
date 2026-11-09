@@ -1,0 +1,12 @@
+//! phase: 6
+//! expect: trap explicit
+// A WaitGroup's add past 4,294,967,295 traps explicit (specs/runtime RD5).
+module t
+import "std/sync"
+func main() -> i32 {
+    wg := sync.WaitGroup.new()
+    wg.add(4294967295u32)
+    wg.add(1u32)
+    print_str("not reached")
+    return 0i32
+}

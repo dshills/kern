@@ -1,0 +1,63 @@
+//! phase: 6
+//! expect: output sync_channel_pool
+//! tsan: clean
+// A channel of one slot between six producers and six consumers, two of
+// them timed (specs/runtime RD5). A send wakes one receiver and a receive
+// one sender, so a wake that went to a thread which then ignored it would
+// leave a value queued with every consumer asleep: the program would hang.
+module cc
+import "std/sync"
+func producer(ch: view[sync.Channel[u64]], n: u64) -> u64 {
+    var i: u64 = 0u64
+    while i < n {
+        match ch.send(1u64) {
+            Ok(u) => { }
+            Err(v) => { trap() }
+        }
+        i = i + 1u64
+    }
+    return 0u64
+}
+func consumer(ch: view[sync.Channel[u64]], total: view[Atomic[u64]]) -> u64 {
+    while true {
+        match ch.recv() {
+            Some(v) => { old := total.fetch_add(v, Ordering.seq_cst) }
+            None => { return 0u64 }
+        }
+    }
+    return 0u64
+}
+func timed_consumer(ch: view[sync.Channel[u64]], total: view[Atomic[u64]]) -> u64 {
+    while true {
+        match ch.recv_ns(50000u64) {
+            Some(v) => { old := total.fetch_add(v, Ordering.seq_cst) }
+            None => { if ch.is_closed() && ch.len() == 0usize { return 0u64 } }
+        }
+    }
+    return 0u64
+}
+// every value sent is received exactly once
+func main() -> i32 {
+    ch := sync.Channel[u64].new(1usize)
+    total := Atomic[u64].new(0u64)
+    with outer := thread.scope() {
+        c1 := outer.spawn(consumer, ch, total)
+        c2 := outer.spawn(consumer, ch, total)
+        c3 := outer.spawn(consumer, ch, total)
+        c4 := outer.spawn(consumer, ch, total)
+        c5 := outer.spawn(timed_consumer, ch, total)
+        c6 := outer.spawn(timed_consumer, ch, total)
+        with s := thread.scope() {
+            p1 := s.spawn(producer, ch, 400u64)
+            p2 := s.spawn(producer, ch, 400u64)
+            p3 := s.spawn(producer, ch, 400u64)
+            p4 := s.spawn(producer, ch, 400u64)
+            p5 := s.spawn(producer, ch, 400u64)
+            p6 := s.spawn(producer, ch, 400u64)
+        }
+        ch.close()
+    }
+    print_u64(total.load(Ordering.seq_cst))
+    println()
+    return 0i32
+}

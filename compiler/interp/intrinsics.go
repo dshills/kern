@@ -476,45 +476,56 @@ func init() {
 			<-m.lock
 			return nil
 		},
+		// try_acquire takes the lock only if it is free; held is the edit
+		// of the guarded value for a caller that holds it (Mutex.try_with,
+		// specs/runtime RD3)
+		"Mutex.try_acquire": func(it *Interp, a []Value, _ callCtx) []Value {
+			m := acc(a[0]).Ref.get().(*Mutex)
+			select {
+			case m.lock <- struct{}{}:
+			default:
+				return []Value{Bool(false)} // held, by any thread: no trap
+			}
+			m.state.Lock()
+			m.Locked = true
+			m.owner = it.tid
+			m.state.Unlock()
+			return []Value{Bool(true)}
+		},
+		"Mutex.held": func(it *Interp, a []Value, _ callCtx) []Value {
+			m := acc(a[0]).Ref.get().(*Mutex)
+			return []Value{&Access{Ref: mutexRef{m}, Edit: true}}
+		},
+		// parking (specs/runtime RD1)
+		"park": func(it *Interp, a []Value, _ callCtx) []Value {
+			if gen, wait := it.parkOn(a[0], a[1]); wait {
+				it.await(gen)
+			}
+			return nil
+		},
+		"park_ns": func(it *Interp, a []Value, _ callCtx) []Value {
+			gen, wait := it.parkOn(a[0], a[1])
+			if !wait {
+				return []Value{Bool(true)} // the value already differs
+			}
+			return []Value{Bool(it.awaitFor(gen, u64(a[2])))}
+		},
+		"unpark_one": func(it *Interp, a []Value, _ callCtx) []Value { it.unpark(); return nil },
+		"unpark_all": func(it *Interp, a []Value, _ callCtx) []Value { it.unpark(); return nil },
+		"Condvar.wait_ns": func(it *Interp, a []Value, c callCtx) []Value {
+			m, gen := it.condvarRelease(a, c)
+			woken := it.awaitFor(gen, u64(a[2]))
+			it.condvarReacquire(m)
+			return []Value{Bool(woken)}
+		},
 		"Condvar.new": func(it *Interp, a []Value, c callCtx) []Value {
 			it.runtimeAlloc(c.pos)
 			return []Value{&Condvar{gen: make(chan struct{})}}
 		},
 		"Condvar.wait": func(it *Interp, a []Value, c callCtx) []Value {
-			cv := acc(a[0]).Ref.get().(*Condvar)
-			// the guard is the edit a Mutex lock bound (the checker requires
-			// it): its ref is the Mutex's slot
-			mr, ok := acc(a[1]).Ref.(mutexRef)
-			if !ok {
-				it.trap("explicit", c.pos) // not a lock guard
-			}
-			m := mr.m
-			m.state.Lock()
-			held := m.Locked && m.owner == it.tid
-			m.state.Unlock()
-			if !held {
-				it.trap("explicit", c.pos) // the calling thread does not hold the lock
-			}
-			cv.state.Lock()
-			if cv.mutex == nil {
-				cv.mutex = m
-			}
-			same := cv.mutex == m
-			gen := cv.gen
-			cv.state.Unlock()
-			if !same {
-				it.trap("explicit", c.pos) // a second Mutex on one Condvar
-			}
-			m.state.Lock()
-			m.Locked = false
-			m.state.Unlock()
-			<-m.lock
+			m, gen := it.condvarRelease(a, c)
 			it.await(gen)
-			it.acquire(m)
-			m.state.Lock()
-			m.Locked = true
-			m.owner = it.tid
-			m.state.Unlock()
+			it.condvarReacquire(m)
 			return nil
 		},
 		"Condvar.notify_one": func(it *Interp, a []Value, _ callCtx) []Value {
@@ -1021,6 +1032,73 @@ func (it *Interp) acquire(m *Mutex) {
 			panic(exitCode(code))
 		}
 	}
+}
+
+// condvarRelease is the first half of a Condvar wait: it checks the guard
+// (the edit a Mutex lock bound, held by the calling thread, of the one
+// Mutex the Condvar is used with), releases the lock and returns the Mutex
+// and the generation channel a notify closes.
+func (it *Interp) condvarRelease(a []Value, c callCtx) (*Mutex, chan struct{}) {
+	cv := acc(a[0]).Ref.get().(*Condvar)
+	// the guard is the edit a Mutex lock bound (the checker requires
+	// it): its ref is the Mutex's slot
+	mr, ok := acc(a[1]).Ref.(mutexRef)
+	if !ok {
+		it.trap("explicit", c.pos) // not a lock guard
+	}
+	m := mr.m
+	m.state.Lock()
+	held := m.Locked && m.owner == it.tid
+	m.state.Unlock()
+	if !held {
+		it.trap("explicit", c.pos) // the calling thread does not hold the lock
+	}
+	cv.state.Lock()
+	if cv.mutex == nil {
+		cv.mutex = m
+	}
+	same := cv.mutex == m
+	gen := cv.gen
+	cv.state.Unlock()
+	if !same {
+		it.trap("explicit", c.pos) // a second Mutex on one Condvar
+	}
+	m.state.Lock()
+	m.Locked = false
+	m.state.Unlock()
+	<-m.lock
+	return m, gen
+}
+
+// condvarReacquire is the second half: the lock is taken again.
+func (it *Interp) condvarReacquire(m *Mutex) {
+	it.acquire(m)
+	m.state.Lock()
+	m.Locked = true
+	m.owner = it.tid
+	m.state.Unlock()
+}
+
+// parkOn begins a park on an atomic: under parkMu it reads the atomic and,
+// when its value equals expect, returns the generation channel to wait on.
+func (it *Interp) parkOn(atomic, expect Value) (chan struct{}, bool) {
+	it.sh.parkMu.Lock()
+	defer it.sh.parkMu.Unlock()
+	atomicMu.Lock()
+	cur := atomicLoad(atomic)
+	atomicMu.Unlock()
+	if !equalValues(cur, expect) {
+		return nil, false
+	}
+	return it.sh.parkGen, true
+}
+
+// unpark wakes every parked thread (each re-checks its condition).
+func (it *Interp) unpark() {
+	it.sh.parkMu.Lock()
+	close(it.sh.parkGen)
+	it.sh.parkGen = make(chan struct{})
+	it.sh.parkMu.Unlock()
 }
 
 // atomicMu serializes the interpreter's atomic and reference-count updates.

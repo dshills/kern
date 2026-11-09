@@ -1,0 +1,44 @@
+read 7
+read again 8
+holds 1
+drop 1
+once ran 1
+once is done
+waitgroup reached zero
+capacity 2
+nothing
+nothing
+sent
+sent
+not sent, value back: 3
+len 2
+got 1
+sent
+got 2
+closed
+not sent, value back: 5
+not sent, value back: 6
+got 4
+nothing
+nothing
+nothing
+len 0
+received 10
+drop 10
+refused 13
+drop 13
+channel of tokens ends
+drop 11
+drop 12
+try_with ran
+guarded 6
+try_with refused while held
+still 6
+try_with ran again
+wait_ns timed out
+lock held again: 7
+wait_ns of 0 timed out
+park_ns timed out
+park_ns of 0 timed out
+park_ns returned: the value differs
+park returned: the value differs

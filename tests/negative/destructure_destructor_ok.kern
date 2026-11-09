@@ -1,11 +1,12 @@
 //! phase: 1
 //! expect: accept
 //! twin: destructure_destructor
+// Slot declares no destructor: its payload, a Box, moves into the arm.
 module m
-union Slot { Full(u64); Empty }
+union Slot { Full(Box[u64]); Empty }
 func take_it(s: own Slot) -> u64 {
     match move s {
-        Full(v) => return v
+        Full(b) => return b.into()
         Empty => return 0u64
     }
 }

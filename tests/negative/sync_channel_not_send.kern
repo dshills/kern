@@ -1,0 +1,14 @@
+//! expect: reject SHARE_NOT_SHARE rule=5.5.3
+//! twin: sync_channel_not_send_ok
+// A Channel is Share only for a Send payload (its conditional assertion,
+// rule 5.5.1): one carrying raw pointers cannot be viewed from another
+// thread.
+module m
+import "std/sync"
+struct Raw { p: RawPtr[u8] }
+func drain(ch: view[sync.Channel[Raw]]) -> u64 { return 0u64 }
+func f(ch: view[sync.Channel[Raw]]) {
+    with s := thread.scope() {
+        j := s.spawn(drain, ch)   // SHARE_NOT_SHARE
+    }
+}

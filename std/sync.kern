@@ -1,0 +1,427 @@
+// std/sync: synchronization types beyond the prelude's Mutex and Condvar,
+// for hosted programs (a freestanding image has one thread and no park).
+// Imported with `import "std/sync"` (specs/runtime RD5).
+//
+// Everything here is kern code over two things the prelude provides:
+// Atomic, and park (block while an atomic holds a value) with its wakes.
+// A type's waiters park on an atomic "events" word that every state change
+// they wait for increments before it wakes them, and a waiter reads the
+// word before it tests its condition: a change after the read makes the
+// park return at once, so no wake is lost. RwLock and Channel also count
+// the threads parked on a word, and a change wakes only when the count is
+// not zero, so an operation nobody waits for makes no system call. The
+// waiter adds itself before it parks and the changer reads the count after
+// it bumps the word: whichever comes second sees the other.
+//
+// A trap ends the program, so none of these types has a poisoned state:
+// a closure that traps inside Once.call takes every waiter down with it.
+module sync
+
+// ---- RwLock ----
+
+// RwLock guards a value for any number of readers or one writer.
+// `with r := lock.read() { ... }` binds a view, `with w := lock.write()
+// { ... }` an edit; each is released at the end of its block. A waiting
+// writer blocks new readers, so writers are not starved; a thread that
+// asks for a second read while a writer waits therefore blocks for good,
+// as does one that asks for the write while it holds a read.
+//
+// state is the number of readers, or WRITER when a writer holds the lock;
+// waiting is the number of writers waiting.
+struct RwLock[T] nocopy { state: Atomic[u32]; waiting: Atomic[u32]; events: Atomic[u32]; sleepers: Atomic[u32]; data: RawPtr[T] }
+unsafe assert Interior for RwLock
+unsafe assert Share for RwLock where T: Send + Share
+unsafe assert Send for RwLock where T: Send
+
+const WRITER: u32 = 2147483648u32
+
+impl RwLock[T] {
+    contract { ensures "data addresses one live T until the destructor takes it" }
+    func new(v: own T) -> RwLock[T] {
+        unsafe {
+            p := ptr_cast[T, u8](heap_alloc(size_of[T](), align_of[T]()))
+            ptr_store(p, v)
+            return RwLock[T] { state: Atomic[u32].new(0u32), waiting: Atomic[u32].new(0u32), events: Atomic[u32].new(0u32), sleepers: Atomic[u32].new(0u32), data: p }
+        }
+    }
+
+    // read blocks while a writer holds the lock or waits for it.
+    contract { invariant "state counts this reader until read_unlock, and no writer holds the lock while it is not zero: the view cannot change under the reader" }
+    func read(view self) -> view[T] release read_unlock {
+        while true {
+            seen := self.events.load(Ordering.seq_cst)
+            s := self.state.load(Ordering.seq_cst)
+            if s < WRITER && self.waiting.load(Ordering.seq_cst) == 0u32 {
+                if s == WRITER - 1u32 { trap_kind(overflow) }
+                match self.state.compare_exchange(s, s + 1u32, Ordering.seq_cst, Ordering.seq_cst) {
+                    Ok(old) => { break }
+                    Err(old) => { }
+                }
+            } else {
+                self.sleep(seen)
+            }
+        }
+        unsafe { return ptr_view(self.data) }
+    }
+    func read_unlock(view self) {
+        if self.state.fetch_sub(1u32, Ordering.seq_cst) == 1u32 { self.changed() }
+    }
+
+    // write blocks until no reader and no writer holds the lock.
+    contract { invariant "state is WRITER until write_unlock, which no reader and no other writer gets past: the edit is exclusive" }
+    func write(view self) -> edit[T] release write_unlock {
+        old := self.waiting.fetch_add(1u32, Ordering.seq_cst)
+        while true {
+            seen := self.events.load(Ordering.seq_cst)
+            match self.state.compare_exchange(0u32, WRITER, Ordering.seq_cst, Ordering.seq_cst) {
+                Ok(was) => { break }
+                Err(was) => { self.sleep(seen) }
+            }
+        }
+        left := self.waiting.fetch_sub(1u32, Ordering.seq_cst)
+        unsafe { return ptr_edit(self.data) }
+    }
+    func write_unlock(view self) {
+        self.state.store(0u32, Ordering.seq_cst)
+        self.changed()
+    }
+
+    // changed tells every waiter that the lock's state moved.
+    func changed(view self) {
+        old := self.events.fetch_add(1u32, Ordering.seq_cst)
+        if self.sleepers.load(Ordering.seq_cst) != 0u32 { unpark_all(self.events) }
+    }
+    // sleep parks until a change after the caller read seen from events.
+    func sleep(view self, seen: u32) {
+        old := self.sleepers.fetch_add(1u32, Ordering.seq_cst)
+        park(self.events, seen)
+        left := self.sleepers.fetch_sub(1u32, Ordering.seq_cst)
+    }
+
+    contract { requires "data addresses the live T, which nothing reads after this" }
+    func release(edit self) {
+        unsafe {
+            v := ptr_take(self.data)
+            drop(v)
+            heap_free(ptr_cast[u8, T](self.data), size_of[T](), align_of[T]())
+        }
+    }
+    destructor(edit self) { self.release() }
+}
+
+// ---- Once ----
+
+// Once runs a closure exactly once across all threads. Every call returns
+// only after that one run has finished, whichever thread made it. The
+// closure must not call the same Once: that call would wait for itself.
+//
+// state: 0 not run, 1 running, 2 done.
+struct Once nocopy { state: Atomic[u32] }
+
+impl Once {
+    func new() -> Once { return Once { state: Atomic[u32].new(0u32) } }
+
+    func call(view self, f: closure()) {
+        while true {
+            s := self.state.load(Ordering.seq_cst)
+            if s == 2u32 { return }
+            if s == 0u32 {
+                match self.state.compare_exchange(0u32, 1u32, Ordering.seq_cst, Ordering.seq_cst) {
+                    Ok(old) => {
+                        f()
+                        self.state.store(2u32, Ordering.seq_cst)
+                        unpark_all(self.state)
+                        return
+                    }
+                    Err(old) => { }
+                }
+            } else {
+                park(self.state, 1u32)
+            }
+        }
+    }
+
+    func is_done(view self) -> bool { return self.state.load(Ordering.seq_cst) == 2u32 }
+}
+
+// ---- WaitGroup ----
+
+// WaitGroup counts pieces of work in progress: add before starting some,
+// done as each finishes, wait until none is left. done below zero and an
+// add that would take the count past 4,294,967,295 trap explicit.
+struct WaitGroup nocopy { count: Atomic[u32] }
+
+impl WaitGroup {
+    func new() -> WaitGroup { return WaitGroup { count: Atomic[u32].new(0u32) } }
+
+    func add(view self, n: u32) {
+        while true {
+            c := self.count.load(Ordering.seq_cst)
+            if n > 4294967295u32 - c { trap_kind(explicit) }
+            match self.count.compare_exchange(c, c + n, Ordering.seq_cst, Ordering.seq_cst) {
+                Ok(old) => { return }
+                Err(old) => { }
+            }
+        }
+    }
+
+    func done(view self) {
+        while true {
+            c := self.count.load(Ordering.seq_cst)
+            if c == 0u32 { trap_kind(explicit) }
+            match self.count.compare_exchange(c, c - 1u32, Ordering.seq_cst, Ordering.seq_cst) {
+                Ok(old) => {
+                    if c == 1u32 { unpark_all(self.count) }
+                    return
+                }
+                Err(old) => { }
+            }
+        }
+    }
+
+    // wait blocks until the count is zero.
+    func wait(view self) {
+        while true {
+            c := self.count.load(Ordering.seq_cst)
+            if c == 0u32 { return }
+            park(self.count, c)
+        }
+    }
+}
+
+// ---- Channel ----
+
+// Channel is a bounded first-in-first-out queue for any number of senders
+// and receivers. A sender blocks while it is full and a receiver while it
+// is empty. After close, sends fail and receives drain what is left.
+// Values still queued when the channel is destroyed are destroyed.
+//
+// lock guards buf, head and count (0 free, 1 held, 2 held with a thread
+// parked on it, as the runtime's Mutex). Receivers park on items, which
+// every send bumps, and senders on space, which every receive bumps; takers
+// and givers count the threads parked on each. One value or one free slot
+// serves one thread, so a send or a receive wakes one; every woken thread
+// looks at the queue again before it does anything else, timed or not, so
+// a wake is never spent on a thread that then ignores it. close bumps and
+// wakes both, all of them.
+struct Channel[T] nocopy { lock: Atomic[u32]; items: Atomic[u32]; space: Atomic[u32]; takers: Atomic[u32]; givers: Atomic[u32]; shut: Atomic[u32]; buf: RawPtr[T]; cap: usize; head: usize; count: usize }
+unsafe assert Interior for Channel
+unsafe assert Share for Channel where T: Send
+unsafe assert Send for Channel where T: Send
+
+impl Channel[T] {
+    // new makes a channel that holds up to capacity values; a capacity of
+    // 0 traps explicit.
+    contract { ensures "buf addresses storage for capacity values of T, none of them live" }
+    func new(capacity: usize) -> Channel[T] {
+        if capacity == 0usize { trap_kind(explicit) }
+        match elems_bytes[T](capacity) {
+            Some(bytes) => {
+                unsafe {
+                    p := ptr_cast[T, u8](heap_alloc(bytes, align_of[T]()))
+                    return Channel[T] { lock: Atomic[u32].new(0u32), items: Atomic[u32].new(0u32), space: Atomic[u32].new(0u32), takers: Atomic[u32].new(0u32), givers: Atomic[u32].new(0u32), shut: Atomic[u32].new(0u32), buf: p, cap: capacity, head: 0usize, count: 0usize }
+                }
+            }
+            None => { trap_kind(oom) }
+        }
+        trap()
+    }
+
+    func acquire(view self) {
+        match self.lock.compare_exchange(0u32, 1u32, Ordering.acquire, Ordering.relaxed) {
+            Ok(old) => { return }
+            Err(old) => { }
+        }
+        while self.lock.swap(2u32, Ordering.acquire) != 0u32 { park(self.lock, 2u32) }
+    }
+    func unlock(view self) {
+        if self.lock.swap(0u32, Ordering.release) == 2u32 { unpark_one(self.lock) }
+    }
+
+    // gave and took tell one waiting receiver that a value arrived, and
+    // one waiting sender that a slot came free.
+    func gave(view self) {
+        old := self.items.fetch_add(1u32, Ordering.seq_cst)
+        if self.takers.load(Ordering.seq_cst) != 0u32 { unpark_one(self.items) }
+    }
+    func took(view self) {
+        old := self.space.fetch_add(1u32, Ordering.seq_cst)
+        if self.givers.load(Ordering.seq_cst) != 0u32 { unpark_one(self.space) }
+    }
+    // await_item and await_space park until a change after the caller read
+    // seen from the word, or for ns nanoseconds when timed.
+    func await_item(view self, seen: u32) {
+        old := self.takers.fetch_add(1u32, Ordering.seq_cst)
+        park(self.items, seen)
+        left := self.takers.fetch_sub(1u32, Ordering.seq_cst)
+    }
+    func await_item_ns(view self, seen: u32, ns: u64) {
+        old := self.takers.fetch_add(1u32, Ordering.seq_cst)
+        woken := park_ns(self.items, seen, ns)
+        left := self.takers.fetch_sub(1u32, Ordering.seq_cst)
+    }
+    func await_space(view self, seen: u32) {
+        old := self.givers.fetch_add(1u32, Ordering.seq_cst)
+        park(self.space, seen)
+        left := self.givers.fetch_sub(1u32, Ordering.seq_cst)
+    }
+
+    // put stores v after the queued values; the caller holds the lock and
+    // has checked that there is room.
+    contract { requires "the caller holds lock and count < cap: the slot is free storage" }
+    func put(view self, v: own T) {
+        unsafe {
+            at := (self.head + self.count) % self.cap
+            ptr_store(ptr_offset(self.buf, truncate[isize](at)), v)
+            self.count = self.count + 1usize
+        }
+    }
+    // pop takes the oldest value; the caller holds the lock and has
+    // checked that there is one.
+    contract { requires "the caller holds lock and count > 0: the slot at head holds a live T" }
+    func pop(view self) -> T {
+        unsafe {
+            v := ptr_take(ptr_offset(self.buf, truncate[isize](self.head)))
+            self.head = (self.head + 1usize) % self.cap
+            self.count = self.count - 1usize
+            return v
+        }
+    }
+    contract { requires "the caller holds lock" }
+    func room(view self) -> bool { unsafe { return self.count < self.cap } }
+    contract { requires "the caller holds lock" }
+    func some(view self) -> bool { unsafe { return self.count > 0usize } }
+
+    // send queues v, blocking while the channel is full: Ok(()), or
+    // Err(v) with the value back when the channel is closed.
+    func send(view self, v: own T) -> Result[(), T] {
+        while true {
+            seen := self.space.load(Ordering.seq_cst)
+            self.acquire()
+            if self.shut.load(Ordering.seq_cst) != 0u32 {
+                self.unlock()
+                return Err(v)
+            }
+            if self.room() {
+                self.put(v)
+                self.unlock()
+                self.gave()
+                return Ok(())
+            }
+            self.unlock()
+            self.await_space(seen)
+        }
+        trap()
+    }
+
+    // try_send queues v without blocking: Err(v) when the channel is full
+    // or closed.
+    func try_send(view self, v: own T) -> Result[(), T] {
+        self.acquire()
+        if self.shut.load(Ordering.seq_cst) != 0u32 || !self.room() {
+            self.unlock()
+            return Err(v)
+        }
+        self.put(v)
+        self.unlock()
+        self.gave()
+        return Ok(())
+    }
+
+    // recv takes the oldest value, blocking while the channel is empty:
+    // None when it is closed and empty.
+    func recv(view self) -> Option[T] {
+        while true {
+            seen := self.items.load(Ordering.seq_cst)
+            self.acquire()
+            if self.some() {
+                v := self.pop()
+                self.unlock()
+                self.took()
+                return Some(v)
+            }
+            closed := self.shut.load(Ordering.seq_cst) != 0u32
+            self.unlock()
+            if closed { return None }
+            self.await_item(seen)
+        }
+        trap()
+    }
+
+    // try_recv takes the oldest value without blocking: None when the
+    // channel is empty.
+    func try_recv(view self) -> Option[T] {
+        self.acquire()
+        if !self.some() {
+            self.unlock()
+            return None
+        }
+        v := self.pop()
+        self.unlock()
+        self.took()
+        return Some(v)
+    }
+
+    // recv_ns is recv that waits at most ns nanoseconds (0 polls once):
+    // None when the time passed with the channel empty, or when it is
+    // closed and empty. A call that returns None has removed nothing.
+    func recv_ns(view self, ns: u64) -> Option[T] {
+        start := now_ns()
+        while true {
+            seen := self.items.load(Ordering.seq_cst)
+            self.acquire()
+            if self.some() {
+                v := self.pop()
+                self.unlock()
+                self.took()
+                return Some(v)
+            }
+            closed := self.shut.load(Ordering.seq_cst) != 0u32
+            self.unlock()
+            if closed { return None }
+            spent := now_ns() - start
+            if spent >= ns { return None }
+            self.await_item_ns(seen, ns - spent)
+        }
+        trap()
+    }
+
+    // close makes every later send fail and wakes every blocked thread;
+    // receivers still get the queued values.
+    func close(view self) {
+        self.shut.store(1u32, Ordering.seq_cst)
+        a := self.items.fetch_add(1u32, Ordering.seq_cst)
+        b := self.space.fetch_add(1u32, Ordering.seq_cst)
+        unpark_all(self.items)
+        unpark_all(self.space)
+    }
+    func is_closed(view self) -> bool { return self.shut.load(Ordering.seq_cst) != 0u32 }
+
+    // len is the number of queued values.
+    contract { requires "count is read under lock" }
+    func len(view self) -> usize {
+        self.acquire()
+        var n: usize = 0usize
+        unsafe { n = self.count }
+        self.unlock()
+        return n
+    }
+    func capacity(view self) -> usize { return self.cap }
+
+    contract { requires "no other thread uses the channel: the queued values are live and buf is its allocation" }
+    func release(edit self) {
+        unsafe {
+            while self.count > 0usize {
+                v := ptr_take(ptr_offset(self.buf, truncate[isize](self.head)))
+                drop(v)
+                self.head = (self.head + 1usize) % self.cap
+                self.count = self.count - 1usize
+            }
+            match elems_bytes[T](self.cap) {
+                Some(bytes) => heap_free(ptr_cast[u8, T](self.buf), bytes, align_of[T]())
+                None => { }
+            }
+        }
+    }
+    destructor(edit self) { self.release() }
+}

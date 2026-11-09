@@ -589,21 +589,7 @@ impl P {
         tps := self.parse_tps()
         ps := self.parse_params()
         ret := self.parse_ret()
-        wh := self.list()
-        if self.at(IDENT) && self.tis(self.tok(self.pos), "where") {
-            u := self.next()
-            while true {
-                wn := self.expect(IDENT)
-                tp := self.mk(N_TP, wn.s, wn.e)
-                self.setp(tp, wn.s, wn.e)
-                cs := self.list()
-                self.add(tp, cs)
-                c := self.expect(COLON)
-                self.parse_constraints(cs, tp)
-                self.add(wh, tp)
-                if !self.accept(COMMA) { break }
-            }
-        }
+        wh := self.parse_where()
         if self.at(IDENT) && self.tis(self.tok(self.pos), "release") {
             u := self.next()
             r := self.expect(IDENT)
@@ -754,16 +740,46 @@ impl P {
         return d
     }
 
+    // parse_where parses an optional `where P: C + D, Q: E` clause, the
+    // constraints on type parameters named elsewhere (a method's owner, a
+    // function, the type of a marker assertion), as a list of type
+    // parameters; the list is empty when there is no clause.
+    func parse_where(edit self) -> usize {
+        wh := self.list()
+        if self.at(IDENT) && self.tis(self.tok(self.pos), "where") {
+            u := self.next()
+            while true {
+                wn := self.expect(IDENT)
+                tp := self.mk(N_TP, wn.s, wn.e)
+                self.setp(tp, wn.s, wn.e)
+                cs := self.list()
+                self.add(tp, cs)
+                c := self.expect(COLON)
+                self.parse_constraints(cs, tp)
+                self.add(wh, tp)
+                if !self.accept(COMMA) { break }
+            }
+        }
+        return wh
+    }
+
+    // parse_assert parses `unsafe assert Marker for T [where P: M, ...]`:
+    // its kids are the type name and the where list.
     func parse_assert(edit self) -> usize {
         t := self.expect(KW_UNSAFE)
         a := self.expect(KW_ASSERT)
         m := self.expect(IDENT)
         f := self.expect(KW_FOR)
         tn := self.parse_tname()
+        wh := self.parse_where()
+        end := self.pend(tn)
+        n := self.nlen(wh)
+        if n > 0usize { end = self.pend(self.kid(wh, n - 1usize)) }
         self.stmt_end()
         d := self.mk(N_ASSERT, m.s, m.e)
-        self.setp(d, t.s, self.pend(tn))
+        self.setp(d, t.s, end)
         self.add(d, tn)
+        self.add(d, wh)
         return d
     }
 }

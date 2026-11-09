@@ -1,0 +1,23 @@
+bound 1
+drop 1
+after the bound arm
+none
+after the bound arm
+two: 21
+drop 11
+drop 10
+after the match
+one: 20
+drop 20
+after the match
+neither
+after the match
+drop 31
+drop 30
+wildcard
+after the wildcard
+neither
+after the wildcard
+drop 40
+40
+2

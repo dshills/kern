@@ -1,0 +1,6 @@
+//! expect: reject NAME_UNRESOLVED rule=T.1
+// A marker assertion's condition is a marker, not an interface.
+module m
+interface Named { func name(view self) -> u64 }
+struct C[T] nocopy { p: RawPtr[T] }
+unsafe assert Send for C where T: Named   // NAME_UNRESOLVED

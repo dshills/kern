@@ -24,11 +24,11 @@ reason. Updated at the end of every phase.
 | RE1 line and column | 4 | e3f7ef2 | The span 0-0 (no location) also gives line 0, column 0 |
 | RE2 backtrace | 4 | e3f7ef2 | A debug build lists every call as written only when made with `--backtrace` (clang inlines at `-O1`) |
 | RE3 parity | 4 | e3f7ef2 |  |
-| RD1 park | 5 | | |
-| RD2 timed wait | 5 | | |
-| RD3 try lock | 5 | | |
-| RD4 conditional assertions | 5 | | |
-| RD5 std/sync | 5 | | |
+| RD1 park | 5 | PH5 |  |
+| RD2 timed wait | 5 | PH5 |  |
+| RD3 try lock | 5 | PH5 | Built on two unsafe prelude operations, `Mutex.try_acquire` and `Mutex.held` |
+| RD4 conditional assertions | 5 | PH5 | `Interior` takes no `where` clause |
+| RD5 std/sync | 5 | PH5 | `Channel.capacity` added; one binding cannot hold two guards, so a nested read through one variable is a compile error, not a block |
 | RF1 checked allocator | 6 | | |
 | RF2 allocation report | 6 | | |
 | RF3 page allocator | 6 | | |
@@ -57,3 +57,4 @@ reason. Updated at the end of every phase.
 | `memcpy` from a null pointer for empty sequences in the hosted runtime | c45f745 |
 | Small integer arguments passed without the extension the C side assumes on x86-64 and Apple arm64 | c45f745 |
 | The interpreter decremented a `Shared` count without the lock that guards its increment | 4dd62e2 |
+| An owned `match` on a union refused payloads whose types have destructors; the rule refuses only a union that declares one itself | PH5 |

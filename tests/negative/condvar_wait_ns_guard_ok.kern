@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: accept
+module m
+struct Cell { ready: bool }
+func f(cv: view[Condvar], m: view[Mutex[Cell]]) -> bool {
+    with g := m.lock() {
+        return cv.wait_ns(g, 1000u64)
+    }
+}

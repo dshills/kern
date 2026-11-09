@@ -1,0 +1,65 @@
+//! phase: 3
+//! expect: output
+// An owned match moves a payload that has a destructor into the arm, and
+// a wildcard arm destroys the whole subject (rule 5.3.1): exactly once
+// either way. Only a union that itself declares a destructor may not be
+// destructured. Until 2026-11-09 the checker refused every subject holding
+// a destructor anywhere, an Option of a Vec included.
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop "); print_u64(self.id); println() }
+}
+union Pair { Both(Tok, Tok); One(Tok); Neither }
+func say(s: view[]u8) { print_str(s); println() }
+func make(id: u64) -> Option[Tok] { return Some(Tok { id: id }) }
+func bound(o: own Option[Tok]) {
+    match move o {
+        Some(t) => { print_str("bound "); print_u64(t.id); println() }
+        None => say("none")
+    }
+    say("after the bound arm")
+}
+func unbound(p: own Pair) {
+    match move p {
+        Both(a, b) => { print_str("two: "); print_u64(a.id + b.id); println() }
+        One(t) => { print_str("one: "); print_u64(t.id); println() }
+        Neither => say("neither")
+    }
+    say("after the match")
+}
+func wild(p: own Pair) {
+    match move p {
+        Neither => say("neither")
+        _ => say("wildcard")
+    }
+    say("after the wildcard")
+}
+func temporary() -> u64 {
+    match make(40u64) {
+        Some(t) => { return t.id }
+        None => { return 0u64 }
+    }
+}
+func bytes() -> usize {
+    v := Vec[u8].new()
+    v.push(1u8)
+    v.push(2u8)
+    o := Some(v)
+    match move o {
+        Some(w) => { return w.len() }
+        None => { return 0usize }
+    }
+}
+func main() -> i32 {
+    bound(Some(Tok { id: 1u64 }))
+    bound(None)
+    unbound(Both(Tok { id: 10u64 }, Tok { id: 11u64 }))
+    unbound(One(Tok { id: 20u64 }))
+    unbound(Neither)
+    wild(Both(Tok { id: 30u64 }, Tok { id: 31u64 }))
+    wild(Neither)
+    print_u64(temporary()); println()
+    print_u64(u64(bytes())); println()
+    return 0i32
+}

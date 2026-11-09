@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/dshills/kern/compiler/ast"
@@ -80,7 +81,7 @@ func New(mod *ir.Module, file string, out, errOut io.Writer) *Interp {
 	mu := &sync.Mutex{}
 	// the program's arguments default to its name alone, as a native run
 	// without arguments reports them (SetArgs replaces them)
-	return &Interp{mod: mod, file: file, out: &lockedWriter{mu: mu, w: out}, errOut: &lockedWriter{mu: mu, w: errOut}, stackBytes: 8 << 20, spawnStack: 8 << 20, heap: newRawHeap(), sh: &sharedState{nextIdent: 1, fatalCh: make(chan struct{}), args: []string{file}}}
+	return &Interp{mod: mod, file: file, out: &lockedWriter{mu: mu, w: out}, errOut: &lockedWriter{mu: mu, w: errOut}, stackBytes: 8 << 20, spawnStack: 8 << 20, heap: newRawHeap(), sh: &sharedState{nextIdent: 1, fatalCh: make(chan struct{}), parkGen: make(chan struct{}), args: []string{file}}}
 }
 
 // sharedState is the process-wide interpreter state shared by every thread
@@ -107,6 +108,15 @@ type sharedState struct {
 	// stackAPI is thread.set_stack_bytes's value, 0 when never set: the
 	// simulated stack of every thread spawned afterwards
 	stackAPI atomic.Uint64
+	// parkMu and parkGen are the parking of specs/runtime RD1: a parker
+	// checks its atomic under parkMu and then waits for the generation
+	// channel it read there to be closed; every unpark closes the current
+	// one and makes the next. A waker changes the atomic before it
+	// unparks, so a parker either sees the new value or holds the channel
+	// the waker closes: no wake is lost. Every unpark wakes every parker,
+	// which the contract permits (a parker re-checks its condition).
+	parkMu  sync.Mutex
+	parkGen chan struct{}
 	// funcs holds each called function's funcInfo
 	funcs sync.Map
 }
@@ -287,6 +297,28 @@ func (it *Interp) await(done chan struct{}) {
 	if code, ok := it.terminated(); ok {
 		panic(exitCode(code))
 	}
+}
+
+// awaitFor is await with a time limit: it reports false when ns
+// nanoseconds passed before done was closed.
+func (it *Interp) awaitFor(done chan struct{}, ns uint64) bool {
+	const maxWait = uint64(1<<63 - 1)
+	if ns > maxWait {
+		ns = maxWait
+	}
+	timer := time.NewTimer(time.Duration(ns))
+	defer timer.Stop()
+	woken := true
+	select {
+	case <-done:
+	case <-timer.C:
+		woken = false
+	case <-it.sh.fatalCh:
+	}
+	if code, ok := it.terminated(); ok {
+		panic(exitCode(code))
+	}
+	return woken
 }
 
 // SetIdentityTags disables identity tags (a debug-build feature, PLAN.md

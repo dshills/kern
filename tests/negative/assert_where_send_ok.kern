@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: accept
+// The accepting twin: both parameters satisfy the conditions.
+module m
+struct Pair[A, B] nocopy { a: RawPtr[A]; b: RawPtr[B] }
+unsafe assert Send for Pair where A: Send + Share, B: Send
+func sink(p: own Pair[u64, u8]) -> u64 { return 0u64 }
+func f(p: own Pair[u64, u8]) -> Result[u64, SpawnErr] {
+    t := thread.spawn(sink, p)?
+    return Ok(t.join())
+}

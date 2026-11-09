@@ -248,6 +248,18 @@ void kern_mutex_try_new(int64_t size, void *src, void (*glue)(void *), char *out
 void *kern_mutex_lock(kern_mutex *mx, const kern_loc *at);
 // Releases the lock the caller holds and wakes one waiter.
 void kern_mutex_unlock(kern_mutex *mx);
+// Acquires the lock only if it is free: 1, or 0 when any thread holds it, the caller included.
+int32_t kern_mutex_try_lock(kern_mutex *mx);
+// Returns the guarded value's address, for a caller that holds the lock.
+void *kern_mutex_data(kern_mutex *mx);
+// Blocks the calling thread while the 32-bit word at w equals expect; may return at any time, and a wake between the caller's check and the sleep is not lost.
+void kern_park(_Atomic(uint32_t) *w, uint32_t expect);
+// As kern_park, returning also after ns nanoseconds: 0 only when the time elapsed, else 1.
+int32_t kern_park_ns(_Atomic(uint32_t) *w, uint32_t expect, uint64_t ns);
+// Wakes one thread parked on w.
+void kern_unpark_one(_Atomic(uint32_t) *w);
+// Wakes every thread parked on w.
+void kern_unpark_all(_Atomic(uint32_t) *w);
 // Destroys the guarded value with g and frees the lock.
 void kern_mutex_drop(kern_mutex *mx, kern_glue g);
 // Creates a Condvar; traps oom.
@@ -256,6 +268,8 @@ void *kern_condvar_new(const kern_loc *at);
 void kern_condvar_try_new(char *out, int64_t off);
 // Releases the Mutex guarding data, blocks until notified (or spuriously), and reacquires it; traps explicit on a lock not held or a second Mutex.
 void kern_condvar_wait(kern_condvar *cv, void *data, const kern_loc *at);
+// As kern_condvar_wait, returning also after ns nanoseconds with the lock held again: 0 only when the time elapsed, else 1.
+int32_t kern_condvar_wait_ns(kern_condvar *cv, void *data, uint64_t ns, const kern_loc *at);
 // Wakes one thread waiting on the Condvar.
 void kern_condvar_notify_one(kern_condvar *cv);
 // Wakes every thread waiting on the Condvar.

@@ -185,11 +185,15 @@ type GlobalDecl struct {
 	Value Expr
 }
 
-// AssertDecl is `unsafe assert Marker for T`.
+// AssertDecl is `unsafe assert Marker for T`, or with a condition on the
+// type's parameters `unsafe assert Marker for T where P: Send, ...`: the
+// type then has the marker only for arguments that satisfy it
+// (docs/ownership.md rule 5.5.1).
 type AssertDecl struct {
 	Pos
 	Marker string
 	Type   *TypeName
+	Where  []*TypeParam
 }
 
 // TypeExpr is a syntactic type.

@@ -1,0 +1,138 @@
+//! phase: 6
+//! expect: output
+// std/sync on one thread (specs/runtime RD5), and the prelude's try lock
+// and timed waits (RD1 to RD3): what each operation returns in each state.
+module t
+import "std/sync"
+func say(s: view[]u8) { print_str(s); println() }
+func num(label: view[]u8, n: u64) { print_str(label); print_u64(n); println() }
+
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { num("drop ", self.id) }
+}
+
+func rwlock() {
+    l := sync.RwLock[u64].new(7u64)
+    with r := l.read() { num("read ", r) }
+    with w := l.write() { w = w + 1u64 }
+    with r := l.read() { num("read again ", r) }
+    // the value is destroyed with the lock
+    owned := sync.RwLock[Tok].new(Tok { id: 1u64 })
+    with r := owned.read() { num("holds ", r.id) }
+}
+
+func once() {
+    o := sync.Once.new()
+    n := 0u64
+    o.call(|| { n = n + 1u64 })
+    o.call(|| { n = n + 10u64 })
+    num("once ran ", n)
+    if o.is_done() { say("once is done") }
+}
+
+func waitgroup() {
+    wg := sync.WaitGroup.new()
+    wg.wait()
+    wg.add(2u32)
+    wg.add(0u32)
+    wg.done()
+    wg.done()
+    wg.wait()
+    say("waitgroup reached zero")
+}
+
+func show(r: Option[u64]) {
+    match r {
+        Some(v) => num("got ", v)
+        None => say("nothing")
+    }
+}
+func sent(r: Result[(), u64]) {
+    match r {
+        Ok(u) => say("sent")
+        Err(v) => num("not sent, value back: ", v)
+    }
+}
+func channel() {
+    ch := sync.Channel[u64].new(2usize)
+    num("capacity ", u64(ch.capacity()))
+    show(ch.try_recv())
+    show(ch.recv_ns(0u64))
+    sent(ch.send(1u64))
+    sent(ch.try_send(2u64))
+    sent(ch.try_send(3u64))
+    num("len ", u64(ch.len()))
+    show(ch.recv())
+    sent(ch.send(4u64))
+    show(ch.recv_ns(1000000u64))
+    if ch.is_closed() { say("closed too early") }
+    ch.close()
+    if ch.is_closed() { say("closed") }
+    sent(ch.send(5u64))
+    sent(ch.try_send(6u64))
+    show(ch.recv())
+    show(ch.recv())
+    show(ch.try_recv())
+    show(ch.recv_ns(1000000u64))
+    num("len ", u64(ch.len()))
+    // values still queued are destroyed with the channel, oldest first
+    toks := sync.Channel[Tok].new(3usize)
+    match toks.send(Tok { id: 10u64 }) {
+        Ok(u) => { }
+        Err(t) => say("send failed")
+    }
+    match toks.send(Tok { id: 11u64 }) {
+        Ok(u) => { }
+        Err(t) => say("send failed")
+    }
+    match toks.recv() {
+        Some(t) => num("received ", t.id)
+        None => say("nothing")
+    }
+    match toks.send(Tok { id: 12u64 }) {
+        Ok(u) => { }
+        Err(t) => say("send failed")
+    }
+    toks.close()
+    match toks.send(Tok { id: 13u64 }) {
+        Ok(u) => say("sent after close")
+        Err(t) => num("refused ", t.id)
+    }
+    say("channel of tokens ends")
+}
+
+func prelude() {
+    sm := Shared[Mutex[u64]].new(Mutex[u64].new(5u64))
+    other := sm.clone()
+    if sm.get().try_with(|g| { g = g + 1u64 }) { say("try_with ran") } else { say("try_with refused") }
+    with g := sm.get().lock() {
+        num("guarded ", g)
+        if other.get().try_with(|h| { h = 100u64 }) { say("try_with ran while held") } else { say("try_with refused while held") }
+        num("still ", g)
+    }
+    if sm.get().try_with(|g| { g = g + 1u64 }) { say("try_with ran again") } else { say("try_with refused") }
+    cv := Condvar.new()
+    with g := sm.get().lock() {
+        if cv.wait_ns(g, 2000000u64) { say("wait_ns woken") } else { say("wait_ns timed out") }
+        num("lock held again: ", g)
+        if cv.wait_ns(g, 0u64) { say("wait_ns woken") } else { say("wait_ns of 0 timed out") }
+    }
+    flag := Atomic[u32].new(0u32)
+    if park_ns(flag, 0u32, 2000000u64) { say("park_ns woken") } else { say("park_ns timed out") }
+    if park_ns(flag, 0u32, 0u64) { say("park_ns woken") } else { say("park_ns of 0 timed out") }
+    if park_ns(flag, 9u32, 2000000u64) { say("park_ns returned: the value differs") } else { say("park_ns timed out") }
+    park(flag, 9u32)
+    unpark_one(flag)
+    unpark_all(flag)
+    say("park returned: the value differs")
+}
+
+func main() -> i32 {
+    rwlock()
+    once()
+    waitgroup()
+    channel()
+    prelude()
+    return 0i32
+}

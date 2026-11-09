@@ -884,6 +884,23 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		setDst(fe.rt("kern_mutex_lock", "ptr (ptr, ptr)", "ptr "+fe.handle(a[0])+", ptr "+fe.loc(c.Pos)))
 	case "Mutex.unlock":
 		fe.rt("kern_mutex_unlock", "void (ptr)", "ptr "+fe.handle(a[0]))
+	case "Mutex.try_acquire":
+		r := fe.rt("kern_mutex_try_lock", "i32 (ptr)", "ptr "+fe.handle(a[0]))
+		ok := fe.next("t")
+		fe.emit("%s = icmp ne i32 %s, 0", ok, r)
+		setDst(ok)
+	case "Mutex.held":
+		setDst(fe.rt("kern_mutex_data", "ptr (ptr)", "ptr "+fe.handle(a[0])))
+	// parking (specs/runtime RD1): the atomic's cell is the word waited on
+	case "park":
+		fe.rt("kern_park", "void (ptr, i32)", "ptr "+fe.cell(a[0])+", i32 "+fe.v(a[1]))
+	case "park_ns":
+		r := fe.rt("kern_park_ns", "i32 (ptr, i32, i64)", "ptr "+fe.cell(a[0])+", i32 "+fe.v(a[1])+", i64 "+fe.v(a[2]))
+		ok := fe.next("t")
+		fe.emit("%s = icmp ne i32 %s, 0", ok, r)
+		setDst(ok)
+	case "unpark_one", "unpark_all":
+		fe.rt("kern_"+c.Intrinsic, "void (ptr)", "ptr "+fe.cell(a[0]))
 	// Condvar: wait is given the guard (the Mutex's data pointer, which the
 	// checker requires to be the edit bound by a Mutex lock); the runtime
 	// recovers the Mutex from it
@@ -891,6 +908,11 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		setDst(fe.rt("kern_condvar_new", "ptr (ptr)", "ptr "+fe.loc(c.Pos)))
 	case "Condvar.wait":
 		fe.rt("kern_condvar_wait", "void (ptr, ptr, ptr)", "ptr "+fe.handle(a[0])+", ptr "+fe.v(a[1])+", ptr "+fe.loc(c.Pos))
+	case "Condvar.wait_ns":
+		r := fe.rt("kern_condvar_wait_ns", "i32 (ptr, ptr, i64, ptr)", "ptr "+fe.handle(a[0])+", ptr "+fe.v(a[1])+", i64 "+fe.v(a[2])+", ptr "+fe.loc(c.Pos))
+		ok := fe.next("t")
+		fe.emit("%s = icmp ne i32 %s, 0", ok, r)
+		setDst(ok)
 	case "Condvar.notify_one":
 		fe.rt("kern_condvar_notify_one", "void (ptr)", "ptr "+fe.handle(a[0]))
 	case "Condvar.notify_all":

@@ -1,0 +1,8 @@
+//! expect: reject UNSAFE_OP_OUTSIDE_UNSAFE rule=6.4
+//! twin: mutex_try_acquire_unsafe_ok
+// Mutex.try_acquire takes a lock that nothing releases: an unsafe
+// operation (rule 5.3.6). Mutex.try_with is the safe form.
+module m
+func f(m: view[Mutex[u64]]) -> bool {
+    return m.try_acquire()   // UNSAFE_OP_OUTSIDE_UNSAFE
+}

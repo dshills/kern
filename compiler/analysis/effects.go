@@ -57,7 +57,7 @@ func (s kindSet) list() []string {
 // reach callers through propagation. TestTrappingMatchesRuntime pins this
 // table against the runtimes' trap sites.
 var trapping = map[string]kindSet{
-	"Mutex.lock": kindsOf("explicit"), "Condvar.wait": kindsOf("explicit"), "Shared.clone": kindsOf("overflow"),
+	"Mutex.lock": kindsOf("explicit"), "Condvar.wait": kindsOf("explicit"), "Condvar.wait_ns": kindsOf("explicit"), "Shared.clone": kindsOf("overflow"),
 	"SystemAllocator.alloc": kindsOf("explicit"), "SystemAllocator.realloc": kindsOf("explicit"), "SystemAllocator.alloc_zeroed": kindsOf("explicit"), "SystemAllocator.free": kindsOf("explicit"),
 	"simd_shuffle": kindsOf("bounds"), "asm": allKinds,
 	"ptr_load": kindsOf("explicit"), "ptr_store": kindsOf("explicit"), "ptr_take": kindsOf("explicit"), "ptr_load_volatile": kindsOf("explicit"), "ptr_store_volatile": kindsOf("explicit"), "ptr_copy": kindsOf("explicit"), "ptr_store_seq": kindsOf("explicit"),
@@ -100,7 +100,7 @@ var spawning = map[string]bool{"thread.spawn": true, "scope.spawn": true}
 
 // unsafeIntrinsics are the enumerated unsafe operations among intrinsics.
 func unsafeIntrinsic(name string) bool {
-	return strings.HasPrefix(name, "ptr_") || name == "asm" || name == "SystemAllocator.alloc" || name == "SystemAllocator.realloc" || name == "SystemAllocator.alloc_zeroed" || name == "SystemAllocator.free"
+	return strings.HasPrefix(name, "ptr_") || name == "asm" || name == "Mutex.try_acquire" || name == "Mutex.held" || name == "SystemAllocator.alloc" || name == "SystemAllocator.realloc" || name == "SystemAllocator.alloc_zeroed" || name == "SystemAllocator.free"
 }
 
 type effects struct {

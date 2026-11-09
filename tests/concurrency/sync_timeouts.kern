@@ -1,0 +1,153 @@
+//! phase: 6
+//! expect: output sync_timeouts
+//! tsan: clean
+// Timed waits with another thread on the other side (specs/runtime RD1,
+// RD2, RD5): each returns "woken" when the other thread acts within the
+// time, and waits at least the time when nothing comes. The upper bounds
+// are loose (ten seconds for a 30 ms wait) so that a loaded host passes.
+module cc
+import "std/sync"
+func say(s: view[]u8) { print_str(s); println() }
+func pause(ns: u64) {
+    start := now_ns()
+    while now_ns() - start < ns { yield_now() }
+}
+
+// a notify within the time: wait_ns returns true with the lock held
+struct Box1 { ready: bool }
+func notifier(m: view[Mutex[Box1]], cv: view[Condvar]) -> u64 {
+    pause(5000000u64)
+    with g := m.lock() { g.ready = true }
+    cv.notify_all()
+    return 0u64
+}
+func waiter(m: view[Mutex[Box1]], cv: view[Condvar], res: view[Atomic[u32]]) -> u64 {
+    with g := m.lock() {
+        woken := true
+        while !g.ready && woken { woken = cv.wait_ns(g, 10000000000u64) }
+        if g.ready { res.store(1u32, Ordering.seq_cst) } else { res.store(2u32, Ordering.seq_cst) }
+    }
+    return 0u64
+}
+func condvar() {
+    m := Mutex[Box1].new(Box1 { ready: false })
+    cv := Condvar.new()
+    res := Atomic[u32].new(0u32)
+    with s := thread.scope() {
+        w := s.spawn(waiter, m, cv, res)
+        n := s.spawn(notifier, m, cv)
+    }
+    if res.load(Ordering.seq_cst) == 1u32 { say("condvar: notified in time") } else { say("condvar: timed out") }
+    // nothing notifies: a wait that reports the time elapsed lasted at
+    // least its time. A wake without a notify is permitted, so such a wait
+    // is made again.
+    var verdict: u32 = 0u32
+    var tries: u64 = 0u64
+    with g := m.lock() {
+        while verdict == 0u32 && tries < 100u64 {
+            start := now_ns()
+            woken := cv.wait_ns(g, 30000000u64)
+            spent := now_ns() - start
+            if !woken { verdict = timed(spent) }
+            tries = tries + 1u64
+        }
+    }
+    report("condvar", verdict)
+}
+// timed judges a wait of 30 ms that reported its time elapsed: 1 when it
+// lasted that long and no more than ten seconds, else 2.
+func timed(spent: u64) -> u32 {
+    if spent >= 30000000u64 && spent <= 10000000000u64 { return 1u32 }
+    return 2u32
+}
+func report(what: view[]u8, verdict: u32) {
+    print_str(what)
+    if verdict == 1u32 { say(": waited the whole time") }
+    if verdict == 2u32 { say(": reported the time elapsed too early or far too late") }
+    if verdict == 0u32 { say(": never reported the time elapsed") }
+}
+
+// a value sent within the time: recv_ns returns it
+func late_sender(ch: view[sync.Channel[u64]]) -> u64 {
+    pause(5000000u64)
+    match ch.send(42u64) {
+        Ok(u) => { }
+        Err(v) => { }
+    }
+    return 0u64
+}
+func channel() {
+    ch := sync.Channel[u64].new(1usize)
+    with s := thread.scope() {
+        j := s.spawn(late_sender, ch)
+        match ch.recv_ns(10000000000u64) {
+            Some(v) => { print_str("channel: received "); print_u64(v); println() }
+            None => say("channel: timed out")
+        }
+    }
+    start := now_ns()
+    match ch.recv_ns(30000000u64) {
+        Some(v) => say("channel: a value from nowhere")
+        None => {
+            if now_ns() - start >= 30000000u64 { say("channel: waited the whole time") } else { say("channel: returned early") }
+        }
+    }
+}
+
+// an unpark within the time: park_ns returns true
+func raiser(flag: view[Atomic[u32]]) -> u64 {
+    pause(5000000u64)
+    flag.store(1u32, Ordering.seq_cst)
+    unpark_one(flag)
+    return 0u64
+}
+func parking() {
+    flag := Atomic[u32].new(0u32)
+    with s := thread.scope() {
+        j := s.spawn(raiser, flag)
+        woken := true
+        while flag.load(Ordering.seq_cst) == 0u32 && woken { woken = park_ns(flag, 0u32, 10000000000u64) }
+        if flag.load(Ordering.seq_cst) == 1u32 { say("park: woken in time") } else { say("park: timed out") }
+    }
+    var verdict: u32 = 0u32
+    var tries: u64 = 0u64
+    while verdict == 0u32 && tries < 100u64 {
+        start := now_ns()
+        woken := park_ns(flag, 1u32, 30000000u64)
+        spent := now_ns() - start
+        if !woken { verdict = timed(spent) }
+        tries = tries + 1u64
+    }
+    report("park", verdict)
+}
+
+// the longest time there is: park_ns sleeps until the unpark, it does not
+// return at once with an error the caller would spin on
+func forever() {
+    flag := Atomic[u32].new(0u32)
+    var returns: u64 = 0u64
+    with s := thread.scope() {
+        j := s.spawn(raiser, flag)
+        while flag.load(Ordering.seq_cst) == 0u32 {
+            woken := park_ns(flag, 0u32, 18446744073709551615u64)
+            returns = returns + 1u64
+        }
+    }
+    if returns < 1000u64 { say("park: the longest time sleeps") } else { say("park: the longest time spins") }
+    ch := sync.Channel[u64].new(1usize)
+    with s := thread.scope() {
+        j := s.spawn(late_sender, ch)
+        match ch.recv_ns(18446744073709551615u64) {
+            Some(v) => { say("channel: the longest time receives") }
+            None => { say("channel: the longest time gave up") }
+        }
+    }
+}
+
+func main() -> i32 {
+    condvar()
+    channel()
+    parking()
+    forever()
+    return 0i32
+}

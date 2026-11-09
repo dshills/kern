@@ -1,0 +1,16 @@
+//! phase: 6
+//! expect: output
+// The twin of the std/sync trap fixtures: the same operations within their
+// bounds complete (specs/runtime RD5).
+module t
+import "std/sync"
+func main() -> i32 {
+    wg := sync.WaitGroup.new()
+    wg.add(4294967295u32)
+    wg.done()
+    wg.add(1u32)
+    ch := sync.Channel[u64].new(1usize)
+    print_str("within bounds")
+    println()
+    return 0i32
+}

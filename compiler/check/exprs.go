@@ -410,7 +410,7 @@ func (f *fn) call(st *flow, x *ast.CallExpr) *result {
 		// call through a function value: evaluate the callee expression first (spec §4)
 		f.consumeValue(st, x.Fn)
 	}
-	if isCoreMethod(info, "Condvar", "wait") && len(x.Args) == 1 {
+	if (isCoreMethod(info, "Condvar", "wait") && len(x.Args) == 1) || (isCoreMethod(info, "Condvar", "wait_ns") && len(x.Args) == 2) {
 		// the guard must be the edit a Mutex lock bound, unprojected: the
 		// runtime recovers the Mutex from it (spec §5.5)
 		id, _ := x.Args[0].X.(*ast.Ident)

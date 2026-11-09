@@ -1,0 +1,151 @@
+//! phase: 6
+//! expect: output sync_types
+//! tsan: clean
+// std/sync with several threads (specs/runtime RD5): readers and writers
+// of an RwLock, a Once raced by eight threads, a WaitGroup, and a bounded
+// Channel between three producers and two consumers.
+module cc
+import "std/sync"
+func say(s: view[]u8) { print_str(s); println() }
+
+// Four writers add 1 a thousand times each; four readers check that they
+// never see the pair of numbers out of step, which a torn write would show.
+struct Pair { a: u64; b: u64 }
+func writer(l: view[sync.RwLock[Pair]]) -> u64 {
+    i := 0u64
+    while i < 1000u64 {
+        with w := l.write() {
+            w.a = w.a + 1u64
+            w.b = w.b + 2u64
+        }
+        i = i + 1u64
+    }
+    return 0u64
+}
+func reader(l: view[sync.RwLock[Pair]], torn: view[Atomic[u64]]) -> u64 {
+    i := 0u64
+    while i < 1000u64 {
+        with r := l.read() {
+            if r.b != r.a * 2u64 { old := torn.fetch_add(1u64, Ordering.seq_cst) }
+        }
+        i = i + 1u64
+    }
+    return 0u64
+}
+func rwlock() {
+    l := sync.RwLock[Pair].new(Pair { a: 0u64, b: 0u64 })
+    torn := Atomic[u64].new(0u64)
+    with s := thread.scope() {
+        w1 := s.spawn(writer, l)
+        r1 := s.spawn(reader, l, torn)
+        w2 := s.spawn(writer, l)
+        r2 := s.spawn(reader, l, torn)
+        w3 := s.spawn(writer, l)
+        r3 := s.spawn(reader, l, torn)
+        w4 := s.spawn(writer, l)
+        r4 := s.spawn(reader, l, torn)
+    }
+    with r := l.read() {
+        print_str("rwlock: "); print_u64(r.a); print_str(" "); print_u64(r.b); print_str(", torn reads "); print_u64(torn.load(Ordering.seq_cst)); println()
+    }
+}
+
+// Eight threads race one Once: its closure runs once, and every thread
+// returns only after it has.
+func racer(o: view[sync.Once], runs: view[Atomic[u64]]) -> u64 {
+    o.call(|| { old := runs.fetch_add(1u64, Ordering.seq_cst) })
+    return runs.load(Ordering.seq_cst)
+}
+func once() {
+    o := sync.Once.new()
+    runs := Atomic[u64].new(0u64)
+    if o.is_done() { say("once: done before any call") }
+    with s := thread.scope() {
+        i := 0u64
+        while i < 8u64 {
+            j := s.spawn(racer, o, runs)
+            i = i + 1u64
+        }
+    }
+    print_str("once: ran "); print_u64(runs.load(Ordering.seq_cst)); println()
+    if o.is_done() { say("once: done") }
+}
+
+// Each worker finishes one piece of work; wait returns when all have.
+func worker(wg: view[sync.WaitGroup], sum: view[Atomic[u64]], n: u64) -> u64 {
+    old := sum.fetch_add(n, Ordering.seq_cst)
+    wg.done()
+    return 0u64
+}
+func waitgroup() {
+    wg := sync.WaitGroup.new()
+    sum := Atomic[u64].new(0u64)
+    wg.add(6u32)
+    with s := thread.scope() {
+        i := 1u64
+        while i <= 6u64 {
+            j := s.spawn(worker, wg, sum, i)
+            i = i + 1u64
+        }
+        wg.wait()
+        print_str("waitgroup: "); print_u64(sum.load(Ordering.seq_cst)); println()
+    }
+    wg.wait()
+}
+
+// Three producers send 200 numbers each through a channel of four slots;
+// two consumers add up what they receive until the channel is closed and
+// empty.
+func producer(ch: view[sync.Channel[u64]], base: u64) -> u64 {
+    failed := 0u64
+    i := 0u64
+    while i < 200u64 {
+        match ch.send(base + i) {
+            Ok(u) => { }
+            Err(v) => { failed = failed + 1u64 }
+        }
+        i = i + 1u64
+    }
+    return failed
+}
+func consumer(ch: view[sync.Channel[u64]], total: view[Atomic[u64]], got: view[Atomic[u64]]) -> u64 {
+    while true {
+        match ch.recv() {
+            Some(v) => {
+                a := total.fetch_add(v, Ordering.seq_cst)
+                b := got.fetch_add(1u64, Ordering.seq_cst)
+            }
+            None => { return 0u64 }
+        }
+    }
+    return 0u64
+}
+func channel() {
+    ch := sync.Channel[u64].new(4usize)
+    total := Atomic[u64].new(0u64)
+    got := Atomic[u64].new(0u64)
+    with consumers := thread.scope() {
+        c1 := consumers.spawn(consumer, ch, total, got)
+        c2 := consumers.spawn(consumer, ch, total, got)
+        with producers := thread.scope() {
+            p1 := producers.spawn(producer, ch, 0u64)
+            p2 := producers.spawn(producer, ch, 1000u64)
+            p3 := producers.spawn(producer, ch, 2000u64)
+        }
+        ch.close()
+    }
+    // 3 * (0 + ... + 199) + 200 * (0 + 1000 + 2000)
+    print_str("channel: "); print_u64(got.load(Ordering.seq_cst)); print_str(" values, sum "); print_u64(total.load(Ordering.seq_cst)); println()
+    match ch.send(1u64) {
+        Ok(u) => say("channel: sent after close")
+        Err(v) => say("channel: closed")
+    }
+}
+
+func main() -> i32 {
+    rwlock()
+    once()
+    waitgroup()
+    channel()
+    return 0i32
+}

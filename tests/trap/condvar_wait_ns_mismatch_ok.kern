@@ -1,0 +1,19 @@
+//! phase: 6
+//! expect: output condvar_wait_ns_mismatch_ok
+//! twin: condvar_wait_ns_mismatch
+
+// The twin: both timed waits use the Condvar's one Mutex, and each returns
+// with the lock held when its millisecond has passed.
+module t
+struct Both { a: Mutex[u64]; b: Mutex[u64]; cv: Condvar }
+func main() -> i32 {
+    x := Both { a: Mutex[u64].new(0u64), b: Mutex[u64].new(0u64), cv: Condvar.new() }
+    with g := x.a.lock() { woken := x.cv.wait_ns(g, 1000000u64) }
+    with g := x.a.lock() {
+        woken := x.cv.wait_ns(g, 1000000u64)
+        g = g + 1u64
+        print_u64(g)
+        println()
+    }
+    return 0i32
+}

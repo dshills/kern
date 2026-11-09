@@ -447,26 +447,7 @@ func (p *parser) parseFunc(withBody bool) *ast.FuncDecl {
 	d.TypeParams = p.parseTypeParams()
 	d.Params = p.parseParams()
 	d.Ret = p.parseRet()
-	if p.at(lexer.Ident) && p.cur().Text == "where" { // contextual keyword
-		p.next()
-		for {
-			n := p.expect(lexer.Ident)
-			tp := &ast.TypeParam{Pos: tokPos(n), Name: n.Text}
-			p.expect(lexer.Colon)
-			for {
-				c := p.parseTypeName()
-				tp.Constraints = append(tp.Constraints, c)
-				tp.End = c.End
-				if !p.accept(lexer.Plus) {
-					break
-				}
-			}
-			d.Where = append(d.Where, tp)
-			if !p.accept(lexer.Comma) {
-				break
-			}
-		}
-	}
+	d.Where = p.parseWhere()
 	if p.at(lexer.Ident) && p.cur().Text == "release" { // contextual keyword
 		p.next()
 		d.Release = p.expect(lexer.Ident).Text
@@ -600,8 +581,42 @@ func (p *parser) parseAssert() ast.Decl {
 	m := p.expect(lexer.Ident)
 	p.expect(lexer.KwFor)
 	tn := p.parseTypeName()
+	d := &ast.AssertDecl{Pos: span(tokPos(t), tn.Pos), Marker: m.Text, Type: tn}
+	d.Where = p.parseWhere()
+	if n := len(d.Where); n > 0 {
+		d.End = d.Where[n-1].End
+	}
 	p.stmtEnd()
-	return &ast.AssertDecl{Pos: span(tokPos(t), tn.Pos), Marker: m.Text, Type: tn}
+	return d
+}
+
+// parseWhere parses an optional `where P: C + D, Q: E` clause: constraints
+// on type parameters named elsewhere (a method's owner, a function, or
+// the type of a marker assertion). `where` is a contextual keyword.
+func (p *parser) parseWhere() []*ast.TypeParam {
+	if !p.at(lexer.Ident) || p.cur().Text != "where" {
+		return nil
+	}
+	p.next()
+	var out []*ast.TypeParam
+	for {
+		n := p.expect(lexer.Ident)
+		tp := &ast.TypeParam{Pos: tokPos(n), Name: n.Text}
+		p.expect(lexer.Colon)
+		for {
+			c := p.parseTypeName()
+			tp.Constraints = append(tp.Constraints, c)
+			tp.End = c.End
+			if !p.accept(lexer.Plus) {
+				break
+			}
+		}
+		out = append(out, tp)
+		if !p.accept(lexer.Comma) {
+			break
+		}
+	}
+	return out
 }
 
 // ---- types ----

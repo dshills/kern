@@ -370,8 +370,15 @@ func (c *fnCtx) match(sc *scope, s *ast.Match) {
 		}
 		return
 	}
-	if owned && HasDestructor(subjT) {
-		c.errorf("OWN_DESTRUCTURE_DESTRUCTOR", s.Subject.Span(), "owned match subject of type %s has a destructor", subjT)
+	if owned && n.Decl.Destructor != nil {
+		// rule 5.3.1: a type that declares a destructor is destroyed whole,
+		// so its payload must not be moved out from under it. A payload's
+		// own destructor is no obstacle: a bound payload moves into the
+		// arm's local, which destroys it, and an unbound one is destroyed
+		// on entering the arm. (Until 2026-11-09 any destructor anywhere in
+		// the subject was refused, which ruled out `match ch.recv()` and
+		// every Option or Result of a container.)
+		c.errorf("OWN_DESTRUCTURE_DESTRUCTOR", s.Subject.Span(), "owned match subject of type %s declares a destructor", subjT)
 	}
 	covered := map[string]bool{}
 	wild := false

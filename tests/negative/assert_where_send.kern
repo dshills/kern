@@ -1,0 +1,14 @@
+//! expect: reject SEND_NOT_SEND rule=5.5.2
+//! twin: assert_where_send_ok
+// A conditional Send assertion with two conditions on one parameter and
+// one on another: Pair is Send only when A is Send and Share and B is
+// Send, and Raw is neither.
+module m
+struct Pair[A, B] nocopy { a: RawPtr[A]; b: RawPtr[B] }
+unsafe assert Send for Pair where A: Send + Share, B: Send
+struct Raw { p: RawPtr[u8] }
+func sink(p: own Pair[u64, Raw]) -> u64 { return 0u64 }
+func f(p: own Pair[u64, Raw]) -> Result[u64, SpawnErr] {
+    t := thread.spawn(sink, p)?   // SEND_NOT_SEND
+    return Ok(t.join())
+}

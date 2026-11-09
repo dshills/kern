@@ -1,0 +1,17 @@
+//! phase: 6
+//! expect: trap explicit
+//! twin: condvar_wait_ns_mismatch_ok
+
+// A timed wait has wait's traps (specs/runtime RD2). The first wait binds
+// the Condvar to its Mutex and returns when its millisecond has passed; a
+// wait with a second Mutex then traps.
+module t
+struct Both { a: Mutex[u64]; b: Mutex[u64]; cv: Condvar }
+func main() -> i32 {
+    x := Both { a: Mutex[u64].new(0u64), b: Mutex[u64].new(0u64), cv: Condvar.new() }
+    with g := x.a.lock() { woken := x.cv.wait_ns(g, 1000000u64) }
+    with h := x.b.lock() { woken := x.cv.wait_ns(h, 1000000u64) }   // trap explicit: a second Mutex on the Condvar
+    print_str("not reached")
+    println()
+    return 0i32
+}

@@ -34,7 +34,7 @@ import (
 //	FuncDecl    (func Name Contract|_ [Budget] [TypeParams] [Params] [Ret] [Where] Release|_ Body|_ Extern:str|_)
 //	ConstDecl   (const Name Type Value)
 //	GlobalDecl  (global Name Type Value)
-//	AssertDecl  (assert Marker Type)
+//	AssertDecl  (assert Marker Type [Where])
 //	PrimType    (prim Name)
 //	TypeName    (tname Pkg|_ Name [Args])
 //	ArrayType   (array Len Elem)
@@ -342,6 +342,7 @@ func (d *dumper) node(n Node) {
 		d.open("assert")
 		d.word(x.Marker)
 		d.child(x.Type)
+		list(d, x.Where)
 	case *PrimType:
 		d.open("prim")
 		d.word(x.Name)

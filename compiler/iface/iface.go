@@ -56,7 +56,7 @@ func Interface(m *resolve.Module, src map[string][]byte) []byte {
 	sort.Strings(names)
 	for _, n := range names {
 		td := m.Types[n]
-		fmt.Fprintf(&b, "type %s kind=%d nocopy=%v packed=%v view=%v dtor=%v asserts=%v/%v/%v", n, td.Kind, td.NoCopy, td.Packed, td.View, td.Destructor != nil, td.AssertSend, td.AssertShare, td.AssertInterior)
+		fmt.Fprintf(&b, "type %s kind=%d nocopy=%v packed=%v view=%v dtor=%v asserts=%v/%v/%v if=%v/%v", n, td.Kind, td.NoCopy, td.Packed, td.View, td.Destructor != nil, td.AssertSend, td.AssertShare, td.AssertInterior, td.AssertSendIf, td.AssertShareIf)
 		for _, tp := range td.TypeParams {
 			fmt.Fprintf(&b, " [%s]", tp.Name)
 		}

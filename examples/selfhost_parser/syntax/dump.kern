@@ -230,6 +230,7 @@ impl P {
             self.open(n, "assert", o)
             self.name(n, o)
             self.child(self.kid(n, 0usize), o)
+            self.items(self.kid(n, 1usize), o)
         } else if k == N_PRIM {
             self.open(n, "prim", o)
             self.name(n, o)

@@ -68,16 +68,33 @@ void kern_test_shared_seed_count(kern_shared *s, int64_t n) { atomic_store(&s->c
 // the other documented errors cannot arise.
 #if defined(__APPLE__)
 #include <os/os_sync_wait_on_address.h>
-static void kern_park(_Atomic(uint32_t) *w, uint32_t expect) { (void)os_sync_wait_on_address(w, expect, sizeof *w, OS_SYNC_WAIT_ON_ADDRESS_NONE); }
-static void kern_unpark_one(_Atomic(uint32_t) *w) { (void)os_sync_wake_by_address_any(w, sizeof *w, OS_SYNC_WAKE_BY_ADDRESS_NONE); }
-static void kern_unpark_all(_Atomic(uint32_t) *w) { (void)os_sync_wake_by_address_all(w, sizeof *w, OS_SYNC_WAKE_BY_ADDRESS_NONE); }
+void kern_park(_Atomic(uint32_t) *w, uint32_t expect) { (void)os_sync_wait_on_address(w, expect, sizeof *w, OS_SYNC_WAIT_ON_ADDRESS_NONE); }
+void kern_unpark_one(_Atomic(uint32_t) *w) { (void)os_sync_wake_by_address_any(w, sizeof *w, OS_SYNC_WAKE_BY_ADDRESS_NONE); }
+void kern_unpark_all(_Atomic(uint32_t) *w) { (void)os_sync_wake_by_address_all(w, sizeof *w, OS_SYNC_WAKE_BY_ADDRESS_NONE); }
+// kern_park_ns is kern_park that also returns after ns nanoseconds: 0 only
+// when the time elapsed, 1 for every other return (a wake, a value that
+// already differs, an interruption).
+int32_t kern_park_ns(_Atomic(uint32_t) *w, uint32_t expect, uint64_t ns) {
+    if (ns == 0) return atomic_load_explicit(w, memory_order_relaxed) != expect; // a timeout of 0 means "forever" to the system call
+    int r = os_sync_wait_on_address_with_timeout(w, expect, sizeof *w, OS_SYNC_WAIT_ON_ADDRESS_NONE, OS_CLOCK_MACH_ABSOLUTE_TIME, ns);
+    return !(r < 0 && errno == ETIMEDOUT);
+}
 #elif defined(__linux__)
 #include <linux/futex.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-static void kern_park(_Atomic(uint32_t) *w, uint32_t expect) { (void)syscall(SYS_futex, w, FUTEX_WAIT_PRIVATE, expect, NULL, NULL, 0); }
-static void kern_unpark_one(_Atomic(uint32_t) *w) { (void)syscall(SYS_futex, w, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0); }
-static void kern_unpark_all(_Atomic(uint32_t) *w) { (void)syscall(SYS_futex, w, FUTEX_WAKE_PRIVATE, INT32_MAX, NULL, NULL, 0); }
+void kern_park(_Atomic(uint32_t) *w, uint32_t expect) { (void)syscall(SYS_futex, w, FUTEX_WAIT_PRIVATE, expect, NULL, NULL, 0); }
+void kern_unpark_one(_Atomic(uint32_t) *w) { (void)syscall(SYS_futex, w, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0); }
+void kern_unpark_all(_Atomic(uint32_t) *w) { (void)syscall(SYS_futex, w, FUTEX_WAKE_PRIVATE, INT32_MAX, NULL, NULL, 0); }
+// kern_park_ns is kern_park that also returns after ns nanoseconds: 0 only
+// when the time elapsed, 1 for every other return (a wake, a value that
+// already differs, an interruption).
+int32_t kern_park_ns(_Atomic(uint32_t) *w, uint32_t expect, uint64_t ns) {
+    if (ns == 0) return atomic_load_explicit(w, memory_order_relaxed) != expect; // nothing to wait for: no system call
+    struct timespec ts = { (time_t)(ns / 1000000000ull), (long)(ns % 1000000000ull) };
+    long r = syscall(SYS_futex, w, FUTEX_WAIT_PRIVATE, expect, &ts, NULL, 0);
+    return !(r < 0 && errno == ETIMEDOUT);
+}
 #else
 #error "kern: no park primitive for this platform (os_sync_wait_on_address on macOS 14.4+, futex on Linux)"
 #endif
@@ -125,6 +142,17 @@ static inline void kern_mutex_release(kern_mutex *mx) {
     if (atomic_exchange_explicit(&mx->state, 0, memory_order_release) == 2) kern_unpark_one(&mx->state);
 }
 void kern_mutex_unlock(kern_mutex *mx) { kern_mutex_release(mx); }
+// kern_mutex_try_lock acquires the lock only if it is free: 1, or 0 when
+// it is held by any thread, the caller included (no trap).
+int32_t kern_mutex_try_lock(kern_mutex *mx) {
+    uint32_t s = 0;
+    if (!atomic_compare_exchange_strong_explicit(&mx->state, &s, 1, memory_order_acquire, memory_order_relaxed)) return 0;
+    atomic_store_explicit(&mx->owner, kern_self(), memory_order_relaxed);
+    return 1;
+}
+// kern_mutex_data is the guarded value's address, for a caller that holds
+// the lock.
+void *kern_mutex_data(kern_mutex *mx) { return mx->data; }
 void kern_mutex_drop(kern_mutex *mx, kern_glue g) { if (mx == NULL) return; if (g) g(mx->data); free(mx); }
 
 // ---- Condvar (spec §5.5) ----
@@ -156,17 +184,37 @@ void kern_condvar_try_new(char *out, int64_t off) {
     out[0] = 0;
     memcpy(out + off, &cv, sizeof cv);
 }
-void kern_condvar_wait(kern_condvar *cv, void *data, const kern_loc *at) {
+// kern_condvar_enter checks a wait's guard and binds the Condvar to its
+// Mutex, trapping explicit for a lock this thread does not hold and for a
+// second Mutex on one Condvar; it returns the Mutex.
+static kern_mutex *kern_condvar_enter(kern_condvar *cv, void *data, uintptr_t self, const kern_loc *at) {
     kern_mutex *mx = (kern_mutex *)((char *)data - offsetof(kern_mutex, data));
-    uintptr_t self = kern_self();
     if (atomic_load_explicit(&mx->owner, memory_order_relaxed) != self) kern_trap_loc(11, at); // the lock is not held by this thread
     uintptr_t bound = atomic_load_explicit(&cv->mutex, memory_order_relaxed), want = 0;
     if (bound != (uintptr_t)mx && !atomic_compare_exchange_strong(&cv->mutex, &want, (uintptr_t)mx) && want != (uintptr_t)mx) kern_trap_loc(11, at); // a second Mutex on one Condvar
+    return mx;
+}
+void kern_condvar_wait(kern_condvar *cv, void *data, const kern_loc *at) {
+    uintptr_t self = kern_self();
+    kern_mutex *mx = kern_condvar_enter(cv, data, self, at);
     uint32_t seq = atomic_load_explicit(&cv->seq, memory_order_relaxed);
     kern_mutex_release(mx);
     kern_park(&cv->seq, seq);
     kern_mutex_acquire(mx);
     atomic_store_explicit(&mx->owner, self, memory_order_relaxed);
+}
+// kern_condvar_wait_ns is kern_condvar_wait that also returns when ns
+// nanoseconds have passed: 0 only when the time elapsed, else 1; the lock
+// is held again in either case.
+int32_t kern_condvar_wait_ns(kern_condvar *cv, void *data, uint64_t ns, const kern_loc *at) {
+    uintptr_t self = kern_self();
+    kern_mutex *mx = kern_condvar_enter(cv, data, self, at);
+    uint32_t seq = atomic_load_explicit(&cv->seq, memory_order_relaxed);
+    kern_mutex_release(mx);
+    int32_t woken = kern_park_ns(&cv->seq, seq, ns);
+    kern_mutex_acquire(mx);
+    atomic_store_explicit(&mx->owner, self, memory_order_relaxed);
+    return woken;
 }
 void kern_condvar_notify_one(kern_condvar *cv) { atomic_fetch_add_explicit(&cv->seq, 1, memory_order_relaxed); kern_unpark_one(&cv->seq); }
 void kern_condvar_notify_all(kern_condvar *cv) { atomic_fetch_add_explicit(&cv->seq, 1, memory_order_relaxed); kern_unpark_all(&cv->seq); }

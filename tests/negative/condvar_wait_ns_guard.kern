@@ -1,0 +1,8 @@
+//! expect: reject CONDVAR_NOT_GUARD rule=5.5.4
+//! twin: condvar_wait_ns_guard_ok
+// Condvar.wait_ns takes the edit bound by a Mutex lock, as wait does.
+module m
+struct Cell { ready: bool }
+func f(cv: view[Condvar], c: edit[Cell]) -> bool {
+    return cv.wait_ns(c, 1000u64)   // CONDVAR_NOT_GUARD
+}

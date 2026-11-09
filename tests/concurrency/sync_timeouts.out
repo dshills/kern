@@ -1,0 +1,8 @@
+condvar: notified in time
+condvar: waited the whole time
+channel: received 42
+channel: waited the whole time
+park: woken in time
+park: waited the whole time
+park: the longest time sleeps
+channel: the longest time receives

@@ -9,7 +9,8 @@ import        = "import" string_lit newline ;
 
 decl          = struct_decl | union_decl | interface_decl | impl_decl | func_decl
               | extern_decl | const_decl | tls_decl | assert_decl ;
-assert_decl   = "unsafe" "assert" ( "Send" | "Share" | "Interior" ) "for" ident newline ;
+assert_decl   = "unsafe" "assert" ( "Send" | "Share" | "Interior" ) "for" ident [ "where" where_bound { "," where_bound } ] newline ;
+                (* the where clause: on Send and Share only; each constraint one of Copy, Send, Share, on a parameter of the type *)
 
 type_params   = "[" type_param { "," type_param } "]" ;
 type_param    = ident [ ":" constraint { "+" constraint } ] ;
