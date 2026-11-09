@@ -242,6 +242,12 @@ type Info struct {
 	// OutFieldDrops records, per error-path exit (*ast.Return, *ast.Try),
 	// the initialized fields of partially initialized out storage to destroy.
 	OutFieldDrops map[any]map[*Symbol][]string
+	// AssignDrop marks an assignment whose target is not a whole owned
+	// variable (a field, an element, a place behind an edit access or a
+	// returned projection) and holds an initialized value: the previous
+	// value is destroyed before the store (Rule 5.1.9). Whole owned
+	// variables are listed in Drops instead.
+	AssignDrop map[*ast.Assign]bool
 	// OwnedSubject marks with/match statements whose subject is an owned
 	// value consumed by the statement (a temporary the lowering must own).
 	OwnedSubject map[any]bool
@@ -274,7 +280,7 @@ func newInfo() *Info {
 		Types: map[ast.Expr]Type{}, Idents: map[*ast.Ident]*Symbol{}, Calls: map[*ast.CallExpr]*CallInfo{},
 		Funcs: map[*ast.FuncDecl]*FuncDecl{}, Decls: map[any]*Symbol{}, Consts: map[ast.Expr]bool{}, ImportedConsts: map[*ast.FieldExpr]*ConstDecl{},
 		Fields: map[*ast.FieldExpr]*FieldDecl{}, Variants: map[*ast.Arm]*VariantDecl{}, Closures: map[*ast.ClosureExpr]*ClosureInfo{}, Consumed: map[ast.Expr]*ast.Ident{},
-		Drops: map[any][]*Symbol{}, OutFieldDrops: map[any]map[*Symbol][]string{}, OwnedSubject: map[any]bool{},
+		Drops: map[any][]*Symbol{}, OutFieldDrops: map[any]map[*Symbol][]string{}, AssignDrop: map[*ast.Assign]bool{}, OwnedSubject: map[any]bool{},
 		TypeNames: map[*ast.TypeName]*TypeDecl{}, IfaceNames: map[*ast.TypeName]*InterfaceDecl{},
 		CursorCalls: map[*ast.CallExpr]bool{}, CursorViews: map[*ast.With]bool{}, TwoPhase: map[TwoPhaseArg]bool{},
 	}

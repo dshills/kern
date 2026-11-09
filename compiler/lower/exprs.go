@@ -679,6 +679,7 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 	}
 	var args []*ir.Value
 	var argAccs []*ir.Value
+	var callTemps []*ir.Local // temporaries this call viewed that have destructors
 	var argExprs []*ast.Arg
 	if info.Method {
 		argExprs = append(argExprs, &ast.Arg{Pos: x.Fn.(*ast.FieldExpr).X.Span(), X: x.Fn.(*ast.FieldExpr).X})
@@ -729,10 +730,15 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 				fl.emit(&ir.AccessBegin{Dst: acc, Edit: p.Conv == ast.ConvEdit, Place: r.pl, Pos: a.Pos})
 				argAccs = append(argAccs, acc)
 			default:
-				// a temporary value viewed: materialize it
+				// a temporary value viewed: materialize it; one that is
+				// not Copy is destroyed when the call returns, or when the
+				// access the call returns ends (below)
 				tmp := fl.newTemp(r.val.Type)
 				fl.emit(&ir.Store{Place: ir.Place{Local: tmp}, Src: r.val})
 				fl.emit(&ir.Init{Place: ir.Place{Local: tmp}})
+				if !resolve.IsCopy(r.val.Type) {
+					callTemps = append(callTemps, tmp)
+				}
 				acc = fl.newValue(pt)
 				fl.emit(&ir.AccessBegin{Dst: acc, Edit: p.Conv == ast.ConvEdit, Place: ir.Place{Local: tmp}, Pos: a.Pos})
 				argAccs = append(argAccs, acc)
@@ -813,8 +819,24 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 			retIsAccess = true
 		}
 	}
+	// A temporary this call viewed, and one an argument access is derived
+	// from (`make().as_view()` passed on), dies with the call unless the
+	// call returns an access, which may be derived from it: then it lives
+	// as long as that access (the first of a tuple, which ends last).
 	for i := len(argAccs) - 1; i >= 0; i-- {
 		fl.emit(&ir.AccessEnd{Access: argAccs[i]})
+		if retIsAccess {
+			callTemps = append(callTemps, fl.tied[argAccs[i]]...)
+		} else {
+			fl.dropTied(argAccs[i])
+		}
+	}
+	if retIsAccess {
+		fl.tie(dsts[0], callTemps)
+	} else {
+		for i := len(callTemps) - 1; i >= 0; i-- {
+			fl.emitDrop(ir.Place{Local: callTemps[i]}, callTemps[i].Type, x.Pos)
+		}
 	}
 	if retIsAccess {
 		if len(dsts) > 1 {
@@ -971,6 +993,7 @@ func (fl *fnLower) wideAccess(x *ast.CallExpr, name string, t resolve.Type, edit
 	end := func() {
 		for i := len(opened) - 1; i >= 0; i-- {
 			fl.emit(&ir.AccessEnd{Access: opened[i]})
+			fl.dropTied(opened[i])
 		}
 	}
 	if edit {
@@ -1126,6 +1149,7 @@ func (fl *fnLower) spawn(x *ast.CallExpr, info *resolve.CallInfo, t resolve.Type
 	} else {
 		for _, acc := range spawned {
 			fl.emit(&ir.AccessEnd{Access: acc})
+			fl.dropTied(acc)
 		}
 	}
 	return operand{val: v, owned: true}

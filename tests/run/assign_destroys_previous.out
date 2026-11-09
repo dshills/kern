@@ -1,0 +1,36 @@
+drop 140
+an out field assigned twice
+drop 11
+drop 10
+a local assigned
+drop 21
+drop 20
+assigned through an edit parameter
+drop 40
+a struct with a destructor assigned through an edit parameter
+drop 61
+drop 60
+a field of self assigned
+drop 71
+drop 70
+self assigned
+drop 100
+a field of a local assigned
+drop 110
+an array element assigned
+drop 120
+a with binding assigned
+drop 130
+an option assigned
+end
+drop 121
+drop 111
+drop 112
+drop 101
+drop 102
+drop 91
+drop 90
+drop 50
+drop 31
+drop 30
+drop 141

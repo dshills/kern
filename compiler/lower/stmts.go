@@ -112,6 +112,17 @@ func (fl *fnLower) assign(s *ast.Assign) {
 	if !target.isPlace() {
 		fl.fail(s.Pos, "assignment target is not a place")
 	}
+	if fl.l.info.AssignDrop[s] {
+		// Rule 5.1.9: the value is evaluated, then the previous value of
+		// the place is destroyed, then the new value is stored
+		tt := fl.typeOf(s.Target)
+		if a, ok := tt.(*resolve.Access); ok {
+			tt = a.Elem
+		}
+		if !resolve.IsCopy(tt) {
+			fl.emitDrop(target.pl, tt, s.Pos)
+		}
+	}
 	fl.emit(&ir.Store{Place: target.pl, Src: v})
 	if target.pl.Local != nil {
 		fl.emit(&ir.Init{Place: target.pl})

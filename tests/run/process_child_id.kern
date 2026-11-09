@@ -1,0 +1,26 @@
+//! phase: 6
+//! expect: output
+// Child.id reports the child's process ID, which is never zero for a
+// started child (the one std/process entry no other fixture reached,
+// specs/runtime RA3).
+module t
+import "std/io"
+import "std/process"
+func child_id() -> Result[(), io.IoErr] {
+    cmd := process.Command.new("true")
+    c := cmd.spawn()?
+    if c.id() != 0u32 { print_str("child has an id") } else { print_str("child id is zero") }
+    println()
+    st := c.wait()?
+    if st.success() { print_str("child succeeded") } else { print_str("child failed") }
+    println()
+    return Ok(())
+}
+func main() -> i32 {
+    r := child_id()
+    match r {
+        Ok(u) => { }
+        Err(e) => { print_str("failed"); println() }
+    }
+    return 0i32
+}

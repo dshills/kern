@@ -335,6 +335,11 @@ type fnLower struct {
 	// closureAccs are the capture accesses opened by closure arguments of
 	// the call being lowered; the call ends them with its other arguments
 	closureAccs []*ir.Value
+	// tied holds, for an access a call returned, the temporaries the
+	// access is derived from: a temporary receiver (`make().as_view()`)
+	// must outlive the access and is destroyed when it ends (spec §5.7:
+	// every owned value is destroyed exactly once)
+	tied map[*ir.Value][]*ir.Local
 }
 
 // frame mirrors one checker scope: the symbols bound in it (whose exits the
@@ -624,9 +629,32 @@ func (fl *fnLower) endAccess(v *ir.Value) {
 	if rel, ok := fl.relOf[v]; ok {
 		// the obligation is the same on every exit path, so it is kept
 		fl.emit(&ir.AccessEnd{Access: v, Release: rel.fn, Recv: rel.recv})
+		fl.dropTied(v)
 		return
 	}
 	fl.emit(&ir.AccessEnd{Access: v})
+	fl.dropTied(v)
+}
+
+// dropTied destroys the temporaries that live as long as the access v,
+// which has just ended. An access can end on several exit paths; each
+// emits its own drops, so the table is kept.
+func (fl *fnLower) dropTied(v *ir.Value) {
+	ts := fl.tied[v]
+	for i := len(ts) - 1; i >= 0; i-- {
+		fl.emitDrop(ir.Place{Local: ts[i]}, ts[i].Type, ast.Pos{})
+	}
+}
+
+// tie makes the temporaries live as long as the access v.
+func (fl *fnLower) tie(v *ir.Value, temps []*ir.Local) {
+	if len(temps) == 0 {
+		return
+	}
+	if fl.tied == nil {
+		fl.tied = map[*ir.Value][]*ir.Local{}
+	}
+	fl.tied[v] = append(fl.tied[v], temps...)
 }
 
 func (fl *fnLower) outFieldDrops(key any) {

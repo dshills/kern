@@ -243,6 +243,8 @@ func (f *fn) assign(st *flow, s *ast.Assign) *flow {
 			if r.pl.perm != ast.ConvEdit {
 				f.errorf("ACC_PERMISSION_ESCALATION", s.Target.Span(), "assignment through a view")
 			}
+			// the projected place holds a value, which the store replaces
+			f.c.info.AssignDrop[s] = true
 		}
 		f.finish(st, s)
 		return st
@@ -262,6 +264,10 @@ func (f *fn) assign(st *flow, s *ast.Assign) *flow {
 		}
 		if (vs == nil || vs.st == stInit) && !resolve.IsCopy(root.Type) && (root.Kind == resolve.SymLocal || root.Kind == resolve.SymParam && root.Conv != ast.ConvView && root.Conv != ast.ConvEdit) {
 			f.c.info.Drops[s] = []*resolve.Symbol{root}
+		} else if root.Kind == resolve.SymAccess || root.Kind == resolve.SymParam && (root.Conv == ast.ConvView || root.Conv == ast.ConvEdit) {
+			// the whole value behind an access (an edit parameter, self, a
+			// with binding): it is initialized, and the store replaces it
+			f.c.info.AssignDrop[s] = true
 		}
 	} else if vs != nil && vs.st != stInit {
 		// field assignment on uninitialized or moved storage
@@ -273,6 +279,11 @@ func (f *fn) assign(st *flow, s *ast.Assign) *flow {
 		if root.Conv == ast.ConvOut && target.path[0].kind == peField && len(target.path) == 1 {
 			if vs.fields == nil {
 				vs.fields = map[string]bool{}
+			}
+			if vs.fields[target.path[0].name] {
+				// the field was initialized by an earlier store: this
+				// one replaces its value
+				f.c.info.AssignDrop[s] = true
 			}
 			vs.fields[target.path[0].name] = true
 			vs.st = stPartial
@@ -290,6 +301,11 @@ func (f *fn) assign(st *flow, s *ast.Assign) *flow {
 	}
 	if target.perm != ast.ConvEdit && !f.interiorEscalation(target) {
 		f.errorf("ACC_PERMISSION_ESCALATION", s.Target.Span(), "assignment through a view binding")
+	}
+	if len(target.path) > 0 {
+		// a field or an element of an initialized value: the store
+		// replaces the value it holds
+		f.c.info.AssignDrop[s] = true
 	}
 	t := f.tick()
 	f.accs = append(f.accs, &access{pl: *target, kind: accEdit, start: t, end: t, pos: s.Target.Span()})

@@ -1,0 +1,33 @@
+//! phase: 3
+//! expect: output
+// A temporary with a destructor used as a method receiver is destroyed
+// exactly once (spec §5.7): when the call returns, or, when the call returns
+// an access derived from it, when that access ends. Found by the sanitized
+// fixture run (specs/runtime RA5): such temporaries were never destroyed.
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    func peek(view self) -> u64 { return self.id }
+    func me(view self) -> view[Tok] { return self }
+    destructor(edit self) { print_str("drop "); print_u64(self.id); println() }
+}
+func make(id: u64) -> Tok { return Tok { id: id } }
+func show(t: view[Tok]) { print_str("show "); print_u64(t.id); println() }
+func pick(t: view[Tok], n: u64) -> u64 { return t.id + n }
+func main() -> i32 {
+    print_u64(make(1u64).peek()); println()
+    show(make(2u64).me())
+    x := make(3u64).peek()
+    show(make(4u64).me().me())
+    print_u64(pick(make(5u64).me(), make(6u64).peek())); println()
+    with v := make(7u64).me() {
+        print_str("in with "); print_u64(v.id); println()
+    }
+    i := 0u64
+    while i < 2u64 {
+        if make(8u64 + i).peek() == 8u64 { print_str("eight"); println() }
+        i = i + 1u64
+    }
+    print_str("end"); println()
+    return 0i32
+}

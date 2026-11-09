@@ -137,7 +137,7 @@ func f() -> u64 { var p: P; p.x = 1u64; p.y = 2u64; return p.x }    // INIT_FIEL
 ```
 
 ### Rule 5.1.9 — Reassignment and scope exit
-Reassignment of an owned variable destroys the previous value first, in the order of §4: `expr` is evaluated, then the previous value of `place` is destroyed, then the new value is stored. Early return and `?` propagation destroy all owned locals of exited scopes in reverse declaration order. Recursion creates one owner per activation.
+Reassignment destroys the previous value first, in the order of §4: `expr` is evaluated, then the previous value of `place` is destroyed, then the new value is stored. This holds for every initialized target: an owned variable, a field or an array element of one, the value behind an `edit` parameter, `self` or a `with` binding (`self = v`, `self.f = v`, `e = v`), and a place a projection returned. The one assignment that destroys nothing is the first store into storage that holds no value: an uninitialized or moved variable, or a field of `out` storage not yet initialized (§5.2). Early return and `?` propagation destroy all owned locals of exited scopes in reverse declaration order. Recursion creates one owner per activation. *(Until 2026-11-09 only an assignment to a whole owned variable destroyed the previous value; every other form leaked it. `tests/run/assign_destroys_previous.kern`.)*
 
 ## 5.2 Parameter conventions
 ### Rule 5.2.1 — The four conventions
@@ -459,7 +459,7 @@ A struct declared `view struct` is permitted to contain `view`/`edit` fields and
 A type declares at most one destructor, `destructor(edit self) { ... }`, in the type's own module. A type with a destructor, or with any field whose type has a destructor, is move-only (Rule 5.1.2).
 
 ### Rule 5.7.2 — Destruction order
-When an owner is destroyed (scope exit, reassignment, `drop(x)`, container destruction, `Pool.free`), the runtime first runs the type's destructor with `self` bound as an `edit` access, then destroys the fields in reverse declaration order, each recursively by this rule. Array elements are destroyed from the last index to the first.
+When an owner is destroyed (scope exit, reassignment, `drop(x)`, container destruction, `Pool.free`), the runtime first runs the type's destructor with `self` bound as an `edit` access, then destroys the fields in reverse declaration order, each recursively by this rule. Array elements are destroyed from the last index to the first. A temporary, an owned value an expression produces that no variable binds, is an owner too: one used as a method receiver (`make().len()`, `path().as_view()`) is destroyed when that call returns, or, when the call returns an access, which may be derived from it, when that access ends (after the call it is passed to, or at the end of the block that binds it). *(Until 2026-11-09 such a temporary was never destroyed; `tests/run/temp_receiver_drop.kern`.)*
 
 ### Rule 5.7.3 — Inside the destructor
 `self` is reachable only through the `edit self` binding; moving `self` or a field out is reported under Rule 5.1.6 (use `take`/`replace`). The destructor must not return a value and must not be called explicitly; `drop(x)` is the only explicit destruction operation and consumes `x`.

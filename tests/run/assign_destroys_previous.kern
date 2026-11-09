@@ -1,0 +1,75 @@
+//! phase: 3
+//! expect: output
+// An assignment destroys the previous value of its target before storing
+// the new one (Rule 5.1.9), whatever the target is: a local, a field, an
+// array element, the value behind an edit parameter or self, a field of
+// self, a with binding, and a field of out storage
+// that an earlier store initialized. Found by the sanitized
+// fixture run (specs/runtime RA5): only a whole local was destroyed, and
+// every other form leaked the value it replaced.
+module t
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop "); print_u64(self.id); println() }
+}
+struct Pair nocopy { a: Tok; b: Tok }
+func mk(n: u64) -> Pair { return Pair { a: Tok { id: n }, b: Tok { id: n + 1u64 } } }
+func say(s: view[]u8) { print_str(s); println() }
+func via_edit(p: edit[Pair]) {
+    q := mk(30u64)
+    p = q
+    say("assigned through an edit parameter")
+}
+func tok_via_edit(t: edit[Tok]) {
+    t = Tok { id: 50u64 }
+    say("a struct with a destructor assigned through an edit parameter")
+}
+struct Holder nocopy { p: Pair }
+impl Holder {
+    func reset(edit self) {
+        self.p = mk(70u64)
+        say("a field of self assigned")
+    }
+    func replace_self(edit self) {
+        self = Holder { p: mk(90u64) }
+        say("self assigned")
+    }
+}
+struct Cell nocopy { v: u64; tok: Tok }
+// the second store into a field of out storage replaces the first
+func init_twice(c: out Cell) {
+    c.tok = Tok { id: 140u64 }
+    c.tok = Tok { id: 141u64 }
+    c.v = 7u64
+}
+func main() -> i32 {
+    var c: Cell
+    init_twice(out c)
+    say("an out field assigned twice")
+    p := mk(10u64)
+    p = mk(20u64)
+    say("a local assigned")
+    via_edit(p)
+    t := Tok { id: 40u64 }
+    tok_via_edit(t)
+    h := Holder { p: mk(60u64) }
+    h.reset()
+    h.replace_self()
+    q := Pair { a: Tok { id: 100u64 }, b: Tok { id: 101u64 } }
+    q.a = Tok { id: 102u64 }
+    say("a field of a local assigned")
+    var xs: [2]Tok = [Tok { id: 110u64 }, Tok { id: 111u64 }]
+    xs[0usize] = Tok { id: 112u64 }
+    say("an array element assigned")
+    v := Vec[Tok].new()
+    v.push(Tok { id: 120u64 })
+    with e := v.at(0usize) { e = Tok { id: 121u64 } }
+    say("a with binding assigned")
+    o := Some(Tok { id: 130u64 })
+    o = None
+    say("an option assigned")
+    var n: u64 = 1u64
+    n = 2u64
+    say("end")
+    return 0i32
+}
