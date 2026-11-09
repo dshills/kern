@@ -20,8 +20,6 @@ var runtimeTrapSites = []struct {
 	{"Mutex.new", "kern_mutex_new", "oom"},
 	{"Condvar.new", "kern_condvar_new", "oom"},
 	{"thread.scope", "kern_scope_new", "oom"},
-	{"thread.spawn", "kern_spawn_common", "oom"},
-	{"scope.spawn", "kern_scope_spawn", "oom"},
 	{"Shared.clone", "kern_shared_clone", "overflow"},
 	{"Mutex.lock", "kern_mutex_lock", "explicit"},
 	{"Condvar.wait", "kern_condvar_wait", "explicit"},
@@ -66,8 +64,11 @@ func TestTrappingMatchesRuntime(t *testing.T) {
 			t.Errorf("trapping[%s] = %v, missing %s", s.intrinsic, k.list(), s.kind)
 		}
 	}
-	// every runtime object allocation goes through kern_alloc, which traps oom
-	if strings.Count(native, "kern_alloc(") < 7 {
+	// every runtime object allocation that traps oom goes through
+	// kern_alloc: its definition and the four call sites (Shared.new,
+	// Mutex.new, Condvar.new, thread.scope). A spawn allocates with
+	// kern_try_alloc and fails as Err(SpawnErr) (specs/runtime RC3).
+	if strings.Count(native, "kern_alloc(") != 5 {
 		t.Errorf("kern_alloc call sites changed: recheck the oom entries")
 	}
 }

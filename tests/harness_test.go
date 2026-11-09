@@ -359,8 +359,8 @@ func TestRegistryInventory(t *testing.T) {
 	}
 	skip := map[string]bool{"TRAP_INFO": true, "OWN_": true, "INIT_": true, "ACC_": true, "SEND_": true, "SHARE_": true, "UNSAFE_": true, "EDIT_": true, "API_": true}
 	for code := range seen {
-		if skip[code] || strings.HasSuffix(code, "_") {
-			continue
+		if skip[code] || strings.HasSuffix(code, "_") || strings.HasPrefix(code, "KERN_") {
+			continue // KERN_*: the runtime's environment variables, not diagnostic codes
 		}
 		if !diag.Valid(diag.Code(code)) {
 			t.Errorf("code %s appears in the spec or reference but is not registered", code)

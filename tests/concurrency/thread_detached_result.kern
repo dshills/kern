@@ -1,0 +1,77 @@
+//! phase: 3
+//! expect: output thread_detached_result
+//! tsan: clean
+// A Thread destroyed without join detaches its thread, and the result is
+// destroyed exactly once (Rule 5.5.2, specs/runtime RC1): by the thread
+// itself when its function returns after the handle is gone, and by the
+// handle's destruction when the function had already returned. Until
+// 2026-11-09 the result of a detached thread was never destroyed.
+module cc
+// Res is a thread's result. Its destructor reports itself and then raises
+// the flag the main thread waits on, so the output has one order.
+struct Res nocopy { id: u64; done: Shared[Atomic[u32]] }
+impl Res {
+    destructor(edit self) {
+        print_str("result ")
+        print_u64(self.id)
+        print_str(" destroyed")
+        println()
+        self.done.get().store(1u32, Ordering.seq_cst)
+    }
+}
+func wait_for(flag: view[Atomic[u32]]) {
+    while flag.load(Ordering.seq_cst) == 0u32 { yield_now() }
+}
+// gated returns its result only once the gate is raised.
+func gated(id: u64, gate: own Shared[Atomic[u32]], done: own Shared[Atomic[u32]]) -> Res {
+    wait_for(gate.get())
+    return Res { id: id, done: done }
+}
+// prompt returns at once and raises ran just before.
+func prompt(id: u64, ran: own Shared[Atomic[u32]], done: own Shared[Atomic[u32]]) -> Res {
+    r := Res { id: id, done: done }
+    ran.get().store(1u32, Ordering.seq_cst)
+    return r
+}
+func new_flag() -> Shared[Atomic[u32]] { return Shared[Atomic[u32]].new(Atomic[u32].new(0u32)) }
+// The handle is destroyed while the thread still runs: the thread destroys
+// its result when it ends.
+func dropped_while_running() -> Result[(), SpawnErr] {
+    gate := new_flag()
+    done := new_flag()
+    t := thread.spawn(gated, 1u64, gate.clone(), done.clone())?
+    drop(t)
+    print_str("handle 1 destroyed")
+    println()
+    gate.get().store(1u32, Ordering.seq_cst)
+    wait_for(done.get())
+    return Ok(())
+}
+// The handle is destroyed after the function returned (or, if the thread
+// is slow to finish, just before: the result is destroyed once either way).
+func dropped_after_return() -> Result[(), SpawnErr] {
+    ran := new_flag()
+    done := new_flag()
+    t := thread.spawn(prompt, 2u64, ran.clone(), done.clone())?
+    wait_for(ran.get())
+    i := 0u64
+    while i < 2000u64 { yield_now(); i = i + 1u64 }
+    drop(t)
+    wait_for(done.get())
+    print_str("handle 2 destroyed")
+    println()
+    return Ok(())
+}
+func report(r: Result[(), SpawnErr]) {
+    match r {
+        Ok(u) => { }
+        Err(e) => { print_str("spawn failed"); println() }
+    }
+}
+func main() -> i32 {
+    report(dropped_while_running())
+    report(dropped_after_return())
+    print_str("end")
+    println()
+    return 0i32
+}

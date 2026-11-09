@@ -211,7 +211,8 @@ func compilerDecls(t *testing.T, triple string, freestandingMode bool) map[strin
 	cwd, _ := os.Getwd()
 	decls := map[string]abiSig{}
 	lowered := 0
-	for _, u := range abiUnits(t) {
+	units := abiUnits(t)
+	for _, u := range units {
 		pr := project.Load(cwd, u)
 		if len(pr.Diags) > 0 {
 			continue
@@ -224,7 +225,13 @@ func compilerDecls(t *testing.T, triple string, freestandingMode bool) map[strin
 		if len(ds) > 0 || opt.Run(mod, opt.OptionsFor("debug")) != nil {
 			continue
 		}
-		text, errs := llvm.EmitWith(mod, llvm.Options{Triple: triple, Freestanding: freestandingMode, StackCheck: freestandingMode})
+		// the last unit, the inline program, is emitted as a build that
+		// names a stack size, which declares one more entry
+		var stack uint64
+		if u[0] == units[len(units)-1][0] {
+			stack = 1 << 20
+		}
+		text, errs := llvm.EmitWith(mod, llvm.Options{Triple: triple, Freestanding: freestandingMode, StackCheck: freestandingMode, StackBytes: stack})
 		if len(errs) > 0 {
 			continue // a program the target cannot hold (hosted-only entries are still declared below when it emits)
 		}

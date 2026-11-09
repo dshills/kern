@@ -37,6 +37,7 @@ type Interp struct {
 	TestHooks  bool
 	stackBytes int
 	stackUsed  int
+	spawnStack int      // the configured budget of spawned threads (SetStackLimit)
 	globals    []Value  // this thread's instances of the module's thread_locals
 	heap       *rawHeap // byte-addressed memory for raw pointers
 	sh         *sharedState
@@ -70,7 +71,7 @@ func New(mod *ir.Module, file string, out, errOut io.Writer) *Interp {
 	mu := &sync.Mutex{}
 	// the program's arguments default to its name alone, as a native run
 	// without arguments reports them (SetArgs replaces them)
-	return &Interp{mod: mod, file: file, out: &lockedWriter{mu: mu, w: out}, errOut: &lockedWriter{mu: mu, w: errOut}, stackBytes: 8 << 20, heap: newRawHeap(), sh: &sharedState{nextIdent: 1, fatalCh: make(chan struct{}), args: []string{file}}}
+	return &Interp{mod: mod, file: file, out: &lockedWriter{mu: mu, w: out}, errOut: &lockedWriter{mu: mu, w: errOut}, stackBytes: 8 << 20, spawnStack: 8 << 20, heap: newRawHeap(), sh: &sharedState{nextIdent: 1, fatalCh: make(chan struct{}), args: []string{file}}}
 }
 
 // sharedState is the process-wide interpreter state shared by every thread
@@ -94,6 +95,9 @@ type sharedState struct {
 	fatalCh       chan struct{}
 	// stop is set by Stop: every thread ends at its next basic block
 	stop atomic.Bool
+	// stackAPI is thread.set_stack_bytes's value, 0 when never set: the
+	// simulated stack of every thread spawned afterwards
+	stackAPI atomic.Uint64
 	// funcs holds each called function's funcInfo
 	funcs sync.Map
 }
@@ -160,6 +164,7 @@ func isatty(f *os.File) bool {
 func (it *Interp) child() *Interp {
 	c := *it
 	c.stackUsed = 0
+	c.stackBytes = int(it.nextStackBytes())
 	c.globals = it.freshGlobals()
 	c.inTrap = false
 	c.cur = nil
@@ -287,11 +292,33 @@ func (it *Interp) SetIdentityTags(on bool) {
 }
 
 // SetStackLimit sets the interpreter's stack budget in bytes; each activation
-// is accounted as 512 bytes plus 16 per local and value.
+// is accounted as 512 bytes plus 16 per local and value. It is the budget
+// of the thread that runs main and of every spawned thread, until the
+// program calls thread.set_stack_bytes (specs/runtime RC2).
 func (it *Interp) SetStackLimit(bytes int) {
 	if bytes > 0 {
 		it.stackBytes = bytes
+		it.spawnStack = bytes
 	}
+}
+
+// The bounds of thread.set_stack_bytes and of the configured stack size,
+// as in the hosted runtime (KERN_STACK_MIN, KERN_STACK_MAX).
+const (
+	stackBytesMin = 65536
+	stackBytesMax = 1 << 30
+)
+
+// nextStackBytes is the stack size the next spawned thread gets: the
+// program's own setting, else the configured budget, rounded up to a whole
+// page as natively.
+func (it *Interp) nextStackBytes() uint64 {
+	n := it.sh.stackAPI.Load()
+	if n == 0 {
+		n = uint64(it.spawnStack)
+	}
+	pg := uint64(os.Getpagesize())
+	return (n + pg - 1) / pg * pg
 }
 
 // Run executes the entry function and returns the process exit status: the
@@ -1444,8 +1471,14 @@ func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
 	}
 	switch x := v.(type) {
 	case *Shared:
+		// under the lock that guards clone's increment: threads drop their
+		// references concurrently (an unguarded decrement lost updates,
+		// found by tests/concurrency/thread_detach_stress.kern)
+		atomicMu.Lock()
 		x.Count--
-		if x.Count == 0 {
+		last := x.Count == 0
+		atomicMu.Unlock()
+		if last {
 			it.destroy(x.Val, elem(0))
 		}
 	case *Mutex:
@@ -1462,7 +1495,18 @@ func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
 			}
 		}
 	case *Thread:
-		// detached: the thread runs on; its result is leaked (as natively)
+		// A handle destroyed without join detaches the thread. A thread
+		// that has finished has its result destroyed here; one still
+		// running destroys its own result when its function returns.
+		x.mu.Lock()
+		finished := x.Done
+		if !finished {
+			x.detached, x.elem = true, elem(0)
+		}
+		x.mu.Unlock()
+		if finished && x.trap == nil {
+			it.destroy(x.Result, elem(0))
+		}
 	case *Join:
 		if !x.Taken {
 			it.await(x.done)

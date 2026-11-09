@@ -69,7 +69,7 @@ func TestTrapKindsPerSource(t *testing.T) {
 		{"Shared.try_new", "func f() { s := Shared.try_new(1u64) }", []string{}},
 		{"Mutex.try_new", "func f() { m := Mutex.try_new(1u64) }", []string{}},
 		{"Condvar.try_new", "func f() { c := Condvar.try_new() }", []string{}},
-		{"thread.spawn", "func w(x: u64) -> u64 { return x }\nfunc f() -> Result[u64, SpawnErr] {\n    t := thread.spawn(w, 1u64)?\n    return Ok(t.join())\n}", []string{"oom"}},
+		{"thread.spawn", "func w(x: u64) -> u64 { return x }\nfunc f() -> Result[u64, SpawnErr] {\n    t := thread.spawn(w, 1u64)?\n    return Ok(t.join())\n}", []string{}}, // a spawn that cannot allocate is Err(SpawnErr) (specs/runtime RC3)
 		{"thread.scope", "func f() {\n    with s := thread.scope() { }\n}", []string{"oom"}},
 		{"scope.spawn", "func w(x: u64) -> u64 { return x }\nfunc f() -> Result[u64, SpawnErr] {\n    with s := thread.scope() {\n        j := s.spawn(w, 1u64)?\n        return Ok(j.get())\n    }\n}", []string{"oom"}},
 		{"function value", "func f(g: func(u64) -> u64) -> u64 { return g(1u64) }", all},

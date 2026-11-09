@@ -88,7 +88,8 @@ restrict them to debug):
 | `trap/import_condvar_mismatch/` | `explicit` in `lib/lib.kern` at the second-Mutex `wait` |
 | `trap/import_oom/` | `oom` in `lib/lib.kern` at `Mutex.new` (test hooks) |
 | `trap/import_stack/` | `stack`; interpreter `lib/lib.kern`, native `app.kern` 0–0: agree under the new rule |
-| `trap/oom_{mutex,shared,condvar}_new`, `oom_scope`, `oom_spawn`, `oom_scope_spawn` | `oom` at the call (test hooks) |
+| `trap/oom_{mutex,shared,condvar}_new`, `oom_scope` | `oom` at the call (test hooks) |
+| `oom_spawn`, `oom_scope_spawn` | `oom` at the call when this was written; since 2026-11-09 a spawn whose allocation fails returns `Err(SpawnErr)` (`specs/runtime` RC3) and the fixtures are `run/spawn_alloc_fails` and `run/scope_spawn_alloc_fails` |
 | `trap/shared_overflow` | `overflow` at the `clone` call (natively 0–0 before) |
 | `trap/sysalloc_obligation` | `explicit` at the `alloc` call (natively 0–0 before) |
 

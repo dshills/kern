@@ -946,6 +946,17 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		setDst(fe.rt("kern_scope_new", "ptr (ptr)", "ptr "+fe.loc(c.Pos)))
 	case "thread.spawn", "scope.spawn":
 		fe.spawn(c)
+	case "thread.set_stack_bytes":
+		r := fe.rt("kern_thread_set_stack_bytes", "i32 (i64)", "i64 "+fe.v(a[0]))
+		ok := fe.next("t")
+		fe.emit("%s = icmp ne i32 %s, 0", ok, r)
+		setDst(ok)
+	case "thread.stack_bytes":
+		setDst(fe.rt("kern_thread_stack_bytes", "i64 ()", ""))
+	case "thread.available_parallelism":
+		setDst(fe.rt("kern_thread_available_parallelism", "i64 ()", ""))
+	case "thread.current_id":
+		setDst(fe.rt("kern_thread_current_id", "i64 ()", ""))
 	case "Thread.join":
 		d := dst()
 		out := fe.alloca(e.mty(d.Type))

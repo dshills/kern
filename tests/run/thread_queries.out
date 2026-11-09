@@ -1,0 +1,13 @@
+main is thread 0
+a spawned thread has its own id
+at least one processor
+8388608
+65535 refused
+too large refused
+8388608
+65536 accepted
+65536
+1 GiB accepted
+1073741824
+131072 accepted
+spawned with the new size

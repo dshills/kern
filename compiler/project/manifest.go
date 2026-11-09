@@ -32,7 +32,16 @@ type Manifest struct {
 	Env           *string
 	Target        *string
 	Output        *string
+	// StackBytes is the stack size of spawned threads and of main, from
+	// 65,536 to 1,073,741,824 (specs/runtime RC2).
+	StackBytes *int
 }
+
+// The bounds of a configured stack size, as in the hosted runtime.
+const (
+	StackBytesMin = 65536
+	StackBytesMax = 1 << 30
+)
 
 // ParseManifest reads a manifest's bytes (spec §5): an empty or
 // whitespace-only file is the empty manifest; otherwise one JSON object
@@ -79,7 +88,7 @@ func ParseManifest(path string, b []byte) (*Manifest, []diag.Diagnostic) {
 	}
 	for field := range raw {
 		switch field {
-		case "schema_version", "entry", "opt", "env", "target", "output":
+		case "schema_version", "entry", "opt", "env", "target", "output", "stack_bytes":
 		default:
 			return nil, invalid("%s: unknown field %q", ManifestName, field)
 		}
@@ -131,6 +140,25 @@ func ParseManifest(path string, b []byte) (*Manifest, []diag.Diagnostic) {
 	}
 	if m.Output != nil && (*m.Output == "" || filepath.IsAbs(*m.Output)) {
 		return nil, invalid("%s: field %q must be a relative path", ManifestName, "output")
+	}
+	if v, ok := raw["stack_bytes"]; ok {
+		var n json.Number
+		d := json.NewDecoder(bytes.NewReader(v))
+		d.UseNumber()
+		// a JSON number, written as one: encoding/json also reads a number
+		// out of a string, which a manifest may not use here
+		if tv := bytes.TrimSpace(v); len(tv) == 0 || tv[0] < '0' || tv[0] > '9' {
+			return nil, invalid("%s: field %q must be a whole number from %d to %d", ManifestName, "stack_bytes", StackBytesMin, StackBytesMax)
+		}
+		if err := d.Decode(&n); err != nil || n.String() == "" {
+			return nil, invalid("%s: field %q must be a whole number from %d to %d", ManifestName, "stack_bytes", StackBytesMin, StackBytesMax)
+		}
+		i, err := n.Int64()
+		if err != nil || i < StackBytesMin || i > StackBytesMax {
+			return nil, invalid("%s: field %q must be a whole number from %d to %d", ManifestName, "stack_bytes", StackBytesMin, StackBytesMax)
+		}
+		sb := int(i)
+		m.StackBytes = &sb
 	}
 	return m, nil
 }

@@ -57,6 +57,9 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 	opts.NoStackCheck = bo.NoStackCheck
 	opts.ElideChecks = bo.ElideChecks
 	opts.Debug = bo.Debug
+	if bo.stackSet {
+		opts.StackBytes = uint64(bo.StackBytes)
+	}
 	if out == "" {
 		return fail(stdout, "CLI_INVALID_FLAGS", "build requires -o <out> or an output in %s", project.ManifestName)
 	}

@@ -31,6 +31,9 @@ type Options struct {
 	// ASan marks every function for AddressSanitizer instrumentation
 	// (specs/runtime RA5).
 	ASan bool
+	// StackBytes is the build's stack size for spawned threads and for
+	// main, 0 when the build names none (specs/runtime RC2).
+	StackBytes uint64
 	// ElideChecks drops every bounds, overflow and conversion check: a
 	// measurement-only option (PLAN.md 4.4, the intrinsic-overhead
 	// separation), never a build configuration of the language.
@@ -247,15 +250,20 @@ func (e *emitter) testMain(mod *ir.Module) {
 		// returns (specs/test-runs R2); noinline: a function inlined into
 		// the dispatcher would lose its own location marker
 		// (specs/native-trap-loc)
+		// The three run in a thunk kern_run_main calls, as a program's
+		// main does (the startup contract), so that a test gets the
+		// configured stack too (specs/runtime RC2).
 		fmt.Fprintf(&b, "  call void @kern_set_args(i32 1, ptr %%argv)\n%s", start)
+		fmt.Fprintf(&b, "  %%s%d = call i32 @kern_run_main(ptr @kern.test%d)\n  ret i32 %%s%d\n", i, i, i)
+		fmt.Fprintf(&e.tail, "define internal i32 @kern.test%d() {\nentry:\n", i)
 		if i < len(mod.TestSetup) && mod.TestSetup[i] != "" {
-			fmt.Fprintf(&b, "  call void %s() noinline\n", fnSym(mod.TestSetup[i]))
+			fmt.Fprintf(&e.tail, "  call void %s() noinline\n", fnSym(mod.TestSetup[i]))
 		}
-		fmt.Fprintf(&b, "  call void %s() noinline\n", fnSym(name))
+		fmt.Fprintf(&e.tail, "  call void %s() noinline\n", fnSym(name))
 		if i < len(mod.TestTeardown) && mod.TestTeardown[i] != "" {
-			fmt.Fprintf(&b, "  call void %s() noinline\n", fnSym(mod.TestTeardown[i]))
+			fmt.Fprintf(&e.tail, "  call void %s() noinline\n", fnSym(mod.TestTeardown[i]))
 		}
-		b.WriteString("  ret i32 0\n")
+		e.tail.WriteString("  ret i32 0\n}\n")
 	}
 	b.WriteString("}\n")
 	e.sb.WriteString(b.String())
@@ -776,7 +784,13 @@ func (e *emitter) startCall() string {
 		e.abiDeclared = true
 		fmt.Fprintf(&e.decls, "@%s = external constant i32\n", abiSymbol)
 	}
-	return fmt.Sprintf("  call void @kern_start(ptr @%s)\n", abiSymbol)
+	stack := ""
+	if e.opts.StackBytes > 0 && !e.opts.Freestanding {
+		// the build's stack size, before the runtime reads its configuration
+		e.declare("kern_set_stack_bytes", "void (i64)")
+		stack = fmt.Sprintf("  call void @kern_set_stack_bytes(i64 %d)\n", e.opts.StackBytes)
+	}
+	return stack + fmt.Sprintf("  call void @kern_start(ptr @%s)\n", abiSymbol)
 }
 
 // entryMarker marks the hosted entry wrapper with the program's main

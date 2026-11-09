@@ -1,8 +1,10 @@
 //! phase: 3
-//! expect: trap oom
+//! expect: output
 //! test-hooks: true
-// The runtime's allocation for a spawned thread fails (the armed hook):
-// oom at thread.spawn, in both engines (specs/runtime-trap-file/SPEC.md R4).
+// The allocation of what a spawned thread needs fails (the armed hook):
+// thread.spawn returns Err(SpawnErr), as any spawn that cannot start does, and the
+// program goes on (specs/runtime RC3). Until 2026-11-09 this trapped oom
+// (specs/runtime-trap-file R4).
 module t
 func one(n: u64) -> u64 { return n + 1u64 }
 func run() -> Result[u64, SpawnErr] {
@@ -15,6 +17,8 @@ func main() -> i32 {
         Ok(v) => print_u64(v)
         Err(e) => print_str("spawn failed")
     }
-    print_str("after the trap")
+    println()
+    print_str("after the failed spawn")
+    println()
     return 0i32
 }

@@ -80,6 +80,14 @@ func TestParseManifest(t *testing.T) {
 			t.Errorf("%q: unexpected %v", src, ds)
 		}
 	}
+	for src, want := range map[string]int{`{"stack_bytes": 65536}`: 65536, `{"stack_bytes": 1073741824}`: 1 << 30, `{"stack_bytes": 8388608}`: 8 << 20} {
+		if m, ds := ParseManifest("kern.mod", []byte(src)); len(ds) > 0 || m == nil || m.StackBytes == nil || *m.StackBytes != want {
+			t.Errorf("%s: %+v %v, want stack_bytes %d", src, m, ds, want)
+		}
+	}
+	if m, _ := ParseManifest("kern.mod", []byte(`{}`)); m == nil || m.StackBytes != nil {
+		t.Errorf("a manifest without stack_bytes sets none: %+v", m)
+	}
 	if m, _ := ParseManifest("kern.mod", []byte(`{"opt": "fast", "opt": "release"}`)); m == nil || m.Opt == nil || *m.Opt != "release" {
 		t.Errorf("the last occurrence of a field is the one validated and kept: %+v", m)
 	}
@@ -96,6 +104,12 @@ func TestParseManifest(t *testing.T) {
 		`{"entry": null}`:              "\"entry\"",
 		`{"schema_version": "0.1"}`:    "\"schema_version\"",
 		`{"output": "/abs"}`:           "\"output\"",
+		`{"stack_bytes": 65535}`:       "\"stack_bytes\"",
+		`{"stack_bytes": 1073741825}`:  "\"stack_bytes\"",
+		`{"stack_bytes": "65536"}`:     "\"stack_bytes\"",
+		`{"stack_bytes": 65536.5}`:     "\"stack_bytes\"",
+		`{"stack_bytes": null}`:        "\"stack_bytes\"",
+		`{"stack_bytes": -65536}`:      "\"stack_bytes\"",
 		`{"entry": "a.kern"} x`:        "invalid character",
 		`{`:                            "unexpected",
 		`[1]`:                          "must hold a JSON object",

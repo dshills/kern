@@ -39,6 +39,7 @@
 #include <poll.h>
 #include <limits.h>
 #include <spawn.h>
+#include <sys/mman.h>
 #if defined(__linux__)
 #include <sys/auxv.h>
 #include <features.h>
@@ -264,12 +265,22 @@ void kern_condvar_drop(kern_condvar *cv);
 // Arms a failure of the next spawn.
 void kern_test_fail_next_spawn(void);
 #endif
-// Starts a thread running thunk on a copy of the size-byte argument block, into the Result at out: Ok(handle) or Err(SpawnErr).
+// Starts a thread running thunk on a copy of the size-byte argument block, into the Result at out: Ok(handle) or Err(SpawnErr) with nothing left behind.
 void kern_thread_spawn(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off, const kern_loc *at);
 // Waits for the thread, copies its size-byte result to dst and frees the handle.
 void kern_thread_join(kern_thread *t, void *dst, int64_t size);
-// Destroys an unjoined handle: the thread is detached.
-void kern_thread_drop(kern_thread *t);
+// Destroys an unjoined handle: a running thread is detached and destroys its result with g when it ends; a finished one's result is destroyed with g now.
+void kern_thread_drop(kern_thread *t, kern_glue g);
+// Records the build's stack size, when in range; called by the entry code before kern_start.
+void kern_set_stack_bytes(int64_t n);
+// Returns the stack size the next spawned thread gets, a whole number of pages.
+uint64_t kern_thread_stack_bytes(void);
+// Sets the stack size of threads spawned from now on: 1, or 0 with nothing changed when n is outside 65,536 to 1,073,741,824.
+int32_t kern_thread_set_stack_bytes(uint64_t n);
+// Returns the calling thread's identifier, the one a trap record carries (0 for the thread that runs main).
+uint64_t kern_thread_current_id(void);
+// Returns the number of processors the process may run on, at least 1.
+uint64_t kern_thread_available_parallelism(void);
 // Creates a scope for scoped spawns; traps oom.
 void *kern_scope_new(const kern_loc *at);
 // Starts a scoped thread, as kern_thread_spawn, into the Result at out: Ok(join handle) or Err(SpawnErr).

@@ -1,0 +1,38 @@
+//! phase: 3
+//! expect: output
+// The thread queries and the stack-size setting (specs/runtime RC2, RC4):
+// main is thread 0 and a spawned thread is not; at least one processor;
+// the default stack of a spawned thread is 8 MiB; set_stack_bytes refuses
+// a size out of range and changes nothing, and accepts one in range, which
+// the next spawn uses.
+module t
+func say(s: view[]u8) { print_str(s); println() }
+func id_is_zero() -> bool { return thread.current_id() == 0u64 }
+func on_thread() -> Result[bool, SpawnErr] {
+    t := thread.spawn(id_is_zero)?
+    return Ok(t.join())
+}
+func main() -> i32 {
+    if thread.current_id() == 0u64 { say("main is thread 0") } else { say("main is not thread 0") }
+    r := on_thread()
+    match r {
+        Ok(zero) => { if zero { say("a spawned thread is thread 0") } else { say("a spawned thread has its own id") } }
+        Err(e) => say("spawn failed")
+    }
+    if thread.available_parallelism() >= 1usize { say("at least one processor") } else { say("no processor") }
+    print_u64(u64(thread.stack_bytes())); println()
+    if thread.set_stack_bytes(65535usize) { say("65535 accepted") } else { say("65535 refused") }
+    if thread.set_stack_bytes(1073741825usize) { say("too large accepted") } else { say("too large refused") }
+    print_u64(u64(thread.stack_bytes())); println()
+    if thread.set_stack_bytes(65536usize) { say("65536 accepted") } else { say("65536 refused") }
+    print_u64(u64(thread.stack_bytes())); println()
+    if thread.set_stack_bytes(1073741824usize) { say("1 GiB accepted") } else { say("1 GiB refused") }
+    print_u64(u64(thread.stack_bytes())); println()
+    if thread.set_stack_bytes(131072usize) { say("131072 accepted") } else { say("131072 refused") }
+    r2 := on_thread()
+    match r2 {
+        Ok(zero) => say("spawned with the new size")
+        Err(e) => say("spawn failed")
+    }
+    return 0i32
+}

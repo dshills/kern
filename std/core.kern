@@ -1926,6 +1926,20 @@ impl Scope {
 struct thread { phantom: u8 }
 impl thread {
     func scope() -> Scope
+    // set_stack_bytes sets the stack size of every thread spawned from now
+    // on, by any thread; it returns false and changes nothing when n is
+    // below 65,536 or above 1,073,741,824. The size is rounded up to a
+    // whole page. Without it a spawned thread's stack is KERN_STACK_BYTES,
+    // else the build's --stack-bytes, else 8 MiB (specs/runtime RC2).
+    func set_stack_bytes(n: usize) -> bool
+    // stack_bytes is the stack size the next spawned thread gets.
+    func stack_bytes() -> usize
+    // available_parallelism is the number of processors the process may
+    // run on, at least 1.
+    func available_parallelism() -> usize
+    // current_id is the calling thread's identifier, the one a trap record
+    // carries: 0 for the thread that runs main.
+    func current_id() -> u64
     // thread.spawn(f, own args...) -> Result[Thread[R], SpawnErr] is an intrinsic typed by the checker.
 }
 

@@ -1,0 +1,42 @@
+//! phase: 3
+//! expect: output thread_detach_stress
+//! tsan: clean
+// The handle's destruction races the thread's end 300 times (specs/runtime
+// RC1): whichever comes second destroys the result, exactly once, which
+// the counter of destructions shows. Half the handles are destroyed at
+// once and half after a yield, so both orders occur.
+module cc
+struct Res nocopy { n: u64; destroyed: Shared[Atomic[u64]] }
+impl Res {
+    destructor(edit self) { old := self.destroyed.get().fetch_add(1u64, Ordering.seq_cst) }
+}
+func work(n: u64, destroyed: own Shared[Atomic[u64]]) -> Res {
+    if n % 3u64 == 0u64 { yield_now() }
+    return Res { n: n, destroyed: destroyed }
+}
+func main() -> i32 {
+    destroyed := Shared[Atomic[u64]].new(Atomic[u64].new(0u64))
+    started := 0u64
+    i := 0u64
+    while i < 300u64 {
+        r := thread.spawn(work, i, destroyed.clone())
+        match r {
+            Ok(t) => {
+                started = started + 1u64
+                if i % 2u64 == 0u64 { yield_now() }
+            }
+            Err(e) => { }
+        }
+        i = i + 1u64
+    }
+    while destroyed.get().load(Ordering.seq_cst) < started { yield_now() }
+    // a second destruction of any result would take the count past the
+    // number of threads; give one time to happen
+    j := 0u64
+    while j < 2000u64 { yield_now(); j = j + 1u64 }
+    if started == 300u64 { print_str("300 threads") } else { print_str("some spawns failed") }
+    println()
+    if destroyed.get().load(Ordering.seq_cst) == started { print_str("every result destroyed once") } else { print_str("a result was destroyed twice") }
+    println()
+    return 0i32
+}

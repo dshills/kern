@@ -238,8 +238,10 @@ func (e *emitter) namedGlue(b *strings.Builder, n *resolve.Named) {
 			e.declare("kern_scope_drop", "void (ptr)")
 			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_scope_drop(ptr %%h)\n")
 		case "Thread":
-			e.declare("kern_thread_drop", "void (ptr)")
-			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_thread_drop(ptr %%h)\n")
+			// the result's destructor: a detached thread destroys its own
+			// result when its function returns (Rule 5.5.2)
+			e.declare("kern_thread_drop", "void (ptr, ptr)")
+			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_thread_drop(ptr %%h, ptr %s)\n", eg)
 		case "Join":
 			e.declare("kern_join_drop", "void (ptr, ptr)")
 			fmt.Fprintf(b, "  %%h = load ptr, ptr %%p\n  call void @kern_join_drop(ptr %%h, ptr %s)\n", eg)

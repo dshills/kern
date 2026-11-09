@@ -333,6 +333,12 @@ type Thread struct {
 	Done   bool
 	done   chan struct{} // closed when the thread's function returned or trapped
 	trap   *Trap
+	// mu orders the handle's destruction against the thread's end: the
+	// result is destroyed exactly once, by whichever comes second
+	// (Rule 5.5.2, specs/runtime RC1)
+	mu       sync.Mutex
+	detached bool
+	elem     resolve.Type // the result's type, set when the handle is destroyed first
 }
 
 // Join is a scoped thread handle.

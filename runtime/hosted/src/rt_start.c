@@ -37,6 +37,3 @@ void kern_start(const void *abi) {
     sigaction(SIGBUS, &sa, NULL);
     atexit(kern_flush);
 }
-
-// kern_run_main runs the program's main function and returns its result.
-int32_t kern_run_main(int32_t (*fn)(void)) { return fn(); }

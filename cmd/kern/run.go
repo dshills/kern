@@ -34,6 +34,9 @@ type BuildOptions struct {
 	// optSet and envSet record an explicit --opt or --env, which overrides
 	// the manifest's value (specs/module-discovery/SPEC.md R23).
 	optSet, envSet bool
+	// stackSet: StackBytes came from --stack-bytes or the manifest, not
+	// from the default (specs/runtime RC2)
+	stackSet, stackFlag bool
 }
 
 // applyManifest takes the manifest's opt and env where no flag set them.
@@ -47,6 +50,31 @@ func (o *BuildOptions) applyManifest(m *project.Manifest) {
 	if !o.envSet && m.Env != nil {
 		o.Env = *m.Env
 	}
+	if !o.stackFlag && m.StackBytes != nil {
+		o.StackBytes, o.stackSet = *m.StackBytes, true
+	}
+}
+
+// stackBytesFromEnv is KERN_STACK_BYTES when it holds an accepted value
+// (a decimal integer of 1 to 10 digits in range), as the hosted runtime
+// reads it; the interpreter's simulated stack follows the same sources as
+// a native program's (specs/runtime RC2).
+func stackBytesFromEnv() (int, bool) {
+	s := os.Getenv("KERN_STACK_BYTES")
+	if s == "" || len(s) > 10 {
+		return 0, false
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n < project.StackBytesMin || n > project.StackBytesMax {
+		return 0, false
+	}
+	return n, true
 }
 
 // load discovers the program's files from the named ones, or from the
@@ -138,10 +166,10 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 				opts.Env, opts.envSet = v, true
 			case "--stack-bytes":
 				n, err := strconv.Atoi(v)
-				if err != nil || n <= 0 {
-					return opts, nil, nil, fmt.Errorf("--stack-bytes must be a positive integer")
+				if err != nil || n < project.StackBytesMin || n > project.StackBytesMax || strings.TrimLeft(v, "0123456789") != "" {
+					return opts, nil, nil, fmt.Errorf("--stack-bytes must be a whole number from %d to %d", project.StackBytesMin, project.StackBytesMax)
 				}
-				opts.StackBytes = n
+				opts.StackBytes, opts.stackSet, opts.stackFlag = n, true, true
 			}
 		case strings.HasPrefix(a, "-"):
 			return opts, nil, nil, fmt.Errorf("unknown flag %s", a)
@@ -208,7 +236,11 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 	it.TestHooks = opts.TestHooks
 	it.Freestanding = opts.Env == "freestanding"
 	it.SetIdentityTags(opts.Opt != "release")
-	it.SetStackLimit(opts.StackBytes)
+	stack := opts.StackBytes
+	if n, ok := stackBytesFromEnv(); ok {
+		stack = n // the environment overrides the build's value, as natively
+	}
+	it.SetStackLimit(stack)
 	return it.Run()
 }
 

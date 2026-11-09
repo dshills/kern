@@ -559,23 +559,50 @@ func init() {
 			return []Value{&Scope{}}
 		},
 		"thread.spawn": func(it *Interp, a []Value, c callCtx) []Value {
-			it.runtimeAlloc(c.pos)
-			if it.takeFailNextSpawn() {
+			// a failed spawn, by the spawn hook or by the allocation of
+			// what the thread needs, is Err(SpawnErr) and leaves nothing
+			// behind (specs/runtime RC3)
+			if it.takeFailNextSpawn() || it.takeFailNextAlloc() {
 				return spawnErrValue() // the kern side destroys the own arguments
 			}
 			t := &Thread{done: make(chan struct{})}
-			it.spawned(a[0].(FuncVal).Name, a[1:], func(v Value, tr *Trap) { t.Result, t.trap, t.Done = v, tr, true; close(t.done) })
+			it.spawned(a[0].(FuncVal).Name, a[1:], func(child *Interp, v Value, tr *Trap) {
+				t.mu.Lock()
+				t.Result, t.trap, t.Done = v, tr, true
+				detached, elem := t.detached, t.elem
+				t.mu.Unlock()
+				close(t.done)
+				if detached && tr == nil {
+					child.destroy(v, elem) // nobody will take the result
+				}
+			})
 			return []Value{&Union{Tag: 0, Fields: []Value{t}}}
 		},
+		"thread.set_stack_bytes": func(it *Interp, a []Value, _ callCtx) []Value {
+			n := u64(a[0])
+			if n < stackBytesMin || n > stackBytesMax {
+				return []Value{Bool(false)}
+			}
+			it.sh.stackAPI.Store(n)
+			return []Value{Bool(true)}
+		},
+		"thread.stack_bytes": func(it *Interp, a []Value, _ callCtx) []Value {
+			return []Value{mkInt(tyUsize, it.nextStackBytes())}
+		},
+		"thread.available_parallelism": func(it *Interp, a []Value, _ callCtx) []Value {
+			return []Value{mkInt(tyUsize, uint64(runtime.NumCPU()))}
+		},
+		"thread.current_id": func(it *Interp, a []Value, _ callCtx) []Value {
+			return []Value{mkInt(tyU64, it.tid)}
+		},
 		"scope.spawn": func(it *Interp, a []Value, c callCtx) []Value {
-			it.runtimeAlloc(c.pos)
-			if it.takeFailNextSpawn() {
+			if it.takeFailNextSpawn() || it.takeFailNextAlloc() {
 				return spawnErrValue()
 			}
 			sc := acc(a[1]).Ref.get().(*Scope)
 			j := &Join{done: make(chan struct{})}
 			sc.Joins = append(sc.Joins, j)
-			it.spawned(a[0].(FuncVal).Name, a[2:], func(v Value, tr *Trap) { j.Result, j.trap, j.Done = v, tr, true; close(j.done) })
+			it.spawned(a[0].(FuncVal).Name, a[2:], func(_ *Interp, v Value, tr *Trap) { j.Result, j.trap, j.Done = v, tr, true; close(j.done) })
 			return []Value{&Union{Tag: 0, Fields: []Value{j}}}
 		},
 		"Thread.join": func(it *Interp, a []Value, _ callCtx) []Value {
@@ -1012,7 +1039,7 @@ func notifyAll(cv *Condvar) {
 // the interpreter with fresh thread-locals. A trap on the thread writes its
 // record there and makes the program terminate at the next join or at its
 // end (natively the process aborts at once).
-func (it *Interp) spawned(name string, args []Value, finish func(Value, *Trap)) {
+func (it *Interp) spawned(name string, args []Value, finish func(*Interp, Value, *Trap)) {
 	child := it.child()
 	go func() {
 		var result Value = Unit{}
@@ -1040,7 +1067,7 @@ func (it *Interp) spawned(name string, args []Value, finish func(Value, *Trap)) 
 		if trapped != nil {
 			it.fatalTrap(trapped)
 		}
-		finish(result, trapped)
+		finish(child, result, trapped)
 	}()
 }
 

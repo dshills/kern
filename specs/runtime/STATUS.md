@@ -17,10 +17,10 @@ reason. Updated at the end of every phase.
 | RB3 robust writes | 2 | c62a4d7 | The recorded failure is standard output's; standard error's writes have no later call to report through. `EINTR` is retried but not provoked by a test |
 | RB4 terminal query | 2 | c62a4d7 |  |
 | RB5 exit | 2 | c62a4d7 |  |
-| RC1 detached threads | 3 | | |
-| RC2 stack size | 3 | | |
-| RC3 spawn robustness | 3 | | |
-| RC4 queries | 3 | | |
+| RC1 detached threads | 3 | PHASE3 |  |
+| RC2 stack size | 3 | PHASE3 | `kern test` has no `--stack-bytes` (it honours `KERN_STACK_BYTES`); the manifest's error code is `PROJECT_INVALID`, as for every manifest error |
+| RC3 spawn robustness | 3 | PHASE3 | A spawn whose allocation fails is `Err(SpawnErr)`; it trapped `oom` before (`specs/runtime-trap-file` R4) |
+| RC4 queries | 3 | PHASE3 |  |
 | RE1 line and column | 4 | | |
 | RE2 backtrace | 4 | | |
 | RE3 parity | 4 | | |
@@ -56,3 +56,4 @@ reason. Updated at the end of every phase.
 | A temporary used as a method receiver was never destroyed (Rule 5.7.2) | 41b5593 |
 | `memcpy` from a null pointer for empty sequences in the hosted runtime | c45f745 |
 | Small integer arguments passed without the extension the C side assumes on x86-64 and Apple arm64 | c45f745 |
+| The interpreter decremented a `Shared` count without the lock that guards its increment | PHASE3 |
