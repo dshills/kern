@@ -28,6 +28,9 @@ type Options struct {
 	StackCheck bool
 	// TSan marks every function for ThreadSanitizer instrumentation.
 	TSan bool
+	// ASan marks every function for AddressSanitizer instrumentation
+	// (specs/runtime RA5).
+	ASan bool
 	// ElideChecks drops every bounds, overflow and conversion check: a
 	// measurement-only option (PLAN.md 4.4, the intrinsic-overhead
 	// separation), never a build configuration of the language.
@@ -138,12 +141,18 @@ func emitWith(mod *ir.Module, opts Options) (*emitter, string, []error) {
 			setArgs += "  call void @kern_set_args(i32 %argc, ptr %argv)\n"
 			e.declare("kern_set_args", "void (i32, ptr)")
 		}
+		// the startup contract (specs/runtime/PLAN.md): the setters, then
+		// kern_start with the ABI symbol's address (the reference that
+		// makes a runtime of another ABI version fail to link), then
+		// kern_run_main with a thunk that calls main and widens its result
+		// to the exit status. The thunk carries main's location marker:
+		// LLVM inlines main into it, and a fault there is main's.
 		if ret == "void" {
-			fmt.Fprintf(&e.sb, "define i32 %s(%s)%s {\nentry:\n%s  call void @kern_start()\n  call %s %s()\n  ret i32 0\n}\n", entrySym, params, e.entryMarker(mod.Entry), setArgs, retOrVoid(ret), fnSym(mod.Entry))
+			fmt.Fprintf(&e.sb, "define internal i32 @kern.entry()%s {\nentry:\n  call %s %s()\n  ret i32 0\n}\n", e.entryMarker(mod.Entry), retOrVoid(ret), fnSym(mod.Entry))
 		} else {
-			fmt.Fprintf(&e.sb, "define i32 %s(%s)%s {\nentry:\n%s  call void @kern_start()\n  %%r = call %s %s()\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", entrySym, params, e.entryMarker(mod.Entry), setArgs, ret, fnSym(mod.Entry), widenOp(ret), ret)
+			fmt.Fprintf(&e.sb, "define internal i32 @kern.entry()%s {\nentry:\n  %%r = call %s %s()\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", e.entryMarker(mod.Entry), ret, fnSym(mod.Entry), widenOp(ret), ret)
 		}
-		e.declare("kern_start", "void ()")
+		fmt.Fprintf(&e.sb, "define i32 %s(%s) {\nentry:\n%s%s  %%s = call i32 @kern_run_main(ptr @kern.entry)\n  ret i32 %%s\n}\n", entrySym, params, setArgs, e.startCall())
 	}
 	var out strings.Builder
 	fmt.Fprintf(&out, "; kern %s\ntarget triple = \"%s\"\n\n", mod.Name, triple)
@@ -174,6 +183,9 @@ func (e *emitter) fnAttrs() string {
 	attrs := ""
 	if !e.opts.StackCheck {
 		attrs += " \"probe-stack\"=\"inline-asm\"" // hosted: the guard page must not be skipped
+	}
+	if e.opts.ASan {
+		attrs += " sanitize_address"
 	}
 	if e.opts.TSan {
 		attrs += " sanitize_thread"
@@ -210,7 +222,7 @@ func (e *emitter) testMain(mod *ir.Module) {
 	e.declare("strtol", "i64 (ptr, ptr, i32)")
 	e.declare("kern_set_file", "void (ptr)")
 	e.declare("kern_set_args", "void (i32, ptr)")
-	e.declare("kern_start", "void ()")
+	start := e.startCall()
 	var b strings.Builder
 	b.WriteString("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n")
 	b.WriteString(e.fnLocTable())
@@ -235,7 +247,7 @@ func (e *emitter) testMain(mod *ir.Module) {
 		// returns (specs/test-runs R2); noinline: a function inlined into
 		// the dispatcher would lose its own location marker
 		// (specs/native-trap-loc)
-		fmt.Fprintf(&b, "  call void @kern_set_args(i32 1, ptr %%argv)\n  call void @kern_start()\n")
+		fmt.Fprintf(&b, "  call void @kern_set_args(i32 1, ptr %%argv)\n%s", start)
 		if i < len(mod.TestSetup) && mod.TestSetup[i] != "" {
 			fmt.Fprintf(&b, "  call void %s() noinline\n", fnSym(mod.TestSetup[i]))
 		}
@@ -748,6 +760,23 @@ func (fe *fnEmit) marker() string {
 
 func (e *emitter) markerFor(idx int64) string {
 	return fmt.Sprintf(" section \"%s\" prefix { i64, i64 } { i64 %d, i64 %d }", kernTextSection(e.opts.Triple), uint64(locMagic), idx)
+}
+
+// abiSymbol is the runtime's ABI symbol (kern_rt.h KERN_RT_ABI_SYMBOL,
+// specs/runtime RA4): every program references it, so a program and a
+// runtime of different ABI versions do not link.
+const abiSymbol = "kern_rt_abi_2"
+
+// startCall declares the startup entries and returns the call that
+// initializes the runtime, passing the ABI symbol's address.
+func (e *emitter) startCall() string {
+	e.declare("kern_start", "void (ptr)")
+	e.declare("kern_run_main", "i32 (ptr)")
+	if !e.abiDeclared {
+		e.abiDeclared = true
+		fmt.Fprintf(&e.decls, "@%s = external constant i32\n", abiSymbol)
+	}
+	return fmt.Sprintf("  call void @kern_start(ptr @%s)\n", abiSymbol)
 }
 
 // entryMarker marks the hosted entry wrapper with the program's main

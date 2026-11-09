@@ -1,0 +1,281 @@
+// kern hosted runtime: the entries compiled kern code calls, with their C
+// prototypes (the ABI, specs/runtime/SPEC.md RA1). kern_rt.c includes this
+// header and then every unit; a function that is not declared here is
+// static in its unit. TestRuntimeABI checks every declaration the compiler
+// emits against these definitions, and docs/runtime.md's entry table is
+// generated from this file: each prototype is preceded by its one-line
+// contract.
+//
+// Conventions. A (p, n) pair is a byte sequence of n bytes, not
+// NUL-terminated. An `out`/`off` pair is the address of a Result the entry
+// fills: out[0] is the tag (0 Ok, 1 Err) and the payload goes at out + off.
+// A trailing `const kern_loc *at` is the location of the user-level call,
+// where the entry raises its traps (null: no location). An entry that
+// returns int32_t or int64_t "or -errno" returns the negated system error
+// on failure. Entries under KERN_TEST_HOOKS exist only in a --test-hooks
+// build.
+#ifndef KERN_RT_H
+#define KERN_RT_H
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE // pthread_getattr_np on glibc
+#endif
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <unistd.h>
+#include <time.h>
+#include <sched.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <poll.h>
+#include <limits.h>
+#include <spawn.h>
+#if defined(__linux__)
+#include <features.h>
+// posix_spawn_file_actions_addclosefrom_np keeps every descriptor above 2
+// out of a child (specs/std-process R4); glibc has it since 2.34
+#if !defined(__GLIBC__) || !__GLIBC_PREREQ(2, 34)
+#error "kern's hosted runtime needs glibc 2.34 or newer on Linux (specs/std-process)"
+#endif
+#endif
+#ifdef __APPLE__
+#include <sys/ucontext.h>
+#else
+#include <ucontext.h>
+#endif
+
+// KERN_RT_ABI is the version of this interface. It changes when an existing
+// entry's prototype or contract changes; every program references the
+// symbol kern_rt_abi_<KERN_RT_ABI>, so one built for another version does
+// not link (RA4).
+#define KERN_RT_ABI 2
+#define KERN_RT_ABI_SYMBOL kern_rt_abi_2
+extern const int32_t KERN_RT_ABI_SYMBOL;
+
+// kern_glue is a destructor the compiler emits for a type: it destroys the
+// value at its argument.
+typedef void (*kern_glue)(void *);
+// kern_loc is the location of a user-level call: a byte span and the file
+// (null: the program's file).
+typedef struct { int64_t start, end; const char *file; } kern_loc;
+
+typedef struct kern_shared kern_shared;
+typedef struct kern_mutex kern_mutex;
+typedef struct kern_condvar kern_condvar;
+typedef struct kern_thread kern_thread;
+typedef struct kern_scope kern_scope;
+typedef struct kern_join kern_join;
+typedef struct kern_sysalloc kern_sysalloc;
+
+// ---- rt_start.c: startup ----
+
+// Initializes the runtime once, on the initial thread, before the program runs; abi is ignored (it makes the program reference the ABI symbol).
+void kern_start(const void *abi);
+// Runs the program's main function and returns its result, the process's exit status.
+int32_t kern_run_main(int32_t (*fn)(void));
+
+// ---- rt_base.c: standard output and exit ----
+
+// Writes v in decimal to standard output.
+void print_u64(uint64_t v);
+// Writes v in decimal to standard output.
+void print_i64(int64_t v);
+// Writes "true" or "false" to standard output.
+void print_bool(uint8_t v);
+// Writes the n bytes at p to standard output.
+void print_str(const char *p, int64_t n);
+// Writes the n bytes at p to standard error, unbuffered.
+void eprint_str(const char *p, int64_t n);
+// Writes a newline to standard output.
+void println(void);
+// Flushes standard output and ends the process with status code, running no destructor.
+void kern_exit(int32_t code);
+
+// ---- rt_io.c: std/io ----
+
+// Records the program's arguments for kern_io_argc and kern_io_arg; called by the entry code before kern_start.
+void kern_set_args(int32_t argc, char **argv);
+// Opens the path for reading, or for writing (created, truncated): a descriptor above 2, close-on-exec, or -errno.
+int32_t kern_io_open(const char *p, int64_t n, uint8_t write);
+// Reads up to n bytes from fd: the count, 0 at end of file, or -errno.
+int64_t kern_io_read(int32_t fd, char *buf, int64_t n);
+// Reads once after waiting up to ns nanoseconds for fd to be ready: the count, 0 at end of file, -2^32 on timeout, or -errno.
+int64_t kern_io_read_timeout(int32_t fd, char *buf, int64_t n, uint64_t ns);
+// Writes n bytes to fd (descriptor 1 through the output buffer): the count or -errno.
+int64_t kern_io_write(int32_t fd, const char *p, int64_t n);
+// Closes a descriptor the program opened: 0 or -errno.
+int32_t kern_io_close(int32_t fd);
+// Removes the file at the path: 0 or -errno.
+int32_t kern_io_remove(const char *p, int64_t n);
+// Creates the directory at the path: 0 or -errno.
+int32_t kern_io_mkdir(const char *p, int64_t n);
+// Removes the empty directory at the path: 0 or -errno.
+int32_t kern_io_rmdir(const char *p, int64_t n);
+// Classifies the path, following links: 1 regular file, 2 directory, 3 other, or -errno.
+int32_t kern_io_kind(const char *p, int64_t n);
+// Writes the directory's entry names, sorted, each NUL-terminated, into buf when they fit in cap: the bytes needed or -errno.
+int64_t kern_io_list(const char *p, int64_t n, char *buf, int64_t cap);
+// Creates a fresh temporary file or directory named with the prefix and writes its path into buf: the length or -errno.
+int64_t kern_io_temp(const char *p, int64_t n, uint8_t dir, char *buf, int64_t cap);
+// Returns the number of program arguments.
+int64_t kern_io_argc(void);
+// Copies at most n bytes of argument i into buf: the argument's length, 0 when there is none.
+int64_t kern_io_arg(int64_t i, char *buf, int64_t n);
+
+// ---- rt_proc.c: std/process ----
+
+// Returns the number of entries in the environment the program started with.
+int64_t kern_proc_env_count(void);
+// Copies at most n bytes of environment entry i into buf: the entry's length, 0 when there is none.
+int64_t kern_proc_env_at(int64_t i, char *buf, int64_t n);
+// Starts a child process (specs/std-process R4) and stores the parent's pipe ends in fds: its process ID or -errno.
+int64_t kern_proc_spawn(const char *prog, int64_t progn, const char *argvb, int64_t argvn, int64_t argc,
+                        const char *envb, int64_t envn, int64_t envc, const char *dirp, int64_t dirn, uint8_t has_dir,
+                        const char *search, int64_t searchn, const uint8_t *modes, int64_t modesn, int32_t *fds, int64_t fdsn);
+// Waits for child h (block) or polls it: 1 with st filled (0 and the exit code, or 1 and the signal), 0 while it runs, or -errno.
+int32_t kern_proc_wait(int64_t h, uint8_t block, int32_t *st, int64_t n);
+// Sends signal sig to child h: 0 or -errno.
+int32_t kern_proc_signal(int64_t h, int32_t sig);
+// Returns child h's process ID, 0 for an invalid handle.
+uint32_t kern_proc_pid(int64_t h);
+// Releases a child's handle; nothing to do natively.
+void kern_proc_release(int64_t h);
+// Waits for a child's inherited output to be forwarded; nothing to do natively.
+void kern_proc_flush_inherited(int64_t h);
+// Closes a pipe end: 0 or -errno.
+int32_t kern_proc_close(int32_t fd);
+// Reads from a pipe end, retrying when interrupted: the count, 0 at end of file, or -errno.
+int64_t kern_proc_read(int32_t fd, char *buf, int64_t n);
+// Writes to a pipe end, retrying when interrupted, never raising SIGPIPE: the count or -errno.
+int64_t kern_proc_write(int32_t fd, const char *data, int64_t n);
+// Returns the host's error number for a portable index (0 EINVAL, 1 ENAMETOOLONG, 2 EBADF, 3 EPIPE, 5 EAGAIN, else EIO).
+int32_t kern_proc_errno(uint8_t which);
+// Takes the armed fault of a pipe kind: its error number, 0 when none is armed.
+int32_t kern_proc_fault_take(uint8_t kind);
+#ifdef KERN_TEST_HOOKS
+// Arms a fault: the next pipe operation of the kind fails with code.
+void kern_proc_fault_arm(uint8_t kind, int32_t code);
+#endif
+
+// ---- rt_trap.c: traps ----
+
+// Installs the process-wide trap handler with one atomic exchange and returns the previous one (null: the default).
+void *kern_set_handler(void *fn);
+// Records the program's file name, reported by a trap that names none.
+void kern_set_file(const char *name);
+// Raises a trap of the kind at the span in file (null: the program's): runs the handler once and aborts; never returns.
+_Noreturn void kern_trap(int32_t kind, int64_t start, int64_t end, const char *file);
+// Registers the table of function locations the fault handler names faults with.
+void kern_set_fn_locs(const void *t, int64_t n);
+
+// ---- rt_alloc.c: allocation ----
+
+#ifdef KERN_TEST_HOOKS
+// Arms a failure of the next allocation.
+void kern_test_fail_next_alloc(void);
+// Exists only with test hooks, so a program using them without the flag fails to link.
+void kern_test_require_hooks(void);
+#endif
+// Issues the next container identity tag: from 1 in a debug build, 0 (unchecked) in a release build or after wrap-around.
+uint32_t kern_next_identity(void);
+// Returns the system allocator, a process-wide object.
+void *kern_sysalloc_new(void);
+// Allocates size bytes at align into the Result at out: Ok(pointer) or Err(OutOfMemory); traps explicit on a violated obligation.
+void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at);
+// Resizes an allocation, keeping the common prefix, into the Result at out; on Err the old allocation stays.
+void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at);
+// Allocates zeroed bytes, as kern_sysalloc_alloc.
+void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at);
+// Frees an allocation made with the same size and align.
+void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align, const kern_loc *at);
+
+// ---- rt_time.c: clocks ----
+
+// Returns the monotonic clock in nanoseconds.
+uint64_t kern_now_ns(void);
+// Sleeps at least ns nanoseconds, resuming when interrupted.
+void kern_time_sleep_ns(uint64_t ns, const kern_loc *at);
+// Returns the wall clock in nanoseconds since the Unix epoch.
+uint64_t kern_time_wall_ns(const kern_loc *at);
+
+// ---- rt_str.c: floating-point text ----
+
+// Writes the shortest decimal digits and exponent that round-trip v into buf: the length.
+int64_t kern_str_f64_digits(double v, char *buf, int64_t n);
+// Parses validated decimal text to the nearest double; traps oom when a copy of long text cannot be allocated.
+double kern_str_parse_f64(const char *p, int64_t n, const kern_loc *at);
+
+// ---- rt_sync.c: Shared, Mutex, Condvar ----
+
+// Creates a Shared holding a copy of the size bytes at src, with count 1; traps oom.
+void *kern_shared_new(int64_t size, const void *src, const kern_loc *at);
+// As kern_shared_new into the Result at out; on failure destroys the value at src with glue and stores Err(OutOfMemory).
+void kern_shared_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off);
+// Returns the address of the shared value.
+void *kern_shared_get(kern_shared *s);
+// Adds a reference and returns s; traps overflow at the maximum count.
+void *kern_shared_clone(kern_shared *s, const kern_loc *at);
+// Drops a reference; the last one destroys the value with g and frees the object.
+void kern_shared_drop(kern_shared *s, kern_glue g);
+#ifdef KERN_TEST_HOOKS
+// Sets a Shared's reference count.
+void kern_test_shared_seed_count(kern_shared *s, int64_t n);
+#endif
+// Creates a Mutex holding a copy of the size bytes at src; traps oom.
+void *kern_mutex_new(int64_t size, const void *src, const kern_loc *at);
+// As kern_mutex_new into the Result at out; on failure destroys the value at src with glue and stores Err(OutOfMemory).
+void kern_mutex_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off);
+// Acquires the lock, blocking, and returns the guarded value's address; traps explicit when the caller holds it.
+void *kern_mutex_lock(kern_mutex *mx, const kern_loc *at);
+// Releases the lock the caller holds and wakes one waiter.
+void kern_mutex_unlock(kern_mutex *mx);
+// Destroys the guarded value with g and frees the lock.
+void kern_mutex_drop(kern_mutex *mx, kern_glue g);
+// Creates a Condvar; traps oom.
+void *kern_condvar_new(const kern_loc *at);
+// As kern_condvar_new into the Result at out: Ok(pointer) or Err(OutOfMemory).
+void kern_condvar_try_new(char *out, int64_t off);
+// Releases the Mutex guarding data, blocks until notified (or spuriously), and reacquires it; traps explicit on a lock not held or a second Mutex.
+void kern_condvar_wait(kern_condvar *cv, void *data, const kern_loc *at);
+// Wakes one thread waiting on the Condvar.
+void kern_condvar_notify_one(kern_condvar *cv);
+// Wakes every thread waiting on the Condvar.
+void kern_condvar_notify_all(kern_condvar *cv);
+// Frees the Condvar.
+void kern_condvar_drop(kern_condvar *cv);
+
+// ---- rt_thread.c: threads ----
+
+#ifdef KERN_TEST_HOOKS
+// Arms a failure of the next spawn.
+void kern_test_fail_next_spawn(void);
+#endif
+// Starts a thread running thunk on a copy of the size-byte argument block, into the Result at out: Ok(handle) or Err(SpawnErr).
+void kern_thread_spawn(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off, const kern_loc *at);
+// Waits for the thread, copies its size-byte result to dst and frees the handle.
+void kern_thread_join(kern_thread *t, void *dst, int64_t size);
+// Destroys an unjoined handle: the thread is detached.
+void kern_thread_drop(kern_thread *t);
+// Creates a scope for scoped spawns; traps oom.
+void *kern_scope_new(const kern_loc *at);
+// Starts a scoped thread, as kern_thread_spawn, into the Result at out: Ok(join handle) or Err(SpawnErr).
+void kern_scope_spawn(kern_scope *sc, void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off, const kern_loc *at);
+// Waits for a scoped thread and copies its size-byte result to dst.
+void kern_join_get(kern_join *j, void *dst, int64_t size);
+// Destroys a join handle; a result not taken is destroyed with g after the thread ends.
+void kern_join_drop(kern_join *j, kern_glue g);
+// Joins every thread of the scope in creation order and frees it.
+void kern_scope_drop(kern_scope *sc);
+// Yields the processor to another thread.
+void kern_yield(void);
+
+#endif

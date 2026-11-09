@@ -101,7 +101,7 @@ func TestProvidedMatchesObjects(t *testing.T) {
 		t.Skip("llvm-nm not on PATH")
 	}
 	dir := t.TempDir()
-	files := map[string]string{"rt.c": RuntimeC, "f64text.c": F64TextC, "start_aarch64.S": StartAArch64, "start_x86_64.S": StartX8664}
+	files := map[string]string{"rt.c": RuntimeC, "kern_rt_fs.h": Header, "f64text.c": F64TextC, "start_aarch64.S": StartAArch64, "start_x86_64.S": StartX8664}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)

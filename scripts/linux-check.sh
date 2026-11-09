@@ -13,18 +13,34 @@
 # subprocess tests of the timeouts.
 # The gate fails when a `go test` command fails, when any test fails, or
 # when a named test has no pass event (it was skipped or never ran).
+#
+#   scripts/linux-check.sh --run "<go test arguments>" [--run "..."]... [TestName...]
+#
+# With --run, each group replaces the std/process runs above: `go test` is
+# run once per group with those arguments (specs/runtime gate 5), e.g.
+#   scripts/linux-check.sh --run "./compiler/analysis -run ^TestRuntime" TestRuntimeABI
+# KERN_SANITIZE, when set, is passed into the container.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [ "$#" -eq 0 ]; then
-  echo "usage: $0 TestName..." >&2
+  echo "usage: $0 [--run \"go test arguments\"]... TestName..." >&2
   exit 2
 fi
+runs=()
+while [ "${1:-}" = "--run" ]; do
+  [ "$#" -ge 2 ] || { echo "$0: --run needs an argument" >&2; exit 2; }
+  runs+=("$2")
+  shift 2
+done
+# the groups cross into the container as one newline-separated variable
+groups=""
+for r in ${runs[@]+"${runs[@]}"}; do groups+="$r"$'\n'; done
 
 image=kern-linux-check:go1.25
 docker build -q -t "$image" - >/dev/null <<'EOF'
 FROM golang:1.25 AS go
 FROM ubuntu:24.04
-RUN apt-get update && apt-get install -y --no-install-recommends clang lld jq ca-certificates git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends clang lld libclang-rt-18-dev llvm jq ca-certificates git && rm -rf /var/lib/apt/lists/*
 COPY --from=go /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
 EOF
@@ -34,6 +50,7 @@ docker run --rm \
   -v kern-linux-check-cache:/cache \
   -e GOCACHE=/cache/build -e GOMODCACHE=/cache/mod -e HOME=/tmp/home \
   -e GOFLAGS=-buildvcs=false -e GOTOOLCHAIN=local \
+  -e KERN_SANITIZE="${KERN_SANITIZE:-}" -e LINUX_CHECK_RUNS="$groups" \
   -w /src "$image" bash -c '
 set -uo pipefail
 mkdir -p "$HOME"
@@ -44,12 +61,19 @@ run() {
   local code=$?
   [ "$code" -eq 0 ] || { echo "go test $* exited $code"; status=1; }
 }
-run ./tests -run "^TestFixtures\$/run/std_process"
-run ./tests -run "^TestFixtures\$/run/std_timeouts"
-run ./cmd/kern -run "^Test(ReadStdinTimeout|OutputTimeoutReaps)\$"
-run ./tests -run "^TestFixtures\$/ffi/process"
-run ./tests -run "^TestProcess"
-run ./compiler/interp -run "^TestProc"
+if [ -n "$LINUX_CHECK_RUNS" ]; then
+  while IFS= read -r group; do
+    [ -n "$group" ] || continue
+    eval "run $group"
+  done <<<"$LINUX_CHECK_RUNS"
+else
+  run ./tests -run "^TestFixtures\$/run/std_process"
+  run ./tests -run "^TestFixtures\$/run/std_timeouts"
+  run ./cmd/kern -run "^Test(ReadStdinTimeout|OutputTimeoutReaps)\$"
+  run ./tests -run "^TestFixtures\$/ffi/process"
+  run ./tests -run "^TestProcess"
+  run ./compiler/interp -run "^TestProc"
+fi
 failed=$(jq -r "select(.Action == \"fail\" and .Test != null) | .Test" /tmp/events.json | sort -u)
 if [ -n "$failed" ]; then
   echo "failed:"; echo "$failed" | sed "s/^/  /"

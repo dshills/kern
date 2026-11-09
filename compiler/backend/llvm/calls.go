@@ -470,6 +470,12 @@ func (fe *fnEmit) loadResult(dst *ir.Value, ptr string) {
 func (fe *fnEmit) rt(name, sig string, args string) string {
 	fe.e.declare(name, sig)
 	ret := sig[:strings.Index(sig, " (")]
+	if isRuntimeEntry(name) {
+		args = abiArgs(args, fe.e.opts.Triple)
+		if ext := smallIntExt(fe.e.opts.Triple); ext != "" && smallInt(ret) {
+			ret = ext + " " + ret
+		}
+	}
 	if ret == "void" {
 		fe.emit("call void @%s(%s)", name, args)
 		return ""

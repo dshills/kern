@@ -67,8 +67,7 @@ _start64:
     lea _kern_stack_bottom(%rip), %rax
     add $4096, %rax                 // one guard page below the limit
     mov %rax, kern_stack_limit(%rip)
-    call kern_start
-    call kern_main
+    call kern_main                  // the image's entry: kern_start, then the program
     mov %eax, %edi
     call kern_exit
 1:  hlt

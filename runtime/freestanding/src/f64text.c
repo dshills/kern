@@ -2,8 +2,7 @@
 // std/str runtime entries the hosted runtime implements with snprintf and
 // strtod, computed exactly with fixed-size big integers on the stack. No
 // allocation, no libc, no trap; every helper is static.
-#include <stdint.h>
-#include <stddef.h>
+#include "kern_rt_fs.h"
 
 // f64t_big is an unsigned integer of n 32-bit limbs, least significant
 // first, with w[n-1] != 0 (n == 0 is zero). 160 limbs (5120 bits) hold
@@ -345,7 +344,7 @@ int64_t kern_str_f64_digits(double v, char *buf, int64_t n) {
 // kern_str_parse_f64 is the correctly rounded value of text already
 // checked to be one JSON number (±Inf when it overflows). It needs no
 // copy and no allocation, so it never traps; at is unused.
-double kern_str_parse_f64(const char *p, int64_t n, const void *at) {
+double kern_str_parse_f64(const char *p, int64_t n, const kern_loc *at) {
     (void)at;
     return f64t_parse(p, n);
 }

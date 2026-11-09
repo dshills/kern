@@ -28,10 +28,12 @@ type emitter struct {
 	eqs      map[string]bool   // emitted equality glue
 	glueBody strings.Builder
 	runtime  map[string]bool // declared runtime functions
-	errs     []error
-	thunks   int
-	dbg      *debugInfo // DWARF metadata, nil without debug info
-	rec      *recording // runtime-entry requests, nil unless Options.Record
+	// abiDeclared: the ABI symbol's declaration has been written
+	abiDeclared bool
+	errs        []error
+	thunks      int
+	dbg         *debugInfo // DWARF metadata, nil without debug info
+	rec         *recording // runtime-entry requests, nil unless Options.Record
 }
 
 // lty maps a type to its LLVM type in registers (bool is i1).
@@ -300,8 +302,83 @@ func (e *emitter) declare(name, sig string) {
 		return
 	}
 	e.runtime[key] = true
+	if isRuntimeEntry(name) {
+		sig = abiSig(sig, e.opts.Triple)
+	}
 	// sig is "ret (params)"
 	i := strings.Index(sig, " (")
 	ret, params := sig[:i], sig[i+2:len(sig)-1]
 	fmt.Fprintf(&e.decls, "declare %s @%s(%s)\n", ret, name, params)
+}
+
+// isRuntimeEntry reports whether name is an entry of the kern runtimes
+// (runtime/hosted/src/kern_rt.h), as opposed to an LLVM intrinsic or a C
+// library function.
+func isRuntimeEntry(name string) bool {
+	switch name {
+	case "print_u64", "print_i64", "print_bool", "print_str", "eprint_str", "println":
+		return true
+	}
+	return strings.HasPrefix(name, "kern_")
+}
+
+// smallInt reports whether t is an integer type narrower than 32 bits.
+func smallInt(t string) bool { return t == "i1" || t == "i8" || t == "i16" }
+
+// smallIntExt is the extension attribute a C function's unsigned small
+// integer parameters and results carry on the target, "" when the calling
+// convention leaves the extension to the callee. x86-64 (System V) and
+// Apple's arm64 convention have the caller extend, and clang marks such
+// values zeroext there; the standard AArch64 convention (Linux, bare
+// metal) does not, and clang writes no attribute.
+func smallIntExt(triple string) string {
+	arm := strings.HasPrefix(triple, "aarch64") || strings.HasPrefix(triple, "arm64")
+	apple := strings.Contains(triple, "apple") || strings.Contains(triple, "darwin") || strings.Contains(triple, "macos")
+	if arm && !apple {
+		return ""
+	}
+	return "zeroext"
+}
+
+// abiSig gives a runtime entry's signature the extension attributes the C
+// side has on the target (specs/runtime RA3). Every runtime entry takes
+// and returns its small integers unsigned (uint8_t, uint16_t); a caller
+// that passed them unextended where the convention has the caller extend
+// would leave the callee reading the register's upper bits.
+// TestRuntimeABI checks the result against clang's own definitions.
+func abiSig(sig, triple string) string {
+	ext := smallIntExt(triple)
+	if ext == "" {
+		return sig
+	}
+	i := strings.Index(sig, " (")
+	ret, params := sig[:i], sig[i+2:len(sig)-1]
+	if smallInt(ret) {
+		ret = ext + " " + ret
+	}
+	if params == "" {
+		return ret + " ()"
+	}
+	ps := strings.Split(params, ", ")
+	for k, p := range ps {
+		if smallInt(p) {
+			ps[k] = p + " " + ext
+		}
+	}
+	return ret + " (" + strings.Join(ps, ", ") + ")"
+}
+
+// abiArgs is abiSig for a call's argument list ("i8 %x, ptr %p").
+func abiArgs(args, triple string) string {
+	ext := smallIntExt(triple)
+	if ext == "" || args == "" || strings.ContainsAny(args, "{(") {
+		return args // no runtime entry takes an aggregate; left alone if one ever does
+	}
+	as := strings.Split(args, ", ")
+	for k, a := range as {
+		if t, rest, ok := strings.Cut(a, " "); ok && smallInt(t) && !strings.HasPrefix(rest, ext+" ") {
+			as[k] = t + " " + ext + " " + rest
+		}
+	}
+	return strings.Join(as, ", ")
 }

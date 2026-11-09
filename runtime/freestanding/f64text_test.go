@@ -29,6 +29,9 @@ func f64Driver(t *testing.T) string {
 	if err := os.WriteFile(src, []byte(F64TextC), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "kern_rt_fs.h"), []byte(Header), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	exe := filepath.Join(dir, "f64driver")
 	if out, err := exec.Command(clang, "-O2", "-o", exe, filepath.Join("testdata", "f64driver.c"), src).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
@@ -326,6 +329,9 @@ func TestF64TextSelfContained(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "f64text.c")
 	if err := os.WriteFile(src, []byte(F64TextC), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kern_rt_fs.h"), []byte(Header), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	for _, triple := range []string{"aarch64-unknown-none-elf", "x86_64-unknown-none-elf"} {

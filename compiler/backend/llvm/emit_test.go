@@ -373,8 +373,14 @@ func TestEmitFunctionMarkers(t *testing.T) {
 	if !strings.Contains(text, sec+"-1 }") {
 		t.Errorf("no library function carries the marker -1\n%s", text)
 	}
-	if !strings.Contains(text, "define i32 @main(i32 %argc, ptr %argv) "+sec+mm[1]+" }") || !strings.Contains(text, "call void @kern_set_fn_locs(ptr @kern.fn_locs, i64 2)") {
-		t.Errorf("the entry wrapper must carry main's marker and hand over the table\n%s", text)
+	// the thunk kern_run_main calls carries main's marker (LLVM inlines
+	// main into it), and the C-level entry hands over the table and
+	// follows the startup contract (specs/runtime/PLAN.md)
+	if !strings.Contains(text, "define internal i32 @kern.entry() "+sec+mm[1]+" }") || !strings.Contains(text, "call void @kern_set_fn_locs(ptr @kern.fn_locs, i64 2)") {
+		t.Errorf("the entry thunk must carry main's marker and the entry hand over the table\n%s", text)
+	}
+	if !strings.Contains(text, "define i32 @main(i32 %argc, ptr %argv) {") || !strings.Contains(text, "call void @kern_start(ptr @kern_rt_abi_2)\n  %s = call i32 @kern_run_main(ptr @kern.entry)\n  ret i32 %s") {
+		t.Errorf("the entry does not follow the startup contract\n%s", text)
 	}
 	table := regexp.MustCompile(`@kern\.fn_locs = private constant \[2 x \{ i64, i64, ptr \}\] \[(.*)\]`).FindStringSubmatch(text)
 	if table == nil {

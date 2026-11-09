@@ -6,8 +6,11 @@
 // is a first-fit free list over a static arena of KERN_HEAP_SIZE bytes.
 // trunc/truncf and the memory routines are the libc symbols LLVM may call
 // for in compiled code.
-#include <stdint.h>
-#include <stddef.h>
+#include "kern_rt_fs.h"
+
+// kern_rt_abi_2 is the ABI symbol every image references (RA4).
+_Static_assert(KERN_RT_ABI == 2, "the ABI symbol's name carries KERN_RT_ABI");
+const int32_t kern_rt_abi_2 = KERN_RT_ABI;
 
 typedef struct { uint8_t kind; uint8_t pad[7]; const char *file; uint64_t start, end, thread_id; } kern_trapinfo;
 
@@ -24,7 +27,7 @@ static void kern_putc(char c) {
     while (*(volatile uint32_t *)0x09000018u & (1u << 5)) {} // UARTFR.TXFF: wait for FIFO space
     *(volatile uint32_t *)0x09000000u = (uint32_t)(uint8_t)c;
 }
-static void kern_poweroff(int code) {
+static _Noreturn void kern_poweroff(int code) {
     (void)code;
     register uint64_t x0 __asm__("x0") = 0x84000008u; // PSCI SYSTEM_OFF
     __asm__ volatile("hvc #0" : : "r"(x0) : "memory");
@@ -37,13 +40,13 @@ static void kern_putc(char c) {
     while (!(kern_inb(0x3FD) & 0x20)) {} // LSR.THRE: transmitter ready
     kern_outb(0x3F8, (uint8_t)c);
 }
-static void kern_poweroff(int code) {
+static _Noreturn void kern_poweroff(int code) {
     __asm__ volatile("outw %0, %1" : : "a"((uint16_t)code), "Nd"((uint16_t)0xF4)); // isa-debug-exit: exits with (code << 1) | 1
     for (;;) { __asm__ volatile("hlt"); }
 }
 #else
 static void kern_putc(char c) { (void)c; }
-static void kern_poweroff(int code) { (void)code; for (;;) {} }
+static _Noreturn void kern_poweroff(int code) { (void)code; for (;;) {} }
 #endif
 
 static void kern_puts(const char *s) { while (*s) kern_putc(*s++); }
@@ -70,14 +73,17 @@ void eprint_str(const char *p, int64_t n) { print_str(p, n); }
 void println(void) { kern_putc('\n'); }
 
 // ---- halt protocol ----
-static void kern_halt(int code) {
+static _Noreturn void kern_halt(int code) {
     kern_puts("{\"halt\":{\"code\":");
     kern_putu((uint64_t)(uint32_t)code);
     kern_puts("}}\n");
     kern_poweroff(code);
 }
-void kern_exit(int32_t code) { kern_halt((int)code); }
-void kern_start(void) {}
+_Noreturn void kern_exit(int32_t code) { kern_halt((int)code); }
+// kern_start is called by the image's entry (kern_main) before the program
+// runs; kern_run_main runs the program's main function.
+void kern_start(const void *abi) { (void)abi; }
+int32_t kern_run_main(int32_t (*fn)(void)) { return fn(); }
 void kern_yield(void) {}
 void kern_set_file(const char *name) { kern_file = name; }
 void *kern_set_handler(void *fn) { void *old = kern_handler; kern_handler = fn; return old; }
@@ -86,7 +92,7 @@ static const char *kern_trap_names[] = {"bounds", "overflow", "div_zero", "shift
 
 // kern_trap writes the record to the console (the default handler), runs a
 // custom handler once instead when installed, and halts with code 134.
-void kern_trap(int32_t kind, int64_t start, int64_t end, const char *file) {
+_Noreturn void kern_trap(int32_t kind, int64_t start, int64_t end, const char *file) {
     if (kern_in_trap) kern_halt(134);
     kern_in_trap = 1;
     if (!file) file = kern_file; // the trapping function's file, or the program's
@@ -147,15 +153,15 @@ void *memset(void *d, int c, size_t n) { char *dp = d; while (n--) *dp++ = (char
 // Once the counter wraps it stays at 0, which disables the check, rather
 // than issuing tags a second time. There are no threads, so a plain
 // counter suffices.
+#ifdef KERN_RELEASE
+uint32_t kern_next_identity(void) { return 0; }
+#else
 static uint32_t kern_identity = 1;
 uint32_t kern_next_identity(void) {
-#ifdef KERN_RELEASE
-    return 0;
-#else
     if (kern_identity == 0) return 0;
     return kern_identity++;
-#endif
 }
+#endif
 
 // ---- SystemAllocator (spec §6, ADR-011) ----
 //
@@ -179,7 +185,9 @@ uint32_t kern_next_identity(void) {
 _Static_assert(KERN_HEAP_SIZE >= KERN_HEAP_GRAIN && KERN_HEAP_SIZE % KERN_HEAP_GRAIN == 0, "KERN_HEAP_SIZE must be a positive multiple of KERN_HEAP_GRAIN");
 
 typedef struct kern_free_block { size_t size; struct kern_free_block *next; } kern_free_block;
-typedef struct { int unused; } kern_sysalloc;
+struct kern_sysalloc {
+    int unused;
+};
 
 static uint8_t kern_heap[KERN_HEAP_SIZE] __attribute__((aligned(4096)));
 static kern_free_block *kern_free_head = 0;
@@ -208,8 +216,7 @@ static size_t kern_block_align(int64_t align) { return (size_t)align < KERN_HEAP
 // (specs/runtime-trap-file/SPEC.md); a null record is no location (the
 // span 0-0 and the program's file), and a null file in a record is the
 // program's file with the record's span, as for kern_trap.
-typedef struct { int64_t start, end; const char *file; } kern_loc;
-static void kern_trap_loc(int32_t kind, const kern_loc *at) {
+static _Noreturn void kern_trap_loc(int32_t kind, const kern_loc *at) {
     if (at == 0) kern_trap(kind, 0, 0, 0);
     kern_trap(kind, at->start, at->end, at->file);
 }
@@ -377,7 +384,7 @@ uint64_t kern_now_ns(void) { return 0; }
 // kern_time_sleep_ns waits until the clock has advanced by at least ns
 // (busy-waiting: no interrupts are enabled); at is unused, since nothing
 // here can fail.
-void kern_time_sleep_ns(uint64_t ns, const void *at) {
+void kern_time_sleep_ns(uint64_t ns, const kern_loc *at) {
     (void)at;
     if (ns == 0) return;
     uint64_t start = kern_now_ns();

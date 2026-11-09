@@ -14,8 +14,7 @@ _start:
     add x0, x0, #4096          // one guard page below the limit
     ldr x1, =kern_stack_limit
     str x0, [x1]
-    bl kern_start
-    bl kern_main
+    bl kern_main               // the image's entry: kern_start, then the program
     bl kern_exit
 1:  wfi
     b 1b

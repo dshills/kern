@@ -44,6 +44,10 @@ type Options struct {
 	// TSan instruments the program and runtime with ThreadSanitizer
 	// (concurrency fixtures, PLAN.md 3.3).
 	TSan bool
+	// Sanitize instruments the program and the runtime with
+	// AddressSanitizer and UndefinedBehaviorSanitizer, for the sanitized
+	// fixture runs (specs/runtime RA5); a report ends the program.
+	Sanitize bool
 	// ElideChecks is the measurement-only option that drops runtime checks
 	// (PLAN.md 4.4); it is not a build configuration of the language.
 	ElideChecks bool
@@ -53,6 +57,10 @@ type Options struct {
 	// prologue check (stack overflow becomes a trusted-boundary obligation).
 	NoStackCheck bool
 }
+
+// sanitizeFlags build with AddressSanitizer and UndefinedBehaviorSanitizer;
+// an undefined-behaviour report is fatal, as an address report is.
+var sanitizeFlags = []string{"-fsanitize=address,undefined", "-fno-sanitize-recover=undefined", "-g"}
 
 // FreestandingTriple is the default bare-metal target (QEMU virt).
 const FreestandingTriple = "aarch64-unknown-none-elf"
@@ -153,7 +161,7 @@ func BuildModule(mod *ir.Module, srcs []*source.File, out string, opts Options) 
 			triple = FreestandingTriple
 		}
 	}
-	lo := llvm.Options{Triple: triple, Freestanding: opts.Freestanding, StackCheck: opts.Freestanding && !opts.NoStackCheck, TSan: opts.TSan, ElideChecks: opts.ElideChecks}
+	lo := llvm.Options{Triple: triple, Freestanding: opts.Freestanding, StackCheck: opts.Freestanding && !opts.NoStackCheck, TSan: opts.TSan, ASan: opts.Sanitize && !opts.Freestanding, ElideChecks: opts.ElideChecks}
 	if opts.Debug {
 		lo.Sources = map[string][]byte{}
 		for _, f := range srcs {
@@ -203,6 +211,9 @@ func BuildModule(mod *ir.Module, srcs []*source.File, out string, opts Options) 
 	if opts.TSan {
 		rtFlags = append(rtFlags, "-fsanitize=thread", "-g")
 	}
+	if opts.Sanitize {
+		rtFlags = append(rtFlags, sanitizeFlags...)
+	}
 	if opts.Debug {
 		rtFlags = append(rtFlags, "-g", "-O0")
 	}
@@ -225,6 +236,9 @@ func BuildModule(mod *ir.Module, srcs []*source.File, out string, opts Options) 
 	}
 	if opts.TSan {
 		args = append(args, "-fsanitize=thread", "-g")
+	}
+	if opts.Sanitize {
+		args = append(args, sanitizeFlags...)
 	}
 	if opts.Debug {
 		args = append(args, "-g", "-O0")
@@ -532,7 +546,7 @@ func buildFreestanding(text, out, triple string, release bool) error {
 	if strings.HasPrefix(triple, "x86_64") {
 		start, script, x86 = freestanding.StartX8664, freestanding.Q35LinkerScript, true
 	}
-	files := map[string]string{"prog.ll": text, "rt.c": freestanding.RuntimeC, "f64text.c": freestanding.F64TextC, "start.S": start, "image.ld": script}
+	files := map[string]string{"prog.ll": text, "rt.c": freestanding.RuntimeC, "kern_rt_fs.h": freestanding.Header, "f64text.c": freestanding.F64TextC, "start.S": start, "image.ld": script}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			return err

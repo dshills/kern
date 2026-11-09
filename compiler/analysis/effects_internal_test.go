@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dshills/kern/runtime/hosted"
 )
 
 // runtimeTrapSites are the runtimes' trap sites for intrinsics: the hosted
@@ -50,7 +52,7 @@ func TestTrappingMatchesRuntime(t *testing.T) {
 		}
 		return string(b)
 	}
-	native := read("runtime", "hosted", "src", "kern_rt.c")
+	native := hosted.Source // every unit of the hosted runtime
 	interp := read("compiler", "interp", "intrinsics.go")
 	for _, s := range runtimeTrapSites {
 		if s.native != "" && !strings.Contains(native, s.native+"(") {

@@ -59,3 +59,29 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+  # The fixtures under AddressSanitizer, LeakSanitizer and
+  # UndefinedBehaviorSanitizer, in the program and in the runtime
+  # (specs/runtime RA5).
+  sanitize:
+    name: sanitize (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install toolchain
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-20 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y clang-20 lld-20 llvm-20 libclang-rt-20-dev
+          sudo update-alternatives --install /usr/local/bin/clang clang /usr/bin/clang-20 100
+
+      - name: Sanitized fixtures
+        env:
+          KERN_SANITIZE: "1"
+        run: go test ./tests -run '^TestFixturesSanitized$' -timeout 60m
