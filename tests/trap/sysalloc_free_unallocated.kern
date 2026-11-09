@@ -1,0 +1,27 @@
+//! phase: 6
+//! expect: trap explicit
+//! twin: sysalloc_checked_ok
+//! config: opt=debug
+// SystemAllocator.free of an address inside a block, which no alloc returned.
+// A debug build and the interpreter trap explicit at the call
+// (specs/runtime RF1); a release build does not check, the obligation is
+// the caller's there.
+module t
+contract { requires "the block is used as the comments say: this fixture breaks the obligation on purpose" }
+func run() {
+    a := SystemAllocator.new()
+    unsafe {
+        match a.alloc(16usize, 8usize) {
+            Ok(p) => {
+                a.free(ptr_offset(p, 8isize), 8usize, 8usize)   // trap explicit: not a block
+            }
+            Err(e) => { }
+        }
+    }
+}
+func main() -> i32 {
+    run()
+    print_str("after the trap")
+    println()
+    return 0i32
+}

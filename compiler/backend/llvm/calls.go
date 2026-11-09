@@ -605,6 +605,12 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	// std/time (hosted; specs/std-time)
 	case "time_sleep_ns":
 		fe.rt("kern_time_sleep_ns", "void (i64, ptr)", "i64 "+fe.v(a[0])+", ptr "+fe.loc(c.Pos))
+	case "mem_page_size":
+		setDst(fe.rt("kern_mem_page_size", "i64 ()", ""))
+	case "mem_map":
+		setDst(fe.rt("kern_mem_map", "ptr (i64)", "i64 "+fe.v(a[0])))
+	case "mem_unmap":
+		fe.rt("kern_mem_unmap", "void (ptr, i64)", "ptr "+fe.v(a[0])+", i64 "+fe.v(a[1]))
 	case "time_wall_ns":
 		setDst(fe.rt("kern_time_wall_ns", "i64 (ptr)", "ptr "+fe.loc(c.Pos)))
 	case "yield_now":
@@ -867,12 +873,12 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		if c.Intrinsic == "Mutex.try_new" {
 			sym = "kern_mutex_try_new"
 		}
-		fe.rt(sym, "void (i64, ptr, ptr, ptr, i64)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])+", ptr "+fe.e.glueFor(a[0].Type)+", ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.rt(sym, "void (i64, ptr, ptr, ptr, i64, ptr)", "i64 "+sz(a[0].Type)+", ptr "+fe.spill(a[0])+", ptr "+fe.e.glueFor(a[0].Type)+", ptr "+out+", i64 "+fmt.Sprintf("%d", off)+", ptr "+fe.loc(c.Pos))
 		fe.loadResult(d, out)
 	case "Condvar.try_new":
 		d := dst()
 		out, off := fe.unionOut(d)
-		fe.rt("kern_condvar_try_new", "void (ptr, i64)", "ptr "+out+", i64 "+fmt.Sprintf("%d", off))
+		fe.rt("kern_condvar_try_new", "void (ptr, i64, ptr)", "ptr "+out+", i64 "+fmt.Sprintf("%d", off)+", ptr "+fe.loc(c.Pos))
 		fe.loadResult(d, out)
 	case "Shared.get":
 		setDst(fe.rt("kern_shared_get", "ptr (ptr)", "ptr "+fe.handle(a[0])))

@@ -1,0 +1,16 @@
+//! phase: 6
+//! expect: accept
+//! twin: mem_map_unsafe
+// The same calls inside an unsafe block of a function with a contract.
+module m
+import "std/mem"
+contract { requires "the mapping is unmapped once, with its own size, and not used afterwards" }
+func f() -> usize {
+    page := mem.page_size()
+    unsafe {
+        p := mem.mem_map(page)
+        if ptr_addr(p) == 0usize { return 0usize }
+        mem.mem_unmap(p, page)
+    }
+    return page
+}

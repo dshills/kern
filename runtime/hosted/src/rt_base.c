@@ -101,7 +101,8 @@ void print_bool(uint8_t v) { if (v) kern_out("true", 4); else kern_out("false", 
 void print_str(const char *p, int64_t n) { kern_out(p, (size_t)n); }
 void eprint_str(const char *p, int64_t n) { if (n > 0) (void)kern_write_all(2, p, (size_t)n); }
 void println(void) { kern_out("\n", 1); }
-void kern_exit(int32_t code) { kern_flush(); _exit(code); }
+static void kern_alloc_report(void); // rt_alloc.c: the report of KERN_ALLOC_REPORT=1 (RF2)
+void kern_exit(int32_t code) { kern_flush(); kern_alloc_report(); _exit(code); }
 
 // ---- configuration (specs/runtime RB1) ----
 //

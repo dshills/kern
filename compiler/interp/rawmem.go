@@ -17,8 +17,8 @@ import (
 // by their handle number.
 type rawHeap struct {
 	mu      sync.Mutex
-	chunks  []*heapChunk      // never moved once created, so slices stay valid
-	allocs  map[uint64]uint64 // address -> size of live allocations
+	chunks  []*heapChunk        // never moved once created, so slices stay valid
+	allocs  map[uint64]rawBlock // address -> the live allocation there
 	handles []Value
 }
 
@@ -35,7 +35,19 @@ const (
 	maxAllocSize = 1 << 40 // larger requests fail (the interpreter's address space)
 )
 
-func newRawHeap() *rawHeap { return &rawHeap{allocs: map[uint64]uint64{}} }
+func newRawHeap() *rawHeap { return &rawHeap{allocs: map[uint64]rawBlock{}} }
+
+// rawBlock is a live allocation as its caller asked for it: free and
+// realloc must name the same size and alignment (specs/runtime RF1).
+type rawBlock struct{ size, align uint64 }
+
+// is reports whether addr is a live allocation of this size and alignment.
+func (h *rawHeap) is(addr, size, align uint64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	b, ok := h.allocs[addr]
+	return ok && b.size == size && b.align == align
+}
 
 // alloc reserves size bytes at an address that is a multiple of align, or
 // returns 0 when the request cannot be honoured (allocation failure).
@@ -75,7 +87,7 @@ func (h *rawHeap) alloc(size, align uint64) uint64 {
 	}
 	c.used = off + n
 	addr := c.base + off
-	h.allocs[addr] = size
+	h.allocs[addr] = rawBlock{size, align}
 	return addr
 }
 
@@ -100,8 +112,8 @@ func (h *rawHeap) realloc(addr, oldSize, size, align uint64) (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
-	if live < oldSize {
-		oldSize = live
+	if live.size < oldSize {
+		oldSize = live.size
 	}
 	n := h.alloc(size, align)
 	if n == 0 {

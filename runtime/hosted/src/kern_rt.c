@@ -13,6 +13,7 @@
 #include "rt_proc.c"
 #include "rt_trap.c"
 #include "rt_alloc.c"
+#include "rt_mem.c"
 #include "rt_time.c"
 #include "rt_str.c"
 #include "rt_sync.c"

@@ -1,0 +1,68 @@
+// std/mem: memory straight from the operating system, for hosted programs
+// (a freestanding image has no operating system to ask).
+// Imported with `import "std/mem"` (specs/runtime RF3).
+module mem
+
+// Runtime intrinsics (hosted).
+// mem_page_size is the size in bytes of a page of the machine's memory.
+func mem_page_size() -> usize
+// mem_map maps bytes of zeroed, readable and writable memory and returns
+// its address, a multiple of the page size, or a null pointer when the
+// system refuses. An unsafe operation: bytes is a multiple of the page
+// size and not zero, and the memory is the caller's to unmap.
+func mem_map(bytes: usize) -> RawPtr[u8]
+// mem_unmap returns to the system the bytes at p that one mem_map call
+// mapped. An unsafe operation: nothing uses the memory afterwards.
+func mem_unmap(p: RawPtr[u8], bytes: usize)
+
+// page_size is the size in bytes of a page of the machine's memory: a
+// power of two, 4,096 or 16,384 on the supported hosts.
+func page_size() -> usize { return mem_page_size() }
+
+// pages_for is size rounded up to whole pages, one page for a size of 0,
+// or None when that is not representable.
+func pages_for(size: usize) -> Option[usize] {
+    page := mem_page_size()
+    if size == 0usize { return Some(page) }
+    if size > 18446744073709551615usize - (page - 1usize) { return None }
+    return Some((size + (page - 1usize)) / page * page)
+}
+
+// PageAllocator is an Allocator that maps every allocation from the
+// operating system and unmaps it on free. An allocation is whole pages,
+// zeroed, at an address that is a multiple of the page size; the pages go
+// back to the system when it is freed, where the system allocator may keep
+// a freed block for reuse. It suits few, large allocations: each one costs
+// a system call and at least a page.
+//
+// The obligations are an Allocator's (spec §6): align is a power of two
+// and size a multiple of it, else alloc traps explicit. An alignment above
+// the page size is Err(OutOfMemory), as is a request the system refuses.
+struct PageAllocator nocopy { phantom: u8 }
+impl PageAllocator {
+    func new() -> PageAllocator { return PageAllocator { phantom: 0u8 } }
+}
+impl Allocator for PageAllocator {
+    contract { requires "align is a power of two and size a multiple of it"; ensures "Ok addresses pages_for(size) bytes of zeroed memory that only free releases" }
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] {
+        if align == 0usize || (align & (align - 1usize)) != 0usize || size % align != 0usize { trap_kind(explicit) }
+        if align > mem_page_size() { return Err(OutOfMemory) }
+        match pages_for(size) {
+            Some(bytes) => {
+                unsafe {
+                    p := mem_map(bytes)
+                    if ptr_addr(p) == 0usize { return Err(OutOfMemory) }
+                    return Ok(p)
+                }
+            }
+            None => { return Err(OutOfMemory) }
+        }
+    }
+    contract { requires "ptr and size are those of one live allocation of a PageAllocator, which nothing uses afterwards" }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) {
+        match pages_for(size) {
+            Some(bytes) => { unsafe { mem_unmap(ptr, bytes) } }
+            None => { }
+        }
+    }
+}

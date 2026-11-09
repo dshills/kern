@@ -397,6 +397,28 @@ func init() {
 			v := parseF64(seqBytes(acc(a[0])))
 			return []Value{mkFloat("f64", v)}
 		},
+		// std/mem: the interpreter's pages are blocks of its own heap,
+		// aligned to the host's page size
+		"mem_page_size": func(it *Interp, a []Value, _ callCtx) []Value {
+			return []Value{mkInt(tyUsize, uint64(os.Getpagesize()))}
+		},
+		"mem_map": func(it *Interp, a []Value, _ callCtx) []Value {
+			page, bytes := uint64(os.Getpagesize()), u64(a[0])
+			if bytes == 0 || bytes%page != 0 {
+				return []Value{mkInt(tyUsize, 0)}
+			}
+			addr := it.heap.alloc(bytes, page)
+			if addr != 0 {
+				it.heap.zero(addr, bytes)
+			}
+			return []Value{mkInt(tyUsize, addr)}
+		},
+		"mem_unmap": func(it *Interp, a []Value, c callCtx) []Value {
+			if !it.heap.is(u64(a[0]), u64(a[1]), uint64(os.Getpagesize())) || !it.heap.free(u64(a[0])) {
+				it.trap("explicit", c.pos) // not a live mapping of this size
+			}
+			return nil
+		},
 		"time_wall_ns": func(it *Interp, a []Value, _ callCtx) []Value {
 			return []Value{mkInt(tyU64, uint64(time.Now().UnixNano()))}
 		},
@@ -678,6 +700,9 @@ func init() {
 			if align == 0 || align&(align-1) != 0 || align > 4096 || size%align != 0 {
 				it.trap("explicit", c.pos)
 			}
+			if !it.heap.is(addr, oldSize, align) {
+				it.trap("explicit", c.pos) // not a live allocation of this size and alignment (RF1)
+			}
 			if it.takeFailNextAlloc() {
 				return []Value{&Union{Tag: 1, Fields: []Value{&Union{Tag: 0}}}}
 			}
@@ -691,8 +716,8 @@ func init() {
 			return []Value{&Union{Tag: 0, Fields: []Value{mkInt(tyUsize, n)}}}
 		},
 		"SystemAllocator.free": func(it *Interp, a []Value, c callCtx) []Value {
-			if !it.heap.free(u64(a[1])) {
-				it.trap("explicit", c.pos) // not a live allocation of this allocator
+			if !it.heap.is(u64(a[1]), u64(a[2]), u64(a[3])) || !it.heap.free(u64(a[1])) {
+				it.trap("explicit", c.pos) // not a live allocation of this size and alignment (RF1)
 			}
 			return nil
 		},

@@ -1,0 +1,19 @@
+page size is a power of two true
+page size is at least 4096 true
+nothing takes one page true
+a page and a byte take two pages true
+an unrepresentable size is None
+aligned to the page true
+zeroed to the end of the page true
+last byte after a store 200
+three pages at page alignment true
+an empty request gets an address true
+an alignment above the page size is out of memory
+VecIn of 5000, sum 12497500
+BoxIn holds 1
+ArenaIn of 3001, first 11
+PoolIn after a free, second 22
+MapIn of 2000, last 5997
+containers released:
+  drop 1
+done

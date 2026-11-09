@@ -100,7 +100,7 @@ var spawning = map[string]bool{"thread.spawn": true, "scope.spawn": true}
 
 // unsafeIntrinsics are the enumerated unsafe operations among intrinsics.
 func unsafeIntrinsic(name string) bool {
-	return strings.HasPrefix(name, "ptr_") || name == "asm" || name == "Mutex.try_acquire" || name == "Mutex.held" || name == "SystemAllocator.alloc" || name == "SystemAllocator.realloc" || name == "SystemAllocator.alloc_zeroed" || name == "SystemAllocator.free"
+	return strings.HasPrefix(name, "ptr_") || name == "asm" || name == "mem_map" || name == "mem_unmap" || name == "Mutex.try_acquire" || name == "Mutex.held" || name == "SystemAllocator.alloc" || name == "SystemAllocator.realloc" || name == "SystemAllocator.alloc_zeroed" || name == "SystemAllocator.free"
 }
 
 type effects struct {

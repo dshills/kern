@@ -11,6 +11,11 @@ import (
 // isUnsafeOp reports the prelude's enumerated unsafe operations (§6): raw
 // pointer operations, inline assembly, and allocator internals.
 func isUnsafeOp(f *FuncDecl) bool {
+	if f.Module == "mem" && f.Receiver == nil {
+		// std/mem's page mapping: memory the caller must unmap, and
+		// memory that must not be used afterwards
+		return f.Name == "mem_map" || f.Name == "mem_unmap"
+	}
 	if f.Module != "core" {
 		return false
 	}

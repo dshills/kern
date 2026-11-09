@@ -4,6 +4,10 @@
 // kern_rt_abi_2 is the ABI symbol every program references (RA4).
 const int32_t KERN_RT_ABI_SYMBOL = KERN_RT_ABI;
 
+// kern_at_exit runs when main returns: what kern_exit does before it ends
+// the process.
+static void kern_at_exit(void) { kern_flush(); kern_alloc_report(); }
+
 void kern_start(const void *abi) {
     (void)abi;
     static char altstack[65536];
@@ -35,5 +39,5 @@ void kern_start(const void *abi) {
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
-    atexit(kern_flush);
+    atexit(kern_at_exit);
 }

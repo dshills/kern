@@ -1,0 +1,49 @@
+//! phase: 6
+//! expect: output sysalloc_checked_ok
+//! twin: sysalloc_free_wrong_size
+// The twin of the sysalloc_* trap fixtures: every free and realloc names
+// the block's own size and alignment, so the checks of a debug build and
+// of the interpreter pass (specs/runtime RF1).
+module t
+contract { requires "each block is freed once with the size and alignment it has" }
+func run() -> u64 {
+    a := SystemAllocator.new()
+    var sum: u64 = 0u64
+    unsafe {
+        match a.alloc(16usize, 8usize) {
+            Ok(p) => {
+                ptr_store(ptr_cast[u64, u8](p), 7u64)
+                match a.realloc(p, 16usize, 4096usize, 8usize) {
+                    Ok(q) => {
+                        match a.realloc(q, 4096usize, 8usize, 8usize) {
+                            Ok(r) => {
+                                sum = sum + ptr_load(ptr_cast[u64, u8](r))
+                                a.free(r, 8usize, 8usize)
+                            }
+                            Err(e) => { a.free(q, 4096usize, 8usize) }
+                        }
+                    }
+                    Err(e) => { a.free(p, 16usize, 8usize) }
+                }
+            }
+            Err(e) => { }
+        }
+        match a.alloc_zeroed(64usize, 64usize) {
+            Ok(z) => {
+                sum = sum + ptr_load(ptr_cast[u64, u8](z))
+                a.free(z, 64usize, 64usize)
+            }
+            Err(e) => { }
+        }
+        match a.alloc(0usize, 1usize) {
+            Ok(e0) => { a.free(e0, 0usize, 1usize) }
+            Err(e) => { }
+        }
+    }
+    return sum
+}
+func main() -> i32 {
+    print_u64(run())
+    println()
+    return 0i32
+}

@@ -10,8 +10,8 @@ void *kern_shared_new(int64_t size, const void *src, const kern_loc *at) {
     kern_copy(s->data, src, (size_t)size);
     return s;
 }
-void kern_shared_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off) {
-    kern_shared *s = kern_try_alloc(sizeof *s + (size_t)size);
+void kern_shared_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off, const kern_loc *at) {
+    kern_shared *s = kern_try_alloc(sizeof *s + (size_t)size, at);
     if (s == NULL) { kern_try_failed(glue, src, out); return; }
     atomic_store(&s->count, 1); s->size = size;
     kern_copy(s->data, src, (size_t)size);
@@ -28,7 +28,7 @@ void *kern_shared_clone(kern_shared *s, const kern_loc *at) {
 }
 void kern_shared_drop(kern_shared *s, kern_glue g) {
     if (s == NULL) return;
-    if (atomic_fetch_sub(&s->count, 1) == 1) { if (g) g(s->data); free(s); }
+    if (atomic_fetch_sub(&s->count, 1) == 1) { if (g) g(s->data); kern_obj_free(s); }
 }
 #ifdef KERN_TEST_HOOKS
 void kern_test_shared_seed_count(kern_shared *s, int64_t n) { atomic_store(&s->count, (uint64_t)n); }
@@ -110,8 +110,8 @@ void *kern_mutex_new(int64_t size, const void *src, const kern_loc *at) {
     kern_copy(mx->data, src, (size_t)size);
     return mx;
 }
-void kern_mutex_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off) {
-    kern_mutex *mx = kern_try_alloc(sizeof *mx + (size_t)size);
+void kern_mutex_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off, const kern_loc *at) {
+    kern_mutex *mx = kern_try_alloc(sizeof *mx + (size_t)size, at);
     if (mx == NULL) { kern_try_failed(glue, src, out); return; }
     atomic_init(&mx->state, 0);
     atomic_init(&mx->owner, 0);
@@ -153,7 +153,7 @@ int32_t kern_mutex_try_lock(kern_mutex *mx) {
 // kern_mutex_data is the guarded value's address, for a caller that holds
 // the lock.
 void *kern_mutex_data(kern_mutex *mx) { return mx->data; }
-void kern_mutex_drop(kern_mutex *mx, kern_glue g) { if (mx == NULL) return; if (g) g(mx->data); free(mx); }
+void kern_mutex_drop(kern_mutex *mx, kern_glue g) { if (mx == NULL) return; if (g) g(mx->data); kern_obj_free(mx); }
 
 // ---- Condvar (spec §5.5) ----
 
@@ -176,8 +176,8 @@ void *kern_condvar_new(const kern_loc *at) {
     atomic_init(&cv->mutex, 0);
     return cv;
 }
-void kern_condvar_try_new(char *out, int64_t off) {
-    kern_condvar *cv = kern_try_alloc(sizeof *cv);
+void kern_condvar_try_new(char *out, int64_t off, const kern_loc *at) {
+    kern_condvar *cv = kern_try_alloc(sizeof *cv, at);
     if (cv == NULL) { out[0] = 1; return; }
     atomic_init(&cv->seq, 0);
     atomic_init(&cv->mutex, 0);
@@ -218,4 +218,4 @@ int32_t kern_condvar_wait_ns(kern_condvar *cv, void *data, uint64_t ns, const ke
 }
 void kern_condvar_notify_one(kern_condvar *cv) { atomic_fetch_add_explicit(&cv->seq, 1, memory_order_relaxed); kern_unpark_one(&cv->seq); }
 void kern_condvar_notify_all(kern_condvar *cv) { atomic_fetch_add_explicit(&cv->seq, 1, memory_order_relaxed); kern_unpark_all(&cv->seq); }
-void kern_condvar_drop(kern_condvar *cv) { free(cv); }
+void kern_condvar_drop(kern_condvar *cv) { kern_obj_free(cv); }

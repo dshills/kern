@@ -1,0 +1,122 @@
+//! phase: 6
+//! expect: output mem_pages
+// std/mem (specs/runtime RF3): the page size, and PageAllocator on its own
+// and as the allocator of VecIn, BoxIn, ArenaIn, PoolIn and MapIn. Every
+// allocation is zeroed whole pages at an address that is a multiple of the
+// page size; an alignment above the page size is Err(OutOfMemory).
+module run
+import "std/mem"
+import "std/map"
+
+func say(s: view[]u8) { print_str(s); println() }
+func flag(label: view[]u8, ok: bool) { print_str(label); print_str(" "); print_bool(ok); println() }
+func num(label: view[]u8, n: u64) { print_str(label); print_str(" "); print_u64(n); println() }
+
+func size() {
+    page := mem.page_size()
+    flag("page size is a power of two", page != 0usize && (page & (page - 1usize)) == 0usize)
+    flag("page size is at least 4096", page >= 4096usize)
+    match mem.pages_for(0usize) {
+        Some(n) => flag("nothing takes one page", n == page)
+        None => say("pages_for failed")
+    }
+    match mem.pages_for(page + 1usize) {
+        Some(n) => flag("a page and a byte take two pages", n == page * 2usize)
+        None => say("pages_for failed")
+    }
+    match mem.pages_for(18446744073709551615usize) {
+        Some(n) => say("an unrepresentable size was rounded")
+        None => say("an unrepresentable size is None")
+    }
+}
+
+// raw allocates directly: the block is aligned to the page, zeroed to its
+// last byte, writable, and freed with the size it was asked for.
+contract { requires "each block is used within its pages and freed once with its own size" }
+func raw() {
+    a := mem.PageAllocator.new()
+    page := mem.page_size()
+    unsafe {
+        match a.alloc(24usize, 8usize) {
+            Ok(p) => {
+                flag("aligned to the page", ptr_addr(p) % page == 0usize)
+                var zeroed: bool = true
+                for i in 0usize..page {
+                    if ptr_load(ptr_offset(p, truncate[isize](i))) != 0u8 { zeroed = false }
+                }
+                flag("zeroed to the end of the page", zeroed)
+                ptr_store(ptr_offset(p, truncate[isize](page - 1usize)), 200u8)
+                num("last byte after a store", u64(ptr_load(ptr_offset(p, truncate[isize](page - 1usize)))))
+                a.free(p, 24usize, 8usize)
+            }
+            Err(e) => say("alloc failed")
+        }
+        match a.alloc(page * 3usize, page) {
+            Ok(p) => {
+                ptr_store(ptr_offset(p, truncate[isize](page * 3usize - 1usize)), 7u8)
+                flag("three pages at page alignment", ptr_addr(p) % page == 0usize)
+                a.free(p, page * 3usize, page)
+            }
+            Err(e) => say("alloc of three pages failed")
+        }
+        match a.alloc(0usize, 1usize) {
+            Ok(p) => {
+                flag("an empty request gets an address", ptr_addr(p) != 0usize)
+                a.free(p, 0usize, 1usize)
+            }
+            Err(e) => say("alloc of nothing failed")
+        }
+        match a.alloc(page * 2usize, page * 2usize) {
+            Ok(p) => {
+                say("an alignment above the page size was served")
+                a.free(p, page * 2usize, page * 2usize)
+            }
+            Err(e) => say("an alignment above the page size is out of memory")
+        }
+    }
+}
+
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("  drop "); print_u64(self.id); println() }
+}
+
+func containers() -> Result[(), AllocErr] {
+    v := VecIn[u64, mem.PageAllocator].new_in(mem.PageAllocator.new())
+    for i in 0u64..5000u64 { v.try_push(i)? }
+    var sum: u64 = 0u64
+    for i in 0usize..v.len() {
+        with g := v.get(i) { sum = sum + g }
+    }
+    num("VecIn of 5000, sum", sum)
+
+    b := BoxIn[Tok, mem.PageAllocator].try_new_in(Tok { id: 1u64 }, mem.PageAllocator.new())?
+    with g := b.get() { num("BoxIn holds", g.id) }
+
+    a := ArenaIn[u64, mem.PageAllocator].new_in(mem.PageAllocator.new())
+    first := a.try_alloc(11u64)?
+    for i in 0u64..3000u64 { id := a.try_alloc(i)? }
+    with g := a.get(first) { num("ArenaIn of 3001, first", g) }
+
+    p := PoolIn[u64, mem.PageAllocator].new_in(mem.PageAllocator.new())
+    one := p.try_alloc(21u64)?
+    two := p.try_alloc(22u64)?
+    p.free(one)
+    with g := p.get(two) { num("PoolIn after a free, second", g) }
+
+    m := map.MapIn[u64, u64, mem.PageAllocator].new_in(mem.PageAllocator.new())
+    for k in 0u64..2000u64 { old := m.try_insert(k, k * 3u64)? }
+    with g := m.get(1999u64) { num("MapIn of 2000, last", g) }
+    say("containers released:")
+    return Ok(())
+}
+
+func main() -> i32 {
+    size()
+    raw()
+    match containers() {
+        Ok(u) => say("done")
+        Err(e) => say("out of memory")
+    }
+    return 0i32
+}

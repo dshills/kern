@@ -201,12 +201,21 @@ uint32_t kern_next_identity(void);
 void *kern_sysalloc_new(void);
 // Allocates size bytes at align into the Result at out: Ok(pointer) or Err(OutOfMemory); traps explicit on a violated obligation.
 void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at);
-// Resizes an allocation, keeping the common prefix, into the Result at out; on Err the old allocation stays.
+// Resizes an allocation, keeping the common prefix, into the Result at out; on Err the old allocation stays; a debug build traps explicit when p is not a live block of old_size and align.
 void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at);
 // Allocates zeroed bytes, as kern_sysalloc_alloc.
 void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at);
-// Frees an allocation made with the same size and align.
+// Frees an allocation made with the same size and align; a debug build traps explicit when p is not a live block of that size and align.
 void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align, const kern_loc *at);
+
+// ---- rt_mem.c: pages from the operating system (std/mem) ----
+
+// Returns the size of a page of memory in bytes.
+int64_t kern_mem_page_size(void);
+// Maps bytes (a positive multiple of the page size) of zeroed, readable and writable memory: its address, or NULL.
+void *kern_mem_map(int64_t bytes);
+// Unmaps the bytes at p that one kern_mem_map call mapped.
+void kern_mem_unmap(void *p, int64_t bytes);
 
 // ---- rt_time.c: clocks ----
 
@@ -229,7 +238,7 @@ double kern_str_parse_f64(const char *p, int64_t n, const kern_loc *at);
 // Creates a Shared holding a copy of the size bytes at src, with count 1; traps oom.
 void *kern_shared_new(int64_t size, const void *src, const kern_loc *at);
 // As kern_shared_new into the Result at out; on failure destroys the value at src with glue and stores Err(OutOfMemory).
-void kern_shared_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off);
+void kern_shared_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off, const kern_loc *at);
 // Returns the address of the shared value.
 void *kern_shared_get(kern_shared *s);
 // Adds a reference and returns s; traps overflow at the maximum count.
@@ -243,7 +252,7 @@ void kern_test_shared_seed_count(kern_shared *s, int64_t n);
 // Creates a Mutex holding a copy of the size bytes at src; traps oom.
 void *kern_mutex_new(int64_t size, const void *src, const kern_loc *at);
 // As kern_mutex_new into the Result at out; on failure destroys the value at src with glue and stores Err(OutOfMemory).
-void kern_mutex_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off);
+void kern_mutex_try_new(int64_t size, void *src, void (*glue)(void *), char *out, int64_t off, const kern_loc *at);
 // Acquires the lock, blocking, and returns the guarded value's address; traps explicit when the caller holds it.
 void *kern_mutex_lock(kern_mutex *mx, const kern_loc *at);
 // Releases the lock the caller holds and wakes one waiter.
@@ -265,7 +274,7 @@ void kern_mutex_drop(kern_mutex *mx, kern_glue g);
 // Creates a Condvar; traps oom.
 void *kern_condvar_new(const kern_loc *at);
 // As kern_condvar_new into the Result at out: Ok(pointer) or Err(OutOfMemory).
-void kern_condvar_try_new(char *out, int64_t off);
+void kern_condvar_try_new(char *out, int64_t off, const kern_loc *at);
 // Releases the Mutex guarding data, blocks until notified (or spuriously), and reacquires it; traps explicit on a lock not held or a second Mutex.
 void kern_condvar_wait(kern_condvar *cv, void *data, const kern_loc *at);
 // As kern_condvar_wait, returning also after ns nanoseconds with the lock held again: 0 only when the time elapsed, else 1.

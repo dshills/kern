@@ -78,7 +78,7 @@ enum { KERN_T_RUNNING = 0, KERN_T_FINISHED = 1, KERN_T_DETACHED = 2 };
 struct kern_thread {
     pthread_t t;
     void (*thunk)(void *);
-    char *block;
+    char *block;     // the packed arguments and the result slot: the bytes after the record, in its allocation
     int64_t roff;
     void *altmap;    // the alternate signal stack's mapping: a guard page, then KERN_ALTSTACK bytes
     size_t altlen;
@@ -109,7 +109,7 @@ static void kern_thread_leave(void *altmap, size_t altlen) {
     munmap(altmap, altlen);
 }
 
-static void kern_thread_free(kern_thread *t) { free(t->block); free(t); }
+static void kern_thread_free(kern_thread *t) { kern_obj_free(t); }
 
 static void *kern_thread_run(void *arg) {
     kern_thread *t = arg;
@@ -138,13 +138,16 @@ void kern_test_fail_next_spawn(void) { atomic_store(&kern_fail_spawn, 1); }
 // acquired before the thread is created. On failure the packed arguments
 // are freed as bytes only: the kern side destroys the owned ones it kept
 // (Rule 5.5.3), since no thread took them.
-static kern_thread *kern_spawn_common(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff) {
+static kern_thread *kern_spawn_common(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, const kern_loc *loc) {
     if (atomic_load(&kern_fail_spawn) && atomic_exchange(&kern_fail_spawn, 0)) return NULL;
-    kern_thread *t = kern_try_alloc(sizeof *t);
+    // one allocation: the record, then the block at the next multiple of
+    // 16 bytes, the alignment malloc gives a block of its own
+    const size_t head = (sizeof(kern_thread) + 15) & ~(size_t)15;
+    kern_thread *t = kern_try_alloc(head + (size_t)size, loc);
     if (t == NULL) return NULL;
-    t->block = kern_try_alloc((size_t)size);
-    t->altmap = t->block != NULL ? kern_altstack_map(&t->altlen) : NULL;
-    if (t->altmap == NULL) { free(t->block); free(t); return NULL; }
+    t->block = (char *)t + head;
+    t->altmap = kern_altstack_map(&t->altlen);
+    if (t->altmap == NULL) { kern_obj_free(t); return NULL; }
     kern_copy(t->block, pack, (size_t)size);
     t->thunk = thunk; t->roff = roff; t->glue = NULL; t->joined = 0;
     atomic_init(&t->state, KERN_T_RUNNING);
@@ -158,8 +161,7 @@ static kern_thread *kern_spawn_common(void (*thunk)(void *), const void *pack, i
     return t;
 }
 void kern_thread_spawn(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off, const kern_loc *at) {
-    (void)at;
-    kern_thread *t = kern_spawn_common(thunk, pack, size, roff);
+    kern_thread *t = kern_spawn_common(thunk, pack, size, roff, at);
     if (t == NULL) { out[0] = 1; return; }
     out[0] = 0;
     memcpy(out + off, &t, sizeof t);
@@ -185,7 +187,6 @@ void kern_thread_drop(kern_thread *t, kern_glue g) {
 }
 void *kern_scope_new(const kern_loc *at) { kern_scope *s = kern_alloc(sizeof *s, at); memset(s, 0, sizeof *s); return s; }
 void kern_scope_spawn(kern_scope *sc, void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off, const kern_loc *at) {
-    (void)at;
     // the join slot and the join handle are acquired before the worker
     // starts, so that failing to get either is an ordinary spawn failure
     if (sc->n == sc->cap) {
@@ -194,10 +195,10 @@ void kern_scope_spawn(kern_scope *sc, void (*thunk)(void *), const void *pack, i
         if (!nj) { out[0] = 1; return; }
         sc->joins = nj; sc->cap = ncap;
     }
-    kern_join *j = kern_try_alloc(sizeof *j);
+    kern_join *j = kern_try_alloc(sizeof *j, at);
     if (j == NULL) { out[0] = 1; return; }
-    kern_thread *t = kern_spawn_common(thunk, pack, size, roff);
-    if (t == NULL) { free(j); out[0] = 1; return; }
+    kern_thread *t = kern_spawn_common(thunk, pack, size, roff, at);
+    if (t == NULL) { kern_obj_free(j); out[0] = 1; return; }
     sc->joins[sc->n++] = t;
     j->t = t; j->taken = 0;
     out[0] = 0;
@@ -207,7 +208,7 @@ void kern_join_get(kern_join *j, void *dst, int64_t size) {
     if (!j->t->joined) { pthread_join(j->t->t, NULL); j->t->joined = 1; }
     kern_copy(dst, j->t->block + j->t->roff, (size_t)size);
     j->taken = 1;
-    free(j);
+    kern_obj_free(j);
 }
 void kern_join_drop(kern_join *j, kern_glue g) {
     if (j == NULL) return;
@@ -215,7 +216,7 @@ void kern_join_drop(kern_join *j, kern_glue g) {
         if (!j->t->joined) { pthread_join(j->t->t, NULL); j->t->joined = 1; }
         if (g) g(j->t->block + j->t->roff);
     }
-    free(j);
+    kern_obj_free(j);
 }
 void kern_scope_drop(kern_scope *sc) {
     if (sc == NULL) return;
@@ -224,7 +225,7 @@ void kern_scope_drop(kern_scope *sc) {
         if (!t->joined) { pthread_join(t->t, NULL); t->joined = 1; }
         kern_thread_free(t);
     }
-    free(sc->joins); free(sc);
+    free(sc->joins); kern_obj_free(sc);
 }
 
 void kern_yield(void) { sched_yield(); }

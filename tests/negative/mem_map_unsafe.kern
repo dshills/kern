@@ -1,0 +1,11 @@
+//! expect: reject UNSAFE_OP_OUTSIDE_UNSAFE rule=6.4
+//! twin: mem_map_unsafe_ok
+// std/mem's mem_map hands out memory that only mem_unmap gives back: an
+// unsafe operation (specs/runtime RF3). PageAllocator is the form for
+// containers.
+module m
+import "std/mem"
+func f() -> usize {
+    p := mem.mem_map(mem.page_size())   // UNSAFE_OP_OUTSIDE_UNSAFE
+    return 0usize
+}
