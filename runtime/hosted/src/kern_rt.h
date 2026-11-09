@@ -40,6 +40,7 @@
 #include <limits.h>
 #include <spawn.h>
 #if defined(__linux__)
+#include <sys/auxv.h>
 #include <features.h>
 // posix_spawn_file_actions_addclosefrom_np keeps every descriptor above 2
 // out of a child (specs/std-process R4); glibc has it since 2.34
@@ -99,6 +100,10 @@ void eprint_str(const char *p, int64_t n);
 void println(void);
 // Flushes standard output and ends the process with status code, running no destructor.
 void kern_exit(int32_t code);
+// Flushes standard output and takes the recorded write failure: 0, or -errno of the first failed write since the last call.
+int32_t kern_io_flush_stdout(void);
+// Reports whether standard stream 0, 1 or 2 is a terminal: 1 or 0.
+int32_t kern_io_is_terminal(int32_t stream);
 
 // ---- rt_io.c: std/io ----
 

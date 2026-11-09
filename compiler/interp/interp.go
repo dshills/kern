@@ -9,6 +9,8 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"unsafe"
 
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/ir"
@@ -96,16 +98,61 @@ type sharedState struct {
 	funcs sync.Map
 }
 
-// lockedWriter serializes output from several threads.
+// lockedWriter serializes output from several threads and remembers the
+// first failed write, which io.flush_stdout reports (specs/runtime RB3).
 type lockedWriter struct {
-	mu *sync.Mutex
-	w  io.Writer
+	mu  *sync.Mutex
+	w   io.Writer
+	err error
 }
 
 func (l *lockedWriter) Write(b []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.w.Write(b)
+	n, err := l.w.Write(b)
+	if err != nil && l.err == nil {
+		l.err = err
+	}
+	return n, err
+}
+
+// takeErr returns and clears the remembered failure.
+func (l *lockedWriter) takeErr() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	err := l.err
+	l.err = nil
+	return err
+}
+
+// isTerminal reports whether w, or the writer a lockedWriter wraps, is a
+// terminal device.
+func isTerminal(w any) bool {
+	if l, ok := w.(*lockedWriter); ok {
+		w = l.w
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	return isatty(f)
+}
+
+// isatty asks the system whether f is a terminal, as isatty(3) does: by
+// reading its terminal settings.
+func isatty(f *os.File) bool {
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return false
+	}
+	var termios [256]byte // room for a struct termios on every supported system
+	var e syscall.Errno
+	if err := rc.Control(func(fd uintptr) {
+		_, _, e = syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(ioctlGetTermios), uintptr(unsafe.Pointer(&termios[0])))
+	}); err != nil {
+		return false
+	}
+	return e == 0
 }
 
 // child is a copy of the interpreter for a new thread: fresh thread-locals,

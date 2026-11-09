@@ -60,6 +60,7 @@ int32_t kern_io_open(const char *p, int64_t n, uint8_t write) {
     return kern_open_above2(path, write ? O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC : O_RDONLY | O_CLOEXEC, 0644);
 }
 int64_t kern_io_read(int32_t fd, char *buf, int64_t n) {
+    if (fd == 0) kern_flush(); // what the program wrote is seen before it waits for input (RB2)
     ssize_t r = read(fd, buf, (size_t)n);
     return r < 0 ? -errno : (int64_t)r;
 }
@@ -73,6 +74,7 @@ int64_t kern_io_read(int32_t fd, char *buf, int64_t n) {
 int64_t kern_io_read_timeout(int32_t fd, char *buf, int64_t n, uint64_t ns) {
     if (n <= 0) return 0;
     if (fd < 0) return -EBADF;
+    if (fd == 0) kern_flush(); // as kern_io_read
     uint64_t start = kern_now_ns();
     for (;;) {
         uint64_t spent = kern_now_ns() - start;

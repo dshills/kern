@@ -543,6 +543,10 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[1]))
 		bp, bl := fe.seqParts(a[2])
 		setDst(fe.rt("kern_io_temp", "i64 (ptr, i64, i8, ptr, i64)", "ptr "+p+", i64 "+l+", i8 "+z+", ptr "+bp+", i64 "+bl))
+	case "io_flush_stdout":
+		setDst(fe.rt("kern_io_flush_stdout", "i32 ()", ""))
+	case "io_is_terminal":
+		setDst(fe.rt("kern_io_is_terminal", "i32 (i32)", "i32 "+fe.v(a[0])))
 	case "io_argc":
 		setDst(fe.rt("kern_io_argc", "i64 ()", ""))
 	case "io_arg":

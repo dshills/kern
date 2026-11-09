@@ -62,7 +62,7 @@ static _Noreturn void kern_trap_at(int32_t kind, int64_t start, int64_t end, con
         n = kern_cat(b, n, "},\"thread\":");
         n += kern_fmt_u64(b + n, kern_tid);
         n = kern_cat(b, n, "}}\n");
-        kern_write_all(2, b, n);
+        (void)kern_write_all(2, b, n);
     } else {
         h(&kern_info);
     }

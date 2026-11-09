@@ -1,0 +1,26 @@
+//! phase: 6
+//! expect: output
+// The standard streams' queries (specs/runtime RB3, RB4): the harness runs
+// a program with its output captured, so standard output and standard
+// error are not terminals, and a flush of standard output that has
+// accepted everything reports Ok, once and again.
+module t
+import "std/io"
+func say(s: view[]u8) { print_str(s); println() }
+func flushed() {
+    r := io.flush_stdout()
+    match r {
+        Ok(u) => say("flush ok")
+        Err(e) => say("flush failed")
+    }
+}
+func main() -> i32 {
+    if io.is_terminal(io.Stream.Stdout) { say("stdout is a terminal") } else { say("stdout is not a terminal") }
+    if io.is_terminal(io.Stream.Stderr) { say("stderr is a terminal") } else { say("stderr is not a terminal") }
+    flushed()
+    print_str("no newline yet")
+    flushed()
+    println()
+    flushed()
+    return 0i32
+}

@@ -10,6 +10,8 @@ void kern_start(const void *abi) {
     long pg = sysconf(_SC_PAGESIZE);
     if (pg > 0) kern_page = (uintptr_t)pg;
     kern_std_init(); // first: before anything else opens a descriptor
+    kern_config_init();
+    kern_out_tty = isatty(1);
     kern_env_init();
     kern_sig_init(); // before the runtime installs its own handlers
     kern_null = kern_open_above2("/dev/null", O_RDWR | O_CLOEXEC, 0);

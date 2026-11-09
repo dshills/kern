@@ -90,6 +90,32 @@ func init() {
 			return nil
 		},
 		"println": func(it *Interp, a []Value, _ callCtx) []Value { _, _ = fmt.Fprintln(it.out); return nil },
+		// the interpreter does not buffer standard output, so a flush has
+		// nothing to write; it reports and clears the first failed write,
+		// as the runtime does (specs/runtime RB3)
+		"io_flush_stdout": func(it *Interp, a []Value, _ callCtx) []Value {
+			if l, ok := it.out.(*lockedWriter); ok {
+				if err := l.takeErr(); err != nil {
+					return []Value{mkInt(tyI32, uint64(uint32(-errnoOf(err))))}
+				}
+			}
+			return []Value{mkInt(tyI32, 0)}
+		},
+		"io_is_terminal": func(it *Interp, a []Value, _ callCtx) []Value {
+			tty := false
+			switch int32(a[0].(Int).Bits) {
+			case 0:
+				tty = isTerminal(os.Stdin)
+			case 1:
+				tty = isTerminal(it.out)
+			case 2:
+				tty = isTerminal(it.errOut)
+			}
+			if tty {
+				return []Value{mkInt(tyI32, 1)}
+			}
+			return []Value{mkInt(tyI32, 0)}
+		},
 		// std/io (hosted): descriptors are indexes into the shared file
 		// table (0, 1 and 2 are the standard streams, 1 and 2 through the
 		// interpreter's writers); errors are negative errno values

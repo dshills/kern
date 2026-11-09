@@ -1,0 +1,6 @@
+stdout is not a terminal
+stderr is not a terminal
+flush ok
+no newline yetflush ok
+
+flush ok

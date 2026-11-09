@@ -26,6 +26,11 @@ func io_list(path: view[]u8, buf: edit[]u8) -> i64
 func io_temp(prefix: view[]u8, dir: bool, buf: edit[]u8) -> i64
 func io_argc() -> usize
 func io_arg(i: usize, buf: edit[]u8) -> usize
+// io_flush_stdout flushes standard output and takes the recorded write
+// failure: 0, or -errno of the first failed write since the last call.
+func io_flush_stdout() -> i32
+// io_is_terminal is 1 when standard stream 0, 1 or 2 is a terminal, else 0.
+func io_is_terminal(stream: i32) -> i32
 
 func err_of(code: i32) -> IoErr {
     if code == 2i32 { return NotFound }
@@ -105,6 +110,35 @@ func write_file(path: view[]u8, data: view[]u8) -> Result[(), IoErr] {
 // (stdout in order with print_str).
 func write_stdout(data: view[]u8) -> Result[(), IoErr] { return write_all(1i32, data) }
 func write_stderr(data: view[]u8) -> Result[(), IoErr] { return write_all(2i32, data) }
+
+// flush_stdout writes out what the program has printed so far and reports
+// whether standard output is still accepting it. Standard output is
+// buffered: it reaches the descriptor when the buffer fills, after each
+// line when the descriptor is a terminal, before the program reads
+// standard input, before a child inherits the stream, and when the program
+// ends (specs/runtime RB2). A write that fails drops its bytes and is
+// remembered (the first failure is kept); flush_stdout returns that
+// failure, once, and Ok(()) when there was none (RB3). print_str and its
+// kin never fail visibly.
+func flush_stdout() -> Result[(), IoErr] {
+    r := io_flush_stdout()
+    if r < 0i32 { return Err(err_of(0i32 - r)) }
+    return Ok(())
+}
+
+// Stream names one of the three standard streams.
+union Stream { Stdin; Stdout; Stderr }
+
+// is_terminal reports whether a standard stream is a terminal (RB4).
+func is_terminal(s: Stream) -> bool {
+    var n: i32 = 0i32
+    match s {
+        Stdin => { n = 0i32 }
+        Stdout => { n = 1i32 }
+        Stderr => { n = 2i32 }
+    }
+    return io_is_terminal(n) != 0i32
+}
 
 // remove_file deletes the file at path.
 func remove_file(path: view[]u8) -> Result[(), IoErr] {
