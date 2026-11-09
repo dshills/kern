@@ -12,11 +12,11 @@ reason. Updated at the end of every phase.
 | RA4 ABI version | 1 | c45f745 |  |
 | RA5 sanitized runs | 1, final | c45f745 (mode, test, fixes; complete at gate 8) | The list of known reports is empty: RC1's leak has no fixture yet |
 | RA6 static analysis | 1 | c45f745 |  |
-| RB1 configuration | 2 | PHASE2 | The privileged case is tested through a test hook (`KERN_TEST_PRIVILEGED`) |
-| RB2 standard output policy | 2 | PHASE2 |  |
-| RB3 robust writes | 2 | PHASE2 | The recorded failure is standard output's; standard error's writes have no later call to report through. `EINTR` is retried but not provoked by a test |
-| RB4 terminal query | 2 | PHASE2 |  |
-| RB5 exit | 2 | PHASE2 |  |
+| RB1 configuration | 2 | c62a4d7 | The privileged case is tested through a test hook (`KERN_TEST_PRIVILEGED`) |
+| RB2 standard output policy | 2 | c62a4d7 |  |
+| RB3 robust writes | 2 | c62a4d7 | The recorded failure is standard output's; standard error's writes have no later call to report through. `EINTR` is retried but not provoked by a test |
+| RB4 terminal query | 2 | c62a4d7 |  |
+| RB5 exit | 2 | c62a4d7 |  |
 | RC1 detached threads | 3 | | |
 | RC2 stack size | 3 | | |
 | RC3 spawn robustness | 3 | | |
