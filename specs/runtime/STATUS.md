@@ -6,12 +6,12 @@ reason. Updated at the end of every phase.
 
 | Requirement | Phase | Commit | Deviations |
 |---|---|---|---|
-| RA1 source layout | 1 | PHASE1 |  |
-| RA2 warning-clean | 1 | PHASE1 |  |
-| RA3 ABI conformance | 1 | PHASE1 | On Linux the second architecture is checked only when its system headers are installed (CI runs both natively) |
-| RA4 ABI version | 1 | PHASE1 |  |
-| RA5 sanitized runs | 1, final | PHASE1 (mode, test, fixes; complete at gate 8) | The list of known reports is empty: RC1's leak has no fixture yet |
-| RA6 static analysis | 1 | PHASE1 |  |
+| RA1 source layout | 1 | c45f745 |  |
+| RA2 warning-clean | 1 | c45f745 |  |
+| RA3 ABI conformance | 1 | c45f745 | On Linux the second architecture is checked only when its system headers are installed (CI runs both natively) |
+| RA4 ABI version | 1 | c45f745 |  |
+| RA5 sanitized runs | 1, final | c45f745 (mode, test, fixes; complete at gate 8) | The list of known reports is empty: RC1's leak has no fixture yet |
+| RA6 static analysis | 1 | c45f745 |  |
 | RB1 configuration | 2 | | |
 | RB2 standard output policy | 2 | | |
 | RB3 robust writes | 2 | | |
@@ -54,5 +54,5 @@ reason. Updated at the end of every phase.
 |---|---|
 | Assignment through an access, to a field or to an element did not destroy the previous value (Rule 5.1.9) | 41b5593 |
 | A temporary used as a method receiver was never destroyed (Rule 5.7.2) | 41b5593 |
-| `memcpy` from a null pointer for empty sequences in the hosted runtime | PHASE1 |
-| Small integer arguments passed without the extension the C side assumes on x86-64 and Apple arm64 | PHASE1 |
+| `memcpy` from a null pointer for empty sequences in the hosted runtime | c45f745 |
+| Small integer arguments passed without the extension the C side assumes on x86-64 and Apple arm64 | c45f745 |
