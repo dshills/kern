@@ -29,9 +29,9 @@ reason. Updated at the end of every phase.
 | RD3 try lock | 5 | 5d37494 | Built on two unsafe prelude operations, `Mutex.try_acquire` and `Mutex.held` |
 | RD4 conditional assertions | 5 | 5d37494 | `Interior` takes no `where` clause |
 | RD5 std/sync | 5 | 5d37494 | `Channel.capacity` added; one binding cannot hold two guards, so a nested read through one variable is a compile error, not a block |
-| RF1 checked allocator | 6 | PH6 | When the table cannot record a block that `realloc` already moved, unknown addresses stop being errors (no trap is added) |
-| RF2 allocation report | 6 | PH6 | A scope's table of joins is not counted; a thread became one allocation |
-| RF3 page allocator | 6 | PH6 | `alloc` traps `explicit` for a request that breaks an allocator's obligations |
+| RF1 checked allocator | 6 | baf1818 | When the table cannot record a block that `realloc` already moved, unknown addresses stop being errors (no trap is added) |
+| RF2 allocation report | 6 | baf1818 | A scope's table of joins is not counted; a thread became one allocation |
+| RF3 page allocator | 6 | baf1818 | `alloc` traps `explicit` for a request that breaks an allocator's obligations |
 | RG1 error kinds | 7 | | |
 | RG2 File | 7 | | |
 | RG3 metadata and paths | 7 | | |
