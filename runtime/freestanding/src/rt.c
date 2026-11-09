@@ -88,6 +88,46 @@ void kern_yield(void) {}
 void kern_set_file(const char *name) { kern_file = name; }
 void *kern_set_handler(void *fn) { void *old = kern_handler; kern_handler = fn; return old; }
 
+// ---- line tables (specs/runtime RE1) ----
+// One record per source file of the program, registered by the image's
+// entry: its name (the constant every trap site passes), the byte offset
+// of each line's first byte, and the file's length; as in the hosted
+// runtime.
+typedef struct {
+    const char *name;
+    const int32_t *starts;
+    int64_t count;
+    int64_t size;
+} kern_srcfile;
+static const kern_srcfile *kern_files = 0;
+static int64_t kern_nfiles = 0;
+void kern_set_lines(const void *t, int64_t n) { kern_files = (const kern_srcfile *)t; kern_nfiles = n; }
+
+static int kern_streq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+// kern_line_col is the 1-based line and byte column of offset start in
+// file: 0 and 0 when no table names the file, when start is past the
+// file's end, or for the span 0-0, which stands for "no location".
+static void kern_line_col(const char *file, int64_t start, int64_t end, uint64_t *line, uint64_t *col) {
+    *line = 0; *col = 0;
+    const kern_srcfile *files = kern_files, *f = 0;
+    const int64_t nfiles = kern_nfiles;
+    if (file == 0 || files == 0 || (start == 0 && end == 0)) return;
+    // by the name's address (the constant a trap site passes), else by its text
+    for (int64_t i = 0; i < nfiles; i++) if (files[i].name == file) { f = &files[i]; break; }
+    if (f == 0) for (int64_t i = 0; i < nfiles; i++) if (files[i].name != 0 && kern_streq(files[i].name, file)) { f = &files[i]; break; }
+    if (f == 0 || f->count <= 0 || start < 0 || start > f->size) return;
+    int64_t lo = 0, hi = f->count; // the last line start at or before start
+    while (hi - lo > 1) {
+        int64_t mid = (lo + hi) / 2;
+        if ((int64_t)f->starts[mid] <= start) lo = mid; else hi = mid;
+    }
+    *line = (uint64_t)lo + 1;
+    *col = (uint64_t)(start - (int64_t)f->starts[lo]) + 1;
+}
+
 static const char *kern_trap_names[] = {"bounds", "overflow", "div_zero", "shift", "conversion", "generation", "vacant", "identity", "disjoint", "oom", "stack", "explicit", "unreachable"};
 
 // kern_trap writes the record to the console (the default handler), runs a
@@ -102,7 +142,11 @@ _Noreturn void kern_trap(int32_t kind, int64_t start, int64_t end, const char *f
         kern_puts("\",\"file\":\""); kern_putjson(file);
         kern_puts("\",\"span\":{\"start\":"); kern_putu((uint64_t)start);
         kern_puts(",\"end\":"); kern_putu((uint64_t)end);
-        kern_puts("},\"thread\":0}}\n");
+        uint64_t line, col;
+        kern_line_col(file, start, end, &line, &col);
+        kern_puts("},\"line\":"); kern_putu(line);
+        kern_puts(",\"col\":"); kern_putu(col);
+        kern_puts(",\"thread\":0}}\n");
     } else {
         kern_trapinfo info = {(uint8_t)kind, {0}, file, (uint64_t)start, (uint64_t)end, 0};
         h(&info);

@@ -211,6 +211,9 @@ type Program struct {
 	Diags   []diag.Diagnostic
 	// Typing results for the checker.
 	Info *Info
+	// Sources are the program's own files as given, by name, for the line
+	// tables a trap's line and column come from (specs/runtime RE1).
+	Sources []*source.File
 }
 
 // Info records per-node resolution results.
@@ -357,7 +360,7 @@ func Resolve(files []*source.File) *Program { return ResolveFor(files, false) }
 // ResolveFor is Resolve for a debug or a release build: the two differ only
 // in the prelude's mode lines (Prelude).
 func ResolveFor(files []*source.File, release bool) *Program {
-	prog := &Program{Modules: map[string]*Module{}, Info: newInfo()}
+	prog := &Program{Modules: map[string]*Module{}, Info: newInfo(), Sources: files}
 	r := &resolver{prog: prog}
 	core := r.loadPrelude(release)
 	prog.Core = core

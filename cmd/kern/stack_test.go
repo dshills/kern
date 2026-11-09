@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,5 +100,42 @@ func TestStackBytesSources(t *testing.T) {
 	manifest(`{"entry": "app.kern", "stack_bytes": 100}`)
 	if code, out, _ := invoke(t, "", "run"); code != 2 || firstCode(t, out) != "PROJECT_INVALID" {
 		t.Errorf("an unaccepted manifest stack_bytes: exit %d %s, want PROJECT_INVALID", code, out)
+	}
+}
+
+// kern run --backtrace makes the interpreter follow a trap's record with a
+// backtrace line; KERN_BACKTRACE decides it either way (specs/runtime RE2).
+func TestRunBacktraceFlag(t *testing.T) {
+	dir := t.TempDir()
+	src := "module t\nfunc inner(xs: view[]u64, i: usize) -> u64 { return xs[i] }\nfunc main() -> i32 {\n    var xs: [2]u64 = [1u64, 2u64]\n    print_u64(inner(xs, 9usize))\n    return 0i32\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "app.kern"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	lines := func(args ...string) []string {
+		t.Helper()
+		code, _, errb := invoke(t, "", append([]string{"run"}, args...)...)
+		if code != 134 {
+			t.Fatalf("run %v: exit %d, stderr %q", args, code, errb)
+		}
+		return strings.Split(strings.TrimRight(errb, "\n"), "\n")
+	}
+	at := strings.Index(src, "xs[i]")
+	col := at - strings.Index(src, "func inner") + 1
+	record := fmt.Sprintf(`{"trap":{"kind":"bounds","file":"app.kern","span":{"start":%d,"end":%d},"line":2,"col":%d,"thread":0}}`, at, at+len("xs[i]"), col)
+	const backtrace = `{"backtrace":{"thread":0,"frames":[{"function":"t.inner","file":"app.kern","line":2},{"function":"t.main","file":"app.kern","line":3}]}}`
+	if got := lines("app.kern"); len(got) != 1 || got[0] != record {
+		t.Errorf("without the flag: %q", got)
+	}
+	if got := lines("--backtrace", "app.kern"); len(got) != 2 || got[0] != record || got[1] != backtrace {
+		t.Errorf("with the flag: %q", got)
+	}
+	t.Setenv("KERN_BACKTRACE", "0")
+	if got := lines("--backtrace", "app.kern"); len(got) != 1 {
+		t.Errorf("KERN_BACKTRACE=0 with the flag: %q", got)
+	}
+	t.Setenv("KERN_BACKTRACE", "1")
+	if got := lines("app.kern"); len(got) != 2 || got[1] != backtrace {
+		t.Errorf("KERN_BACKTRACE=1 without the flag: %q", got)
 	}
 }

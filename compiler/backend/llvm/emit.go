@@ -34,6 +34,12 @@ type Options struct {
 	// StackBytes is the build's stack size for spawned threads and for
 	// main, 0 when the build names none (specs/runtime RC2).
 	StackBytes uint64
+	// Backtrace makes the default trap handler write a backtrace unless
+	// KERN_BACKTRACE=0 (specs/runtime RE2).
+	Backtrace bool
+	// KeepFrames marks every user function noinline, so that a backtrace
+	// lists the calls as written: a debug build made with --backtrace.
+	KeepFrames bool
 	// ElideChecks drops every bounds, overflow and conversion check: a
 	// measurement-only option (PLAN.md 4.4, the intrinsic-overhead
 	// separation), never a build configuration of the language.
@@ -134,7 +140,7 @@ func emitWith(mod *ir.Module, opts Options) (*emitter, string, []error) {
 		// the program's file, which a trap raised by the runtime itself
 		// (a stack check, a mutex misuse) names in its record: the file
 		// declaring main
-		params, setArgs := "", e.fnLocTable()
+		params, setArgs := "", e.fnLocTable()+e.lineTables()
 		if entry.File != "" {
 			setArgs += fmt.Sprintf("  call void @kern_set_file(ptr %s)\n", e.fileSym(entry.File))
 			e.declare("kern_set_file", "void (ptr)")
@@ -148,12 +154,13 @@ func emitWith(mod *ir.Module, opts Options) (*emitter, string, []error) {
 		// kern_start with the ABI symbol's address (the reference that
 		// makes a runtime of another ABI version fail to link), then
 		// kern_run_main with a thunk that calls main and widens its result
-		// to the exit status. The thunk carries main's location marker:
-		// LLVM inlines main into it, and a fault there is main's.
+		// to the exit status. The call is noinline and the thunk carries
+		// no location marker, so main keeps its own frame and marker: a
+		// fault in main is found in main, and a backtrace lists it once.
 		if ret == "void" {
-			fmt.Fprintf(&e.sb, "define internal i32 @kern.entry()%s {\nentry:\n  call %s %s()\n  ret i32 0\n}\n", e.entryMarker(mod.Entry), retOrVoid(ret), fnSym(mod.Entry))
+			fmt.Fprintf(&e.sb, "define internal i32 @kern.entry() {\nentry:\n  call %s %s() noinline\n  ret i32 0\n}\n", retOrVoid(ret), fnSym(mod.Entry))
 		} else {
-			fmt.Fprintf(&e.sb, "define internal i32 @kern.entry()%s {\nentry:\n  %%r = call %s %s()\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", e.entryMarker(mod.Entry), ret, fnSym(mod.Entry), widenOp(ret), ret)
+			fmt.Fprintf(&e.sb, "define internal i32 @kern.entry() {\nentry:\n  %%r = call %s %s() noinline\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", ret, fnSym(mod.Entry), widenOp(ret), ret)
 		}
 		fmt.Fprintf(&e.sb, "define i32 %s(%s) {\nentry:\n%s%s  %%s = call i32 @kern_run_main(ptr @kern.entry)\n  ret i32 %%s\n}\n", entrySym, params, setArgs, e.startCall())
 	}
@@ -229,6 +236,7 @@ func (e *emitter) testMain(mod *ir.Module) {
 	var b strings.Builder
 	b.WriteString("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n")
 	b.WriteString(e.fnLocTable())
+	b.WriteString(e.lineTables())
 	b.WriteString("  %few = icmp slt i32 %argc, 2\n  br i1 %few, label %usage, label %pick\n")
 	b.WriteString("usage:\n  ret i32 2\n")
 	b.WriteString("pick:\n  %endp = alloca ptr\n  %a1p = getelementptr ptr, ptr %argv, i64 1\n  %a1 = load ptr, ptr %a1p\n")
@@ -734,6 +742,11 @@ func (e *emitter) function(f *ir.Func) {
 		// discards the copy (docs/reports/gap-diagnosis.md)
 		linkage = "internal "
 	}
+	if e.opts.KeepFrames && !f.Library {
+		// a debug build made with --backtrace: every user function keeps
+		// its own frame, so the backtrace lists the calls as written
+		attrs += " noinline"
+	}
 	fmt.Fprintf(&e.sb, "define %s%s %s(%s)%s%s%s%s {\nentry:\n%s%s}\n\n", linkage, e.retType(f), e.symOf(f), strings.Join(ps, ", "), attrs, e.attrRef(), fe.marker(), dbgSuffix, entry, fe.body.String())
 }
 
@@ -761,7 +774,9 @@ func (fe *fnEmit) marker() string {
 	if !fe.f.Library {
 		idx = int64(len(e.fnLocs))
 		e.fnLocIdx[fe.f.Name] = idx
-		e.fnLocs = append(e.fnLocs, fmt.Sprintf("{ i64, i64, ptr } { i64 %d, i64 %d, ptr %s }", fe.f.Pos.Start, fe.f.Pos.End, fe.fileOperand(fe.f.File)))
+		// the declaration's span and file, and the function's qualified
+		// name for the backtrace (specs/runtime RE2)
+		e.fnLocs = append(e.fnLocs, fmt.Sprintf("{ i64, i64, ptr, ptr } { i64 %d, i64 %d, ptr %s, ptr %s }", fe.f.Pos.Start, fe.f.Pos.End, fe.fileOperand(fe.f.File), e.nameSym(fe.f.Name)))
 	}
 	return e.markerFor(idx)
 }
@@ -785,26 +800,16 @@ func (e *emitter) startCall() string {
 		fmt.Fprintf(&e.decls, "@%s = external constant i32\n", abiSymbol)
 	}
 	stack := ""
+	if e.opts.Backtrace && !e.opts.Freestanding {
+		e.declare("kern_set_backtrace", "void (i32)")
+		stack = "  call void @kern_set_backtrace(i32 1)\n"
+	}
 	if e.opts.StackBytes > 0 && !e.opts.Freestanding {
 		// the build's stack size, before the runtime reads its configuration
 		e.declare("kern_set_stack_bytes", "void (i64)")
-		stack = fmt.Sprintf("  call void @kern_set_stack_bytes(i64 %d)\n", e.opts.StackBytes)
+		stack += fmt.Sprintf("  call void @kern_set_stack_bytes(i64 %d)\n", e.opts.StackBytes)
 	}
 	return stack + fmt.Sprintf("  call void @kern_start(ptr @%s)\n", abiSymbol)
-}
-
-// entryMarker marks the hosted entry wrapper with the program's main
-// function's location: LLVM inlines main into it, and a fault there is
-// main's.
-func (e *emitter) entryMarker(entry string) string {
-	if e.opts.Freestanding {
-		return ""
-	}
-	idx, ok := e.fnLocIdx[entry]
-	if !ok {
-		idx = -1
-	}
-	return e.markerFor(idx)
 }
 
 // fnLocTable emits the table of function locations the markers index and
@@ -814,8 +819,50 @@ func (e *emitter) fnLocTable() string {
 		return ""
 	}
 	e.declare("kern_set_fn_locs", "void (ptr, i64)")
-	fmt.Fprintf(&e.tail, "@kern.fn_locs = private constant [%d x { i64, i64, ptr }] [%s]\n", len(e.fnLocs), strings.Join(e.fnLocs, ", "))
+	fmt.Fprintf(&e.tail, "@kern.fn_locs = private constant [%d x { i64, i64, ptr, ptr }] [%s]\n", len(e.fnLocs), strings.Join(e.fnLocs, ", "))
 	return fmt.Sprintf("  call void @kern_set_fn_locs(ptr @kern.fn_locs, i64 %d)\n", len(e.fnLocs))
+}
+
+// nameSym is a constant holding a function's qualified name.
+func (e *emitter) nameSym(name string) string {
+	sym := fmt.Sprintf("@kern.fn.%d", len(e.fnLocs))
+	fmt.Fprintf(&e.tail, "%s = private constant [%d x i8] c\"%s\\00\"\n", sym, len(name)+1, llvmString(name))
+	return sym
+}
+
+// llvmString escapes s for an LLVM c"..." constant.
+func llvmString(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c >= 0x7f || c == '"' || c == '\\' {
+			fmt.Fprintf(&b, "\\%02X", c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// lineTables emits the program's line tables and returns the call that
+// hands them to the runtime, for the entry code (specs/runtime RE1): one
+// record per source file, { name, line starts, count, length }, where the
+// name is the constant every trap site in the file passes.
+func (e *emitter) lineTables() string {
+	if len(e.mod.Files) == 0 {
+		return ""
+	}
+	var recs []string
+	for i, f := range e.mod.Files {
+		starts := make([]string, len(f.LineStarts))
+		for k, s := range f.LineStarts {
+			starts[k] = fmt.Sprintf("i32 %d", s)
+		}
+		fmt.Fprintf(&e.tail, "@kern.lines.%d = private constant [%d x i32] [%s]\n", i, len(starts), strings.Join(starts, ", "))
+		recs = append(recs, fmt.Sprintf("{ ptr, ptr, i64, i64 } { ptr %s, ptr @kern.lines.%d, i64 %d, i64 %d }", e.fileSym(f.Name), i, len(starts), f.Size))
+	}
+	e.declare("kern_set_lines", "void (ptr, i64)")
+	fmt.Fprintf(&e.tail, "@kern.files = private constant [%d x { ptr, ptr, i64, i64 }] [%s]\n", len(recs), strings.Join(recs, ", "))
+	return fmt.Sprintf("  call void @kern_set_lines(ptr @kern.files, i64 %d)\n", len(recs))
 }
 
 // kernTextSection is the section every hosted kern function is placed in,

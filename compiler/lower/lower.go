@@ -41,7 +41,7 @@ type Options struct {
 
 // LowerWith is Lower with extra roots.
 func LowerWith(prog *resolve.Program, o Options) (mod *ir.Module, diags []diag.Diagnostic) {
-	l := &lowerer{prog: prog, info: prog.Info, mod: &ir.Module{Name: prog.Main.Name}, done: map[string]*ir.Func{}, parent: map[string]string{}, dtorType: map[string]*resolve.Named{}}
+	l := &lowerer{prog: prog, info: prog.Info, mod: &ir.Module{Name: prog.Main.Name, Files: sourceFiles(prog)}, done: map[string]*ir.Func{}, parent: map[string]string{}, dtorType: map[string]*resolve.Named{}}
 	defer func() {
 		if r := recover(); r != nil {
 			if le, ok := r.(lowerError); ok {
@@ -860,4 +860,14 @@ func (fl *fnLower) symPlace(sym *resolve.Symbol) ir.Place {
 		return ir.Place{Access: acc}
 	}
 	return ir.Place{Local: fl.local(sym)}
+}
+
+// sourceFiles is the module's line tables: one per source file of the
+// program, in the order given.
+func sourceFiles(prog *resolve.Program) []ir.SourceFile {
+	out := make([]ir.SourceFile, 0, len(prog.Sources))
+	for _, f := range prog.Sources {
+		out = append(out, ir.SourceFile{Name: f.Name, LineStarts: ir.LineStartsOf(f.Bytes), Size: len(f.Bytes)})
+	}
+	return out
 }

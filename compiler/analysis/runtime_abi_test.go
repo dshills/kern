@@ -226,12 +226,14 @@ func compilerDecls(t *testing.T, triple string, freestandingMode bool) map[strin
 			continue
 		}
 		// the last unit, the inline program, is emitted as a build that
-		// names a stack size, which declares one more entry
+		// names a stack size and asks for backtraces, each of which
+		// declares one more entry
 		var stack uint64
+		backtrace := false
 		if u[0] == units[len(units)-1][0] {
-			stack = 1 << 20
+			stack, backtrace = 1<<20, true
 		}
-		text, errs := llvm.EmitWith(mod, llvm.Options{Triple: triple, Freestanding: freestandingMode, StackCheck: freestandingMode, StackBytes: stack})
+		text, errs := llvm.EmitWith(mod, llvm.Options{Triple: triple, Freestanding: freestandingMode, StackCheck: freestandingMode, StackBytes: stack, Backtrace: backtrace})
 		if len(errs) > 0 {
 			continue // a program the target cannot hold (hosted-only entries are still declared below when it emits)
 		}

@@ -21,9 +21,9 @@ reason. Updated at the end of every phase.
 | RC2 stack size | 3 | 4dd62e2 | `kern test` has no `--stack-bytes` (it honours `KERN_STACK_BYTES`); the manifest's error code is `PROJECT_INVALID`, as for every manifest error |
 | RC3 spawn robustness | 3 | 4dd62e2 | A spawn whose allocation fails is `Err(SpawnErr)`; it trapped `oom` before (`specs/runtime-trap-file` R4) |
 | RC4 queries | 3 | 4dd62e2 |  |
-| RE1 line and column | 4 | | |
-| RE2 backtrace | 4 | | |
-| RE3 parity | 4 | | |
+| RE1 line and column | 4 | PHASE4 | The span 0-0 (no location) also gives line 0, column 0 |
+| RE2 backtrace | 4 | PHASE4 | A debug build lists every call as written only when made with `--backtrace` (clang inlines at `-O1`) |
+| RE3 parity | 4 | PHASE4 |  |
 | RD1 park | 5 | | |
 | RD2 timed wait | 5 | | |
 | RD3 try lock | 5 | | |

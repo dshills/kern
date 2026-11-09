@@ -373,16 +373,21 @@ func TestEmitFunctionMarkers(t *testing.T) {
 	if !strings.Contains(text, sec+"-1 }") {
 		t.Errorf("no library function carries the marker -1\n%s", text)
 	}
-	// the thunk kern_run_main calls carries main's marker (LLVM inlines
-	// main into it), and the C-level entry hands over the table and
-	// follows the startup contract (specs/runtime/PLAN.md)
-	if !strings.Contains(text, "define internal i32 @kern.entry() "+sec+mm[1]+" }") || !strings.Contains(text, "call void @kern_set_fn_locs(ptr @kern.fn_locs, i64 2)") {
-		t.Errorf("the entry thunk must carry main's marker and the entry hand over the table\n%s", text)
+	// the thunk kern_run_main calls has no marker and calls main noinline,
+	// so main keeps its own frame and marker; the C-level entry hands over
+	// the tables and follows the startup contract (specs/runtime/PLAN.md)
+	if !strings.Contains(text, "define internal i32 @kern.entry() {\nentry:\n  %r = call i32 @\"t.main\"() noinline") || !strings.Contains(text, "call void @kern_set_fn_locs(ptr @kern.fn_locs, i64 2)") {
+		t.Errorf("the entry thunk must call main noinline and the entry hand over the table\n%s", text)
+	}
+	// the line table of the one source file: its seven line starts, the
+	// last at the file's length (specs/runtime RE1)
+	if !strings.Contains(text, "call void @kern_set_lines(ptr @kern.files, i64 1)") || !regexp.MustCompile(`@kern\.lines\.0 = private constant \[8 x i32\] \[i32 0, i32 9, `).MatchString(text) || !strings.Contains(text, fmt.Sprintf("i64 8, i64 %d }", len(src))) {
+		t.Errorf("no line table for the source file\n%s", text)
 	}
 	if !strings.Contains(text, "define i32 @main(i32 %argc, ptr %argv) {") || !strings.Contains(text, "call void @kern_start(ptr @kern_rt_abi_2)\n  %s = call i32 @kern_run_main(ptr @kern.entry)\n  ret i32 %s") {
 		t.Errorf("the entry does not follow the startup contract\n%s", text)
 	}
-	table := regexp.MustCompile(`@kern\.fn_locs = private constant \[2 x \{ i64, i64, ptr \}\] \[(.*)\]`).FindStringSubmatch(text)
+	table := regexp.MustCompile(`@kern\.fn_locs = private constant \[2 x \{ i64, i64, ptr, ptr \}\] \[(.*)\]`).FindStringSubmatch(text)
 	if table == nil {
 		t.Fatalf("no location table\n%s", text)
 	}
@@ -393,11 +398,15 @@ func TestEmitFunctionMarkers(t *testing.T) {
 	if !strings.Contains(entries[i], fmt.Sprintf("i64 %d, i64 %d, ptr @kern.file.", fAt, fEnd)) {
 		t.Errorf("f's entry %q, want its declaration %d-%d", entries[i], fAt, fEnd)
 	}
+	// each entry names its function, for the backtrace (RE2)
+	if !strings.Contains(text, `c"t.f\00"`) || !strings.Contains(text, `c"t.main\00"`) || !strings.Contains(entries[i], "ptr @kern.fn.") {
+		t.Errorf("the location table does not name its functions\n%s", text)
+	}
 	if elf, errs := llvm.Emit(lowerSrc(), "x86_64-unknown-linux-gnu"); len(errs) > 0 || !strings.Contains(elf, `section "kern_text" prefix`) {
 		t.Errorf("an ELF target uses the kern_text section (errs %v)", errs)
 	}
 	free, errs := llvm.EmitWith(lowerSrc(), llvm.Options{Triple: "x86_64-unknown-none", Freestanding: true, StackCheck: true})
-	if len(errs) > 0 || strings.Contains(free, "prefix") || strings.Contains(free, "kern_set_fn_locs") {
+	if len(errs) > 0 || strings.Contains(free, "prefix") || strings.Contains(free, "kern_set_fn_locs") || !strings.Contains(free, "call void @kern_set_lines(ptr @kern.files, i64 1)") {
 		t.Errorf("a freestanding build carries no marker (errs %v)", errs)
 	}
 }

@@ -60,6 +60,7 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 	if bo.stackSet {
 		opts.StackBytes = uint64(bo.StackBytes)
 	}
+	opts.Backtrace = bo.Backtrace
 	if out == "" {
 		return fail(stdout, "CLI_INVALID_FLAGS", "build requires -o <out> or an output in %s", project.ManifestName)
 	}

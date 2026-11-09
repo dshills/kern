@@ -51,6 +51,9 @@ type Options struct {
 	// StackBytes is the stack size of spawned threads and of main, 0 for
 	// the runtime's default (specs/runtime RC2).
 	StackBytes uint64
+	// Backtrace makes the default trap handler write a backtrace unless
+	// KERN_BACKTRACE=0 (specs/runtime RE2).
+	Backtrace bool
 	// ElideChecks is the measurement-only option that drops runtime checks
 	// (PLAN.md 4.4); it is not a build configuration of the language.
 	ElideChecks bool
@@ -164,7 +167,7 @@ func BuildModule(mod *ir.Module, srcs []*source.File, out string, opts Options) 
 			triple = FreestandingTriple
 		}
 	}
-	lo := llvm.Options{Triple: triple, Freestanding: opts.Freestanding, StackCheck: opts.Freestanding && !opts.NoStackCheck, TSan: opts.TSan, ASan: opts.Sanitize && !opts.Freestanding, StackBytes: opts.StackBytes, ElideChecks: opts.ElideChecks}
+	lo := llvm.Options{Triple: triple, Freestanding: opts.Freestanding, StackCheck: opts.Freestanding && !opts.NoStackCheck, TSan: opts.TSan, ASan: opts.Sanitize && !opts.Freestanding, StackBytes: opts.StackBytes, Backtrace: opts.Backtrace, KeepFrames: opts.Backtrace && opts.Opt != "release", ElideChecks: opts.ElideChecks}
 	if opts.Debug {
 		lo.Sources = map[string][]byte{}
 		for _, f := range srcs {

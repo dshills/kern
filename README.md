@@ -190,8 +190,8 @@ Files on the command line get 0.5.
 | `show-layout` | Exact sizes, alignments and field offsets for the target |
 | `show-copies`, `show-allocations`, `show-bounds-checks`, `show-effects` | Where deep copies, heap allocations, runtime bounds checks and side effects occur, each labelled `proven`, `runtime-checked`, `assumed-unsafe`, `estimated` or `unknown` |
 | `apply-structured-edit` | Apply a semantic edit from the machine API and return the new source |
-| `run` | Execute in the reference interpreter; `--opt=debug\|release`, `--env=hosted\|freestanding`, `--stack-bytes=N` (65,536 to 1,073,741,824), `--test-hooks` |
-| `build` | Produce an executable or freestanding image; `--debug` emits DWARF line tables; `--stack-bytes=N` (or `stack_bytes` in `kern.mod`) gives spawned threads and `main` a stack of N bytes, which `KERN_STACK_BYTES` overrides when the program runs |
+| `run` | Execute in the reference interpreter; `--opt=debug\|release`, `--env=hosted\|freestanding`, `--stack-bytes=N` (65,536 to 1,073,741,824), `--backtrace`, `--test-hooks` |
+| `build` | Produce an executable or freestanding image; `--debug` emits DWARF line tables; `--stack-bytes=N` (or `stack_bytes` in `kern.mod`) gives spawned threads and `main` a stack of N bytes, which `KERN_STACK_BYTES` overrides when the program runs; `--backtrace` makes a trap list the functions on the stack after its record (`KERN_BACKTRACE=1` or `0` decides it at run time) |
 | `debug` | Build with debug info and launch lldb with a `kern-own` command that shows ownership state at the current line |
 | `test` | Run the program's tests in the interpreter and natively, in debug and release, and compare the runs; `--opt=`, `--engine=interp\|native`, `--run=<regexp>`, `--timeout=<seconds>`, `--jobs=<n>`, `--human` |
 | `lsp` | A language server on standard input and output: diagnostics as you type, formatting, the compiler's fixes as quick fixes, ownership facts on hover, go to definition, find references, rename, completion, an outline and signature help; setup for Neovim, Helix and Emacs is in [docs/editors.md](docs/editors.md) |

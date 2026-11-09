@@ -37,6 +37,9 @@ type BuildOptions struct {
 	// stackSet: StackBytes came from --stack-bytes or the manifest, not
 	// from the default (specs/runtime RC2)
 	stackSet, stackFlag bool
+	// Backtrace: the default trap handler writes a backtrace unless
+	// KERN_BACKTRACE=0 (specs/runtime RE2)
+	Backtrace bool
 }
 
 // applyManifest takes the manifest's opt and env where no flag set them.
@@ -151,6 +154,8 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 			opts.ElideChecks = true
 		case a == "--debug":
 			opts.Debug = true
+		case a == "--backtrace":
+			opts.Backtrace = true
 		case strings.HasPrefix(a, "--opt="), strings.HasPrefix(a, "--env="), strings.HasPrefix(a, "--stack-bytes="):
 			k, v, _ := strings.Cut(a, "=")
 			switch k {
@@ -241,6 +246,16 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 		stack = n // the environment overrides the build's value, as natively
 	}
 	it.SetStackLimit(stack)
+	// the backtrace: --backtrace, which KERN_BACKTRACE overrides either
+	// way, as natively
+	bt := opts.Backtrace
+	switch os.Getenv("KERN_BACKTRACE") {
+	case "1":
+		bt = true
+	case "0":
+		bt = false
+	}
+	it.SetBacktrace(bt)
 	return it.Run()
 }
 

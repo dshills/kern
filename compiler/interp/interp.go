@@ -23,6 +23,10 @@ type Trap struct {
 	Kind string
 	Pos  ast.Pos
 	File string
+	// frames are the trapping thread's activations when the trap was
+	// raised, outermost first, kept only when a backtrace was asked for
+	// (the panic that carries the trap unwinds them)
+	frames []*ir.Func
 }
 
 func (t *Trap) Error() string { return "trap " + t.Kind }
@@ -37,12 +41,17 @@ type Interp struct {
 	TestHooks  bool
 	stackBytes int
 	stackUsed  int
-	spawnStack int      // the configured budget of spawned threads (SetStackLimit)
-	globals    []Value  // this thread's instances of the module's thread_locals
-	heap       *rawHeap // byte-addressed memory for raw pointers
-	sh         *sharedState
-	tid        uint64 // this thread's identifier (0 is the main thread)
-	inTrap     bool   // a trap inside the handler terminates
+	spawnStack int // the configured budget of spawned threads (SetStackLimit)
+	// backtrace: the default trap handler writes a backtrace after the
+	// record (specs/runtime RE2); frames is then this thread's activations,
+	// outermost first, kept only while it is on
+	backtrace bool
+	frames    []*frame
+	globals   []Value  // this thread's instances of the module's thread_locals
+	heap      *rawHeap // byte-addressed memory for raw pointers
+	sh        *sharedState
+	tid       uint64 // this thread's identifier (0 is the main thread)
+	inTrap    bool   // a trap inside the handler terminates
 	// Freestanding selects the freestanding emulation: console device
 	// writes go to standard output and the halt line ends the run.
 	Freestanding bool
@@ -169,6 +178,7 @@ func (it *Interp) child() *Interp {
 	c.inTrap = false
 	c.cur = nil
 	c.plans = nil
+	c.frames = nil
 	c.argBuf = nil
 	c.intrBuf = nil
 	it.sh.mu.Lock()
@@ -444,6 +454,8 @@ type trapRecordJSON struct {
 			Start int `json:"start"`
 			End   int `json:"end"`
 		} `json:"span"`
+		Line   int    `json:"line"`
+		Col    int    `json:"col"`
 		Thread uint64 `json:"thread"`
 	} `json:"trap"`
 }
@@ -456,6 +468,7 @@ func (it *Interp) trapRecord(tr *Trap) {
 	rec.Trap.File = tr.File
 	rec.Trap.Span.Start = tr.Pos.Start
 	rec.Trap.Span.End = tr.Pos.End
+	rec.Trap.Line, rec.Trap.Col = it.mod.LineCol(tr.File, tr.Pos.Start, tr.Pos.End)
 	rec.Trap.Thread = it.tid
 	b, _ := json.Marshal(rec)
 	it.sh.mu.Lock()
@@ -466,6 +479,9 @@ func (it *Interp) trapRecord(tr *Trap) {
 			_, _ = fmt.Fprintf(it.out, "%s\n", b) // the console is the only device
 		} else {
 			_, _ = fmt.Fprintf(it.errOut, "%s\n", b)
+			if it.backtrace {
+				_, _ = fmt.Fprintf(it.errOut, "%s\n", it.backtraceLine(tr))
+			}
 		}
 		return
 	}
@@ -484,6 +500,46 @@ func (it *Interp) trapRecord(tr *Trap) {
 		}()
 		it.callNamed(h.Name, []Value{&Access{Ref: slotRef{&slot}}})
 	}()
+}
+
+// SetBacktrace makes the default trap handler write a backtrace after the
+// trap record, as a native program does with KERN_BACKTRACE=1 or built with
+// --backtrace (specs/runtime RE2).
+func (it *Interp) SetBacktrace(on bool) { it.backtrace = on }
+
+// backtraceLine is the backtrace of the trapping thread: its user
+// functions' activations, innermost first, at most 64, each with the
+// function's qualified name and its declaration's file and line. Library
+// activations are left out, as natively.
+func (it *Interp) backtraceLine(tr *Trap) []byte {
+	type btFrame struct {
+		Function string `json:"function"`
+		File     string `json:"file"`
+		Line     int    `json:"line"`
+	}
+	var rec struct {
+		Backtrace struct {
+			Thread    uint64    `json:"thread"`
+			Frames    []btFrame `json:"frames"`
+			Truncated bool      `json:"truncated,omitempty"`
+		} `json:"backtrace"`
+	}
+	rec.Backtrace.Thread = it.tid
+	rec.Backtrace.Frames = []btFrame{}
+	for i := len(tr.frames) - 1; i >= 0; i-- {
+		f := tr.frames[i]
+		if f.Library {
+			continue
+		}
+		if len(rec.Backtrace.Frames) == 64 {
+			rec.Backtrace.Truncated = true
+			break
+		}
+		line, _ := it.mod.LineCol(f.File, f.Pos.Start, f.Pos.End)
+		rec.Backtrace.Frames = append(rec.Backtrace.Frames, btFrame{Function: f.Name, File: f.File, Line: line})
+	}
+	b, _ := json.Marshal(rec)
+	return b
 }
 
 var trapKinds = []string{"bounds", "overflow", "div_zero", "shift", "conversion", "generation", "vacant", "identity", "disjoint", "oom", "stack", "explicit", "unreachable"}
@@ -507,7 +563,14 @@ func (it *Interp) trap(kind string, pos ast.Pos) {
 			file = it.cur.block.File
 		}
 	}
-	panic(&Trap{Kind: kind, Pos: pos, File: file})
+	tr := &Trap{Kind: kind, Pos: pos, File: file}
+	if it.backtrace {
+		tr.frames = make([]*ir.Func, len(it.frames))
+		for i, fr := range it.frames {
+			tr.frames[i] = fr.f
+		}
+	}
+	panic(tr)
 }
 
 // frame is one activation.
@@ -691,7 +754,15 @@ func (it *Interp) callWith(f *ir.Func, fi *funcInfo, args []Value, span *ast.Pos
 	fr.retTo, fr.retIDs = into, ids
 	prev := it.cur
 	it.cur = fr
-	defer func() { it.cur = prev }()
+	if it.backtrace {
+		it.frames = append(it.frames, fr)
+	}
+	defer func() {
+		it.cur = prev
+		if it.backtrace {
+			it.frames = it.frames[:len(it.frames)-1]
+		}
+	}()
 	if f.Library {
 		// a library activation reports its caller's span and file; with no
 		// call site (drop glue, a function value) an empty span and the

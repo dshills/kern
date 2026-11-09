@@ -52,6 +52,8 @@ void kern_yield(void);
 
 // Records the program's file name, reported by a trap that names none.
 void kern_set_file(const char *name);
+// Registers the program's line tables, from which a trap's line and column are computed.
+void kern_set_lines(const void *t, int64_t n);
 // Installs the trap handler and returns the previous one (null: the default).
 void *kern_set_handler(void *fn);
 // Raises a trap of the kind at the span in file (null: the program's): writes the record or runs the handler once, then halts with code 134; never returns.

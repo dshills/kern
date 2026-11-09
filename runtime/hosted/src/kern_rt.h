@@ -180,8 +180,12 @@ void *kern_set_handler(void *fn);
 void kern_set_file(const char *name);
 // Raises a trap of the kind at the span in file (null: the program's): runs the handler once and aborts; never returns.
 _Noreturn void kern_trap(int32_t kind, int64_t start, int64_t end, const char *file);
-// Registers the table of function locations the fault handler names faults with.
+// Registers the table of function locations and names the fault handler and the backtrace read.
 void kern_set_fn_locs(const void *t, int64_t n);
+// Registers the program's line tables, from which a trap's line and column are computed.
+void kern_set_lines(const void *t, int64_t n);
+// Records that the build asked for backtraces (--backtrace); KERN_BACKTRACE overrides it either way.
+void kern_set_backtrace(int32_t on);
 
 // ---- rt_alloc.c: allocation ----
 

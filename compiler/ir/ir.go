@@ -26,7 +26,61 @@ type Module struct {
 	// roots like the tests, run before the test and after it returns.
 	TestSetup    []string
 	TestTeardown []string
-	byName       map[string]*Func
+	// Files are the program's own source files, by name: where each line
+	// starts, from which a trap's line and column are computed (specs/runtime
+	// RE1). Library files are not listed: a trap names the user-level call.
+	Files  []SourceFile
+	byName map[string]*Func
+}
+
+// SourceFile is one source file's line table: the byte offset of each
+// line's first byte (the first is 0; a file that ends in a newline has a
+// last, empty line starting at Size) and the file's length in bytes.
+type SourceFile struct {
+	Name       string
+	LineStarts []int32
+	Size       int
+}
+
+// LineStartsOf computes a file's line table.
+func LineStartsOf(src []byte) []int32 {
+	starts := []int32{0}
+	for i, c := range src {
+		if c == '\n' {
+			starts = append(starts, int32(i+1))
+		}
+	}
+	return starts
+}
+
+// LineCol is the 1-based line and byte column of offset start in the named
+// file: 0, 0 when the module has no table for the file, when start is past
+// the file's end, or for the empty span 0-0 that stands for "no location".
+// The three runtimes compute the same (specs/runtime RE1).
+func (m *Module) LineCol(file string, start, end int) (line, col int) {
+	if start == 0 && end == 0 {
+		return 0, 0
+	}
+	for i := range m.Files {
+		f := &m.Files[i]
+		if f.Name != file {
+			continue
+		}
+		if start < 0 || start > f.Size {
+			return 0, 0
+		}
+		lo, hi := 0, len(f.LineStarts) // the last line start at or before start
+		for hi-lo > 1 {
+			mid := (lo + hi) / 2
+			if int(f.LineStarts[mid]) <= start {
+				lo = mid
+			} else {
+				hi = mid
+			}
+		}
+		return lo + 1, start - int(f.LineStarts[lo]) + 1
+	}
+	return 0, 0
 }
 
 // Func looks up a function by name.
