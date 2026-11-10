@@ -59,6 +59,10 @@ reason. Updated at the end of every phase.
 | RM4 socket options | 13 | 813cc0f | A hop limit outside 1 to 255 is refused before the system is asked |
 | RM5 the interpreter maps files | 13 | 813cc0f | The interpreter's record of a fault has the span 0-0, where the runtime's names the function when its walk finds one |
 | RM6 the interpreter's signal defaults | 13 | 813cc0f | The interpreter gives a signal the system's default with a raw `sigaction`, and exits with 128 + the signal's number should that fail |
+| RN1 readiness | 14 | 6f4dc1f | `Ready`'s fields are `closed` and `failed`. A wait reports at most 64 sockets |
+| RN2 descriptors over a Unix-domain stream | 14 | 6f4dc1f | `Received` is a union, so that a `match` takes the descriptor out. `io.file_of(fd)` added for the library's use. macOS does not answer `SO_ACCEPTCONN`: a listener is told from a stream there by the process's own descriptor table (`proc_pidfdinfo`) |
+| RN3 peer credentials | 14 | 6f4dc1f |  |
+| RN4 abstract names | 14 | 6f4dc1f | In the interpreter on Linux a file's relative path that begins with `@` is bound as `./@...`: its host's network package reads a leading `@` as an abstract name |
 
 ## Found along the way
 
@@ -81,3 +85,5 @@ reason. Updated at the end of every phase.
 | A configured stack of 65,536 bytes could not start `main` or a thread on Linux arm64, whose minimum is 131,072 (found by the final run of the whole suite in the container) | b4f2b5b |
 | Go's network package permits broadcast on every datagram socket and the system on none: the interpreter's UDP sockets could broadcast without `set_broadcast` | 813cc0f |
 | A signal that `signal.raise` sent with a fatal disposition ended a native program before its buffered output was written; `raise` flushes first | 813cc0f |
+| A `?` in an argument of a call whose earlier argument had an access open on a value with a destructor was an internal error of the compiler (`access conflicts with open access`): the error path now ends the accesses that enclosing calls opened | 6f4dc1f |
+| On the error path of a `?` in an operand of a call, a struct literal, a variant or an array, the owned operands already evaluated were never destroyed (Rule 5.7.2): they are destroyed there, newest first | 6f4dc1f |
