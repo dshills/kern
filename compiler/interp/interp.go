@@ -87,8 +87,10 @@ func New(mod *ir.Module, file string, out, errOut io.Writer) *Interp {
 // sharedState is the process-wide interpreter state shared by every thread
 // (spawned threads are goroutines with their own Interp copy).
 type sharedState struct {
-	args          []string             // the program's arguments (std/io args)
-	files         map[int64]*os.File   // open files by descriptor (std/io)
+	args          []string           // the program's arguments (std/io args)
+	files         map[int64]*os.File // open files by descriptor (std/io)
+	socks         map[int64]*sock    // open sockets by descriptor (std/net)
+	nextSock      int64
 	procs         map[int64]*procEntry // started children by handle (std/process)
 	procsKilled   bool                 // KillChildren ran: a child registered later is killed at once
 	procFaults    [3]atomic.Int32      // the std/process fault hook's slots, by pipe kind

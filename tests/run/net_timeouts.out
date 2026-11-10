@@ -1,0 +1,23 @@
+-- accept
+nothing in 30 ms, after at least that long: true
+a look finds nothing
+a connection made is accepted
+-- read
+nothing in 30 ms, after at least that long: true
+a look finds nothing
+after the timeouts the socket still reads [late]
+the other end reads [and writes]
+an empty buffer reads 0
+-- after the peer closed
+read returns 0
+read_timeout returns 0
+a write fails with kind BrokenPipe or ConnectionReset, and the program goes on
+-- a port nobody listens on
+connect: ConnectionRefused
+connect_timeout: ConnectionRefused, not a timeout
+-- connects that give up
+with a duration of zero, some attempt was given up: true
+and they left no descriptor behind: true
+to a full queue, some attempt timed out or was turned away: true
+none failed in another way: true
+each connection made holds one descriptor, the others none: true

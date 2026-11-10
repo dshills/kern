@@ -1,0 +1,92 @@
+//! phase: 6
+//! expect: output net_sockets_move
+//! tsan: clean
+// TcpListener, TcpStream and UdpSocket are Send (specs/runtime RH4): each
+// is handed to another thread, which uses it and destroys it.
+module cc
+import "std/net"
+import "std/io"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+func answer(u: own net.UdpSocket) -> u64 {
+    var buf: [16]u8 = zero()
+    match u.recv_from(buf) {
+        Ok(d) => {
+            match u.send_to(buf[0usize : d.len], d.from) {
+                Ok(n) => { return u64(n) }
+                Err(e) => { return 0u64 }
+            }
+        }
+        Err(e) => { return 0u64 }
+    }
+}
+
+func accept_one(l: own net.TcpListener) -> u64 {
+    match l.accept() {
+        Ok(c) => { return read_all(c) }
+        Err(e) => { return 0u64 }
+    }
+}
+
+func read_all(c: own net.TcpStream) -> u64 {
+    data := Vec[u8].new()
+    match io.read_to_end(c, data) {
+        Ok(n) => { return u64(n) }
+        Err(e) => { return 0u64 }
+    }
+}
+
+func run() -> Result[(), io.IoErr] {
+    // a UdpSocket to a thread
+    u := net.UdpSocket.bind(net.loopback_v4(0u16))?
+    u_at := u.local_addr()?
+    mine := net.UdpSocket.bind(net.loopback_v4(0u16))?
+    match thread.spawn(answer, u) {
+        Ok(t) => {
+            n := mine.send_to("datagram", u_at)?
+            var buf: [16]u8 = zero()
+            d := mine.recv_from(buf)?
+            print_str("the thread's socket answered ")
+            print_u64(t.join())
+            print_str(" bytes: ")
+            print_str(buf[0usize : d.len])
+            println()
+        }
+        Err(e) => say("no thread")
+    }
+    // a TcpListener to one thread, the accepted TcpStream's reading to it;
+    // a connected TcpStream to another
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    at := l.local_addr()?
+    match thread.spawn(accept_one, l) {
+        Ok(server) => {
+            c := net.TcpStream.connect(at)?
+            c.write_all("stream bytes")?
+            c.shutdown(net.Shutdown.Write)?
+            match thread.spawn(read_all, c) {
+                Ok(reader) => {
+                    print_str("the listener's thread read ")
+                    print_u64(server.join())
+                    print_str(" bytes; the stream's thread read ")
+                    print_u64(reader.join())
+                    println()
+                }
+                Err(e) => {
+                    drop(server)
+                    say("no thread")
+                }
+            }
+        }
+        Err(e) => say("no thread")
+    }
+    return Ok(())
+}
+
+func main() -> i32 {
+    match run() {
+        Ok(u) => say("done")
+        Err(e) => say("failed")
+    }
+    return 0i32
+}

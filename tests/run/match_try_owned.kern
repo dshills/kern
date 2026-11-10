@@ -1,0 +1,48 @@
+//! phase: 6
+//! expect: output match_try_owned
+// The value `?` unwraps from a call's result is a temporary, so a match
+// on it owns its payload (docs/ownership.md, the forms that bind an
+// access): `match f()? { Some(v) => keep(v) ... }`.
+module run
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str("drop "); print_u64(self.id); println() }
+}
+union Fail { Bad }
+func find(id: u64) -> Result[Option[Tok], Fail] {
+    if id == 0u64 { return Err(Bad) }
+    if id > 100u64 { return Ok(None) }
+    return Ok(Some(Tok { id: id }))
+}
+func collect(ids: view[]u64, kept: edit[Vec[Tok]]) -> Result[u64, Fail] {
+    var missing: u64 = 0u64
+    for id in ids {
+        match find(id)? {
+            Some(t) => { kept.push(t) }
+            None => { missing = missing + 1u64 }
+        }
+    }
+    return Ok(missing)
+}
+func main() -> i32 {
+    kept := Vec[Tok].new()
+    var ids: [4]u64 = zero()
+    ids[0usize] = 3u64
+    ids[1usize] = 500u64
+    ids[2usize] = 7u64
+    ids[3usize] = 9u64
+    match collect(ids, kept) {
+        Ok(missing) => { print_str("missing "); print_u64(missing); println() }
+        Err(e) => { print_str("failed"); println() }
+    }
+    print_str("kept ")
+    print_u64(u64(kept.len()))
+    println()
+    ids[1usize] = 0u64
+    again := Vec[Tok].new()
+    match collect(ids, again) {
+        Ok(missing) => { print_str("missing "); print_u64(missing); println() }
+        Err(e) => { print_str("failed after keeping "); print_u64(u64(again.len())); println() }
+    }
+    return 0i32
+}

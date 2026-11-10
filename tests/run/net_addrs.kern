@@ -1,0 +1,180 @@
+//! phase: 6
+//! expect: output net_addrs
+// std/net addresses (specs/runtime RH1): parse_addr and format_addr over
+// tables of IPv4 and IPv6 forms, the texts that are not addresses, and
+// resolve of names the loopback answers.
+module t
+import "std/net"
+import "std/io"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+// round parses text and prints what format_addr makes of it.
+func round(text: view[]u8) {
+    print_str(text)
+    print_str(" -> ")
+    match net.parse_addr(text) {
+        Some(a) => {
+            back := net.format_addr(a)
+            print_str(back.as_view())
+            // the canonical text parses to the same address
+            match net.parse_addr(back.as_view()) {
+                Some(again) => {
+                    twice := net.format_addr(again)
+                    if len(twice.as_view()) != len(back.as_view()) { print_str(" (unstable)") }
+                }
+                None => print_str(" (does not parse back)")
+            }
+        }
+        None => print_str("not an address")
+    }
+    println()
+}
+
+func ip(text: view[]u8) {
+    print_str(text)
+    print_str(" -> ")
+    match net.parse_ip(text) {
+        Some(a) => {
+            back := net.format_ip(a)
+            print_str(back.as_view())
+            match a {
+                V4(b) => print_str(" (v4)")
+                V6(b) => print_str(" (v6)")
+            }
+        }
+        None => print_str("not an address")
+    }
+    println()
+}
+
+func has_loopback(list: view[Vec[net.SocketAddr]], port: u16) -> bool {
+    var found: bool = false
+    for a in list.as_view() {
+        if a.port == port {
+            match a.ip {
+                V4(b) => { if b[0usize] == 127u8 { found = true } }
+                V6(b) => { if b[15usize] == 1u8 { found = true } }
+            }
+        }
+    }
+    return found
+}
+
+func main() -> i32 {
+    say("-- IPv4 with a port")
+    round("127.0.0.1:80")
+    round("0.0.0.0:0")
+    round("255.255.255.255:65535")
+    round("10.1.2.3:08080")
+    round("1.2.3.4:65536")
+    round("1.2.3.4:")
+    round("1.2.3.4")
+    round("1.2.3:80")
+    round("1.2.3.4.5:80")
+    round("256.1.1.1:80")
+    round("01.2.3.4:80")
+    round("1..3.4:80")
+    round("1.2.3.4:8a")
+    round(" 1.2.3.4:80")
+    round("1.2.3.4:123456")
+    round("")
+    say("-- IPv6 with a port")
+    round("[::1]:8080")
+    round("[::]:0")
+    round("[2001:db8::1]:443")
+    round("[2001:0DB8:0000:0000:0000:0000:0000:0001]:443")
+    round("[2001:db8:0:0:1:0:0:1]:1")
+    round("[2001:0:0:1:0:0:0:1]:1")
+    round("[1:2:3:4:5:6:7:8]:9")
+    round("[1:0:3:4:5:6:7:8]:9")
+    round("[fe80::]:1")
+    round("[::ffff:192.0.2.1]:53")
+    round("[64:ff9b::192.0.2.33]:53")
+    round("[::1.2.3.4]:5")
+    round("[1::8]:1")
+    round("[1:2:3:4:5:6:7::]:1")
+    round("[::2:3:4:5:6:7:8]:1")
+    round("::1:80")
+    round("[::1]")
+    round("[::1]80")
+    round("[::1:80")
+    round("[1:2:3:4:5:6:7]:1")
+    round("[1:2:3:4:5:6:7:8:9]:1")
+    round("[1::2::3]:1")
+    round("[:1:2:3:4:5:6:7]:1")
+    round("[1:2:3:4:5:6:7:]:1")
+    round("[12345::]:1")
+    round("[g::]:1")
+    round("[1:2:3:4:5:6:7:8::]:1")
+    round("[::1.2.3]:1")
+    round("[1.2.3.4::]:1")
+    round("[1:2:3:4:5:6:7:1.2.3.4]:1")
+    round("[]:1")
+    say("-- addresses without a port")
+    ip("192.168.1.1")
+    ip("::")
+    ip("::1")
+    ip("2001:db8::8:800:200c:417a")
+    ip("ff01::101")
+    ip("0:0:0:0:0:0:0:0")
+    ip("1.2.3.4:5")
+    ip("[::1]")
+    say("-- resolve")
+    match net.resolve("localhost", 8080u16) {
+        Ok(list) => {
+            if has_loopback(list, 8080u16) { say("localhost has a loopback address with the port") } else { say("localhost has no loopback address") }
+        }
+        Err(e) => say("localhost does not resolve")
+    }
+    match net.resolve("127.0.0.1", 9u16) {
+        Ok(list) => {
+            print_str("127.0.0.1 resolves to ")
+            print_u64(u64(list.len()))
+            print_str(" address: ")
+            for a in list.as_view() {
+                text := net.format_addr(a)
+                print_str(text.as_view())
+            }
+            println()
+        }
+        Err(e) => say("127.0.0.1 does not resolve")
+    }
+    match net.resolve("::1", 9u16) {
+        Ok(list) => {
+            for a in list.as_view() {
+                text := net.format_addr(a)
+                say(text.as_view())
+            }
+        }
+        Err(e) => say("::1 does not resolve")
+    }
+    match net.resolve("", 1u16) {
+        Ok(list) => say("an empty name resolved")
+        Err(e) => {
+            match io.kind(e) {
+                InvalidInput => say("an empty name is InvalidInput")
+                _ => say("an empty name is another kind of error")
+            }
+        }
+    }
+    var nul: [3]u8 = zero()
+    nul[0usize] = 97u8
+    nul[2usize] = 98u8
+    match net.resolve(nul, 1u16) {
+        Ok(list) => say("a name with a NUL byte resolved")
+        Err(e) => {
+            match io.kind(e) {
+                InvalidInput => say("a name with a NUL byte is InvalidInput")
+                _ => say("a name with a NUL byte is another kind of error")
+            }
+        }
+    }
+    lo := net.loopback_v4(7u16)
+    text := net.format_addr(lo)
+    say(text.as_view())
+    lo6 := net.loopback_v6(7u16)
+    text6 := net.format_addr(lo6)
+    say(text6.as_view())
+    return 0i32
+}

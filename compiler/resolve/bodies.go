@@ -333,12 +333,14 @@ func accessElem(a *Access) Type {
 }
 
 // isTemporary reports an expression whose value nothing else names: a
-// call's result, a literal, a moved variable, and what take and replace
-// move out of a place.
+// call's result, a literal, a moved variable, what take and replace move
+// out of a place, and the Ok value that `?` unwraps from one of these.
 func isTemporary(e ast.Expr) bool {
-	switch e.(type) {
+	switch x := e.(type) {
 	case *ast.CallExpr, *ast.StructLit, *ast.Move, *ast.Take, *ast.Replace:
 		return true
+	case *ast.Try:
+		return isTemporary(x.X)
 	}
 	return false
 }

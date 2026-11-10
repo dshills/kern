@@ -36,10 +36,10 @@ reason. Updated at the end of every phase.
 | RG2 File | 7 | b764316 | The option is `trunc`: `truncate` is a reserved word. `io.options()` added |
 | RG3 metadata and paths | 7 | b764316 | `copy_file` copies bytes, not the mode |
 | RG4 readers and writers | 7 | b764316 | `write_to`, `read_to_end`, `with_capacity` and `BufWriter.buffered` added; `net.TcpStream` joins in phase 8 |
-| RH1 addresses | 8 | | |
-| RH2 TCP | 8 | | |
-| RH3 UDP | 8 | | |
-| RH4 rules | 8 | | |
+| RH1 addresses | 8 | PH8 | Addresses are taken by value (they copy), not by `view`; `parse_ip`, `format_ip` and the constructors (`v4`, `addr`, `loopback_v4`, ...) added. An IPv6 address has no scope identifier |
+| RH2 TCP | 8 | PH8 | `TcpListener.bind_with_backlog` added |
+| RH3 UDP | 8 | PH8 | `recv_from` returns `Datagram { len, from }`: kern has no tuple type |
+| RH4 rules | 8 | PH8 | A signal interrupting a blocked call is retried in the code but not provoked by a test until phase 9. A connect to a full queue is turned away on macOS and left waiting on Linux; the test accepts both |
 | RI1 std/signal | 9 | | |
 | RI2 std/rand | 9 | | |
 | RJ1 board interface | 10 | | |
@@ -61,3 +61,4 @@ reason. Updated at the end of every phase.
 | The IR validator's worklist bound was too small for a long inlined function (`ownership state does not converge` on correct code) | b764316 |
 | The interpreter's `print_str` crashed on a whole array argument | b764316 |
 | String literals had no `\r` and no byte escape; a variant name shared by two unions could not be written bare; `match replace(...)` did not own its payload (language changes) | b764316 |
+| A match on the value `?` unwraps from a call did not own its payload (language change) | PH8 |

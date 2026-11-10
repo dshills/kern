@@ -1,0 +1,203 @@
+//! phase: 6
+//! expect: output net_timeouts
+// std/net's timed calls and failures on the loopback (specs/runtime RH2,
+// RH4): accept, read and connect that give up after their duration and
+// leave the socket usable; a look with a duration of zero; reading and
+// writing after the peer closed; a refused connection; and that a connect
+// which gives up leaves no descriptor behind.
+module t
+import "std/net"
+import "std/io"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func flag(label: view[]u8, b: bool) { print_str(label); print_str(" "); print_bool(b); println() }
+func text(label: view[]u8, bytes: view[]u8) { print_str(label); print_str(" ["); print_str(bytes); print_str("]"); println() }
+
+// fds counts the process's open descriptors.
+func fds() -> usize {
+    with ls := io.list_dir("/dev/fd") {
+        match ls {
+            Ok(names) => { return names.len() }
+            Err(e) => { return 0usize }
+        }
+    }
+}
+
+func waits() -> Result[(), io.IoErr] {
+    say("-- accept")
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    at := l.local_addr()?
+    start := now_ns()
+    match l.accept_timeout(time.millis(30u64))? {
+        Some(c) => say("accepted a connection nobody made")
+        None => flag("nothing in 30 ms, after at least that long:", now_ns() - start >= 30000000u64)
+    }
+    match l.accept_timeout(time.nanos(0u64))? {
+        Some(c) => say("a look accepted a connection nobody made")
+        None => say("a look finds nothing")
+    }
+    c := net.TcpStream.connect(at)?
+    match l.accept_timeout(time.seconds(10u64))? {
+        Some(s) => {
+            say("a connection made is accepted")
+            talk(s, c)?
+        }
+        None => {
+            drop(c)
+            say("the connection was not accepted in 10 s")
+        }
+    }
+    return Ok(())
+}
+
+// talk has both ends of one connection: s the accepted one, c the
+// connecting one.
+func talk(s: own net.TcpStream, c: own net.TcpStream) -> Result[(), io.IoErr] {
+    say("-- read")
+    var buf: [16]u8 = zero()
+    start := now_ns()
+    match s.read_timeout(buf, time.millis(30u64))? {
+        Some(n) => say("read bytes nobody sent")
+        None => flag("nothing in 30 ms, after at least that long:", now_ns() - start >= 30000000u64)
+    }
+    match s.read_timeout(buf, time.nanos(0u64))? {
+        Some(n) => say("a look read bytes nobody sent")
+        None => say("a look finds nothing")
+    }
+    c.write_all("late")?
+    match s.read_timeout(buf, time.seconds(10u64))? {
+        Some(n) => text("after the timeouts the socket still reads", buf[0usize : n])
+        None => say("the bytes did not arrive in 10 s")
+    }
+    s.write_all("and writes")?
+    n := c.read(buf)?
+    text("the other end reads", buf[0usize : n])
+    var none: [0]u8 = zero()
+    match s.read_timeout(none, time.millis(1u64))? {
+        Some(k) => { print_str("an empty buffer reads "); print_u64(u64(k)); println() }
+        None => say("an empty buffer waited")
+    }
+
+    say("-- after the peer closed")
+    drop(c)
+    print_str("read returns ")
+    print_u64(u64(s.read(buf)?))
+    println()
+    match s.read_timeout(buf, time.seconds(10u64))? {
+        Some(k) => { print_str("read_timeout returns "); print_u64(u64(k)); println() }
+        None => say("read_timeout waited for a closed peer")
+    }
+    // the first writes may be taken: the system learns that the peer is
+    // gone from its answer to them
+    chunk := Vec[u8].new()
+    chunk.resize(4096usize, 0u8)
+    var outcome: u8 = 0u8
+    var tries: u64 = 0u64
+    while outcome == 0u8 && tries < 1000u64 {
+        match s.write(chunk.as_view()) {
+            Ok(k) => { }
+            Err(e) => {
+                match io.kind(e) {
+                    BrokenPipe => { outcome = 1u8 }
+                    ConnectionReset => { outcome = 1u8 }
+                    _ => { outcome = 2u8 }
+                }
+            }
+        }
+        tries = tries + 1u64
+    }
+    if outcome == 1u8 { say("a write fails with kind BrokenPipe or ConnectionReset, and the program goes on") }
+    if outcome == 2u8 { say("a write fails with another kind") }
+    if outcome == 0u8 { say("a thousand writes to a closed peer were taken") }
+    return Ok(())
+}
+
+func refused() -> Result[(), io.IoErr] {
+    say("-- a port nobody listens on")
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    at := l.local_addr()?
+    drop(l)
+    match net.TcpStream.connect(at) {
+        Ok(c) => say("connected to a closed port")
+        Err(e) => {
+            match io.kind(e) {
+                ConnectionRefused => say("connect: ConnectionRefused")
+                _ => say("connect: another kind")
+            }
+        }
+    }
+    match net.TcpStream.connect_timeout(at, time.seconds(5u64)) {
+        Ok(r) => say("connect_timeout did not fail")
+        Err(e) => {
+            match io.kind(e) {
+                ConnectionRefused => say("connect_timeout: ConnectionRefused, not a timeout")
+                _ => say("connect_timeout: another kind")
+            }
+        }
+    }
+    return Ok(())
+}
+
+func given_up() -> Result[(), io.IoErr] {
+    say("-- connects that give up")
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    at := l.local_addr()?
+    // a duration of zero: the attempt is started and, not being complete
+    // at once, given up
+    before := fds()
+    var gave_up: u64 = 0u64
+    for i in 0u64..20u64 {
+        match net.TcpStream.connect_timeout(at, time.nanos(0u64))? {
+            Some(c) => { }
+            None => { gave_up = gave_up + 1u64 }
+        }
+    }
+    flag("with a duration of zero, some attempt was given up:", gave_up > 0u64)
+    flag("and they left no descriptor behind:", fds() == before)
+
+    // a queue of one connection: the system soon leaves an attempt
+    // waiting, or turns it away
+    q := net.TcpListener.bind_with_backlog(net.loopback_v4(0u16), 1u32)?
+    qa := q.local_addr()?
+    kept := Vec[net.TcpStream].new()
+    var turned: u64 = 0u64
+    var odd: u64 = 0u64
+    start := fds()
+    for i in 0u64..12u64 {
+        match net.TcpStream.connect_timeout(qa, time.millis(100u64)) {
+            Ok(r) => {
+                match move r {
+                    Some(c) => { kept.push(c) }
+                    None => { turned = turned + 1u64 }
+                }
+            }
+            Err(e) => {
+                match io.kind(e) {
+                    ConnectionReset => { turned = turned + 1u64 }
+                    ConnectionRefused => { turned = turned + 1u64 }
+                    TimedOut => { turned = turned + 1u64 }
+                    _ => { odd = odd + 1u64 }
+                }
+            }
+        }
+    }
+    flag("to a full queue, some attempt timed out or was turned away:", turned > 0u64)
+    flag("none failed in another way:", odd == 0u64)
+    flag("each connection made holds one descriptor, the others none:", fds() - start == kept.len())
+    return Ok(())
+}
+
+func step(r: own Result[(), io.IoErr]) {
+    match r {
+        Ok(u) => { }
+        Err(e) => say("unexpected failure")
+    }
+}
+
+func main() -> i32 {
+    step(waits())
+    step(refused())
+    step(given_up())
+    return 0i32
+}

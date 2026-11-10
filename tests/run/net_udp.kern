@@ -1,0 +1,124 @@
+//! phase: 6
+//! expect: output net_udp
+// std/net UDP on the loopback (specs/runtime RH3): two sockets exchange
+// datagrams and see each other's address; a datagram longer than the
+// buffer is cut to it; an empty datagram arrives; a timed receive gives
+// up and the socket goes on working; the same exchange over ::1 where
+// the host has it.
+module t
+import "std/net"
+import "std/io"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func flag(label: view[]u8, b: bool) { print_str(label); print_str(" "); print_bool(b); println() }
+func text(label: view[]u8, bytes: view[]u8) { print_str(label); print_str(" ["); print_str(bytes); print_str("]"); println() }
+func num(label: view[]u8, n: u64) { print_str(label); print_str(" "); print_u64(n); println() }
+
+func same(a: net.SocketAddr, b: net.SocketAddr) -> bool {
+    x := net.format_addr(a)
+    y := net.format_addr(b)
+    if x.len() != y.len() { return false }
+    var eq: bool = true
+    with xv := x.as_view() {
+        with yv := y.as_view() {
+            for i in 0usize..len(xv) {
+                if xv[i] != yv[i] { eq = false }
+            }
+        }
+    }
+    return eq
+}
+
+func exchange(lo: net.SocketAddr) -> Result[(), io.IoErr] {
+    a := net.UdpSocket.bind(lo)?
+    b := net.UdpSocket.bind(lo)?
+    a_at := a.local_addr()?
+    b_at := b.local_addr()?
+    flag("each socket has a port of its own:", a_at.port != 0u16 && b_at.port != 0u16 && a_at.port != b_at.port)
+    var buf: [64]u8 = zero()
+
+    num("send_to returns", u64(a.send_to("ping", b_at)?))
+    d := b.recv_from(buf)?
+    text("received", buf[0usize : d.len])
+    flag("from the sender's address:", same(d.from, a_at))
+    num("the answer's length", u64(b.send_to("pong!", d.from)?))
+    r := a.recv_from(buf)?
+    text("received", buf[0usize : r.len])
+    flag("from the answerer's address:", same(r.from, b_at))
+
+    // a datagram longer than the buffer is cut, and its rest is lost
+    long := Vec[u8].new()
+    for i in 0usize..100usize { long.push(97u8 + truncate[u8](i % 26usize)) }
+    num("a datagram of 100 bytes is sent whole:", u64(a.send_to(long.as_view(), b_at)?))
+    var small: [10]u8 = zero()
+    cut := b.recv_from(small)?
+    text("a buffer of 10 receives", small[0usize : cut.len])
+    start := now_ns()
+    match b.recv_from_timeout(buf, time.millis(30u64))? {
+        Some(more) => say("the rest of the datagram arrived")
+        None => flag("the rest is gone: nothing in 30 ms, after at least that long:", now_ns() - start >= 30000000u64)
+    }
+    match b.recv_from_timeout(buf, time.nanos(0u64))? {
+        Some(more) => say("a look received a datagram nobody sent")
+        None => say("a look finds nothing")
+    }
+
+    // an empty datagram is a datagram
+    num("an empty datagram is sent:", u64(a.send_to("", b_at)?))
+    match b.recv_from_timeout(buf, time.seconds(10u64))? {
+        Some(e) => num("and received, with a length of", u64(e.len))
+        None => say("and never arrives")
+    }
+
+    // 8000 bytes in one datagram
+    big := Vec[u8].new()
+    big.resize(8000usize, 7u8)
+    num("8000 bytes are sent:", u64(a.send_to(big.as_view(), b_at)?))
+    room := Vec[u8].new()
+    room.resize(9000usize, 0u8)
+    var got: usize = 0usize
+    with e := room.as_edit() {
+        g := b.recv_from(e)?
+        got = g.len
+    }
+    num("and received:", u64(got))
+
+    // a socket may send to itself
+    num("to itself:", u64(a.send_to("self", a_at)?))
+    own_d := a.recv_from(buf)?
+    text("received", buf[0usize : own_d.len])
+    return Ok(())
+}
+
+func main() -> i32 {
+    say("-- IPv4")
+    match exchange(net.loopback_v4(0u16)) {
+        Ok(u) => { }
+        Err(e) => say("failed")
+    }
+    // over ::1 the lines are the same; a host without it is passed over
+    match net.UdpSocket.bind(net.loopback_v6(0u16)) {
+        Ok(probe) => {
+            drop(probe)
+            match six() {
+                Ok(u) => say("-- IPv6: a datagram crossed ::1, or this host has none")
+                Err(e) => say("-- IPv6 failed")
+            }
+        }
+        Err(e) => say("-- IPv6: a datagram crossed ::1, or this host has none")
+    }
+    return 0i32
+}
+
+func six() -> Result[(), io.IoErr] {
+    a := net.UdpSocket.bind(net.loopback_v6(0u16))?
+    b := net.UdpSocket.bind(net.loopback_v6(0u16))?
+    b_at := b.local_addr()?
+    a_at := a.local_addr()?
+    n := a.send_to("six", b_at)?
+    var buf: [16]u8 = zero()
+    d := b.recv_from(buf)?
+    if d.len != 3usize || !same(d.from, a_at) { return Err(io.error_of(io.ErrKind.Other)) }
+    return Ok(())
+}

@@ -1,0 +1,12 @@
+-- IPv4
+the system chose a port: true
+the peer is the listener's address: true
+the client has a port of its own: true
+echoed [hello, echo]
+a read after the end returns 0
+line [first line]
+line [second line]
+line [third, with no end]
+the server counted [1048576]
+bytes the server handled: 1048629
+-- IPv6: echoed over ::1, or this host has none

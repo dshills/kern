@@ -40,6 +40,10 @@
 #include <limits.h>
 #include <spawn.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <netdb.h>
 #if defined(__linux__)
 #include <sys/auxv.h>
 #include <features.h>
@@ -244,6 +248,37 @@ int64_t kern_mem_page_size(void);
 void *kern_mem_map(int64_t bytes);
 // Unmaps the bytes at p that one kern_mem_map call mapped.
 void kern_mem_unmap(void *p, int64_t bytes);
+
+// ---- rt_net.c: sockets (std/net) ----
+// An address is a record of 19 bytes: the family (4 or 6), 16 bytes of address (IPv4 in the first four), the port high byte first.
+// A call with `ns` and `timed` waits at most ns nanoseconds when timed is set and returns -2^32 when that time passed.
+
+// Makes a TCP socket bound to the address and listening with the backlog: a descriptor above 2, close-on-exec, or -errno.
+int32_t kern_net_tcp_listen(const uint8_t *addr, int64_t n, int32_t backlog);
+// Makes a UDP socket bound to the address: a descriptor or -errno.
+int32_t kern_net_udp_bind(const uint8_t *addr, int64_t n);
+// Accepts the next connection of a listening socket: its descriptor, -errno, or -2^32.
+int64_t kern_net_accept(int32_t fd, uint64_t ns, uint8_t timed);
+// Connects a new TCP socket to the address: its descriptor, -errno, or -2^32 (the socket is then closed).
+int64_t kern_net_connect(const uint8_t *addr, int64_t n, uint64_t ns, uint8_t timed);
+// Receives at most n bytes: the count, 0 when the peer closed, -errno, or -2^32.
+int64_t kern_net_recv(int32_t fd, char *buf, int64_t n, uint64_t ns, uint8_t timed);
+// Sends at most n bytes, waiting while the socket's buffer is full: the count or -errno (never a SIGPIPE).
+int64_t kern_net_send(int32_t fd, const char *p, int64_t n);
+// Shuts down reading (0), writing (1) or both (2): 0 or -errno.
+int32_t kern_net_shutdown(int32_t fd, int32_t how);
+// Turns TCP_NODELAY on or off: 0 or -errno.
+int32_t kern_net_set_nodelay(int32_t fd, uint8_t on);
+// Writes the socket's own address, or its peer's, into rec: 0 or -errno.
+int32_t kern_net_addr(int32_t fd, uint8_t peer, uint8_t *rec, int64_t cap);
+// Sends one datagram to the address: the count or -errno.
+int64_t kern_net_send_to(int32_t fd, const char *p, int64_t n, const uint8_t *addr, int64_t an);
+// Receives one datagram, cut to n bytes, and its sender's record into from: the count, -errno, or -2^32.
+int64_t kern_net_recv_from(int32_t fd, char *buf, int64_t n, uint8_t *from, int64_t fcap, uint64_t ns, uint8_t timed);
+// Closes a socket: 0 or -errno.
+int32_t kern_net_close(int32_t fd);
+// Resolves a host name: its addresses' records, each with the port, into recs while they fit; the bytes they need, or -errno.
+int64_t kern_net_resolve(const char *host, int64_t n, uint16_t port, uint8_t *recs, int64_t cap);
 
 // ---- rt_time.c: clocks ----
 

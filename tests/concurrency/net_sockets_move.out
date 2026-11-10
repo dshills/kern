@@ -1,0 +1,3 @@
+the thread's socket answered 8 bytes: datagram
+the listener's thread read 12 bytes; the stream's thread read 0
+done

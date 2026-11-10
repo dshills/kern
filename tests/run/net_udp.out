@@ -1,0 +1,19 @@
+-- IPv4
+each socket has a port of its own: true
+send_to returns 4
+received [ping]
+from the sender's address: true
+the answer's length 5
+received [pong!]
+from the answerer's address: true
+a datagram of 100 bytes is sent whole: 100
+a buffer of 10 receives [abcdefghij]
+the rest is gone: nothing in 30 ms, after at least that long: true
+a look finds nothing
+an empty datagram is sent: 0
+and received, with a length of 0
+8000 bytes are sent: 8000
+and received: 8000
+to itself: 4
+received [self]
+-- IPv6: a datagram crossed ::1, or this host has none

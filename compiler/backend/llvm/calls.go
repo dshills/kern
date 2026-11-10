@@ -635,6 +635,57 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	// std/time (hosted; specs/std-time)
 	case "time_sleep_ns":
 		fe.rt("kern_time_sleep_ns", "void (i64, ptr)", "i64 "+fe.v(a[0])+", ptr "+fe.loc(c.Pos))
+	// std/net (hosted): sockets
+	case "net_tcp_listen":
+		p, l := fe.seqParts(a[0])
+		setDst(fe.rt("kern_net_tcp_listen", "i32 (ptr, i64, i32)", "ptr "+p+", i64 "+l+", i32 "+fe.v(a[1])))
+	case "net_udp_bind":
+		p, l := fe.seqParts(a[0])
+		setDst(fe.rt("kern_net_udp_bind", "i32 (ptr, i64)", "ptr "+p+", i64 "+l))
+	case "net_accept":
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[2]))
+		setDst(fe.rt("kern_net_accept", "i64 (i32, i64, i8)", "i32 "+fe.v(a[0])+", i64 "+fe.v(a[1])+", i8 "+z))
+	case "net_connect":
+		p, l := fe.seqParts(a[0])
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[2]))
+		setDst(fe.rt("kern_net_connect", "i64 (ptr, i64, i64, i8)", "ptr "+p+", i64 "+l+", i64 "+fe.v(a[1])+", i8 "+z))
+	case "net_recv":
+		p, l := fe.seqParts(a[1])
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[3]))
+		setDst(fe.rt("kern_net_recv", "i64 (i32, ptr, i64, i64, i8)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l+", i64 "+fe.v(a[2])+", i8 "+z))
+	case "net_send":
+		p, l := fe.seqParts(a[1])
+		setDst(fe.rt("kern_net_send", "i64 (i32, ptr, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l))
+	case "net_shutdown":
+		setDst(fe.rt("kern_net_shutdown", "i32 (i32, i32)", "i32 "+fe.v(a[0])+", i32 "+fe.v(a[1])))
+	case "net_set_nodelay":
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[1]))
+		setDst(fe.rt("kern_net_set_nodelay", "i32 (i32, i8)", "i32 "+fe.v(a[0])+", i8 "+z))
+	case "net_addr":
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[1]))
+		p, l := fe.seqParts(a[2])
+		setDst(fe.rt("kern_net_addr", "i32 (i32, i8, ptr, i64)", "i32 "+fe.v(a[0])+", i8 "+z+", ptr "+p+", i64 "+l))
+	case "net_send_to":
+		p, l := fe.seqParts(a[1])
+		q, m := fe.seqParts(a[2])
+		setDst(fe.rt("kern_net_send_to", "i64 (i32, ptr, i64, ptr, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l+", ptr "+q+", i64 "+m))
+	case "net_recv_from":
+		p, l := fe.seqParts(a[1])
+		q, m := fe.seqParts(a[2])
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[4]))
+		setDst(fe.rt("kern_net_recv_from", "i64 (i32, ptr, i64, ptr, i64, i64, i8)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l+", ptr "+q+", i64 "+m+", i64 "+fe.v(a[3])+", i8 "+z))
+	case "net_close":
+		setDst(fe.rt("kern_net_close", "i32 (i32)", "i32 "+fe.v(a[0])))
+	case "net_resolve":
+		p, l := fe.seqParts(a[0])
+		q, m := fe.seqParts(a[2])
+		setDst(fe.rt("kern_net_resolve", "i64 (ptr, i64, i16, ptr, i64)", "ptr "+p+", i64 "+l+", i16 "+fe.v(a[1])+", ptr "+q+", i64 "+m))
 	case "mem_page_size":
 		setDst(fe.rt("kern_mem_page_size", "i64 ()", ""))
 	case "mem_map":

@@ -1,0 +1,631 @@
+// std/net: TCP and UDP sockets over IPv4 and IPv6, for hosted programs
+// (a freestanding image has no network behind these).
+// Imported with `import "std/net"` (specs/runtime area H).
+//
+// A socket call blocks the calling thread until it completes, or, for the
+// `_timeout` forms, until its duration has passed: there is no
+// non-blocking mode. A call that a signal interrupts carries on. Sockets
+// are not inherited by child processes. Writing to a connection the peer
+// closed is an error of kind BrokenPipe or ConnectionReset and never ends
+// the program. Every type here may move to another thread.
+module net
+import "std/io"
+import "std/time"
+
+// Runtime intrinsics (hosted). An address crosses as a record of 19
+// bytes: the family (4 or 6), 16 bytes of address (IPv4 in the first
+// four), the port high byte first. A call with ns and timed waits at most
+// ns nanoseconds when timed is set and returns io.timed_out() when that
+// time passed; each returns its value or -errno.
+func net_tcp_listen(addr: view[]u8, backlog: i32) -> i32
+func net_udp_bind(addr: view[]u8) -> i32
+func net_accept(fd: i32, ns: u64, timed: bool) -> i64
+func net_connect(addr: view[]u8, ns: u64, timed: bool) -> i64
+func net_recv(fd: i32, buf: edit[]u8, ns: u64, timed: bool) -> i64
+func net_send(fd: i32, data: view[]u8) -> i64
+func net_shutdown(fd: i32, how: i32) -> i32
+func net_set_nodelay(fd: i32, on: bool) -> i32
+func net_addr(fd: i32, peer: bool, rec: edit[]u8) -> i32
+func net_send_to(fd: i32, data: view[]u8, addr: view[]u8) -> i64
+func net_recv_from(fd: i32, buf: edit[]u8, from: edit[]u8, ns: u64, timed: bool) -> i64
+func net_close(fd: i32) -> i32
+func net_resolve(host: view[]u8, port: u16, recs: edit[]u8) -> i64
+
+// ---- addresses (RH1) ----
+
+// IpAddr is an IPv4 or an IPv6 address, its bytes in network order.
+union IpAddr { V4(a: [4]u8); V6(a: [16]u8) }
+
+// SocketAddr is an address and a port. Addresses are small values that
+// copy: every function here takes one by value, so the result of one call
+// can be the argument of another.
+struct SocketAddr { ip: IpAddr; port: u16 }
+
+// v4 is the IPv4 address a.b.c.d.
+func v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+    var bytes: [4]u8 = zero()
+    bytes[0usize] = a
+    bytes[1usize] = b
+    bytes[2usize] = c
+    bytes[3usize] = d
+    return V4(bytes)
+}
+
+// addr joins an address and a port.
+func addr(ip: IpAddr, port: u16) -> SocketAddr { return SocketAddr { ip: ip, port: port } }
+
+// loopback_v4 and loopback_v6 are 127.0.0.1 and ::1 with a port; any_v4
+// and any_v6 are the addresses that stand for every interface. Port 0
+// asks the system for a free port, which local_addr then reports.
+func loopback_v4(port: u16) -> SocketAddr { return addr(v4(127u8, 0u8, 0u8, 1u8), port) }
+func loopback_v6(port: u16) -> SocketAddr {
+    var bytes: [16]u8 = zero()
+    bytes[15usize] = 1u8
+    return addr(V6(bytes), port)
+}
+func any_v4(port: u16) -> SocketAddr { return addr(v4(0u8, 0u8, 0u8, 0u8), port) }
+func any_v6(port: u16) -> SocketAddr {
+    var bytes: [16]u8 = zero()
+    return addr(V6(bytes), port)
+}
+
+// to_wire and from_wire convert between a SocketAddr and the runtime's
+// record of 19 bytes.
+func to_wire(a: view[SocketAddr], rec: edit[]u8) {
+    for i in 0usize..19usize { rec[i] = 0u8 }
+    match a.ip {
+        V4(b) => {
+            rec[0usize] = 4u8
+            for i in 0usize..4usize { rec[1usize + i] = b[i] }
+        }
+        V6(b) => {
+            rec[0usize] = 6u8
+            for i in 0usize..16usize { rec[1usize + i] = b[i] }
+        }
+    }
+    rec[17usize] = truncate[u8](a.port >> 8u32)
+    rec[18usize] = truncate[u8](a.port & 255u16)
+}
+func from_wire(rec: view[]u8) -> SocketAddr {
+    port := u16(rec[17usize]) * 256u16 + u16(rec[18usize])
+    if rec[0usize] == 6u8 {
+        var b: [16]u8 = zero()
+        for i in 0usize..16usize { b[i] = rec[1usize + i] }
+        return addr(V6(b), port)
+    }
+    var b: [4]u8 = zero()
+    for i in 0usize..4usize { b[i] = rec[1usize + i] }
+    return addr(V4(b), port)
+}
+
+// number reads a decimal number of 1 to max digits with no sign: its
+// value, or None for anything else. With strict set a leading zero is
+// refused unless the number is 0 itself.
+func number(s: view[]u8, max: usize, strict: bool) -> Option[u32] {
+    if len(s) == 0usize || len(s) > max { return None }
+    if strict && len(s) > 1usize && s[0usize] == 48u8 { return None }
+    var v: u32 = 0u32
+    for c in s {
+        if c < 48u8 || c > 57u8 { return None }
+        v = v * 10u32 + u32(c - 48u8)
+    }
+    return Some(v)
+}
+
+// parse_v4 reads a.b.c.d into dst, four decimal numbers of at most 255
+// with no leading zeros: whether the text was one.
+func parse_v4(s: view[]u8, dst: edit[]u8) -> bool {
+    var part: usize = 0usize
+    var start: usize = 0usize
+    var i: usize = 0usize
+    while i <= len(s) {
+        if i == len(s) || s[i] == 46u8 {
+            if part == 4usize { return false }
+            match number(s[start : i], 3usize, true) {
+                Some(v) => {
+                    if v > 255u32 { return false }
+                    dst[part] = truncate[u8](v)
+                }
+                None => { return false }
+            }
+            part = part + 1usize
+            start = i + 1usize
+        }
+        i = i + 1usize
+    }
+    return part == 4usize
+}
+
+// hex is the value of a hexadecimal digit, or 16 for any other byte.
+func hex(c: u8) -> u16 {
+    if c >= 48u8 && c <= 57u8 { return u16(c - 48u8) }
+    if c >= 97u8 && c <= 102u8 { return u16(c - 87u8) }
+    if c >= 65u8 && c <= 70u8 { return u16(c - 55u8) }
+    return 16u16
+}
+
+// parse_v6 reads an IPv6 address in its text form into dst: eight groups
+// of one to four hexadecimal digits separated by colons, where one run of
+// zero groups may be written `::` and the last two groups may be written
+// as an IPv4 address. Whether the text was one.
+func parse_v6(s: view[]u8, dst: edit[]u8) -> bool {
+    var groups: [8]u16 = zero()
+    var count: usize = 0usize
+    var gap: usize = 0usize
+    var gapped: bool = false
+    n := len(s)
+    var i: usize = 0usize
+    if n >= 2usize && s[0usize] == 58u8 && s[1usize] == 58u8 {
+        gapped = true
+        i = 2usize
+    } else if n >= 1usize && s[0usize] == 58u8 {
+        return false
+    }
+    while i < n {
+        // the token runs to the next colon or the end
+        var j: usize = i
+        var dotted: bool = false
+        while j < n && s[j] != 58u8 {
+            if s[j] == 46u8 { dotted = true }
+            j = j + 1usize
+        }
+        if dotted {
+            // an IPv4 address: the last token, standing for two groups
+            var four: [4]u8 = zero()
+            if j != n || count > 6usize || !parse_v4(s[i : n], four) { return false }
+            groups[count] = u16(four[0usize]) * 256u16 + u16(four[1usize])
+            groups[count + 1usize] = u16(four[2usize]) * 256u16 + u16(four[3usize])
+            count = count + 2usize
+            i = n
+        } else {
+            if j == i || j - i > 4usize || count == 8usize { return false }
+            var v: u16 = 0u16
+            for c in s[i : j] {
+                d := hex(c)
+                if d == 16u16 { return false }
+                v = v * 16u16 + d
+            }
+            groups[count] = v
+            count = count + 1usize
+            i = j
+            if i < n {
+                if i + 1usize < n && s[i + 1usize] == 58u8 {
+                    if gapped { return false }
+                    gapped = true
+                    gap = count
+                    i = i + 2usize
+                } else {
+                    i = i + 1usize
+                    if i == n { return false }
+                }
+            }
+        }
+    }
+    var full: [8]u16 = zero()
+    if gapped {
+        // `::` stands for at least one group
+        if count > 7usize { return false }
+        for k in 0usize..gap { full[k] = groups[k] }
+        for k in gap..count { full[8usize - count + k] = groups[k] }
+    } else {
+        if count != 8usize { return false }
+        full = groups
+    }
+    for k in 0usize..8usize {
+        dst[k * 2usize] = truncate[u8](full[k] >> 8u32)
+        dst[k * 2usize + 1usize] = truncate[u8](full[k] & 255u16)
+    }
+    return true
+}
+
+// parse_ip reads an IPv4 address (a.b.c.d) or an IPv6 address (in any of
+// its text forms, without brackets).
+func parse_ip(text: view[]u8) -> Option[IpAddr] {
+    var four: [4]u8 = zero()
+    if parse_v4(text, four) { return Some(V4(four)) }
+    var sixteen: [16]u8 = zero()
+    if parse_v6(text, sixteen) { return Some(V6(sixteen)) }
+    return None
+}
+
+// parse_addr reads `a.b.c.d:port` or `[v6]:port`; the port is 0 to 65535
+// in one to five decimal digits.
+func parse_addr(text: view[]u8) -> Option[SocketAddr] {
+    n := len(text)
+    if n == 0usize { return None }
+    var host_end: usize = 0usize
+    var port_at: usize = 0usize
+    var six: bool = false
+    if text[0usize] == 91u8 {
+        var close: usize = 1usize
+        while close < n && text[close] != 93u8 { close = close + 1usize }
+        if close + 1usize >= n || text[close + 1usize] != 58u8 { return None }
+        six = true
+        host_end = close
+        port_at = close + 2usize
+    } else {
+        var colon: usize = 0usize
+        while colon < n && text[colon] != 58u8 { colon = colon + 1usize }
+        if colon == n { return None }
+        host_end = colon
+        port_at = colon + 1usize
+    }
+    var port: u16 = 0u16
+    match number(text[port_at : n], 5usize, false) {
+        Some(p) => {
+            if p > 65535u32 { return None }
+            port = truncate[u16](p)
+        }
+        None => { return None }
+    }
+    if six {
+        var sixteen: [16]u8 = zero()
+        if !parse_v6(text[1usize : host_end], sixteen) { return None }
+        return Some(addr(V6(sixteen), port))
+    }
+    var four: [4]u8 = zero()
+    if !parse_v4(text[0usize : host_end], four) { return None }
+    return Some(addr(V4(four), port))
+}
+
+// push_number appends v in decimal.
+func push_number(dst: edit[Vec[u8]], v: u32) {
+    var digits: [10]u8 = zero()
+    var n: usize = 0usize
+    var x: u32 = v
+    while true {
+        digits[n] = 48u8 + truncate[u8](x % 10u32)
+        n = n + 1usize
+        x = x / 10u32
+        if x == 0u32 { break }
+    }
+    while n > 0usize {
+        n = n - 1usize
+        dst.push(digits[n])
+    }
+}
+
+// push_v4 appends a.b.c.d.
+func push_v4(dst: edit[Vec[u8]], b: view[]u8) {
+    for i in 0usize..4usize {
+        if i > 0usize { dst.push(46u8) }
+        push_number(dst, u32(b[i]))
+    }
+}
+
+// push_v6 appends an IPv6 address in its canonical text: lowercase, no
+// leading zeros, the longest run of two or more zero groups (the first of
+// equals) written `::`, and an IPv4-mapped address (::ffff:a.b.c.d) with
+// its last two groups as the IPv4 address.
+func push_v6(dst: edit[Vec[u8]], b: view[]u8) {
+    var groups: [8]u16 = zero()
+    for k in 0usize..8usize { groups[k] = u16(b[k * 2usize]) * 256u16 + u16(b[k * 2usize + 1usize]) }
+    var mapped: bool = groups[5usize] == 65535u16
+    for k in 0usize..5usize {
+        if groups[k] != 0u16 { mapped = false }
+    }
+    var shown: usize = 8usize
+    if mapped { shown = 6usize }
+    // the longest run of zero groups among those shown
+    var best: usize = 0usize
+    var best_len: usize = 0usize
+    var k: usize = 0usize
+    while k < shown {
+        if groups[k] == 0u16 {
+            var e: usize = k
+            while e < shown && groups[e] == 0u16 { e = e + 1usize }
+            if e - k > best_len {
+                best = k
+                best_len = e - k
+            }
+            k = e
+        } else {
+            k = k + 1usize
+        }
+    }
+    if best_len < 2usize { best_len = 0usize }
+    var g: usize = 0usize
+    while g < shown {
+        if best_len > 0usize && g == best {
+            dst.push(58u8)
+            dst.push(58u8)
+            g = g + best_len
+        } else {
+            if g > 0usize && !(best_len > 0usize && g == best + best_len) { dst.push(58u8) }
+            // the group in hexadecimal without leading zeros
+            var started: bool = false
+            for shift in 0u32..4u32 {
+                d := truncate[u8]((groups[g] >> (12u32 - shift * 4u32)) & 15u16)
+                if d != 0u8 || started || shift == 3u32 {
+                    started = true
+                    if d < 10u8 { dst.push(48u8 + d) } else { dst.push(87u8 + d) }
+                }
+            }
+            g = g + 1usize
+        }
+    }
+    if mapped {
+        if !(best_len > 0usize && best + best_len == 6usize) { dst.push(58u8) }
+        push_v4(dst, b[12usize : 16usize])
+    }
+}
+
+// format_ip is an address as text: a.b.c.d, or an IPv6 address in its
+// canonical form.
+func format_ip(ip: IpAddr) -> Vec[u8] {
+    text := Vec[u8].new()
+    match ip {
+        V4(b) => { push_v4(text, b) }
+        V6(b) => { push_v6(text, b) }
+    }
+    return text
+}
+
+// format_addr is `a.b.c.d:port` or `[v6]:port`, which parse_addr reads
+// back.
+func format_addr(a: SocketAddr) -> Vec[u8] {
+    text := Vec[u8].new()
+    match a.ip {
+        V4(b) => { push_v4(text, b) }
+        V6(b) => {
+            text.push(91u8)
+            push_v6(text, b)
+            text.push(93u8)
+        }
+    }
+    text.push(58u8)
+    push_number(text, u32(a.port))
+    return text
+}
+
+// resolve asks the system resolver for the addresses of a host name (or
+// of an address written as text), each joined with port, in the
+// resolver's order and without repeats. A name the resolver does not know
+// is an error of kind NotFound.
+func resolve(host: view[]u8, port: u16) -> Result[Vec[SocketAddr], io.IoErr] {
+    buf := Vec[u8].new()
+    buf.resize(304usize, 0u8)
+    while true {
+        var n: i64 = 0i64
+        with e := buf.as_edit() { n = net_resolve(host, port, e) }
+        if n < 0i64 { return Err(io.neg(n)) }
+        if usize(n) <= buf.len() {
+            list := Vec[SocketAddr].new()
+            with b := buf.as_view() {
+                var at: usize = 0usize
+                while at + 19usize <= usize(n) {
+                    // a record the list already has is the same address again
+                    var seen: bool = false
+                    var prev: usize = 0usize
+                    while prev < at && !seen {
+                        var same: bool = true
+                        for k in 0usize..19usize {
+                            if b[prev + k] != b[at + k] { same = false }
+                        }
+                        seen = same
+                        prev = prev + 19usize
+                    }
+                    if !seen { list.push(from_wire(b[at : at + 19usize])) }
+                    at = at + 19usize
+                }
+            }
+            return Ok(list)
+        }
+        buf.resize(usize(n), 0u8)
+    }
+    return Err(io.error_of(io.ErrKind.Other))
+}
+
+// sock_addr reads a socket's own address, or its peer's.
+func sock_addr(fd: i32, peer: bool) -> Result[SocketAddr, io.IoErr] {
+    var rec: [19]u8 = zero()
+    r := net_addr(fd, peer, rec)
+    if r < 0i32 { return Err(io.err_of(0i32 - r)) }
+    return Ok(from_wire(rec))
+}
+
+// ---- TCP (RH2) ----
+
+// TcpListener is a socket that accepts connections on an address. It is
+// closed when it is destroyed.
+struct TcpListener nocopy { fd: i32 }
+
+impl TcpListener {
+    // bind makes a listener on addr, with address reuse on (a server may
+    // be restarted on its port at once) and a queue of 128 connections
+    // waiting to be accepted.
+    func bind(addr: SocketAddr) -> Result[TcpListener, io.IoErr] { return TcpListener.bind_with_backlog(addr, 128u32) }
+
+    // bind_with_backlog is bind with a queue of the given length; what
+    // the system does with a connection beyond it is the system's choice.
+    func bind_with_backlog(addr: SocketAddr, backlog: u32) -> Result[TcpListener, io.IoErr] {
+        var rec: [19]u8 = zero()
+        to_wire(addr, rec)
+        var queue: u32 = backlog
+        if queue > 65535u32 { queue = 65535u32 }
+        fd := net_tcp_listen(rec, truncate[i32](queue))
+        if fd < 0i32 { return Err(io.err_of(0i32 - fd)) }
+        return Ok(TcpListener { fd: fd })
+    }
+
+    // accept waits for the next connection.
+    func accept(edit self) -> Result[TcpStream, io.IoErr] {
+        r := net_accept(self.fd, 0u64, false)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(TcpStream { fd: truncate[i32](r) })
+    }
+
+    // accept_timeout is accept waiting at most d: None when no connection
+    // arrived in that time. A duration of zero looks once.
+    func accept_timeout(edit self, d: time.Duration) -> Result[Option[TcpStream], io.IoErr] {
+        r := net_accept(self.fd, d.ns, true)
+        if r == io.timed_out() { return Ok(None) }
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Some(TcpStream { fd: truncate[i32](r) }))
+    }
+
+    // local_addr is the address the listener is bound to: the way to
+    // learn the port the system chose for port 0.
+    func local_addr(view self) -> Result[SocketAddr, io.IoErr] { return sock_addr(self.fd, false) }
+
+    destructor(edit self) {
+        if self.fd >= 0i32 { r := net_close(self.fd) }
+    }
+}
+
+// Shutdown names the direction TcpStream.shutdown ends.
+union Shutdown { Read; Write; Both }
+
+// TcpStream is one end of a connection: an io.Reader and an io.Writer.
+// It is closed when it is destroyed.
+struct TcpStream nocopy { fd: i32 }
+
+impl io.Reader for TcpStream {
+    // read receives at most len(buf) bytes and returns how many: 0 when
+    // the peer has closed its end, or for an empty buf.
+    func read(edit self, buf: edit[]u8) -> Result[usize, io.IoErr] {
+        r := net_recv(self.fd, buf, 0u64, false)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(usize(r))
+    }
+}
+
+impl io.Writer for TcpStream {
+    // write sends at most len(data) bytes and returns how many the system
+    // took, waiting while its buffer is full.
+    func write(edit self, data: view[]u8) -> Result[usize, io.IoErr] {
+        r := net_send(self.fd, data)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(usize(r))
+    }
+    // flush does nothing: a stream has no buffer on this side of the
+    // system's.
+    func flush(edit self) -> Result[(), io.IoErr] { return Ok(()) }
+}
+
+impl TcpStream {
+    // connect makes a connection to addr.
+    func connect(addr: SocketAddr) -> Result[TcpStream, io.IoErr] {
+        var rec: [19]u8 = zero()
+        to_wire(addr, rec)
+        r := net_connect(rec, 0u64, false)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(TcpStream { fd: truncate[i32](r) })
+    }
+
+    // connect_timeout is connect waiting at most d: None when the
+    // connection was not made in that time, and the attempt is then
+    // given up. A duration of zero starts the attempt and returns None
+    // unless it succeeded at once.
+    func connect_timeout(addr: SocketAddr, d: time.Duration) -> Result[Option[TcpStream], io.IoErr] {
+        var rec: [19]u8 = zero()
+        to_wire(addr, rec)
+        r := net_connect(rec, d.ns, true)
+        if r == io.timed_out() { return Ok(None) }
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Some(TcpStream { fd: truncate[i32](r) }))
+    }
+
+    // read_timeout is read waiting at most d for bytes: Some(n) for n
+    // bytes (0 when the peer has closed its end, or for an empty buf),
+    // None when none arrived in that time. A duration of zero looks once.
+    func read_timeout(edit self, buf: edit[]u8, d: time.Duration) -> Result[Option[usize], io.IoErr] {
+        r := net_recv(self.fd, buf, d.ns, true)
+        if r == io.timed_out() { return Ok(None) }
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Some(usize(r)))
+    }
+
+    // write_all sends all of data.
+    func write_all(edit self, data: view[]u8) -> Result[(), io.IoErr] {
+        var off: usize = 0usize
+        while off < len(data) {
+            r := net_send(self.fd, data[off : len(data)])
+            if r < 0i64 { return Err(io.neg(r)) }
+            off = off + usize(r)
+        }
+        return Ok(())
+    }
+
+    // shutdown ends one direction, or both, without closing the socket:
+    // after Write the peer reads the end of the stream, and this side can
+    // still read what the peer sends.
+    func shutdown(edit self, how: Shutdown) -> Result[(), io.IoErr] {
+        var n: i32 = 2i32
+        match how {
+            Read => { n = 0i32 }
+            Write => { n = 1i32 }
+            Both => { n = 2i32 }
+        }
+        return io.status(net_shutdown(self.fd, n))
+    }
+
+    // set_nodelay turns the delay of small writes (Nagle's algorithm) off
+    // or back on.
+    func set_nodelay(edit self, on: bool) -> Result[(), io.IoErr] { return io.status(net_set_nodelay(self.fd, on)) }
+
+    // peer_addr and local_addr are the addresses of the two ends.
+    func peer_addr(view self) -> Result[SocketAddr, io.IoErr] { return sock_addr(self.fd, true) }
+    func local_addr(view self) -> Result[SocketAddr, io.IoErr] { return sock_addr(self.fd, false) }
+
+    destructor(edit self) {
+        if self.fd >= 0i32 { r := net_close(self.fd) }
+    }
+}
+
+// ---- UDP (RH3) ----
+
+// Datagram is what recv_from received: the number of bytes it put in the
+// buffer and the address they came from.
+struct Datagram { len: usize; from: SocketAddr }
+
+// UdpSocket sends and receives datagrams. It is closed when it is
+// destroyed.
+struct UdpSocket nocopy { fd: i32 }
+
+impl UdpSocket {
+    // bind makes a socket on addr.
+    func bind(addr: SocketAddr) -> Result[UdpSocket, io.IoErr] {
+        var rec: [19]u8 = zero()
+        to_wire(addr, rec)
+        fd := net_udp_bind(rec)
+        if fd < 0i32 { return Err(io.err_of(0i32 - fd)) }
+        return Ok(UdpSocket { fd: fd })
+    }
+
+    // send_to sends data as one datagram to an address and returns its
+    // length.
+    func send_to(edit self, data: view[]u8, to: SocketAddr) -> Result[usize, io.IoErr] {
+        var rec: [19]u8 = zero()
+        to_wire(to, rec)
+        r := net_send_to(self.fd, data, rec)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(usize(r))
+    }
+
+    // recv_from waits for one datagram and puts it in buf; a datagram
+    // longer than buf is cut to it and the rest is lost.
+    func recv_from(edit self, buf: edit[]u8) -> Result[Datagram, io.IoErr] {
+        var rec: [19]u8 = zero()
+        r := net_recv_from(self.fd, buf, rec, 0u64, false)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Datagram { len: usize(r), from: from_wire(rec) })
+    }
+
+    // recv_from_timeout is recv_from waiting at most d: None when no
+    // datagram arrived in that time. A duration of zero looks once.
+    func recv_from_timeout(edit self, buf: edit[]u8, d: time.Duration) -> Result[Option[Datagram], io.IoErr] {
+        var rec: [19]u8 = zero()
+        r := net_recv_from(self.fd, buf, rec, d.ns, true)
+        if r == io.timed_out() { return Ok(None) }
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Some(Datagram { len: usize(r), from: from_wire(rec) }))
+    }
+
+    // local_addr is the address the socket is bound to.
+    func local_addr(view self) -> Result[SocketAddr, io.IoErr] { return sock_addr(self.fd, false) }
+
+    destructor(edit self) {
+        if self.fd >= 0i32 { r := net_close(self.fd) }
+    }
+}

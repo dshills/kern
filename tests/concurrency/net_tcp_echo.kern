@@ -1,0 +1,197 @@
+//! phase: 6
+//! expect: output net_tcp_echo
+//! tsan: clean
+// std/net TCP on the loopback (specs/runtime RH2, RH4): a server thread
+// that owns the listener and a client on the main thread. One connection
+// is echoed, one is read by lines through a BufReader, one carries a
+// megabyte; then the same echo over IPv6 where the host has ::1.
+module cc
+import "std/net"
+import "std/io"
+
+func say(s: view[]u8) { print_str(s); println() }
+func flag(label: view[]u8, b: bool) { print_str(label); print_str(" "); print_bool(b); println() }
+func text(label: view[]u8, bytes: view[]u8) { print_str(label); print_str(" ["); print_str(bytes); print_str("]"); println() }
+
+// echo sends back what it reads until the peer stops writing, and
+// returns the number of bytes.
+func echo(c: own net.TcpStream) -> u64 {
+    var buf: [1024]u8 = zero()
+    var total: u64 = 0u64
+    while true {
+        match c.read(buf) {
+            Ok(k) => {
+                if k == 0usize { break }
+                match c.write_all(buf[0usize : k]) {
+                    Ok(u) => { }
+                    Err(e) => { break }
+                }
+                total = total + u64(k)
+            }
+            Err(e) => { break }
+        }
+    }
+    return total
+}
+
+// count reads to the end and answers with the number of bytes as text.
+func count(c: own net.TcpStream) -> u64 {
+    var buf: [4096]u8 = zero()
+    var total: u64 = 0u64
+    while true {
+        match c.read(buf) {
+            Ok(k) => {
+                if k == 0usize { break }
+                total = total + u64(k)
+            }
+            Err(e) => { break }
+        }
+    }
+    var digits: [20]u8 = zero()
+    var n: usize = 0usize
+    var x: u64 = total
+    while true {
+        digits[19usize - n] = 48u8 + truncate[u8](x % 10u64)
+        n = n + 1usize
+        x = x / 10u64
+        if x == 0u64 { break }
+    }
+    match c.write_all(digits[20usize - n : 20usize]) {
+        Ok(u) => { }
+        Err(e) => { }
+    }
+    return total
+}
+
+// serve owns the listener: it echoes the first echoes connections and
+// counts the bytes of one more when counted is set.
+func serve(l: own net.TcpListener, echoes: u64, counted: bool) -> u64 {
+    var total: u64 = 0u64
+    for i in 0u64..echoes {
+        match l.accept() {
+            Ok(c) => { total = total + echo(c) }
+            Err(e) => { return total }
+        }
+    }
+    if counted {
+        match l.accept() {
+            Ok(c) => { total = total + count(c) }
+            Err(e) => { return total }
+        }
+    }
+    return total
+}
+
+func same(a: net.SocketAddr, b: net.SocketAddr) -> bool {
+    x := net.format_addr(a)
+    y := net.format_addr(b)
+    if x.len() != y.len() { return false }
+    var eq: bool = true
+    with xv := x.as_view() {
+        with yv := y.as_view() {
+            for i in 0usize..len(xv) {
+                if xv[i] != yv[i] { eq = false }
+            }
+        }
+    }
+    return eq
+}
+
+func v4() -> Result[(), io.IoErr] {
+    say("-- IPv4")
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    at := l.local_addr()?
+    flag("the system chose a port:", at.port != 0u16)
+    match thread.spawn(serve, l, 2u64, true) {
+        Ok(server) => {
+            // one: echo
+            c := net.TcpStream.connect(at)?
+            c.set_nodelay(true)?
+            peer := c.peer_addr()?
+            flag("the peer is the listener's address:", same(peer, at))
+            mine := c.local_addr()?
+            flag("the client has a port of its own:", mine.port != 0u16 && mine.port != at.port)
+            c.write_all("hello, ")?
+            c.write_all("echo")?
+            c.shutdown(net.Shutdown.Write)?
+            back := Vec[u8].new()
+            n := io.read_to_end(c, back)?
+            text("echoed", back.as_view())
+            var one: [1]u8 = zero()
+            print_str("a read after the end returns ")
+            print_u64(u64(c.read(one)?))
+            println()
+            drop(c)
+
+            // two: lines through the interfaces
+            d := net.TcpStream.connect(at)?
+            io.write_to(d, "first line\nsecond line\r\nthird, with no end")?
+            d.flush()?
+            d.shutdown(net.Shutdown.Write)?
+            r := io.BufReader[net.TcpStream].new(d)
+            while true {
+                line := Vec[u8].new()
+                if !r.read_line(line)? { break }
+                text("line", line.as_view())
+            }
+            drop(r)
+
+            // three: a megabyte one way, its count the other
+            big := net.TcpStream.connect(at)?
+            chunk := Vec[u8].new()
+            chunk.resize(65536usize, 120u8)
+            for i in 0usize..16usize { big.write_all(chunk.as_view())? }
+            big.shutdown(net.Shutdown.Write)?
+            answer := Vec[u8].new()
+            m := io.read_to_end(big, answer)?
+            text("the server counted", answer.as_view())
+            drop(big)
+
+            print_str("bytes the server handled: ")
+            print_u64(server.join())
+            println()
+        }
+        Err(e) => say("no thread")
+    }
+    return Ok(())
+}
+
+// v6 is the echo over ::1: true when it ran, false when this host has no
+// IPv6 loopback to bind.
+func v6() -> Result[bool, io.IoErr] {
+    match net.TcpListener.bind(net.loopback_v6(0u16)) {
+        Ok(l) => {
+            at := l.local_addr()?
+            var ok: bool = false
+            match thread.spawn(serve, l, 1u64, false) {
+                Ok(server) => {
+                    c := net.TcpStream.connect(at)?
+                    peer := c.peer_addr()?
+                    c.write_all("six")?
+                    c.shutdown(net.Shutdown.Write)?
+                    back := Vec[u8].new()
+                    n := io.read_to_end(c, back)?
+                    drop(c)
+                    handled := server.join()
+                    ok = n == 3usize && same(peer, at) && handled == 3u64
+                }
+                Err(e) => { }
+            }
+            if !ok { return Err(io.error_of(io.ErrKind.Other)) }
+            return Ok(true)
+        }
+        Err(e) => { return Ok(false) }
+    }
+}
+
+func main() -> i32 {
+    match v4() {
+        Ok(u) => { }
+        Err(e) => say("IPv4 failed")
+    }
+    match v6() {
+        Ok(ran) => say("-- IPv6: echoed over ::1, or this host has none")
+        Err(e) => say("-- IPv6 failed")
+    }
+    return 0i32
+}
