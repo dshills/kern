@@ -165,17 +165,21 @@ balance.
   a second of waiting is exposed to that where a count over a
   millisecond is not, which fits the line that failed; it is a reading
   of the evidence, not something observed.
-- **What changed.** The fixture takes a count again when it does not
-  balance, up to three times, and prints both numbers when it never
-  does, so a run on that host now says which way the count is off. The
-  retry cannot hide a leak from the suite: `TestConnectsThatFailLeaveNoDescriptor`
-  makes the same counts, with no retry, in a process of the program's
-  own, in both engines, with attempts given up at once, turned away by a
-  full queue, timed out and refused.
+- **What changed.** A count of a process's descriptors proves something
+  only in a process of the program's own, so that is where it is now
+  made. The fixture keeps what the attempts returned;
+  `TestConnectsThatFailLeaveNoDescriptor` runs the program by itself, in
+  both engines, with attempts given up at once, turned away by a full
+  queue, timed out and refused, counts after each kind and again after
+  every listener and connection is destroyed, and prints both numbers
+  when a count is off. With the runtime's close of a timed-out attempt
+  removed, it reports the descriptors left. Should the interpreter leak
+  on that host after all, this test says so there, with the numbers.
 
 With these changes `go test ./...` and the sanitized corpus pass on
 macOS 27, and the Linux container's gate passes with 2,816 tests, the
-two new tests named in it. The macOS 26 host has not run them yet.
+two new tests named in it, at the fix and again after the count was
+moved out of the fixture. The macOS 26 host has not run them yet.
 
 ## Verification
 

@@ -67,7 +67,7 @@ and child-facing descriptors. What that adds to the review:
 | Item | Finding | Status |
 |---|---|---|
 | Environment variables | `KERN_BACKTRACE`, `KERN_STACK_BYTES` and `KERN_ALLOC_REPORT` are read once at startup, accept only their listed forms, and are ignored by a set-user-ID or set-group-ID process; none names a path or is passed to another program | closed (`TestRuntimeConfigurationVariables`) |
-| Descriptors | every file, socket and pipe the runtime opens is close-on-exec and numbered above 2; a child gets the descriptors `std/process` names and no other; a standard descriptor closed at startup is filled before anything is opened | closed (`TestProcInheritFile`, `TestConnectsThatFailLeaveNoDescriptor`, `net_timeouts.kern`'s descriptor counts) |
+| Descriptors | every file, socket and pipe the runtime opens is close-on-exec and numbered above 2; a child gets the descriptors `std/process` names and no other; a standard descriptor closed at startup is filled before anything is opened | closed (`TestProcInheritFile`, `TestConnectsThatFailLeaveNoDescriptor`'s descriptor counts) |
 | Paths | a path with a NUL byte or of 4,096 bytes or more is refused before any system call; `create_new` fails on an existing path, a symbolic link included (`O_EXCL`); the library does not follow or resolve paths on its own account | closed (`io_file.kern`, `io_paths.kern`) |
 | Temporary files | made with `mkdtemp` and `mkostemp` under `TMPDIR` | closed (unchanged) |
 | Sockets | no call can block past its duration; a write to a closed peer is an error, never a signal; an IPv6 socket is IPv6 only; nothing listens unless the program binds | closed (`net_timeouts.kern`) |

@@ -578,7 +578,7 @@ func tried(label: view[]u8, at: net.SocketAddr, n: u64, d: time.Duration) {
     }
     counted(label, fds(), start + kept.len())
 }
-func run() -> Result[(), io.IoErr] {
+func attempts() -> Result[(), io.IoErr] {
     l := net.TcpListener.bind(net.loopback_v4(0u16))?
     tried("given up at once", l.local_addr()?, 20u64, time.nanos(0u64))
     q := net.TcpListener.bind_with_backlog(net.loopback_v4(0u16), 1u32)?
@@ -592,25 +592,28 @@ func run() -> Result[(), io.IoErr] {
     return Ok(())
 }
 func main() -> i32 {
-    match run() {
+    base := fds()
+    match attempts() {
         Ok(u) => { }
         Err(e) => { print_str("failed"); println() }
     }
+    counted("after every listener and connection is destroyed", fds(), base)
     return 0i32
 }
 `
 
 // A connection attempt that does not become a connection leaves no
-// descriptor (specs/runtime RH2), whichever way it ends, in both engines.
-// The program runs as its own process, where the count of descriptors is
-// its own: the fixture tests/run/net_timeouts.kern makes the same count
-// inside the test binary, whose own descriptors come and go, and so has
-// to take a count again when it does not balance.
+// descriptor, whichever way it ends, and a socket's destructor closes it
+// (specs/runtime RH2, RH3), in both engines. The program runs as its own
+// process, where the count of descriptors is its own; inside the test
+// binary, where the fixtures' interpreter runs, the host's descriptors
+// come and go and such a count proves nothing.
 func TestConnectsThatFailLeaveNoDescriptor(t *testing.T) {
 	want := "given up at once: balanced\n" +
 		"to a full queue: balanced\n" +
 		"to an address nothing answers at: balanced\n" +
-		"to a port nobody listens on: balanced\n"
+		"to a port nobody listens on: balanced\n" +
+		"after every listener and connection is destroyed: balanced\n"
 	for _, engine := range []string{"native", "interpreter"} {
 		t.Run(engine, func(t *testing.T) {
 			stdout, stderr, err := ranEngine(t, connectsThatFail, engine == "interpreter")
