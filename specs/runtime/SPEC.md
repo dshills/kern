@@ -1,6 +1,6 @@
 # Spec: the kern runtime, complete
 
-**Version:** 0.9. **Status:** implemented (`specs/runtime/STATUS.md`). **Date:** 2026-11-09.
+**Version:** 0.9. **Status:** implemented (`specs/runtime/STATUS.md`); the owner approved its scope, the non-goals of §2 included, on 2026-11-10. **Date:** 2026-11-09.
 
 ## 0. Goal
 
@@ -78,7 +78,8 @@ what it does and small for what a release needs:
 - Trap containment in freestanding images (ADR-015 option D stays deferred).
 - Changing the performance of code that does not use the new facilities:
   the benchmark workloads' release instruction counts stay within 1% (R-P1).
-- Pushing to origin or publishing a release.
+- Pushing to origin or publishing a release as part of the work (the
+  owner had `main` pushed on 2026-11-10; no release was made).
 
 ## 3. Requirements
 

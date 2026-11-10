@@ -157,7 +157,8 @@ reproduced it, with the hosts' own Go release either.
   its host library's call that also asks what each entry is, and that
   call fails the whole listing when the system will not say for one
   entry, where the runtime reads names only. The interpreter now reads
-  names only too; a run on that host is what confirms it.
+  names only too, and the next run on that host passed, both tests
+  below among it, with counts that are not none.
 - **What the search found on the way.** Looking for a descriptor that
   outlived its owner found the one described above: on macOS a
   descriptor sent over a Unix-domain socket and not taken stayed open

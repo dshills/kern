@@ -175,7 +175,8 @@ its commit and its deviations, and what was found along the way.
 
 Every requirement of the spec is met; the ledger has no open row. Two
 things the runtime does not do were decided in the spec as first written
-(§2, Non-goals) and stand:
+(§2, Non-goals) and stand; the owner approved the scope with them on
+2026-11-10:
 
 - **No asynchronous scheduler.** A call that waits blocks its thread, and
   there is no task type (ADR-017, decision 1). What that leaves a program
@@ -198,8 +199,11 @@ the owner's word. `docs/runtime.md` section 12 states the five
 properties that remain of the interpreter's being a program of another
 runtime.
 
-Publishing is the owner's: nothing has been pushed, by standing
-instruction.
+Publishing is the owner's. `main` was pushed at the owner's word on
+2026-11-10; the first runs on GitHub's hosts found two defects on macOS
+26 that the work's own macOS 27 host had not shown
+(`runtime-poller-descriptors.md`, "After the first push"), and the
+suite passes on all four of them at 665a484. No release was made.
 
 ## Independent checks
 
