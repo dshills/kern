@@ -143,43 +143,47 @@ The work was first run on GitHub's hosts when `main` was pushed at
 327b07d. Both Linux hosts and the sanitized corpus passed. The macOS
 host (macOS 26; this work was done on macOS 27) failed one line of one
 fixture, twice in two runs: `tests/run/net_timeouts.kern`, run by the
-interpreter inside the test binary, counted the process's descriptors
-around twelve connection attempts to a full queue and the count did not
-balance.
+interpreter, counted the process's descriptors around twelve connection
+attempts to a full queue and the count did not balance. Nothing here
+reproduced it, with the hosts' own Go release either.
 
-- **What it led to.** Looking for a descriptor that outlives its owner
-  found the one described above: on macOS a descriptor sent over a
-  Unix-domain socket and not taken stayed open in the receiver. That is
-  fixed and tested (`TestDescriptorsNotTakenAreClosed`), and is not what
-  the fixture counted.
-- **What the fixture counted is not reproduced here.** On macOS 27, with
-  the Go release the hosts use, the fixture balances in every run, in
-  both engines, and so does a program that forces attempts to time out,
-  to be refused and to be turned away. What differs on macOS 27 is the
-  system: an attempt to a full queue is reset at once, where the
-  fixture's time on the macOS 26 host says attempts waited there. The
-  count is of the whole process, and the test binary is not the
-  program's own process: the system's name resolver, which an earlier
-  fixture uses, leaves two sockets of its own open in it (seen here),
-  and may close them at a time of its own (not seen here). A count over
-  a second of waiting is exposed to that where a count over a
-  millisecond is not, which fits the line that failed; it is a reading
-  of the evidence, not something observed.
-- **What changed.** A count of a process's descriptors proves something
-  only in a process of the program's own, so that is where it is now
-  made. The fixture keeps what the attempts returned;
-  `TestConnectsThatFailLeaveNoDescriptor` runs the program by itself, in
-  both engines, with attempts given up at once, turned away by a full
-  queue, timed out and refused, counts after each kind and again after
-  every listener and connection is destroyed, and prints both numbers
-  when a count is off. With the runtime's close of a timed-out attempt
-  removed, it reports the descriptors left. Should the interpreter leak
-  on that host after all, this test says so there, with the numbers.
+- **The cause** was the count, not what it counted. The fixture counts
+  by listing `/dev/fd`, and on that host the interpreter's listing of
+  `/dev/fd` failed every time, which the fixture read as a count of
+  none: no descriptors before, none after, one connection kept. That
+  much is what the second run on that host showed, where the test below
+  printed `0 descriptors open, 1 due`. Why the listing failed is read
+  from the source, not seen: the interpreter listed a directory with
+  its host library's call that also asks what each entry is, and that
+  call fails the whole listing when the system will not say for one
+  entry, where the runtime reads names only. The interpreter now reads
+  names only too; a run on that host is what confirms it.
+- **What the search found on the way.** Looking for a descriptor that
+  outlived its owner found the one described above: on macOS a
+  descriptor sent over a Unix-domain socket and not taken stayed open
+  in the receiver. That is fixed and tested
+  (`TestDescriptorsNotTakenAreClosed`); it was not what the fixture
+  counted.
+- **Where the count is made now.** A count of a process's descriptors
+  is the program's own only in a process of its own, and inside the
+  test binary it is the binary's. The fixture keeps what the attempts
+  returned; `TestConnectsThatFailLeaveNoDescriptor` runs the program by
+  itself, in both engines, with attempts given up at once, turned away
+  by a full queue, timed out and refused, counts after each kind and
+  again after every listener and connection is destroyed, and prints
+  both numbers when a count is off. A listing that fails is said, with
+  its error, and a count of none is never a balance, in this test and
+  in `TestDescriptorsNotTakenAreClosed`. With the runtime's close of a
+  timed-out attempt removed, the test reports the descriptors left.
+- **A first reading that was wrong.** Before the second run, the
+  failure was read as descriptors of the test binary's own closing
+  during the count (the system's resolver leaves two sockets in a
+  process that used it). Nothing showed that, and the numbers the test
+  printed ruled it out.
 
 With these changes `go test ./...` and the sanitized corpus pass on
 macOS 27, and the Linux container's gate passes with 2,816 tests, the
-two new tests named in it, at the fix and again after the count was
-moved out of the fixture. The macOS 26 host has not run them yet.
+two new tests named in it.
 
 ## Verification
 

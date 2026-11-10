@@ -398,6 +398,9 @@ func fds() -> usize {
         }
     }
 }
+// counted says whether as many descriptors are open as were; a count of
+// none is a listing that failed, never a match.
+func counted(base: usize) -> bool { return base > 0usize && fds() == base }
 func run(dir: view[]u8) -> Result[(), io.IoErr] {
     dp := io.join(dir, "d")
     ud := net.UnixDatagram.bind(dp.as_view())?
@@ -416,15 +419,15 @@ func run(dir: view[]u8) -> Result[(), io.IoErr] {
         }
         None => say("no message came")
     }
-    flag("and with it closed none is left open:", fds() == base)
+    flag("and with it closed none is left open:", counted(base))
     c.write_all("1")?
     match c.read_timeout(buf, limit)? {
-        Some(n) => flag("an ordinary read leaves none open:", fds() == base)
+        Some(n) => flag("an ordinary read leaves none open:", counted(base))
         None => say("no second message came")
     }
     c.write_all("2")?
     match ud.recv_from_timeout(buf, limit)? {
-        Some(m) => flag("nor does a datagram:", fds() == base)
+        Some(m) => flag("nor does a datagram:", counted(base))
         None => say("no datagram came")
     }
     c.write_all("3")?
@@ -543,17 +546,28 @@ const connectsThatFail = `module t
 import "std/net"
 import "std/io"
 import "std/time"
+// fds counts the process's open descriptors, and says so when the
+// system will not list them.
 func fds() -> usize {
     with ls := io.list_dir("/dev/fd") {
         match ls {
             Ok(names) => { return names.len() }
-            Err(e) => { return 0usize }
+            Err(e) => {
+                print_str("/dev/fd cannot be listed")
+                match e {
+                    Other(code) => { print_str(": error "); print_u64(u64(code)) }
+                    _ => { }
+                }
+                println()
+                return 0usize
+            }
         }
     }
 }
 func counted(label: view[]u8, open: usize, due: usize) {
     print_str(label)
-    if open == due {
+    // a count of none is a listing that failed, never a balance
+    if open == due && open > 0usize {
         print_str(": balanced")
     } else {
         print_str(": "); print_u64(u64(open)); print_str(" descriptors open, "); print_u64(u64(due)); print_str(" due")
@@ -606,8 +620,10 @@ func main() -> i32 {
 // descriptor, whichever way it ends, and a socket's destructor closes it
 // (specs/runtime RH2, RH3), in both engines. The program runs as its own
 // process, where the count of descriptors is its own; inside the test
-// binary, where the fixtures' interpreter runs, the host's descriptors
-// come and go and such a count proves nothing.
+// binary, where the fixtures' interpreter runs, the count would be of the
+// binary's. A listing of /dev/fd that fails is said and is never a
+// balance: on macOS 26 the interpreter's failed every time, and a count
+// of none before and none after once read as nothing left open.
 func TestConnectsThatFailLeaveNoDescriptor(t *testing.T) {
 	want := "given up at once: balanced\n" +
 		"to a full queue: balanced\n" +

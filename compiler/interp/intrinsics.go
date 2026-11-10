@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -283,13 +284,24 @@ func init() {
 			if e != 0 {
 				return []Value{mkInt(tyI64, uint64(-int64(e)))}
 			}
-			ents, err := os.ReadDir(p) // sorted bytewise by name, as strcmp sorts natively
+			// Names only, as the runtime reads them. os.ReadDir also
+			// asks what each entry is, and fails the whole listing when
+			// the system will not say for one of them: /dev/fd on macOS
+			// 26 gives no type, and a descriptor that cannot be examined
+			// (the host's own kqueue) then made every listing fail.
+			d, err := os.Open(p)
 			if err != nil {
 				return []Value{mkInt(tyI64, uint64(-int64(errnoOf(err))))}
 			}
+			names, err := d.Readdirnames(-1)
+			_ = d.Close()
+			if err != nil {
+				return []Value{mkInt(tyI64, uint64(-int64(errnoOf(err))))}
+			}
+			sort.Strings(names) // bytewise, as strcmp sorts natively
 			var out []byte
-			for _, de := range ents {
-				out = append(append(out, de.Name()...), 0)
+			for _, name := range names {
+				out = append(append(out, name...), 0)
 			}
 			buf := byteSeq(acc(a[1]))
 			if len(out) <= buf.length() {

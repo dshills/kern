@@ -131,7 +131,8 @@ func refused() -> Result[(), io.IoErr] {
 
 // The descriptors these attempts leave are counted where the count is
 // the program's own, TestConnectsThatFailLeaveNoDescriptor: here the
-// interpreter runs inside a test, whose own descriptors come and go.
+// interpreter runs inside a test binary, and the count would be of that
+// binary's descriptors.
 func given_up() -> Result[(), io.IoErr] {
     say("-- connects that give up")
     l := net.TcpListener.bind(net.loopback_v4(0u16))?
