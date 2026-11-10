@@ -243,12 +243,18 @@ static void kern_backtrace(const kern_regs *r) {
     n = kern_cat(b, n, "{\"backtrace\":{\"thread\":");
     n += kern_fmt_u64(b + n, kern_tid);
     n = kern_cat(b, n, ",\"frames\":[");
+    int listed = 0;
     for (int i = 0; i < count; i++) {
         const kern_fnloc *f = frames[i];
+        // The thunk that calls main carries main's location under an entry
+        // of its own, which shares the name's constant: its frame behind
+        // main's own is not a second main. (When main was inlined into the
+        // thunk, the thunk's is the only frame, and it is listed.)
+        if (i > 0 && f != frames[i - 1] && f->name != NULL && f->name == frames[i - 1]->name) continue;
         if (n + 96 >= limit) { more = 1; break; } // a frame's fixed text and its line number always fit
         uint64_t line, col;
         kern_line_col(f->file, f->start, f->end, &line, &col);
-        if (i > 0) b[n++] = ',';
+        if (listed++ > 0) b[n++] = ',';
         n = kern_cat(b, n, "{\"function\":\"");
         n = kern_cat_json(b, n, limit - 64, f->name ? f->name : "");
         n = kern_cat(b, n, "\",\"file\":\"");

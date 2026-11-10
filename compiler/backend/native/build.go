@@ -221,6 +221,19 @@ func BuildModule(mod *ir.Module, srcs []*source.File, out string, opts Options) 
 	// pointers in it too: the fault handler walks the chain through it
 	// (specs/native-trap-loc)
 	rtFlags := []string{level, "-ffp-model=strict", "-fno-omit-frame-pointer"}
+	// The runtime is one object, and a program uses a part of it. The
+	// linker drops what the program does not reach, and with it the
+	// system functions only that part imports: the dynamic loader binds
+	// every import at launch, and the imports of sockets, files and
+	// signals cost an empty program some 2.4 million instructions on
+	// macOS (docs/reports/runtime-summary.md). Mach-O is stripped by
+	// symbol; ELF needs a section per function. A sanitized build is
+	// left whole.
+	strip := !opts.TSan && !opts.Sanitize
+	apple := strings.Contains(triple, "apple") || strings.Contains(triple, "darwin")
+	if strip && !apple {
+		rtFlags = append(rtFlags, "-ffunction-sections", "-fdata-sections")
+	}
 	if opts.Opt == "release" {
 		rtFlags = append(rtFlags, "-DKERN_RELEASE") // identity tags off (PLAN.md 2.2)
 	}
@@ -247,6 +260,12 @@ func BuildModule(mod *ir.Module, srcs []*source.File, out string, opts Options) 
 		}
 	}
 	args := []string{level, "-Wno-override-module", "-ffp-model=strict", "-fno-omit-frame-pointer", "-o", out, ll, rt}
+	switch {
+	case strip && apple:
+		args = append(args, "-Wl,-dead_strip")
+	case strip:
+		args = append(args, "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections")
+	}
 	if opts.Opt == "release" {
 		args = append(args, "-DKERN_RELEASE")
 	}

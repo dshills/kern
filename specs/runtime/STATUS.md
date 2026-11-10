@@ -18,7 +18,7 @@ reason. Updated at the end of every phase.
 | RB4 terminal query | 2 | c62a4d7 |  |
 | RB5 exit | 2 | c62a4d7 |  |
 | RC1 detached threads | 3 | 4dd62e2 |  |
-| RC2 stack size | 3 | 4dd62e2 | `kern test` has no `--stack-bytes` (it honours `KERN_STACK_BYTES`); the manifest's error code is `PROJECT_INVALID`, as for every manifest error |
+| RC2 stack size | 3 | 4dd62e2, PH11 | `kern test` has no `--stack-bytes` (it honours `KERN_STACK_BYTES`); the manifest's error code is `PROJECT_INVALID`, as for every manifest error. A size below the system's minimum for a thread (131,072 bytes on Linux arm64) is raised to it: "the same on Linux and macOS" holds from that size up |
 | RC3 spawn robustness | 3 | 4dd62e2 | A spawn whose allocation fails is `Err(SpawnErr)`; it trapped `oom` before (`specs/runtime-trap-file` R4) |
 | RC4 queries | 3 | 4dd62e2 |  |
 | RE1 line and column | 4 | e3f7ef2 | The span 0-0 (no location) also gives line 0, column 0 |
@@ -44,9 +44,9 @@ reason. Updated at the end of every phase.
 | RI2 std/rand | 9 | 6296fee | `Rng.from_state` and `Rng.state` added |
 | RJ1 board interface | 10 | a176db2 | The heap is at most 1,073,741,824 bytes. The interpreter's emulation has no arena limit and no board. The x86-64 clock is calibrated at its first reading, not in `kern_board_init` |
 | RJ2 allocator checks | 10 | a176db2 |  |
-| RK1 runtime reference | 11 | | |
-| RK2 other documents | 11 | | |
-| R-P1 performance | 11 | | |
+| RK1 runtime reference | 11 | PH11 |  |
+| RK2 other documents | 11 | PH11 | The unsafe audit and the security review are extended by hand; neither is generated |
+| R-P1 performance | 11 | PH11 | Ten workloads at or below v0.1.0. `hash_table` (+2.1%) and `lock_protected_map` (about +8% over fifteen runs) free tables that v0.1.0 leaked (rule 5.1.9, phase 1); `thread_pool` is within its run-to-run spread. `kern_mutex_lock`'s trap tail is shaped differently; the uncontended path and `unlock` are the same instructions |
 
 ## Found along the way
 
@@ -63,3 +63,7 @@ reason. Updated at the end of every phase.
 | String literals had no `\r` and no byte escape; a variant name shared by two unions could not be written bare; `match replace(...)` did not own its payload (language changes) | b764316 |
 | A match on the value `?` unwraps from a call did not own its payload (language change) | 407c1e7 |
 | No way to exchange two move-only elements of a sequence: the prelude gained `swap_at` (language change) | 6296fee |
+| The entry thunk's `noinline` kept LLVM from optimizing `main` a second time (`ring_buffer` +20%, `wal` +12%): the thunk carries `main`'s marker and is inlined again | PH11 |
+| Every program imported the whole runtime's system functions (2.4 million instructions at launch on macOS): the link drops unreached runtime code | PH11 |
+| `tests/run/std_io.kern` wrote to the working directory, which the Linux container mounts read-only | PH11 |
+| A configured stack of 65,536 bytes could not start `main` or a thread on Linux arm64, whose minimum is 131,072 (found by the final run of the whole suite in the container) | PH11 |

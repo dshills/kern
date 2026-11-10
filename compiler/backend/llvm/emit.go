@@ -140,6 +140,12 @@ func emitWith(mod *ir.Module, opts Options) (*emitter, string, []error) {
 		// the program's file, which a trap raised by the runtime itself
 		// (a stack check, a mutex misuse) names in its record: the file
 		// declaring main
+		// The thunk that calls main carries main's location under an
+		// entry of its own (entryMarker), made before the table is written.
+		thunkMarker, thunkCall := e.entryMarker(mod.Entry), ""
+		if opts.KeepFrames {
+			thunkCall = " noinline" // a debug --backtrace build keeps every user frame, main's too
+		}
 		params, setArgs := "", e.fnLocTable()+e.lineTables()
 		if entry.File != "" {
 			setArgs += fmt.Sprintf("  call void @kern_set_file(ptr %s)\n", e.fileSym(entry.File))
@@ -154,13 +160,18 @@ func emitWith(mod *ir.Module, opts Options) (*emitter, string, []error) {
 		// kern_start with the ABI symbol's address (the reference that
 		// makes a runtime of another ABI version fail to link), then
 		// kern_run_main with a thunk that calls main and widens its result
-		// to the exit status. The call is noinline and the thunk carries
-		// no location marker, so main keeps its own frame and marker: a
-		// fault in main is found in main, and a backtrace lists it once.
+		// to the exit status. LLVM is free to inline main into the thunk,
+		// as it inlined it into the C main before there was a thunk: the
+		// inlined body is then optimized a second time in its caller,
+		// which the benchmark loops depend on (ring_buffer lost a fifth of
+		// its speed to a noinline here). The thunk therefore carries
+		// main's location marker: a fault in the inlined main is found in
+		// main, and when main keeps a frame of its own the backtrace
+		// drops the thunk's behind it (rt_trap.c).
 		if ret == "void" {
-			fmt.Fprintf(&e.sb, "define internal i32 @kern.entry() {\nentry:\n  call %s %s() noinline\n  ret i32 0\n}\n", retOrVoid(ret), fnSym(mod.Entry))
+			fmt.Fprintf(&e.sb, "define internal i32 @kern.entry()%s {\nentry:\n  call %s %s()%s\n  ret i32 0\n}\n", thunkMarker, retOrVoid(ret), fnSym(mod.Entry), thunkCall)
 		} else {
-			fmt.Fprintf(&e.sb, "define internal i32 @kern.entry() {\nentry:\n  %%r = call %s %s() noinline\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", ret, fnSym(mod.Entry), widenOp(ret), ret)
+			fmt.Fprintf(&e.sb, "define internal i32 @kern.entry()%s {\nentry:\n  %%r = call %s %s()%s\n  %%s = %s %s %%r to i32\n  ret i32 %%s\n}\n", thunkMarker, ret, fnSym(mod.Entry), thunkCall, widenOp(ret), ret)
 		}
 		fmt.Fprintf(&e.sb, "define i32 %s(%s) {\nentry:\n%s%s  %%s = call i32 @kern_run_main(ptr @kern.entry)\n  ret i32 %%s\n}\n", entrySym, params, setArgs, e.startCall())
 	}
@@ -779,6 +790,19 @@ func (fe *fnEmit) marker() string {
 		e.fnLocs = append(e.fnLocs, fmt.Sprintf("{ i64, i64, ptr, ptr } { i64 %d, i64 %d, ptr %s, ptr %s }", fe.f.Pos.Start, fe.f.Pos.End, fe.fileOperand(fe.f.File), e.nameSym(fe.f.Name)))
 	}
 	return e.markerFor(idx)
+}
+
+// entryMarker is the marker of the thunk that calls the entry function:
+// a table entry of its own with main's span, file and name. The two
+// entries share the name's constant, which is how the backtrace tells the
+// thunk's frame behind main's from a second activation of main.
+func (e *emitter) entryMarker(entry string) string {
+	idx, ok := e.fnLocIdx[entry]
+	if e.opts.Freestanding || !ok {
+		return ""
+	}
+	e.fnLocs = append(e.fnLocs, e.fnLocs[idx])
+	return e.markerFor(int64(len(e.fnLocs) - 1))
 }
 
 func (e *emitter) markerFor(idx int64) string {

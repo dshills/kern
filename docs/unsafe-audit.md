@@ -199,6 +199,39 @@ Exercised by `tests/run/{map_in,map_in_diff}.kern` and
 `tests/freestanding/map_in.kern`, over budget allocators that trap on a
 `free` naming no live allocation, in both engines.
 
+## The runtime work's additions (`specs/runtime`, 2026-11-09)
+
+The prelude gained one function with an `unsafe` block, and two of the
+new modules hold raw memory. The other new modules (`std/net`,
+`std/signal`, `std/rand`, and the additions to `std/io` and
+`std/process`) have none: they are checked kern over runtime entries
+that take and return plain values.
+
+| Function | Operations | Contract | Failure path |
+|---|---|---|---|
+| `Mutex.try_with` (`std/core.kern`) | `try_acquire` (a lock nothing releases) and `held` (the guarded value without a guard), the two operations rule 5.3.6's escalation leaves unsafe | invariant "the lock is held from try_acquire to unlock, so the edit passed to f is exclusive for the call" | `tests/run/sync_basics.kern` (false, closure not called, when held, by the caller too); `tests/negative/mutex_try_acquire_unsafe.kern` rejects both operations outside `unsafe` |
+| `RwLock.new`, `release` (`std/sync.kern`) | `heap_alloc`, `ptr_store`; `ptr_take`, `heap_free` | ensures "data addresses one live T until the destructor takes it"; requires "data addresses the live T, which nothing reads after this" | the sanitized run of `tests/concurrency/sync_types.kern` reports no leak and no use after free |
+| `RwLock.read`, `write` | `ptr_view`, `ptr_edit` on the held value | invariants: state counts the reader until `read_unlock` and no writer holds the lock meanwhile; state is `WRITER` until `write_unlock`, which no reader and no other writer gets past | `sync_types.kern` under the thread sanitizer: four writers and four readers, a torn pair would be a report and a wrong sum |
+| `Channel.new`, `release` | `heap_alloc`; `ptr_take` of each queued value, `heap_free` | ensures "buf addresses storage for capacity values of T, none of them live"; requires "no other thread uses the channel: the queued values are live and buf is its allocation" | `tests/run/sync_basics.kern` (a counted destructor: every queued value is destroyed once with the channel) |
+| `Channel.put`, `pop` | `ptr_store`, `ptr_take` at a ring slot; writes of `head` and `count` through a `view` (Interior) | requires "the caller holds lock and count < cap: the slot is free storage"; "the caller holds lock and count > 0: the slot at head holds a live T" | `tests/concurrency/sync_channel_pool.kern` under the thread sanitizer: six producers and six consumers through one slot, every value received exactly once |
+| `Channel.room`, `some`, `len` | reads of `count` and `cap` through a `view` | requires "the caller holds lock" (`len` takes it) | the same run |
+| `PageAllocator.alloc`, `free` (`std/mem.kern`) | `mem_map`, `mem_unmap` (the system's pages, which only the caller gives back) | requires "align is a power of two and size a multiple of it", ensures "Ok addresses pages_for(size) bytes of zeroed memory that only free releases"; requires "ptr and size are those of one live allocation of a PageAllocator, which nothing uses afterwards" | `tests/run/mem_pages.kern` (zeroed to the page's last byte, five containers over it); `tests/negative/mem_map_unsafe.kern` rejects the primitives outside `unsafe`; the interpreter traps `explicit` on an unmap that names no live mapping |
+
+**Marker assertions.** `std/sync.kern` asserts `Interior` for `RwLock` and
+`Channel` (their words are written through a `view`, under their own
+locking), and, conditionally, `Share for RwLock where T: Send + Share`,
+`Send for RwLock where T: Send`, and `Share` and `Send for Channel where
+T: Send`. The conditions are the obligations: a reader of an `RwLock`
+shares the value with other readers, so the value must be `Share`; a
+channel moves values between threads and never shares one, so `Send`
+suffices. `tests/negative/sync_channel_not_send.kern` shows a channel of
+a type that is not `Send` refused across threads, and
+`tests/negative/assert_where_*.kern` the conditional form itself.
+
+**`swap_at`** is a safe prelude operation: it checks both indices and
+exchanges the elements' bytes, so no value is duplicated or lost and no
+destructor runs (`tests/run/swap_at.kern`, with a move-only element type).
+
 ## Benchmarks (`bench/kern/`)
 
 `bench/kern/UNSAFE.md` is the per-block inventory written with the programs;
@@ -222,6 +255,8 @@ in summary:
 | `tests/ffi/{scalars,pointers}.kern` | imported `extern "C"` calls, raw buffer handed to C | "the C counterpart is linked", "p addresses n writable bytes owned by the caller" | the C side never frees; `c_sum` over the filled range is checked |
 | `tests/concurrency/race_raw_ptr.kern` | `unsafe assert Send for Slot`, racing `ptr_store` | "the data race is intentional" | the ThreadSanitizer run must report it (`tsan: race`) |
 | `tests/negative/interior_write_unsafe.kern` | write through a `view` of an `Interior` type in its module | invariant "hits is written only while lock is 1" | the twin without `unsafe` is `ASSIGN_IMMUTABLE` |
+| `tests/trap/sysalloc_*.kern`, `tests/freestanding/{double_free,realloc_freed}.kern` | `free` and `realloc` with a wrong size, a wrong alignment, twice, of an address that is not a block | "this fixture breaks the obligation on purpose" | the failure is the point: a debug build, the interpreter and the freestanding allocator trap `explicit` at the call (`specs/runtime` RF1, RJ2) |
+| `tests/run/mem_pages.kern`, `tests/negative/mem_map_unsafe_ok.kern` | `PageAllocator` used directly, `mem_map`/`mem_unmap` | "each block is used within its pages and freed once with its own size" | the interpreter traps `explicit` on a block that is not a live mapping |
 
 ## Rules the audit relies on
 

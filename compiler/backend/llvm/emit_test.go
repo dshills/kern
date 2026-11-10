@@ -373,11 +373,12 @@ func TestEmitFunctionMarkers(t *testing.T) {
 	if !strings.Contains(text, sec+"-1 }") {
 		t.Errorf("no library function carries the marker -1\n%s", text)
 	}
-	// the thunk kern_run_main calls has no marker and calls main noinline,
-	// so main keeps its own frame and marker; the C-level entry hands over
-	// the tables and follows the startup contract (specs/runtime/PLAN.md)
-	if !strings.Contains(text, "define internal i32 @kern.entry() {\nentry:\n  %r = call i32 @\"t.main\"() noinline") || !strings.Contains(text, "call void @kern_set_fn_locs(ptr @kern.fn_locs, i64 2)") {
-		t.Errorf("the entry thunk must call main noinline and the entry hand over the table\n%s", text)
+	// the thunk kern_run_main calls may have main inlined into it, so it
+	// carries a marker with an entry of its own, the third, and its call
+	// is an ordinary one; the C-level entry hands over the table and
+	// follows the startup contract (specs/runtime/PLAN.md)
+	if !strings.Contains(text, "define internal i32 @kern.entry() "+sec+"2 } {\nentry:\n  %r = call i32 @\"t.main\"()\n") || !strings.Contains(text, "call void @kern_set_fn_locs(ptr @kern.fn_locs, i64 3)") {
+		t.Errorf("the entry thunk must carry the third marker and call main, and the entry hand over the table\n%s", text)
 	}
 	// the line table of the one source file: its seven line starts, the
 	// last at the file's length (specs/runtime RE1)
@@ -387,7 +388,7 @@ func TestEmitFunctionMarkers(t *testing.T) {
 	if !strings.Contains(text, "define i32 @main(i32 %argc, ptr %argv) {") || !strings.Contains(text, "call void @kern_start(ptr @kern_rt_abi_2)\n  %s = call i32 @kern_run_main(ptr @kern.entry)\n  ret i32 %s") {
 		t.Errorf("the entry does not follow the startup contract\n%s", text)
 	}
-	table := regexp.MustCompile(`@kern\.fn_locs = private constant \[2 x \{ i64, i64, ptr, ptr \}\] \[(.*)\]`).FindStringSubmatch(text)
+	table := regexp.MustCompile(`@kern\.fn_locs = private constant \[3 x \{ i64, i64, ptr, ptr \}\] \[(.*)\]`).FindStringSubmatch(text)
 	if table == nil {
 		t.Fatalf("no location table\n%s", text)
 	}

@@ -25,7 +25,7 @@ in writing with its rationale.
 | Reference counts and atomics | compare-exchange loops; narrow read-modify-writes are single atomic updates | closed |
 | Test hooks | linked only with `--test-hooks` (`-DKERN_TEST_HOOKS`); release builds cannot reference them | closed |
 | Console device (freestanding) | polls the UART status before each byte; no buffering | closed |
-| Detached threads | the result block of an unjoined thread leaks | accepted: documented limitation (no safety impact) |
+| Detached threads | the result block of an unjoined thread leaked | closed 2026-11-09: the thread destroys its result and frees its record when it ends (section 6) |
 
 ## 3. Machine API input handling (`cmd/kern`)
 
@@ -58,3 +58,25 @@ in writing with its rationale.
 | Partial publication | the release is created as a draft with every asset and made public only after the uploads succeed; recovery from a failure in between is a fixed table in `docs/releasing.md`, and assets are never uploaded by hand | closed |
 | Third-party actions | `actions/checkout@v4` and `actions/setup-go@v5`, referenced by major-version tag rather than commit hash, as in `ci.yml` | accepted: pinning by hash is open |
 | Signing | as in section 4: checksums, not signatures | accepted |
+
+## 6. The runtime work (added 2026-11-09, `specs/runtime`)
+
+The runtime grew from the language's own needs to files, sockets, signals
+and child-facing descriptors. What that adds to the review:
+
+| Item | Finding | Status |
+|---|---|---|
+| Environment variables | `KERN_BACKTRACE`, `KERN_STACK_BYTES` and `KERN_ALLOC_REPORT` are read once at startup, accept only their listed forms, and are ignored by a set-user-ID or set-group-ID process; none names a path or is passed to another program | closed (`TestRuntimeConfigurationVariables`) |
+| Descriptors | every file, socket and pipe the runtime opens is close-on-exec and numbered above 2; a child gets the descriptors `std/process` names and no other; a standard descriptor closed at startup is filled before anything is opened | closed (`TestProcInheritFile`, `net_timeouts.kern`'s descriptor counts) |
+| Paths | a path with a NUL byte or of 4,096 bytes or more is refused before any system call; `create_new` fails on an existing path, a symbolic link included (`O_EXCL`); the library does not follow or resolve paths on its own account | closed (`io_file.kern`, `io_paths.kern`) |
+| Temporary files | made with `mkdtemp` and `mkostemp` under `TMPDIR` | closed (unchanged) |
+| Sockets | no call can block past its duration; a write to a closed peer is an error, never a signal; an IPv6 socket is IPv6 only; nothing listens unless the program binds | closed (`net_timeouts.kern`) |
+| Name resolution | `net.resolve` hands the name to the system resolver after refusing an empty name, one of 256 bytes or more and one with a NUL byte | accepted: the resolver's behaviour is the system's |
+| Signals | the handler sets one bit and writes one byte to a non-blocking pipe: it takes no lock and allocates nothing; a child never inherits a disposition the program set | closed (`signal_children.kern`, `signal_interrupts.kern`) |
+| Random numbers | `rand.fill`, `u64` and `below` are the system's generator (`getentropy`); `Rng` is documented as unfit for secrets | closed (`rand_os.kern`); the distinction is the reference's first paragraph |
+| Allocator checks | a debug build finds a double free, a wrong size and a foreign pointer at the call; a release build does not check, as before | closed for debug builds (`tests/trap/sysalloc_*.kern`); accepted for release |
+| Trap record and backtrace | written with `write(2)` from a fixed buffer; the walk reads the stack through a pipe, so a corrupted frame chain ends the walk instead of faulting; file and function names are JSON-escaped | closed (`TestBacktrace`) |
+| Detached threads | the result of an unjoined thread is destroyed and its record freed when the thread ends | closed: the limitation section 2 accepted is gone (`thread_detached_result.kern`) |
+| Board files | a board file is C the user supplies and is compiled into the image as given | accepted: it is the user's own code, as `extern` C is |
+| Sanitized corpus | every runnable fixture passes under AddressSanitizer and UndefinedBehaviorSanitizer on macOS and Linux with an empty list of known reports | closed (`TestFixturesSanitized`); it found three defects in the compiler's destruction of values, all fixed |
+

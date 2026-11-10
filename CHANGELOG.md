@@ -8,6 +8,83 @@ section of this file into a GitHub release is `docs/releasing.md`.
 
 ## [Unreleased]
 
+The runtime work (`specs/runtime`, `docs/runtime.md`,
+`docs/reports/runtime-summary.md`).
+
+### Language
+
+- String literals take `\r` and `\xHH` (a byte by two hexadecimal
+  digits).
+- `unsafe assert Send` and `unsafe assert Share` may carry a `where`
+  clause over the type's parameters; the type has the marker only for
+  arguments that satisfy it.
+- A variant name that several unions of a module declare is the expected
+  type's when written without its union; it is ambiguous only where
+  nothing says which is wanted.
+- An owned `match` moves a payload out also when the payload's type has a
+  destructor (only a union that declares a destructor itself is refused),
+  and its subject may be what `take`, `replace` or `?` yields.
+- `swap_at(xs, i, j)` exchanges two elements of a sequence of any type.
+- Fixed: assignment through an access, to a field or to an element did
+  not destroy the previous value; a temporary used as a method receiver
+  was never destroyed. Programs that relied on neither are unchanged;
+  programs that leaked no longer do.
+
+### Standard library
+
+- `std/io`: `File` with `OpenOptions`, `seek`, `sync`, `set_len` and
+  `metadata`; `metadata`, `symlink_metadata`, `exists`, `rename`,
+  `hard_link`, `symlink`, `read_link`, `set_mode`, `canonicalize`,
+  `current_dir`, `copy_file`; the interfaces `Reader` and `Writer` with
+  `BufReader` (lines with either terminator) and `BufWriter`; `stdin()`,
+  `stdout()`, `stderr()`; `ErrKind` and `kind(e)`, the same for the same
+  failure on every host; `flush_stdout`, `is_terminal`. `FileKind` gained
+  `Symlink`: an exhaustive `match` on it needs the new arm.
+- `std/net` (new): IPv4 and IPv6 addresses, TCP listeners and streams,
+  UDP sockets, with a timed form of every call that waits.
+- `std/sync` (new): `RwLock`, `Once`, `WaitGroup`, a bounded `Channel`.
+- `std/signal` (new): `catch`, `ignore`, `reset`, `raise`, and `Signals`
+  to wait for what was caught.
+- `std/rand` (new): the system's generator, and `Rng`, a seeded generator
+  with `below`, `fill` and `shuffle`.
+- `std/mem` (new): `page_size` and `PageAllocator`.
+- Prelude: `park`, `park_ns`, `unpark_one`, `unpark_all`;
+  `Condvar.wait_ns`; `Mutex.try_with`; `thread.set_stack_bytes`,
+  `stack_bytes`, `available_parallelism`, `current_id`.
+- `process.Pipe` is an `io.Reader` and an `io.Writer`.
+- A spawn that cannot allocate what the thread needs is
+  `Err(SpawnErr)`; it trapped `oom`.
+- A new file's mode is 0666 less the umask; it was 0644 less the umask.
+
+### Runtimes and targets
+
+- A trap's record carries the line and column of its span. With
+  `KERN_BACKTRACE=1` or a build made with `--backtrace`, a second line
+  lists the kern functions on the trapping thread's stack.
+- Standard output is flushed after each line on a terminal and before a
+  read of standard input; a failed write is reported by `flush_stdout`.
+- A debug build traps `explicit` on a `free` or `realloc` that names no
+  live block or the wrong size, and with `KERN_ALLOC_REPORT=1` reports
+  its allocations when the program ends.
+- A thread destroyed without `join` destroys its result and frees its
+  record when it ends; it leaked both.
+- `--stack-bytes=N` (`stack_bytes` in `kern.mod`) and `KERN_STACK_BYTES`
+  give spawned threads and `main` a stack of N bytes.
+- The freestanding runtime's devices are a board file's
+  (`kern_board.h`): `--board`, `--linker-script` and `--heap-bytes`
+  (`board`, `linker_script`, `heap_bytes` in `kern.mod`). Its allocator
+  traps on a double free.
+- The link drops the runtime code a program does not reach.
+- The runtime's interface has a version (`kern_rt_abi_2`); a program and
+  a runtime of different versions do not link.
+
+### Tooling
+
+- `docs/runtime.md`, the runtime's reference, with every entry of both
+  runtimes generated from their headers; `docs/freestanding-porting.md`.
+- The fixture corpus runs under AddressSanitizer and
+  UndefinedBehaviorSanitizer on macOS and Linux.
+
 ## [v0.1.0] - 2026-11-08
 
 The first release: a research preview of the language, its compiler, its

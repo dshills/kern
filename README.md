@@ -79,6 +79,7 @@ it (`docs/ownership.md` rule 5.6.4).
 | Benchmarks | `bench/` | Thirteen workloads in C, Rust and kern; `bench/PROTOCOL.md` is the method and `bench/REPORT.md` the latest run |
 | Examples | `examples/` | Hello, vector, B-tree, arena-allocated AST, packet parser, thread hand-off, a module with its tests (`examples/testing`), and a kern lexer and a kern parser written in kern |
 | Reports | `docs/reports/`, `docs/security-review.md` | One engineering report per phase and per change since, with its measurements; the security review |
+| Runtime reference | `docs/runtime.md`, `docs/freestanding-porting.md`, `docs/decisions/ADR-017-runtime-architecture.md` | What runs under a program: startup and exit, the standard streams, traps and backtraces, threads, memory checks, every environment variable and build option, and every runtime entry (generated from the headers); how to bring the freestanding runtime to a board; why the runtime has the shape it has (`docs/reports/runtime-summary.md`) |
 | Releases | `CHANGELOG.md`, `docs/releasing.md` | What each release contains and how one is made |
 
 ## Installing

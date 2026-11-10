@@ -1,22 +1,32 @@
 //! phase: 3
 //! expect: output
-// std/io: write a file in the working directory, read it back, read a
-// missing file (NotFound), remove the file, and count the program's
-// arguments (one, the program itself, in both engines).
+// std/io: write a file in a fresh temporary directory, read it back, read
+// a missing file (NotFound), remove the file, and count the program's
+// arguments (one, the program itself, in both engines). The directory is
+// the system's temporary one, so the fixture runs where the working
+// directory cannot be written.
 module t
 import "std/io"
-func main() -> i32 {
-    match io.write_file("std_io.scratch", "line one\nline two\n") {
+func join(dir: view[]u8, name: view[]u8) -> Vec[u8] {
+    p := Vec[u8].new()
+    p.extend(dir)
+    p.push(47u8)
+    p.extend(name)
+    return p
+}
+func run(dir: view[]u8) -> i32 {
+    scratch := join(dir, "std_io.scratch")
+    match io.write_file(scratch.as_view(), "line one\nline two\n") {
         Ok(u) => { print_str("written"); println() }
         Err(e) => { print_str("write failed"); println(); return 1i32 }
     }
-    with r1 := io.read_file("std_io.scratch") {
+    with r1 := io.read_file(scratch.as_view()) {
         match r1 {
             Ok(data) => { print_u64(u64(data.len())); println(); print_str(data.as_view()) }
             Err(e) => { print_str("read failed"); println(); return 1i32 }
         }
     }
-    with r2 := io.read_file("no_such_file.scratch") {
+    with r2 := io.read_file(join(dir, "no_such_file.scratch").as_view()) {
         match r2 {
             Ok(data) => { print_str("unexpected"); println() }
             Err(e) => {
@@ -29,12 +39,26 @@ func main() -> i32 {
             }
         }
     }
-    match io.remove_file("std_io.scratch") {
+    match io.remove_file(scratch.as_view()) {
         Ok(u) => { print_str("removed"); println() }
         Err(e) => { print_str("remove failed"); println(); return 1i32 }
+    }
+    return 0i32
+}
+func main() -> i32 {
+    var status: i32 = 1i32
+    match io.make_temp_dir("kern-std-io-") {
+        Ok(dir) => {
+            status = run(dir.as_view())
+            match io.remove_dir(dir.as_view()) {
+                Ok(u) => { }
+                Err(e) => { print_str("the directory is not empty"); println() }
+            }
+        }
+        Err(e) => { print_str("no temporary directory"); println() }
     }
     a := io.args()
     print_u64(u64(a.len()))
     println()
-    return 0i32
+    return status
 }

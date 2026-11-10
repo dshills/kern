@@ -26,6 +26,18 @@ static uint64_t kern_stack_configured(void) {
     return kern_cfg.stack_bytes != 0 ? kern_cfg.stack_bytes : kern_stack_build;
 }
 static uint64_t kern_page_round(uint64_t n) { return (n + kern_page - 1) / kern_page * kern_page; }
+// kern_stack_request is the size asked of the system for a stack of n
+// bytes: n in whole pages, or the system's own minimum for a thread when
+// that is larger (131,072 bytes with glibc on arm64, where the smallest
+// size kern accepts, 65,536, would be refused and no thread made).
+static size_t kern_stack_request(uint64_t n) {
+    uint64_t size = kern_page_round(n);
+#ifdef _SC_THREAD_STACK_MIN
+    long least = sysconf(_SC_THREAD_STACK_MIN);
+    if (least > 0 && size < (uint64_t)least) size = kern_page_round((uint64_t)least);
+#endif
+    return (size_t)size;
+}
 uint64_t kern_thread_stack_bytes(void) {
     uint64_t n = atomic_load(&kern_stack_api);
     if (n == 0) n = kern_stack_configured();
@@ -154,7 +166,7 @@ static kern_thread *kern_spawn_common(void (*thunk)(void *), const void *pack, i
     pthread_attr_t at;
     int ok = pthread_attr_init(&at) == 0;
     if (ok) {
-        ok = pthread_attr_setstacksize(&at, (size_t)kern_thread_stack_bytes()) == 0 && pthread_create(&t->t, &at, kern_thread_run, t) == 0;
+        ok = pthread_attr_setstacksize(&at, kern_stack_request(kern_thread_stack_bytes())) == 0 && pthread_create(&t->t, &at, kern_thread_run, t) == 0;
         pthread_attr_destroy(&at);
     }
     if (!ok) { munmap(t->altmap, t->altlen); kern_thread_free(t); return NULL; }
@@ -254,7 +266,7 @@ int32_t kern_run_main(int32_t (*fn)(void)) {
     m.altmap = kern_altstack_map(&m.altlen);
     int ok = m.altmap != NULL && pthread_attr_init(&at) == 0;
     if (ok) {
-        ok = pthread_attr_setstacksize(&at, (size_t)kern_page_round(size)) == 0 && pthread_create(&th, &at, kern_main_thread, &m) == 0;
+        ok = pthread_attr_setstacksize(&at, kern_stack_request(size)) == 0 && pthread_create(&th, &at, kern_main_thread, &m) == 0;
         pthread_attr_destroy(&at);
     }
     if (!ok) {

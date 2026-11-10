@@ -27,7 +27,7 @@ extern void *kern_stack_limit;
 
 // ---- rt.c: startup, console, exit ----
 
-// Initializes the runtime before the program runs; abi is ignored (it makes the image reference the ABI symbol).
+// Initializes the runtime before the program runs: it sets the board up (kern_board_init); abi is ignored (it makes the image reference the ABI symbol).
 void kern_start(const void *abi);
 // Runs the program's main function and returns its result, the halt code.
 int32_t kern_run_main(int32_t (*fn)(void));
@@ -93,7 +93,7 @@ void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align, 
 
 // Returns a monotonic clock in nanoseconds.
 uint64_t kern_now_ns(void);
-// Busy-waits until the clock has advanced by at least ns nanoseconds.
+// Busy-waits until the board's clock has advanced by at least ns nanoseconds; returns at once on a board without a clock.
 void kern_time_sleep_ns(uint64_t ns, const kern_loc *at);
 
 // ---- f64text.c: floating-point text (linked only into an image that calls it) ----
