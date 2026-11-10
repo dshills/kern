@@ -335,6 +335,15 @@ type fnLower struct {
 	// closureAccs are the capture accesses opened by closure arguments of
 	// the call being lowered; the call ends them with its other arguments
 	closureAccs []*ir.Value
+	// pendingAccs are the accesses that calls whose arguments are still
+	// being evaluated have opened for their earlier arguments, oldest
+	// first: the error path of a `?` in a later argument ends them
+	pendingAccs []*ir.Value
+	// held are the owned values that expressions in progress have
+	// produced and nothing has consumed yet: the operands of a call or a
+	// literal that were evaluated before a later operand. The error path
+	// of a `?` in that later operand destroys them, newest first.
+	held []heldValue
 	// tied holds, for an access a call returned, the temporaries the
 	// access is derived from: a temporary receiver (`make().as_view()`)
 	// must outlive the access and is destroyed when it ends (spec §5.7:
@@ -634,6 +643,46 @@ func (fl *fnLower) endAccess(v *ir.Value) {
 	}
 	fl.emit(&ir.AccessEnd{Access: v})
 	fl.dropTied(v)
+}
+
+// heldValue is an owned value in flight: an SSA value, or a temporary
+// that already holds one.
+type heldValue struct {
+	val *ir.Value
+	tmp *ir.Local
+}
+
+// hold records an operand's value until the expression that evaluated it
+// consumes it (release). A value that needs no destruction is not held.
+func (fl *fnLower) hold(v *ir.Value) {
+	if v == nil || resolve.IsCopy(v.Type) || isClosure(v.Type) {
+		return
+	}
+	switch v.Type.(type) {
+	case *resolve.Named, *resolve.Array:
+		fl.held = append(fl.held, heldValue{val: v})
+	}
+}
+
+// holdTemp is hold for a temporary that holds an owned value.
+func (fl *fnLower) holdTemp(tmp *ir.Local) { fl.held = append(fl.held, heldValue{tmp: tmp}) }
+
+// release forgets the values held since mark: their expression has them.
+func (fl *fnLower) release(mark int) { fl.held = fl.held[:mark] }
+
+// dropHeld destroys every held value, newest first, on a path that
+// leaves the function. The table is kept: the other path goes on.
+func (fl *fnLower) dropHeld() {
+	for i := len(fl.held) - 1; i >= 0; i-- {
+		h := fl.held[i]
+		tmp := h.tmp
+		if tmp == nil {
+			tmp = fl.newTemp(h.val.Type)
+			fl.emit(&ir.Store{Place: ir.Place{Local: tmp}, Src: h.val})
+			fl.emit(&ir.Init{Place: ir.Place{Local: tmp}})
+		}
+		fl.emitDrop(ir.Place{Local: tmp}, tmp.Type, ast.Pos{})
+	}
 }
 
 // dropTied destroys the temporaries that live as long as the access v,

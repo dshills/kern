@@ -431,6 +431,13 @@ func meta_of(raw: view[]u64) -> Metadata {
 // cannot. A File's descriptor is not inherited by a child process.
 struct File nocopy { fd: i32 }
 
+// file_of makes a File of an open descriptor, which the File then owns
+// and closes. It is for the library's own use (std/net makes a File of a
+// descriptor another program sent): a number that is not an open
+// descriptor of the program's own gives a File whose every call fails,
+// and one that something else owns is closed under its owner.
+func file_of(fd: i32) -> File { return File { fd: fd } }
+
 // open opens the file at path as o says. An option set that names no
 // access (neither read, write nor append), truncates without write or
 // with append, or creates without write or append, is an error of kind

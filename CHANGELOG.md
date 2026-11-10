@@ -25,6 +25,10 @@ The runtime work (`specs/runtime`, `docs/runtime.md`,
   destructor (only a union that declares a destructor itself is refused),
   and its subject may be what `take`, `replace` or `?` yields.
 - `swap_at(xs, i, j)` exchanges two elements of a sequence of any type.
+- Fixed: a `?` in an operand of a call, a struct literal, a variant or
+  an array left the owned operands before it undestroyed on its error
+  path, and after an argument that edits a value with a destructor it
+  was an internal error of the compiler.
 - Fixed: assignment through an access, to a field or to an element did
   not destroy the previous value; a temporary used as a method receiver
   was never destroyed. Programs that relied on neither are unchanged;
@@ -57,6 +61,13 @@ The runtime work (`specs/runtime`, `docs/runtime.md`,
   `set_hop_limit`, `set_linger`, `set_broadcast`, each with its reading
   form, and `nodelay`).
 - `signal.raise` flushes standard output before it sends the signal.
+- `std/net`: `Poller`, the system's readiness queue (epoll, kqueue): one
+  thread waits for many sockets and serves those that are ready.
+  `UnixStream.send_with`, `send_file` and `recv_with` pass open sockets
+  and files between processes; a received `Descriptor` becomes the type
+  the program names, checked against what the system says it is.
+  `UnixStream.peer_credentials`. On Linux, a Unix-domain path that
+  begins with a zero byte is a name in the abstract namespace.
 - `std/sync` (new): `RwLock`, `Once`, `WaitGroup`, a bounded `Channel`.
 - `std/signal` (new): `catch`, `ignore`, `reset`, `raise`, and `Signals`
   to wait for what was caught.

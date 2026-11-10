@@ -1,0 +1,144 @@
+//! phase: 6
+//! expect: output net_poller_threads
+//! tsan: clean
+// A Poller on a thread of its own (specs/runtime RN1): a server thread
+// owns a listener and a Poller and echoes every connection it is given;
+// four client threads each send a hundred messages and read them back;
+// and the main thread stops the server by writing a byte to one end of a
+// pair whose other end the server watches.
+module cc
+import "std/net"
+import "std/io"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+// server echoes until its stop socket is readable: the number of bytes
+// it echoed, or 0 for a failure.
+func server(l: own net.TcpListener, stop: own net.UnixStream) -> u64 {
+    match serve(l, stop) {
+        Ok(n) => { return n }
+        Err(e) => { return 0u64 }
+    }
+}
+func read_at(conns: edit[Vec[net.TcpStream]], i: usize, buf: edit[]u8) -> Result[usize, io.IoErr] {
+    with c := conns.at(i) { return c.read(buf) }
+    return Ok(0usize)
+}
+func write_at(conns: edit[Vec[net.TcpStream]], i: usize, data: view[]u8) -> Result[(), io.IoErr] {
+    with c := conns.at(i) { return c.write_all(data) }
+    return Ok(())
+}
+func watch_at(p: edit[net.Poller], conns: edit[Vec[net.TcpStream]], i: usize) -> Result[(), io.IoErr] {
+    with c := conns.at(i) { return p.watch(c, 2u64 + u64(i), true, false) }
+    return Ok(())
+}
+func unwatch_at(p: edit[net.Poller], conns: edit[Vec[net.TcpStream]], i: usize) -> Result[(), io.IoErr] {
+    with c := conns.at(i) { return p.unwatch(c) }
+    return Ok(())
+}
+func serve(l: edit[net.TcpListener], stop: edit[net.UnixStream]) -> Result[u64, io.IoErr] {
+    p := net.Poller.new()?
+    p.watch(l, 0u64, true, false)?
+    p.watch(stop, 1u64, true, false)?
+    conns := Vec[net.TcpStream].new()
+    events := Vec[net.Ready].new()
+    var buf: [256]u8 = zero()
+    var echoed: u64 = 0u64
+    var running: bool = true
+    while running {
+        n := p.wait(events)?
+        for k in 0usize..n {
+            e := events.get(k)
+            if e.token == 1u64 {
+                running = false
+            } else if e.token == 0u64 {
+                match l.accept_timeout(time.millis(0u64))? {
+                    Some(c) => {
+                        conns.push(c)
+                        watch_at(p, conns, conns.len() - 1usize)?
+                    }
+                    None => { }
+                }
+            } else {
+                i := usize(e.token - 2u64)
+                r := read_at(conns, i, buf)?
+                if r == 0usize {
+                    unwatch_at(p, conns, i)? // the client is done
+                } else {
+                    write_at(conns, i, buf[0usize : r])?
+                    echoed = echoed + u64(r)
+                }
+            }
+        }
+    }
+    return Ok(echoed)
+}
+
+// client sends a hundred messages of sixteen bytes and reads each back:
+// how many came back as sent.
+func client(at: net.SocketAddr, id: u8, good: view[Atomic[u64]]) -> u64 {
+    match talk(at, id) {
+        Ok(n) => {
+            old := good.fetch_add(n, Ordering.seq_cst)
+            return n
+        }
+        Err(e) => { return 0u64 }
+    }
+}
+func talk(at: net.SocketAddr, id: u8) -> Result[u64, io.IoErr] {
+    c := net.TcpStream.connect(at)?
+    var good: u64 = 0u64
+    for round in 0u32..100u32 {
+        var msg: [16]u8 = zero()
+        for k in 0usize..16usize { msg[k] = id + truncate[u8](round % 7u32) + truncate[u8](k) }
+        c.write_all(msg)?
+        var back: [16]u8 = zero()
+        var have: usize = 0usize
+        while have < 16usize {
+            r := c.read(back[have : 16usize])?
+            if r == 0usize { return Ok(good) }
+            have = have + r
+        }
+        var same: bool = true
+        for k in 0usize..16usize {
+            if back[k] != msg[k] { same = false }
+        }
+        if same { good = good + 1u64 }
+    }
+    return Ok(good)
+}
+
+func run() -> Result[(), io.IoErr] {
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    at := l.local_addr()?
+    match net.UnixStream.pair()? {
+        Ends(stop, wake) => {
+            match thread.spawn(server, l, stop) {
+                Ok(srv) => {
+                    good := Atomic[u64].new(0u64)
+                    with s := thread.scope() {
+                        a := s.spawn(client, at, 10u8, good)
+                        b := s.spawn(client, at, 20u8, good)
+                        c := s.spawn(client, at, 30u8, good)
+                        d := s.spawn(client, at, 40u8, good)
+                    }
+                    print_str("messages that came back as sent: "); print_u64(good.load(Ordering.seq_cst)); println()
+                    wake.write_all("!")?
+                    echoed := srv.join()
+                    print_str("the server echoed "); print_u64(echoed); say(" bytes and stopped when woken")
+                }
+                Err(e) => say("no thread")
+            }
+        }
+    }
+    return Ok(())
+}
+
+func main() -> i32 {
+    match run() {
+        Ok(u) => say("done")
+        Err(e) => say("failed")
+    }
+    return 0i32
+}

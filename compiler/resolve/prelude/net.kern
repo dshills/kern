@@ -28,7 +28,7 @@ func net_unix_connect(path: view[]u8, ns: u64, timed: bool) -> i64
 func net_unix_pair(fds: edit[]i32) -> i32
 // net_unix_dgram makes a datagram socket, bound to path unless it is
 // empty; net_unix_recv_from writes the sender's path into from (at least
-// 105 bytes), ended by a zero byte.
+// 105 bytes): its length in the first byte, then its bytes.
 func net_unix_dgram(path: view[]u8) -> i32
 func net_unix_send_to(fd: i32, data: view[]u8, path: view[]u8) -> i64
 func net_unix_recv_from(fd: i32, buf: edit[]u8, from: edit[]u8, ns: u64, timed: bool) -> i64
@@ -47,6 +47,28 @@ func net_get_opt(fd: i32, opt: i32) -> i64
 // buf and returns its length, 0 for none.
 func net_if_index(name: view[]u8) -> u32
 func net_if_name(index: u32, buf: edit[]u8) -> i64
+// net_poller_new makes a readiness queue; net_poller_set watches fd for
+// reading (interest 1), writing (2) or both (3) under a token, or stops
+// watching it (0); net_poller_wait writes (token, flags) pairs into raw
+// and returns how many: flags 1 readable, 2 writable, 4 the peer closed,
+// 8 an error is pending.
+func net_poller_new() -> i32
+func net_poller_set(p: i32, fd: i32, token: u64, interest: i32) -> i32
+func net_poller_wait(p: i32, raw: edit[]u64, ns: u64, timed: bool) -> i64
+// net_send_fd sends bytes over a Unix-domain stream with the descriptor
+// pass attached; net_recv_fd receives bytes and puts a descriptor that
+// came with them in got[0] (-1: none). net_fd_kind says what a
+// descriptor is (1 not a socket, 2 a TCP stream, 3 a TCP listener, 4 a
+// UDP socket, 5 a Unix-domain stream, 6 a Unix-domain listener, 7 a
+// Unix-domain datagram socket, 0 another socket) and net_fd_adopt makes
+// a received one ready for use as the kind named.
+func net_send_fd(fd: i32, data: view[]u8, pass: i32) -> i64
+func net_recv_fd(fd: i32, buf: edit[]u8, got: edit[]i32, ns: u64, timed: bool) -> i64
+func net_fd_kind(fd: i32) -> i32
+func net_fd_adopt(fd: i32, kind: i32) -> i32
+// net_peer_cred writes the user, the group and the process of a
+// Unix-domain stream's peer into raw.
+func net_peer_cred(fd: i32, raw: edit[]u32) -> i32
 func net_addr(fd: i32, peer: bool, rec: edit[]u8) -> i32
 func net_send_to(fd: i32, data: view[]u8, addr: view[]u8) -> i64
 func net_recv_from(fd: i32, buf: edit[]u8, from: edit[]u8, ns: u64, timed: bool) -> i64
@@ -549,6 +571,96 @@ func opt_count(fd: i32, opt: i32) -> Result[u32, io.IoErr] {
     return Ok(truncate[u32](u64(v)))
 }
 
+// ---- readiness (RN1) ----
+
+// Source is a socket a Poller can watch and a UnixStream can send: every
+// socket type of this module. descriptor is the system's number for it,
+// which the socket still owns.
+interface Source {
+    func descriptor(view self) -> i32
+}
+
+// Ready is one watched socket that can be read or written without
+// waiting. token is what the program gave when it asked for the socket to
+// be watched. readable: a read returns at once, with bytes, a connection
+// (for a listener) or the end of the stream. writable: a write takes at
+// least one byte at once. closed: the peer has closed its end, or its
+// sending side; what it sent before can still be read. failed: the
+// socket has an error, which the next read or write returns.
+struct Ready { token: u64; readable: bool; writable: bool; closed: bool; failed: bool }
+
+// Poller waits for any of many sockets, so that one thread can serve
+// them all: watch each socket under a token, wait, and read or write
+// those the wait names. Readiness is a state, not an event: a socket
+// that is readable is reported by every wait until the program has read
+// what is there. The calls of this module go on blocking, so after a
+// wait a program reads once per report, or uses the `_timeout` forms
+// with a duration of zero, which never wait.
+//
+// A socket that is closed stops being watched. A Poller may move to
+// another thread but waits on one thread at a time; to wake a waiting
+// thread from another, watch one end of UnixStream.pair() and write a
+// byte to the other.
+struct Poller nocopy { fd: i32 }
+
+impl Poller {
+    func new() -> Result[Poller, io.IoErr] {
+        fd := net_poller_new()
+        if fd < 0i32 { return Err(io.err_of(0i32 - fd)) }
+        return Ok(Poller { fd: fd })
+    }
+
+    // watch asks for s to be reported when it is readable, writable or
+    // either, under token; for a socket already watched it replaces what
+    // was asked and the token. Neither readable nor writable is an error
+    // of kind InvalidInput.
+    func watch[S: Source](edit self, s: view[S], token: u64, readable: bool, writable: bool) -> Result[(), io.IoErr] {
+        var interest: i32 = 0i32
+        if readable { interest = interest + 1i32 }
+        if writable { interest = interest + 2i32 }
+        if interest == 0i32 { return Err(io.error_of(io.ErrKind.InvalidInput)) }
+        return io.status(net_poller_set(self.fd, s.descriptor(), token, interest))
+    }
+
+    // unwatch stops the reports of s: kind NotFound when it was not
+    // watched.
+    func unwatch[S: Source](edit self, s: view[S]) -> Result[(), io.IoErr] {
+        return io.status(net_poller_set(self.fd, s.descriptor(), 0u64, 0i32))
+    }
+
+    // wait blocks until at least one watched socket is ready, replaces
+    // the contents of into with the reports (at most 64 a call; the rest
+    // come with the next) and returns how many there are.
+    func wait(edit self, into: edit[Vec[Ready]]) -> Result[usize, io.IoErr] { return self.collect(into, 0u64, false) }
+
+    // wait_timeout is wait for at most d: 0 reports when none was ready
+    // in that time. A duration of zero looks once.
+    func wait_timeout(edit self, into: edit[Vec[Ready]], d: time.Duration) -> Result[usize, io.IoErr] { return self.collect(into, d.ns, true) }
+
+    func collect(edit self, into: edit[Vec[Ready]], ns: u64, timed: bool) -> Result[usize, io.IoErr] {
+        into.clear()
+        var raw: [128]u64 = zero()
+        n := net_poller_wait(self.fd, raw, ns, timed)
+        if n < 0i64 { return Err(io.neg(n)) }
+        for k in 0usize..usize(n) {
+            f := raw[k * 2usize + 1usize]
+            into.push(Ready { token: raw[k * 2usize], readable: f & 1u64 != 0u64, writable: f & 2u64 != 0u64, closed: f & 4u64 != 0u64, failed: f & 8u64 != 0u64 })
+        }
+        return Ok(usize(n))
+    }
+
+    destructor(edit self) {
+        if self.fd >= 0i32 { r := net_close(self.fd) }
+    }
+}
+
+impl Source for TcpListener { func descriptor(view self) -> i32 { return self.fd } }
+impl Source for TcpStream { func descriptor(view self) -> i32 { return self.fd } }
+impl Source for UdpSocket { func descriptor(view self) -> i32 { return self.fd } }
+impl Source for UnixListener { func descriptor(view self) -> i32 { return self.fd } }
+impl Source for UnixStream { func descriptor(view self) -> i32 { return self.fd } }
+impl Source for UnixDatagram { func descriptor(view self) -> i32 { return self.fd } }
+
 // ---- TCP (RH2) ----
 
 // TcpListener is a socket that accepts connections on an address. It is
@@ -742,6 +854,13 @@ impl TcpStream {
 // programs on one machine. The path is at most 103 bytes. bind creates
 // it and fails with kind AddrInUse when it exists; nothing removes it
 // but the program (io.remove_file), before the next bind.
+//
+// On Linux a socket may instead have a name in the abstract namespace,
+// which is in no file system, needs no removal and is gone when the
+// socket is closed: wherever this module takes a path, a path whose
+// first byte is zero ("\x00name") is such a name, made of the bytes
+// after it (at least one, none of them zero). macOS has no such
+// namespace: the same call there is an error of kind Unsupported.
 
 // UnixListener accepts connections made to a path.
 struct UnixListener nocopy { fd: i32 }
@@ -784,6 +903,91 @@ struct UnixStream nocopy { fd: i32 }
 // variant so that a match takes both ends out of it:
 // `match net.UnixStream.pair()? { Ends(a, b) => { ... } }`.
 union UnixPair { Ends(UnixStream, UnixStream) }
+
+// Credentials are the user, the group and the process at the other end
+// of a Unix-domain stream; process is 0 where the system does not say.
+struct Credentials { user: u32; group: u32; process: u32 }
+
+// Descriptor is an open file or socket that another program sent
+// (UnixStream.recv_with), before this program has said what it is. kind
+// asks the system; an `into_` method makes it the type named, and fails
+// with kind InvalidInput when it is not that (the descriptor is then
+// closed, as it is when a Descriptor is destroyed unused).
+struct Descriptor nocopy { fd: i32 }
+
+// DescriptorKind is what the system says a descriptor is. Other is a
+// socket of a sort this module has no type for.
+union DescriptorKind { File; TcpStream; TcpListener; UdpSocket; UnixStream; UnixListener; UnixDatagram; Other }
+
+// Received is what recv_with read: the number of bytes (0 when the peer
+// has closed its end), alone or with the descriptor that came with them.
+// It is a union so that a match takes the descriptor out of it:
+// `match s.recv_with(buf)? { Bytes(n) => { ... } WithDescriptor(n, d) => { ... } }`.
+union Received { Bytes(usize); WithDescriptor(usize, Descriptor) }
+
+func received(n: usize, fd: i32) -> Received {
+    if fd < 0i32 { return Bytes(n) }
+    return WithDescriptor(n, Descriptor { fd: fd })
+}
+
+impl Descriptor {
+    func kind(view self) -> Result[DescriptorKind, io.IoErr] {
+        k := net_fd_kind(self.fd)
+        if k < 0i32 { return Err(io.err_of(0i32 - k)) }
+        if k == 1i32 { return Ok(DescriptorKind.File) }
+        if k == 2i32 { return Ok(DescriptorKind.TcpStream) }
+        if k == 3i32 { return Ok(DescriptorKind.TcpListener) }
+        if k == 4i32 { return Ok(DescriptorKind.UdpSocket) }
+        if k == 5i32 { return Ok(DescriptorKind.UnixStream) }
+        if k == 6i32 { return Ok(DescriptorKind.UnixListener) }
+        if k == 7i32 { return Ok(DescriptorKind.UnixDatagram) }
+        return Ok(DescriptorKind.Other)
+    }
+
+    // adopt readies the descriptor as the kind numbered and gives it up:
+    // the caller wraps what it returns.
+    func adopt(own self, kind: i32) -> Result[i32, io.IoErr] {
+        r := net_fd_adopt(self.fd, kind)
+        if r < 0i32 { return Err(io.err_of(0i32 - r)) }
+        self.fd = 0i32 - 1i32
+        return Ok(r)
+    }
+
+    // into_file is the descriptor as an io.File, which has the offset and
+    // the access the sender's open file has: the two share one open file.
+    func into_file(own self) -> Result[io.File, io.IoErr] {
+        fd := self.adopt(1i32)?
+        return Ok(io.file_of(fd))
+    }
+    func into_tcp_stream(own self) -> Result[TcpStream, io.IoErr] {
+        fd := self.adopt(2i32)?
+        return Ok(TcpStream { fd: fd })
+    }
+    func into_tcp_listener(own self) -> Result[TcpListener, io.IoErr] {
+        fd := self.adopt(3i32)?
+        return Ok(TcpListener { fd: fd })
+    }
+    func into_udp_socket(own self) -> Result[UdpSocket, io.IoErr] {
+        fd := self.adopt(4i32)?
+        return Ok(UdpSocket { fd: fd })
+    }
+    func into_unix_stream(own self) -> Result[UnixStream, io.IoErr] {
+        fd := self.adopt(5i32)?
+        return Ok(UnixStream { fd: fd })
+    }
+    func into_unix_listener(own self) -> Result[UnixListener, io.IoErr] {
+        fd := self.adopt(6i32)?
+        return Ok(UnixListener { fd: fd })
+    }
+    func into_unix_datagram(own self) -> Result[UnixDatagram, io.IoErr] {
+        fd := self.adopt(7i32)?
+        return Ok(UnixDatagram { fd: fd })
+    }
+
+    destructor(edit self) {
+        if self.fd >= 0i32 { r := net_close(self.fd) }
+    }
+}
 
 impl io.Reader for UnixStream {
     func read(edit self, buf: edit[]u8) -> Result[usize, io.IoErr] {
@@ -851,6 +1055,53 @@ impl UnixStream {
             Both => { n = 2i32 }
         }
         return io.status(net_shutdown(self.fd, n))
+    }
+
+    // peer_credentials is who the other end was when the connection was
+    // made (or the pair): the system's own record, which the peer cannot
+    // forge.
+    func peer_credentials(view self) -> Result[Credentials, io.IoErr] {
+        var raw: [3]u32 = zero()
+        r := net_peer_cred(self.fd, raw)
+        if r < 0i32 { return Err(io.err_of(0i32 - r)) }
+        return Ok(Credentials { user: raw[0usize], group: raw[1usize], process: raw[2usize] })
+    }
+
+    // send_with sends at most len(data) bytes, at least one, with an open
+    // socket of this program attached, and returns how many bytes the
+    // system took; send_file attaches an open file. The descriptor
+    // travels with the first byte: the receiver gets a descriptor of its
+    // own for the same open socket or file, and this program keeps its.
+    // Empty data is an error of kind InvalidInput.
+    func send_with[S: Source](edit self, data: view[]u8, pass: view[S]) -> Result[usize, io.IoErr] {
+        r := net_send_fd(self.fd, data, pass.descriptor())
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(usize(r))
+    }
+    func send_file(edit self, data: view[]u8, pass: view[io.File]) -> Result[usize, io.IoErr] {
+        r := net_send_fd(self.fd, data, pass.raw_fd())
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(usize(r))
+    }
+
+    // recv_with is read that also takes a descriptor sent with the
+    // bytes it reads; recv_with_timeout waits at most d and returns None
+    // when nothing arrived. A read by any other method drops a descriptor
+    // that came with its bytes (it is closed, not leaked), and so is
+    // every descriptor after the first that one call receives. An empty
+    // buf is an error of kind InvalidInput.
+    func recv_with(edit self, buf: edit[]u8) -> Result[Received, io.IoErr] {
+        var got: [1]i32 = zero()
+        r := net_recv_fd(self.fd, buf, got, 0u64, false)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(received(usize(r), got[0usize]))
+    }
+    func recv_with_timeout(edit self, buf: edit[]u8, d: time.Duration) -> Result[Option[Received], io.IoErr] {
+        var got: [1]i32 = zero()
+        r := net_recv_fd(self.fd, buf, got, d.ns, true)
+        if r == io.timed_out() { return Ok(None) }
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Some(received(usize(r), got[0usize])))
     }
 
     // The buffers, as TcpStream's.
@@ -1008,12 +1259,11 @@ impl UnixDatagram {
     }
 }
 
-// sender is the path the runtime wrote: the bytes before the first zero.
+// sender is the path the runtime wrote: its length, then its bytes.
 func sender(from: view[]u8) -> Vec[u8] {
     path := Vec[u8].new()
-    for c in from {
-        if c == 0u8 { break }
-        path.push(c)
-    }
+    var n: usize = usize(from[0usize])
+    if n + 1usize > len(from) { n = len(from) - 1usize }
+    for k in 0usize..n { path.push(from[1usize + k]) }
     return path
 }

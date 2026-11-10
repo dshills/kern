@@ -76,12 +76,9 @@ ADR-017). The others were gaps, and this phase closes them.
   this phase ended. Phase 13 made it the system's mapping (RM5).
 - **Locks are `flock`'s**: they bind programs that ask and hold per open
   file. Phase 13 added locks on ranges of bytes (RM1).
-- **Unix-domain datagrams** came in phase 13 (RM3). A name in Linux's
-  abstract namespace and the passing of descriptors or credentials over a
-  socket are outside the library by decision (spec §2): the first exists
-  on one of the two hosts only, and the second needs a way to make a
-  `File` or a socket from a descriptor of unknown kind, which the library
-  does not offer.
+- **Unix-domain datagrams** came in phase 13 (RM3); names in Linux's
+  abstract namespace and the passing of descriptors and credentials over
+  a socket in phase 14 (RN2 to RN4).
 
 ## Verification
 

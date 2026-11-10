@@ -1,0 +1,34 @@
+-- a file
+received: 1 byte, File
+it reads on from where the sender's file stood: [descriptor]
+and the sender's file is at the end with it: yes
+-- what it is not
+received: 1 byte, File
+a file as a TCP stream is InvalidInput: yes
+-- a TCP listener and a TCP stream
+received: 1 byte, TcpListener
+the listener received listens on the same port: yes
+received: 1 byte, TcpStream
+the stream received reads what its peer wrote: [over tcp]
+-- a UDP socket
+received: 1 byte, UdpSocket
+the socket received takes the datagram: [to itself]
+-- Unix-domain sockets
+received: 1 byte, UnixStream
+the stream received reads what the other end wrote: [over a pair]
+received: 1 byte, UnixListener
+the listener received accepts: [accepted]
+received: 1 byte, UnixDatagram
+the datagram socket received receives: [to itself]
+received: 1 byte, UnixDatagram
+a datagram socket as a stream is InvalidInput: yes
+-- the rules
+bytes sent alone: 5 bytes, no descriptor
+a descriptor with no bytes is InvalidInput: yes
+so is a receive into no bytes: yes
+nothing in 20 ms: None
+an ordinary read takes the byte: yes
+-- credentials
+each end sees the same user and group at the other: yes
+and the same process, this one: yes
+cleaned up

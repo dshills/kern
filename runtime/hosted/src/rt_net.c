@@ -235,8 +235,27 @@ int64_t kern_net_connect(const uint8_t *addr, int64_t n, uint64_t ns, uint8_t ti
 // or a negative error for a path that cannot be one (empty or holding a
 // NUL: -EINVAL; 104 bytes or more, the smallest limit of the supported
 // hosts: -ENAMETOOLONG).
+//
+// A path whose first byte is NUL is a name in Linux's abstract namespace
+// (specs/runtime RN4): the bytes after it, at least one and none of them
+// NUL, name a socket that is in no file system and is gone when its last
+// descriptor is closed. On a host without that namespace it is
+// -EOPNOTSUPP.
 static int kern_net_unix_sa(const char *p, int64_t n, struct sockaddr_un *sa) {
-    if (n <= 0 || memchr(p, 0, (size_t)n) != NULL) return -EINVAL;
+    if (n <= 0) return -EINVAL;
+    if (p[0] == 0) {
+        if (n < 2 || memchr(p + 1, 0, (size_t)n - 1) != NULL) return -EINVAL;
+        if (n >= 104) return -ENAMETOOLONG;
+#if defined(__linux__)
+        memset(sa, 0, sizeof *sa);
+        sa->sun_family = AF_UNIX;
+        memcpy(sa->sun_path, p, (size_t)n);
+        return (int)(offsetof(struct sockaddr_un, sun_path) + (size_t)n); // the length is the name's end: no NUL closes it
+#else
+        return -EOPNOTSUPP;
+#endif
+    }
+    if (memchr(p, 0, (size_t)n) != NULL) return -EINVAL;
     if (n >= 104 || (size_t)n >= sizeof sa->sun_path) return -ENAMETOOLONG;
     memset(sa, 0, sizeof *sa);
     sa->sun_family = AF_UNIX;
@@ -294,8 +313,9 @@ int64_t kern_net_unix_send_to(int32_t fd, const char *p, int64_t n, const char *
     }
 }
 // kern_net_unix_recv_from receives one datagram, cut to n bytes, and
-// writes its sender's path into from, NUL-terminated: an empty path for a
-// sender that is not bound.
+// writes its sender's path into from: its length in the first byte, then
+// its bytes, which begin with a NUL for a name in the abstract
+// namespace. The length is 0 for a sender that is not bound.
 int64_t kern_net_unix_recv_from(int32_t fd, char *buf, int64_t n, char *from, int64_t fcap, uint64_t ns, uint8_t timed) {
     if (n < 0 || fcap < 105) return -EINVAL;
     uint64_t start = timed ? kern_now_ns() : 0;
@@ -305,10 +325,18 @@ int64_t kern_net_unix_recv_from(int32_t fd, char *buf, int64_t n, char *from, in
         memset(&sa, 0, sizeof sa);
         ssize_t r = recvfrom(fd, buf, (size_t)n, 0, (struct sockaddr *)&sa, &len);
         if (r >= 0) {
-            size_t pl = len > offsetof(struct sockaddr_un, sun_path) ? strnlen(sa.sun_path, len - offsetof(struct sockaddr_un, sun_path)) : 0;
+            size_t have = len > offsetof(struct sockaddr_un, sun_path) ? len - offsetof(struct sockaddr_un, sun_path) : 0;
+            if (have > sizeof sa.sun_path) have = sizeof sa.sun_path;
+            // a path ends at its NUL; where there is an abstract namespace,
+            // a name in it begins with one and is every byte the system
+            // counted (elsewhere a sender with no path has an empty one)
+            size_t pl = strnlen(sa.sun_path, have);
+#if defined(__linux__)
+            if (have > 1 && sa.sun_path[0] == 0) pl = have;
+#endif
             if (pl > 104) pl = 104;
-            memcpy(from, sa.sun_path, pl);
-            from[pl] = 0;
+            from[0] = (char)pl;
+            memcpy(from + 1, sa.sun_path, pl);
             return (int64_t)r;
         }
         if (errno == EINTR) continue;
@@ -318,6 +346,268 @@ int64_t kern_net_unix_recv_from(int32_t fd, char *buf, int64_t n, char *from, in
         if (w < 0) return w;
     }
 }
+
+// ---- descriptors and credentials over a Unix-domain stream (specs/runtime RN2, RN3) ----
+
+int64_t kern_net_send_fd(int32_t fd, const char *p, int64_t n, int32_t pass) {
+    if (n <= 0 || pass < 0) return -EINVAL;
+    struct iovec iov = {(void *)(uintptr_t)p, (size_t)n};
+    union { struct cmsghdr h; char buf[CMSG_SPACE(sizeof(int))]; } u;
+    memset(&u, 0, sizeof u);
+    struct msghdr m;
+    memset(&m, 0, sizeof m);
+    m.msg_iov = &iov;
+    m.msg_iovlen = 1;
+    m.msg_control = u.buf;
+    m.msg_controllen = sizeof u.buf;
+    struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c), &pass, sizeof(int));
+    for (;;) {
+        ssize_t r = sendmsg(fd, &m, KERN_SEND_FLAGS);
+        if (r >= 0) return (int64_t)r;
+        if (errno == EINTR) continue;
+        if (!kern_net_would_block(errno)) return -errno;
+        int w = kern_net_wait(fd, POLLOUT, 0, 0, 0);
+        if (w < 0) return w;
+    }
+}
+int64_t kern_net_recv_fd(int32_t fd, char *buf, int64_t n, int32_t *got, int64_t cap, uint64_t ns, uint8_t timed) {
+    if (n <= 0 || cap < 1) return -EINVAL;
+    got[0] = -1;
+    uint64_t start = timed ? kern_now_ns() : 0;
+    for (;;) {
+        struct iovec iov = {buf, (size_t)n};
+        // room for eight descriptors: the first is the caller's, the
+        // others are closed here, and the system closes what did not fit
+        union { struct cmsghdr h; char buf[CMSG_SPACE(sizeof(int) * 8)]; } u;
+        struct msghdr m;
+        memset(&m, 0, sizeof m);
+        m.msg_iov = &iov;
+        m.msg_iovlen = 1;
+        m.msg_control = u.buf;
+        m.msg_controllen = sizeof u.buf;
+#if defined(MSG_CMSG_CLOEXEC)
+        ssize_t r = recvmsg(fd, &m, MSG_CMSG_CLOEXEC); // atomically: no child of another thread inherits it
+#else
+        ssize_t r = recvmsg(fd, &m, 0);
+#endif
+        if (r >= 0) {
+            for (struct cmsghdr *c = CMSG_FIRSTHDR(&m); c != NULL; c = CMSG_NXTHDR(&m, c)) {
+                if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS || c->cmsg_len < CMSG_LEN(0)) continue;
+                size_t count = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+                for (size_t i = 0; i < count; i++) {
+                    int d;
+                    memcpy(&d, CMSG_DATA(c) + i * sizeof(int), sizeof d);
+                    if (got[0] < 0) {
+                        (void)fcntl(d, F_SETFD, FD_CLOEXEC);
+                        got[0] = d;
+                    } else {
+                        close(d);
+                    }
+                }
+            }
+            return (int64_t)r;
+        }
+        if (errno == EINTR) continue;
+        if (!kern_net_would_block(errno)) return -errno;
+        int w = kern_net_wait(fd, POLLIN, timed, start, ns);
+        if (w == 0) return KERN_TIMED_OUT;
+        if (w < 0) return w;
+    }
+}
+// kern_net_listening reports whether a socket is listening. Linux says
+// so as a socket option; macOS defines the option and refuses to read it,
+// and says so in the socket's entry of the process's descriptor table.
+static int kern_net_listening(int fd) {
+#if defined(__APPLE__)
+    struct socket_fdinfo si;
+    if (proc_pidfdinfo(getpid(), fd, PROC_PIDFDSOCKETINFO, &si, sizeof si) < (int)sizeof si) return 0;
+    return (si.psi.soi_options & SO_ACCEPTCONN) != 0;
+#else
+    int listening = 0;
+    socklen_t len = sizeof listening;
+    if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &listening, &len) < 0) return 0;
+    return listening != 0;
+#endif
+}
+int32_t kern_net_fd_kind(int32_t fd) {
+    struct stat st;
+    if (fstat(fd, &st) < 0) return -errno;
+    if (!S_ISSOCK(st.st_mode)) return 1;
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof ss;
+    memset(&ss, 0, sizeof ss);
+    int type = 0;
+    socklen_t tl = sizeof type;
+    if (getsockname(fd, (struct sockaddr *)&ss, &len) < 0 || getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &tl) < 0) return -errno;
+    int listening = type == SOCK_STREAM && kern_net_listening(fd);
+    int inet = ss.ss_family == AF_INET || ss.ss_family == AF_INET6;
+    int local = ss.ss_family == AF_UNIX;
+    if (type == SOCK_STREAM && inet) return listening ? 3 : 2;
+    if (type == SOCK_STREAM && local) return listening ? 6 : 5;
+    if (type == SOCK_DGRAM && inet) return 4;
+    if (type == SOCK_DGRAM && local) return 7;
+    return 0;
+}
+int32_t kern_net_fd_adopt(int32_t fd, int32_t kind) {
+    int k = kern_net_fd_kind(fd);
+    if (k < 0) return k;
+    if (k != kind || kind == 0) return -EINVAL;
+    if (kind == 1) return fd;
+    // a socket of std/net is non-blocking and never raises SIGPIPE
+    int fl = fcntl(fd, F_GETFL);
+    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0) return -errno;
+#if defined(SO_NOSIGPIPE)
+    int one = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+    return fd;
+}
+int32_t kern_net_peer_cred(int32_t fd, uint32_t *out, int64_t cap) {
+    if (cap < 3) return -EINVAL;
+#if defined(__linux__)
+    struct ucred c;
+    socklen_t len = sizeof c;
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &c, &len) < 0) return -errno;
+    out[0] = (uint32_t)c.uid;
+    out[1] = (uint32_t)c.gid;
+    out[2] = c.pid > 0 ? (uint32_t)c.pid : 0;
+#else
+    uid_t u;
+    gid_t g;
+    if (getpeereid(fd, &u, &g) < 0) return -errno;
+    pid_t pid = 0;
+    socklen_t len = sizeof pid;
+    if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len) < 0) pid = 0;
+    out[0] = (uint32_t)u;
+    out[1] = (uint32_t)g;
+    out[2] = pid > 0 ? (uint32_t)pid : 0;
+#endif
+    return 0;
+}
+
+// ---- readiness (specs/runtime RN1) ----
+
+// A readiness queue is the system's own: epoll on Linux, kqueue on macOS.
+// Both report level-triggered: a descriptor that is ready is reported by
+// every wait until the program has read or written it.
+int32_t kern_net_poller_new(void) {
+#if defined(__linux__)
+    int p = epoll_create1(EPOLL_CLOEXEC);
+    return p < 0 ? -errno : p;
+#else
+    int p = kqueue();
+    if (p < 0) return -errno;
+    if (fcntl(p, F_SETFD, FD_CLOEXEC) < 0) {
+        int e = errno;
+        close(p);
+        return -e;
+    }
+    return p;
+#endif
+}
+int32_t kern_net_poller_set(int32_t p, int32_t fd, uint64_t token, int32_t interest) {
+    if (interest < 0 || interest > 3) return -EINVAL;
+#if defined(__linux__)
+    if (interest == 0) return epoll_ctl(p, EPOLL_CTL_DEL, fd, NULL) < 0 ? -errno : 0;
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.events = (interest & 1 ? EPOLLIN | EPOLLRDHUP : 0u) | (interest & 2 ? EPOLLOUT : 0u);
+    ev.data.u64 = token;
+    if (epoll_ctl(p, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
+    if (errno != ENOENT) return -errno;
+    return epoll_ctl(p, EPOLL_CTL_ADD, fd, &ev) < 0 ? -errno : 0;
+#else
+    // one filter for each direction: the one wanted is added (again, with
+    // the new token), the other deleted, and deleting what is not there
+    // is not this call's failure
+    int found = 0;
+    for (int f = 0; f < 2; f++) {
+        int want = interest & (1 << f);
+        struct kevent ch;
+        EV_SET(&ch, (uintptr_t)fd, f == 0 ? EVFILT_READ : EVFILT_WRITE, want ? EV_ADD : EV_DELETE, 0, 0, (void *)(uintptr_t)token);
+        if (kevent(p, &ch, 1, NULL, 0, NULL) < 0) {
+            if (!want && errno == ENOENT) continue;
+            return -errno;
+        }
+        found = 1;
+    }
+    return interest == 0 && !found ? -ENOENT : 0;
+#endif
+}
+#define KERN_POLL_MAX 128
+int64_t kern_net_poller_wait(int32_t p, uint64_t *out, int64_t cap, uint64_t ns, uint8_t timed) {
+    if (cap < 2) return -EINVAL;
+    int max = cap / 2 > KERN_POLL_MAX ? KERN_POLL_MAX : (int)(cap / 2);
+    uint64_t start = timed ? kern_now_ns() : 0;
+    for (;;) {
+        uint64_t left = 0;
+        if (timed) {
+            uint64_t spent = kern_now_ns() - start;
+            left = spent >= ns ? 0 : ns - spent; // no time left: one look
+        }
+#if defined(__linux__)
+        struct epoll_event evs[KERN_POLL_MAX];
+        int ms = -1;
+        if (timed) {
+            uint64_t whole = left / 1000000u + (left % 1000000u != 0); // whole milliseconds: rounded up
+            ms = whole > (uint64_t)INT_MAX ? INT_MAX : (int)whole;
+        }
+        int r = epoll_wait(p, evs, max, ms);
+#else
+        struct kevent evs[KERN_POLL_MAX];
+        struct timespec ts = {(time_t)(left / 1000000000u), (long)(left % 1000000000u)};
+        int r = kevent(p, NULL, 0, evs, max, timed ? &ts : NULL);
+#endif
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -errno;
+        }
+        if (r == 0) {
+            if (timed && kern_now_ns() - start >= ns) return 0;
+            continue; // the wait ended early: look at the clock again
+        }
+        int n = 0;
+#if defined(__linux__)
+        for (int i = 0; i < r; i++) {
+            uint64_t fl = 0;
+            if (evs[i].events & EPOLLIN) fl |= 1;
+            if (evs[i].events & EPOLLOUT) fl |= 2;
+            if (evs[i].events & (EPOLLRDHUP | EPOLLHUP)) fl |= 4;
+            if (evs[i].events & EPOLLERR) fl |= 8;
+            out[2 * n] = evs[i].data.u64;
+            out[2 * n + 1] = fl;
+            n++;
+        }
+#else
+        // a descriptor ready both ways is two events here: they are
+        // reported as one, as epoll reports them
+        uintptr_t ids[KERN_POLL_MAX];
+        for (int i = 0; i < r; i++) {
+            uint64_t fl = evs[i].filter == EVFILT_READ ? 1 : evs[i].filter == EVFILT_WRITE ? 2 : 0;
+            if (evs[i].flags & EV_EOF) {
+                fl |= 4;
+                if (evs[i].fflags != 0) fl |= 8; // the socket's pending error
+            }
+            if (evs[i].flags & EV_ERROR) fl |= 8;
+            int k = 0;
+            while (k < n && ids[k] != evs[i].ident) k++;
+            if (k == n) {
+                ids[n] = evs[i].ident;
+                out[2 * n] = (uint64_t)(uintptr_t)evs[i].udata;
+                out[2 * n + 1] = 0;
+                n++;
+            }
+            out[2 * k + 1] |= fl;
+        }
+#endif
+        return n;
+    }
+}
+
 int32_t kern_net_unix_pair(int32_t *fds, int64_t cap) {
     if (cap < 2) return -EINVAL;
     int sv[2];

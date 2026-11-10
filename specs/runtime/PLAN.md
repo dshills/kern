@@ -417,6 +417,27 @@ cut short and a write through a read-only mapping trapping in both
 engines; and each signal's default ending a native and an interpreted
 program by the same signal after the same output.
 
+## Phase 14: readiness, descriptors, credentials, abstract names (RN1 to RN4)
+
+**Files.** `rt_net.c` (three entries for the readiness queue, over epoll
+or kqueue; `kern_net_send_fd`, `kern_net_recv_fd`, `kern_net_fd_kind`,
+`kern_net_fd_adopt`; `kern_net_peer_cred`; abstract names in
+`kern_net_unix_sa`, and a datagram's sender as a length and bytes),
+`std/net.kern` (`Source`, `Poller`, `Ready`, `Descriptor`, `Received`,
+`Credentials`), `std/io.kern` (`file_of`), `compiler/backend/llvm/calls.go`,
+`compiler/interp` (`net.go`, and the queue, the credentials and the
+names for each system in `sys_darwin.go` and `sys_linux.go`),
+`compiler/lower` (what the fixtures found: a `?` among a call's
+arguments).
+
+**Tests.** One thread serving a listener and three connections through a
+Poller; a Poller on its own thread, four client threads and a wake-up
+through a pair; a file and a socket of each kind passed over a pair and
+used; files exchanged with the test process, which also checks the
+credentials the program reads; abstract names on Linux and their refusal
+on macOS; and a `?` in an argument, a field and an element with owned
+operands before it.
+
 ## Gate policy
 
 Every gate is mandatory. The standing exception is the `race_raw_ptr`

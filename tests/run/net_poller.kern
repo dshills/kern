@@ -1,0 +1,248 @@
+//! phase: 6
+//! expect: output net_poller
+// A Poller (specs/runtime RN1): one thread serves a listener and three
+// connections, and plays their clients too. Nothing is ready before
+// anyone connects; a listener is readable when a connection waits; a
+// stream when bytes do, and it stays so until they are read; watching
+// again replaces the token and what is asked; a peer's close is reported;
+// an unwatched socket is not; and the same holds of a Unix-domain pair
+// (the way to wake a waiting thread) and of a UDP socket.
+module t
+import "std/net"
+import "std/io"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func yes(what: view[]u8, ok: bool) {
+    print_str(what)
+    if ok { say(": yes") } else { say(": NO") }
+}
+func same(a: view[]u8, b: view[]u8) -> bool {
+    if len(a) != len(b) { return false }
+    for i in 0usize..len(a) {
+        if a[i] != b[i] { return false }
+    }
+    return true
+}
+func watch_at(p: edit[net.Poller], conns: edit[Vec[net.TcpStream]], i: usize, token: u64, readable: bool, writable: bool) -> Result[(), io.IoErr] {
+    with c := conns.at(i) { return p.watch(c, token, readable, writable) }
+    return Ok(())
+}
+func unwatch_at(p: edit[net.Poller], conns: edit[Vec[net.TcpStream]], i: usize) -> Result[(), io.IoErr] {
+    with c := conns.at(i) { return p.unwatch(c) }
+    return Ok(())
+}
+func read_at(conns: edit[Vec[net.TcpStream]], i: usize, buf: edit[]u8) -> Result[usize, io.IoErr] {
+    with c := conns.at(i) { return c.read(buf) }
+    return Ok(0usize)
+}
+func write_at(conns: edit[Vec[net.TcpStream]], i: usize, data: view[]u8) -> Result[(), io.IoErr] {
+    with c := conns.at(i) { return c.write_all(data) }
+    return Ok(())
+}
+// only reports whether every report is of the one token, readable or
+// writable as given.
+func only(events: view[Vec[net.Ready]], token: u64, readable: bool, writable: bool) -> bool {
+    if events.len() != 1usize { return false }
+    e := events.get(0usize)
+    return e.token == token && e.readable == readable && e.writable == writable
+}
+func kind_is_not_found(r: own Result[(), io.IoErr]) -> bool {
+    match r {
+        Ok(u) => { return false }
+        Err(e) => {
+            match io.kind(e) {
+                NotFound => { return true }
+                _ => { return false }
+            }
+        }
+    }
+}
+func kind_is_invalid(r: own Result[(), io.IoErr]) -> bool {
+    match r {
+        Ok(u) => { return false }
+        Err(e) => {
+            match io.kind(e) {
+                InvalidInput => { return true }
+                _ => { return false }
+            }
+        }
+    }
+}
+
+func serve() -> Result[(), io.IoErr] {
+    p := net.Poller.new()?
+    events := Vec[net.Ready].new()
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    at := l.local_addr()?
+    p.watch(l, 0u64, true, false)?
+
+    say("-- before anyone connects")
+    start := now_ns()
+    n0 := p.wait_timeout(events, time.millis(30u64))?
+    yes("nothing in 30 ms, and the wait took its time", n0 == 0usize && now_ns() - start >= 30000000u64)
+    n1 := p.wait_timeout(events, time.millis(0u64))?
+    yes("nothing at a look", n1 == 0usize && events.len() == 0usize)
+    yes("watching for neither reading nor writing is InvalidInput", kind_is_invalid(p.watch(l, 5u64, false, false)))
+
+    say("-- three clients connect and write")
+    clients := Vec[net.TcpStream].new()
+    for i in 0u8..3u8 {
+        c := net.TcpStream.connect(at)?
+        var msg: [8]u8 = zero()
+        for k in 0usize..7usize { msg[k] = "client "[k] }
+        msg[7usize] = 48u8 + i
+        c.write_all(msg)?
+        clients.push(c)
+    }
+    conns := Vec[net.TcpStream].new()
+    var listener_only: bool = true
+    while conns.len() < 3usize {
+        n := p.wait(events)?
+        if !only(events, 0u64, true, false) { listener_only = false }
+        match l.accept_timeout(time.millis(0u64))? {
+            Some(c) => { conns.push(c) }
+            None => { }
+        }
+    }
+    yes("each wait reported the listener, readable, under its token", listener_only)
+    for i in 0usize..3usize { watch_at(p, conns, i, 1u64 + u64(i), true, false)? }
+
+    say("-- the server reads what is ready and answers")
+    // readiness is a state: what is not read is reported again
+    first := p.wait(events)?
+    again := p.wait(events)?
+    yes("unread bytes are reported by the next wait too", first >= 1usize && again >= 1usize)
+    var got: [3]usize = zero()
+    var buf: [64]u8 = zero()
+    var strangers: usize = 0usize
+    var total: usize = 0usize
+    while total < 24usize {
+        n := p.wait(events)?
+        for k in 0usize..n {
+            e := events.get(k)
+            if e.token < 1u64 || e.token > 3u64 || !e.readable {
+                strangers = strangers + 1usize
+            } else {
+                i := usize(e.token - 1u64)
+                r := read_at(conns, i, buf)?
+                write_at(conns, i, buf[0usize : r])?
+                got[i] = got[i] + r
+                total = total + r
+            }
+        }
+    }
+    yes("every connection gave its eight bytes", got[0usize] == 8usize && got[1usize] == 8usize && got[2usize] == 8usize)
+    yes("no other socket was reported", strangers == 0usize)
+    quiet := p.wait_timeout(events, time.millis(0u64))?
+    yes("once read, nothing is ready", quiet == 0usize)
+
+    say("-- the clients read their answers")
+    for i in 0usize..3usize { watch_at(p, clients, i, 100u64 + u64(i), true, false)? }
+    var echoed: [24]u8 = zero()
+    var have: [3]usize = zero()
+    var done: usize = 0usize
+    while done < 24usize {
+        n := p.wait(events)?
+        for k in 0usize..n {
+            e := events.get(k)
+            if e.token >= 100u64 && e.token <= 102u64 {
+                i := usize(e.token - 100u64)
+                r := read_at(clients, i, echoed[i * 8usize + have[i] : i * 8usize + 8usize])?
+                have[i] = have[i] + r
+                done = done + r
+            }
+        }
+    }
+    yes("client 0 has its own bytes back", same(echoed[0usize : 8usize], "client 0"))
+    yes("client 1 has its own bytes back", same(echoed[8usize : 16usize], "client 1"))
+    yes("client 2 has its own bytes back", same(echoed[16usize : 24usize], "client 2"))
+
+    say("-- watching again replaces what was asked")
+    watch_at(p, clients, 0usize, 200u64, false, true)?
+    w := p.wait(events)?
+    yes("a stream with room is writable, under the new token", only(events, 200u64, false, true))
+    watch_at(p, clients, 0usize, 201u64, true, false)?
+    r0 := p.wait_timeout(events, time.millis(0u64))?
+    yes("asked for reading only, it is not reported", r0 == 0usize)
+    watch_at(p, clients, 0usize, 202u64, true, true)?
+    write_at(conns, 0usize, "x")?
+    // the stream is writable at once; the byte may take a moment to arrive
+    var both: bool = false
+    asked := now_ns()
+    while !both && now_ns() - asked < 20000000000u64 {
+        b := p.wait(events)?
+        both = only(events, 202u64, true, true)
+        if !both { yield_now() }
+    }
+    yes("readable and writable are one report", both)
+    r1 := read_at(clients, 0usize, buf)?
+    unwatch_at(p, clients, 0usize)?
+
+    say("-- a peer closes")
+    match clients.pop() {
+        Some(last) => { drop(last) }
+        None => { }
+    }
+    c0 := p.wait(events)?
+    var closed_token: u64 = 0u64
+    if events.len() == 1usize {
+        e := events.get(0usize)
+        if e.readable && e.closed && e.token >= 1u64 && e.token <= 3u64 { closed_token = e.token }
+    }
+    yes("its connection is reported readable and closed", closed_token != 0u64)
+    if closed_token != 0u64 {
+        i := usize(closed_token - 1u64)
+        end := read_at(conns, i, buf)?
+        yes("and a read returns the end of the stream", end == 0usize)
+        unwatch_at(p, conns, i)?
+    }
+    after := p.wait_timeout(events, time.millis(0u64))?
+    yes("unwatched, it is not reported again", after == 0usize)
+
+    say("-- an unwatched listener")
+    p.unwatch(l)?
+    late := net.TcpStream.connect(at)?
+    u0 := p.wait_timeout(events, time.millis(30u64))?
+    yes("a connection that waits is not reported", u0 == 0usize)
+    yes("unwatching what is not watched is NotFound", kind_is_not_found(p.unwatch(l)))
+    p.watch(l, 9u64, true, false)?
+    u1 := p.wait(events)?
+    yes("watched again, it is, under its new token", only(events, 9u64, true, false))
+    p.unwatch(l)?
+
+    say("-- a pair, to wake a waiting thread")
+    match net.UnixStream.pair()? {
+        Ends(a, b) => {
+            p.watch(a, 300u64, true, false)?
+            s0 := p.wait_timeout(events, time.millis(0u64))?
+            b.write_all("!")?
+            s1 := p.wait(events)?
+            yes("a byte written to one end reports the other", s0 == 0usize && only(events, 300u64, true, false))
+        }
+    }
+    // the pair is closed: closing a socket ends its watch
+    s2 := p.wait_timeout(events, time.millis(0u64))?
+    yes("a closed socket is not reported", s2 == 0usize)
+
+    say("-- a UDP socket")
+    u := net.UdpSocket.bind(net.loopback_v4(0u16))?
+    sender := net.UdpSocket.bind(net.loopback_v4(0u16))?
+    p.watch(u, 400u64, true, false)?
+    d0 := p.wait_timeout(events, time.millis(0u64))?
+    sent := sender.send_to("datagram", u.local_addr()?)?
+    d1 := p.wait(events)?
+    yes("a datagram that arrived reports it", d0 == 0usize && only(events, 400u64, true, false))
+    d := u.recv_from(buf)?
+    d2 := p.wait_timeout(events, time.millis(0u64))?
+    yes("and once received, no more", d.len == 8usize && d2 == 0usize)
+    return Ok(())
+}
+
+func main() -> i32 {
+    match serve() {
+        Ok(u) => say("done")
+        Err(e) => say("failed")
+    }
+    return 0i32
+}

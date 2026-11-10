@@ -1,0 +1,100 @@
+//! phase: 6
+//! expect: output try_in_arguments
+// A `?` in an operand of a call or a literal, with operands before it
+// already evaluated (Rule 5.7.2): on its error path the accesses the call
+// had opened end, and the values it had evaluated are destroyed once,
+// newest first, as they are when the call is made. An edit receiver with
+// a destructor; an owned argument; a temporary receiver; nested calls; a
+// struct literal, a variant and an array; and an argument moved from a
+// local.
+module t
+
+func say(s: view[]u8) { print_str(s); println() }
+
+struct Noisy nocopy { id: u32 }
+impl Noisy {
+    func add(edit self, n: u32) -> u32 { return self.id + n }
+    func add2(edit self, other: own Noisy, n: u32) -> u32 { return self.id + other.id + n }
+    func plus(view self, n: u32) -> u32 { return self.id + n }
+    destructor(edit self) { print_str("destroyed "); print_u64(u64(self.id)); println() }
+}
+func make(id: u32) -> Noisy { return Noisy { id: id } }
+func fallible(fail: bool) -> Result[u32, u32] {
+    if fail { return Err(7u32) }
+    return Ok(1u32)
+}
+func sum(a: view[Noisy], b: view[Noisy], n: u32) -> u32 { return a.id + b.id + n }
+
+// an edit receiver with a destructor, and a `?` in a later argument
+func receiver(fail: bool) -> Result[u32, u32] {
+    a := make(1u32)
+    r := a.add(fallible(fail)?)
+    return Ok(r)
+}
+// an owned argument evaluated before the `?`
+func owned(fail: bool) -> Result[u32, u32] {
+    a := make(10u32)
+    r := a.add2(make(11u32), fallible(fail)?)
+    return Ok(r)
+}
+// views of two temporaries, then the `?`
+func temporaries(fail: bool) -> Result[u32, u32] {
+    r := make(20u32).plus(fallible(fail)?)
+    return Ok(r)
+}
+// nested calls: both receivers are open at the `?`
+func nested(fail: bool) -> Result[u32, u32] {
+    a := make(30u32)
+    b := make(31u32)
+    r := a.add(b.add(fallible(fail)?))
+    return Ok(r)
+}
+func show(name: view[]u8, r: own Result[u32, u32]) {
+    print_str(name)
+    match r {
+        Ok(v) => { print_str(": ok "); print_u64(u64(v)); println() }
+        Err(e) => { print_str(": err "); print_u64(u64(e)); println() }
+    }
+}
+func main() -> i32 {
+    show("receiver", receiver(false))
+    show("receiver", receiver(true))
+    show("owned", owned(false))
+    show("owned", owned(true))
+    show("temporaries", temporaries(false))
+    show("temporaries", temporaries(true))
+    show("nested", nested(false))
+    show("nested", nested(true))
+    show("in_struct", in_struct(false))
+    show("in_struct", in_struct(true))
+    show("in_variant", in_variant(false))
+    show("in_variant", in_variant(true))
+    show("moved", moved(false))
+    show("moved", moved(true))
+    show("in_array", in_array(false))
+    show("in_array", in_array(true))
+    return 0i32
+}
+struct Two nocopy { a: Noisy; b: u32 }
+union Maybe { Both(Noisy, u32); Neither }
+func in_struct(fail: bool) -> Result[u32, u32] {
+    t := Two { a: make(40u32), b: fallible(fail)? }
+    return Ok(t.b)
+}
+func in_variant(fail: bool) -> Result[u32, u32] {
+    m := Both(make(50u32), fallible(fail)?)
+    match m {
+        Both(n, v) => { return Ok(v) }
+        Neither => { return Ok(0u32) }
+    }
+}
+func eat(n: own Noisy, v: u32) -> u32 { return n.id + v }
+func moved(fail: bool) -> Result[u32, u32] {
+    x := make(60u32)
+    r := eat(x, fallible(fail)?)
+    return Ok(r)
+}
+func in_array(fail: bool) -> Result[u32, u32] {
+    xs := [make(70u32), make(71u32 + fallible(fail)?)]
+    return Ok(xs[1usize].id)
+}

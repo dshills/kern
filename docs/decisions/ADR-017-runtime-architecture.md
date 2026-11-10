@@ -42,8 +42,17 @@ entry's contract.
 
 **Consequences.** Timeouts are part of every call that waits
 (`accept_timeout`, `read_timeout`, `wait_ns`, `recv_ns`), since there is
-no outer mechanism to cancel one. Stack size is a setting (RC2). A
-program that wants ten thousand idle connections is not served well.
+no outer mechanism to cancel one. Stack size is a setting (RC2).
+
+**Readiness without a scheduler (phase 14).** A program that wants ten
+thousand idle connections was not served well by a thread for each.
+`net.Poller` serves it within this decision: it is the system's
+readiness queue (epoll, kqueue) as a value, one thread asks it which
+sockets can be read or written without waiting, and that thread then
+makes the ordinary calls. Nothing suspends: there is still no task type,
+no second kind of function and no access held across a wait, so the
+language pays none of what the alternative above costs. An event loop is
+a `while` in the program.
 
 ## Decision 2: park is the one blocking primitive
 

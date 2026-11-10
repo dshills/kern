@@ -229,9 +229,13 @@ func (fl *fnLower) expr(e ast.Expr, want resolve.Type) operand {
 	case *ast.ArrayLit:
 		arr := t.(*resolve.Array)
 		var elems []*ir.Value
+		mark := len(fl.held)
 		for _, el := range x.Elems {
-			elems = append(elems, fl.value(el, arr.Elem))
+			ev := fl.value(el, arr.Elem)
+			fl.hold(ev)
+			elems = append(elems, ev)
 		}
+		fl.release(mark)
 		v := fl.newValue(t)
 		fl.emit(&ir.MakeArray{Dst: v, Elems: elems})
 		return operand{val: v, owned: true}
@@ -241,10 +245,14 @@ func (fl *fnLower) expr(e ast.Expr, want resolve.Type) operand {
 			fl.fail(x.Pos, "struct literal of non-struct")
 		}
 		byName := map[string]*ir.Value{}
+		mark := len(fl.held)
 		for _, fi := range x.Fields {
 			_, ft := resolve.FieldType(n, fi.Name)
-			byName[fi.Name] = fl.value(fi.Value, fl.ty(ft))
+			fv := fl.value(fi.Value, fl.ty(ft))
+			fl.hold(fv)
+			byName[fi.Name] = fv
 		}
+		fl.release(mark)
 		var fields []*ir.Value
 		for _, fd := range n.Decl.Fields {
 			fields = append(fields, byName[fd.Name])
@@ -569,6 +577,15 @@ func (fl *fnLower) try(x *ast.Try) operand {
 	errT := fl.ty(n.Args[1])
 	ev := fl.newValue(errT)
 	fl.emit(&ir.Move{Dst: ev, Src: ir.Place{Local: tmp, Path: []ir.PathElem{{Kind: ir.PathVariant, Tag: 1, Field: 0, Name: "Err"}}}})
+	// the accesses that enclosing calls opened for their earlier
+	// arguments end here, newest first, before anything they reach into
+	// is destroyed (the ok path goes on to the calls, which end them)
+	for i := len(fl.pendingAccs) - 1; i >= 0; i-- {
+		fl.endAccess(fl.pendingAccs[i])
+	}
+	// and the values those expressions had already evaluated are
+	// destroyed: nothing will consume them
+	fl.dropHeld()
 	fl.outFieldDrops(x)
 	fl.exit(fl.l.info.Drops[x], 0)
 	retT := fl.f.Rets[0]
@@ -679,6 +696,14 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 	}
 	var args []*ir.Value
 	var argAccs []*ir.Value
+	// an access opened for one argument is open while the later arguments
+	// are evaluated: a `?` among them ends it on its error path
+	pending := len(fl.pendingAccs)
+	mark := len(fl.held)
+	opened := func(accs ...*ir.Value) {
+		argAccs = append(argAccs, accs...)
+		fl.pendingAccs = append(fl.pendingAccs, accs...)
+	}
 	var callTemps []*ir.Local // temporaries this call viewed that have destructors
 	var argExprs []*ast.Arg
 	if info.Method {
@@ -712,7 +737,7 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 			case r.access != nil && !r.isPlace():
 				acc = r.access
 				if r.ownsAccess {
-					argAccs = append(argAccs, acc)
+					opened(acc)
 				}
 			case fl.l.info.TwoPhase[resolve.TwoPhaseArg{Call: x, Arg: i}]:
 				// the checker records only a field path, which lowers to a
@@ -724,11 +749,11 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 				late = append(late, deferred{acc: acc, pl: r.pl, pos: a.Pos})
 			case r.isPlace():
 				if r.access != nil && r.ownsAccess {
-					argAccs = append(argAccs, r.access) // the parent ends after its child
+					opened(r.access) // the parent ends after its child
 				}
 				acc = fl.newValue(pt)
 				fl.emit(&ir.AccessBegin{Dst: acc, Edit: p.Conv == ast.ConvEdit, Place: r.pl, Pos: a.Pos})
-				argAccs = append(argAccs, acc)
+				opened(acc)
 			default:
 				// a temporary value viewed: materialize it; one that is
 				// not Copy is destroyed when the call returns, or when the
@@ -738,10 +763,11 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 				fl.emit(&ir.Init{Place: ir.Place{Local: tmp}})
 				if !resolve.IsCopy(r.val.Type) {
 					callTemps = append(callTemps, tmp)
+					fl.holdTemp(tmp)
 				}
 				acc = fl.newValue(pt)
 				fl.emit(&ir.AccessBegin{Dst: acc, Edit: p.Conv == ast.ConvEdit, Place: ir.Place{Local: tmp}, Pos: a.Pos})
-				argAccs = append(argAccs, acc)
+				opened(acc)
 			}
 			args = append(args, acc)
 		case ast.ConvOut:
@@ -751,16 +777,22 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 			acc := fl.newValue(&resolve.Access{Edit: true, Elem: loc.Type})
 			fl.emit(&ir.AccessBegin{Dst: acc, Edit: true, Place: ir.Place{Local: loc}, Pos: a.Pos})
 			args = append(args, acc)
-			argAccs = append(argAccs, acc)
+			opened(acc)
 			outLocals = append(outLocals, loc)
 		default:
 			n := len(fl.closureAccs)
-			args = append(args, fl.value(a.X, pt))
+			av := fl.value(a.X, pt)
+			fl.hold(av)
+			args = append(args, av)
 			// a closure argument's capture accesses end with the call
-			argAccs = append(argAccs, fl.closureAccs[n:]...)
+			opened(fl.closureAccs[n:]...)
 			fl.closureAccs = fl.closureAccs[:n]
 		}
 	}
+	fl.pendingAccs = fl.pendingAccs[:pending] // every argument is evaluated: the call's own path ends them
+	fl.release(mark)                          // and the call has the values
+	// the two-phase accesses begin here, after every argument: no `?` can
+	// come between them and the call, so they are never pending
 	for _, d := range late {
 		fl.emit(&ir.AccessBegin{Dst: d.acc, Edit: true, Place: d.pl, Pos: d.pos})
 		argAccs = append(argAccs, d.acc)
@@ -1036,9 +1068,13 @@ func (fl *fnLower) variantCtor(x *ast.CallExpr, n *resolve.Named) operand {
 	}
 	fts := resolve.VariantFieldTypes(n, vd)
 	var fields []*ir.Value
+	mark := len(fl.held)
 	for i, a := range x.Args {
-		fields = append(fields, fl.value(a.X, fl.ty(fts[i])))
+		fv := fl.value(a.X, fl.ty(fts[i]))
+		fl.hold(fv)
+		fields = append(fields, fv)
 	}
+	fl.release(mark)
 	v := fl.newValue(n)
 	fl.emit(&ir.MakeUnion{Dst: v, Tag: vd.Index, Fields: fields})
 	return operand{val: v, owned: !resolve.IsCopy(n)}

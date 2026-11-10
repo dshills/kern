@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -31,6 +32,38 @@ type sock struct {
 	tcp  *net.TCPConn
 	udp  *net.UDPConn
 	ud   *net.UnixConn // a Unix-domain datagram socket
+	poll *poller       // a readiness queue
+	// raw is a descriptor another program sent, not yet made one of the
+	// above (std/net's Descriptor); it is the system's own number
+	raw    int
+	hasRaw bool
+}
+
+// poller is a readiness queue: the system's (kqueue or epoll), and the
+// token of each descriptor watched, which the system's event does not
+// carry here.
+type poller struct {
+	fd     int
+	mu     sync.Mutex
+	tokens map[int]uint64
+}
+
+// readyFD is one ready descriptor of the system's, with the runtime's
+// flags: 1 readable, 2 writable, 4 the peer closed, 8 an error pending.
+type readyFD struct {
+	fd    int
+	flags uint64
+}
+
+// osFD is the system's descriptor of a socket. It stays the socket's
+// while the socket is open.
+func (s *sock) osFD() (int, error) {
+	if s.hasRaw {
+		return s.raw, nil
+	}
+	fd := -1
+	err := s.control(func(d int) error { fd = d; return nil })
+	return fd, err
 }
 
 // control runs f on the socket's descriptor, for the options Go's types
@@ -111,6 +144,14 @@ func init() {
 		"net_unix_dgram":     netUnixDgram,
 		"net_unix_send_to":   netUnixSendTo,
 		"net_unix_recv_from": netUnixRecvFrom,
+		"net_poller_new":     netPollerNew,
+		"net_poller_set":     netPollerSet,
+		"net_poller_wait":    netPollerWait,
+		"net_send_fd":        netSendFD,
+		"net_recv_fd":        netRecvFD,
+		"net_fd_kind":        netFDKind,
+		"net_fd_adopt":       netFDAdopt,
+		"net_peer_cred":      netPeerCred,
 		"net_addr":           netAddr,
 		"net_send_to":        netSendTo,
 		"net_recv_from":      netRecvFrom,
@@ -303,12 +344,21 @@ func netConnect(it *Interp, a []Value, _ callCtx) []Value {
 }
 
 // unixPath checks a Unix-domain path as the runtime's kern_net_unix_sa
-// does: 0, or the error number.
+// does and returns it as the network package names it: 0, or the error
+// number. A path whose first byte is zero is a name in the abstract
+// namespace, where the system has one.
 func unixPath(b []byte) (string, syscall.Errno) {
 	if len(b) == 0 {
 		return "", syscall.EINVAL
 	}
-	for _, c := range b {
+	rest := b
+	if b[0] == 0 {
+		if len(b) < 2 {
+			return "", syscall.EINVAL
+		}
+		rest = b[1:]
+	}
+	for _, c := range rest {
 		if c == 0 {
 			return "", syscall.EINVAL
 		}
@@ -316,7 +366,10 @@ func unixPath(b []byte) (string, syscall.Errno) {
 	if len(b) >= 104 {
 		return "", syscall.ENAMETOOLONG
 	}
-	return string(b), 0
+	if b[0] == 0 {
+		return abstractName(string(rest))
+	}
+	return fileName(string(b)), 0
 }
 
 func netUnixListen(it *Interp, a []Value, _ callCtx) []Value {
@@ -561,6 +614,10 @@ func netClose(it *Interp, a []Value, _ callCtx) []Value {
 		err = s.udp.Close()
 	case s.ud != nil:
 		err = s.ud.Close()
+	case s.poll != nil:
+		err = syscall.Close(s.poll.fd)
+	case s.hasRaw:
+		err = syscall.Close(s.raw)
 	}
 	if err != nil {
 		return i32Val(-int32(errnoOf(err)))
@@ -781,8 +838,8 @@ func netUnixSendTo(it *Interp, a []Value, _ callCtx) []Value {
 	}
 }
 
-// netUnixRecvFrom receives one datagram and writes its sender's path,
-// ended by a zero byte, into from.
+// netUnixRecvFrom receives one datagram and writes its sender's path
+// into from: its length in the first byte, then its bytes.
 func netUnixRecvFrom(it *Interp, a []Value, _ callCtx) []Value {
 	s := it.sockOf(a[0])
 	if s == nil || s.ud == nil {
@@ -800,13 +857,357 @@ func netUnixRecvFrom(it *Interp, a []Value, _ callCtx) []Value {
 	}
 	n = min(n, want)
 	putBytes(a[1], buf[:n])
-	path := ""
+	var path []byte
 	if from != nil {
-		path = from.Name
+		path = senderPath(from.Name)
 	}
 	if len(path) > 104 {
 		path = path[:104]
 	}
-	putBytes(a[2], append([]byte(path), 0))
+	putBytes(a[2], append([]byte{byte(len(path))}, path...))
 	return i64Val(int64(n))
+}
+
+// ---- readiness (specs/runtime RN1) ----
+
+func netPollerNew(it *Interp, _ []Value, _ callCtx) []Value {
+	fd, err := pollerNew()
+	if err != nil {
+		return i32Val(-int32(errnoOf(err)))
+	}
+	return i32Val(int32(it.addSock(&sock{poll: &poller{fd: fd, tokens: map[int]uint64{}}})))
+}
+
+func netPollerSet(it *Interp, a []Value, _ callCtx) []Value {
+	p, s := it.sockOf(a[0]), it.sockOf(a[1])
+	interest := int(int32(a[3].(Int).Bits))
+	if p == nil || p.poll == nil || s == nil {
+		return i32Val(-int32(syscall.EBADF))
+	}
+	if interest < 0 || interest > 3 {
+		return i32Val(-int32(syscall.EINVAL))
+	}
+	fd, err := s.osFD()
+	if err == nil {
+		err = pollerSet(p.poll.fd, fd, interest)
+	}
+	if err != nil {
+		return i32Val(-int32(errnoOf(err)))
+	}
+	p.poll.mu.Lock()
+	if interest == 0 {
+		delete(p.poll.tokens, fd)
+	} else {
+		p.poll.tokens[fd] = a[2].(Int).Bits
+	}
+	p.poll.mu.Unlock()
+	return i32Val(0)
+}
+
+func netPollerWait(it *Interp, a []Value, _ callCtx) []Value {
+	p := it.sockOf(a[0])
+	if p == nil || p.poll == nil {
+		return i64Val(-int64(syscall.EBADF))
+	}
+	out := seqOf(acc(a[1]))
+	if out.length() < 2 {
+		return i64Val(-int64(syscall.EINVAL))
+	}
+	max := min(out.length()/2, 128)
+	timed := bool(a[3].(Bool))
+	total := time.Duration(min(a[2].(Int).Bits, uint64(1<<62)))
+	start := time.Now()
+	for {
+		left := max64(total-time.Since(start), 0) // no time left: one look
+		ready, err := pollerWait(p.poll.fd, max, left, timed)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil {
+			return i64Val(-int64(errnoOf(err)))
+		}
+		if len(ready) == 0 {
+			if timed && time.Since(start) >= total {
+				return i64Val(0)
+			}
+			continue // the wait ended early: look at the clock again
+		}
+		p.poll.mu.Lock()
+		for i, r := range ready {
+			out.at(2 * i).set(mkInt(tyU64, p.poll.tokens[r.fd]))
+			out.at(2*i + 1).set(mkInt(tyU64, r.flags))
+		}
+		p.poll.mu.Unlock()
+		return i64Val(int64(len(ready)))
+	}
+}
+
+func max64(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// ---- descriptors and credentials over a Unix-domain stream (RN2, RN3) ----
+
+// passFD is the system's descriptor of a file or socket of the program's.
+func (it *Interp) passFD(d int64) (int, bool) {
+	if d < sockBase {
+		if f := it.openFile(d); f != nil {
+			return int(f.Fd()), true
+		}
+		return -1, false
+	}
+	it.sh.mu.Lock()
+	s := it.sh.socks[d]
+	it.sh.mu.Unlock()
+	if s == nil {
+		return -1, false
+	}
+	fd, err := s.osFD()
+	return fd, err == nil
+}
+
+func netSendFD(it *Interp, a []Value, _ callCtx) []Value {
+	s := it.sockOf(a[0])
+	data := seqBytes(acc(a[1]))
+	if len(data) == 0 {
+		return i64Val(-int64(syscall.EINVAL))
+	}
+	if s == nil || s.conn == nil {
+		return i64Val(-int64(syscall.EBADF))
+	}
+	uc, ok := s.conn.(*net.UnixConn)
+	if !ok {
+		return i64Val(-int64(syscall.ENOTSOCK))
+	}
+	fd, ok := it.passFD(signedOf(a[2].(Int)))
+	if !ok {
+		return i64Val(-int64(syscall.EBADF))
+	}
+	_ = uc.SetWriteDeadline(time.Time{})
+	n, _, err := uc.WriteMsgUnix(data, syscall.UnixRights(fd), nil)
+	if err != nil && n == 0 {
+		return i64Val(netErr(err))
+	}
+	return i64Val(int64(n))
+}
+
+func netRecvFD(it *Interp, a []Value, _ callCtx) []Value {
+	s := it.sockOf(a[0])
+	want := byteSeq(acc(a[1])).length()
+	got := seqOf(acc(a[2]))
+	if want == 0 || got.length() < 1 {
+		return i64Val(-int64(syscall.EINVAL))
+	}
+	if s == nil || s.conn == nil {
+		return i64Val(-int64(syscall.EBADF))
+	}
+	uc, ok := s.conn.(*net.UnixConn)
+	if !ok {
+		return i64Val(-int64(syscall.ENOTSOCK))
+	}
+	got.at(0).set(mkInt(tyI32, uint64(uint32(0xFFFFFFFF))))
+	buf := make([]byte, want)
+	oob := make([]byte, syscall.CmsgSpace(4*8)) // room for eight descriptors, as the runtime's
+	_ = uc.SetReadDeadline(deadline(a[3], a[4]))
+	n, oobn, _, _, err := uc.ReadMsgUnix(buf, oob)
+	n, oobn = max(n, 0), max(oobn, 0) // a call that failed reports -1
+	if err != nil && n == 0 && oobn == 0 {
+		if errors.Is(err, io.EOF) {
+			return i64Val(0)
+		}
+		return i64Val(netErr(err))
+	}
+	// the first descriptor is the program's; any other is closed
+	first := -1
+	if msgs, perr := syscall.ParseSocketControlMessage(oob[:oobn]); perr == nil {
+		for i := range msgs {
+			fds, rerr := syscall.ParseUnixRights(&msgs[i])
+			if rerr != nil {
+				continue
+			}
+			for _, fd := range fds {
+				if first < 0 {
+					syscall.CloseOnExec(fd)
+					first = fd
+				} else {
+					_ = syscall.Close(fd)
+				}
+			}
+		}
+	}
+	if first >= 0 {
+		d := it.addSock(&sock{raw: first, hasRaw: true})
+		got.at(0).set(mkInt(tyI32, uint64(uint32(d))))
+	}
+	putBytes(a[1], buf[:n])
+	return i64Val(int64(n))
+}
+
+// fdKind says what a descriptor of the system's is, as the runtime's
+// kern_net_fd_kind.
+func fdKind(fd int) (int32, error) {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return 0, err
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFSOCK {
+		return 1, nil
+	}
+	typ, err := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_TYPE)
+	if err != nil {
+		return 0, err
+	}
+	listening := 0
+	if typ == syscall.SOCK_STREAM && sockListening(fd) {
+		listening = 1
+	}
+	sa, err := syscall.Getsockname(fd)
+	if err != nil {
+		return 0, err
+	}
+	inet, local := false, false
+	switch sa.(type) {
+	case *syscall.SockaddrInet4, *syscall.SockaddrInet6:
+		inet = true
+	case *syscall.SockaddrUnix:
+		local = true
+	}
+	switch {
+	case typ == syscall.SOCK_STREAM && inet && listening != 0:
+		return 3, nil
+	case typ == syscall.SOCK_STREAM && inet:
+		return 2, nil
+	case typ == syscall.SOCK_STREAM && local && listening != 0:
+		return 6, nil
+	case typ == syscall.SOCK_STREAM && local:
+		return 5, nil
+	case typ == syscall.SOCK_DGRAM && inet:
+		return 4, nil
+	case typ == syscall.SOCK_DGRAM && local:
+		return 7, nil
+	}
+	return 0, nil
+}
+
+func netFDKind(it *Interp, a []Value, _ callCtx) []Value {
+	s := it.sockOf(a[0])
+	if s == nil || !s.hasRaw {
+		return i32Val(-int32(syscall.EBADF))
+	}
+	k, err := fdKind(s.raw)
+	if err != nil {
+		return i32Val(-int32(errnoOf(err)))
+	}
+	return i32Val(k)
+}
+
+// netFDAdopt makes a received descriptor a file or a socket of the
+// interpreter's and returns its descriptor there; on failure it stays
+// what it was, for the program to close.
+func netFDAdopt(it *Interp, a []Value, _ callCtx) []Value {
+	d := signedOf(a[0].(Int))
+	kind := int32(a[1].(Int).Bits)
+	s := it.sockOf(a[0])
+	if s == nil || !s.hasRaw {
+		return i32Val(-int32(syscall.EBADF))
+	}
+	k, err := fdKind(s.raw)
+	if err != nil {
+		return i32Val(-int32(errnoOf(err)))
+	}
+	if k != kind || kind == 0 {
+		return i32Val(-int32(syscall.EINVAL))
+	}
+	f := os.NewFile(uintptr(s.raw), "received")
+	// should the network package refuse the descriptor, the file made of
+	// it must not close it a second time behind the program's back: it is
+	// closed now, and the entry is left with nothing to close
+	failed := func(err error) []Value {
+		_ = f.Close()
+		it.sh.mu.Lock()
+		s.hasRaw = false
+		it.sh.mu.Unlock()
+		return i32Val(-int32(errnoOf(err)))
+	}
+	if kind == 1 {
+		it.sh.mu.Lock()
+		delete(it.sh.socks, d)
+		if it.sh.files == nil {
+			it.sh.files = map[int64]*os.File{}
+		}
+		fd := int64(3)
+		for it.sh.files[fd] != nil {
+			fd++
+		}
+		it.sh.files[fd] = f
+		it.sh.mu.Unlock()
+		return i32Val(int32(fd))
+	}
+	// the network package takes a duplicate, which its poller owns
+	var made *sock
+	switch kind {
+	case 2, 5:
+		c, cerr := net.FileConn(f)
+		if cerr != nil {
+			return failed(cerr)
+		}
+		made = &sock{conn: c.(stream)}
+		if t, ok := c.(*net.TCPConn); ok {
+			made.tcp = t
+		}
+	case 3, 6:
+		l, lerr := net.FileListener(f)
+		if lerr != nil {
+			return failed(lerr)
+		}
+		if t, ok := l.(*net.TCPListener); ok {
+			made = &sock{ln: tcpListener{t}}
+		} else {
+			u := l.(*net.UnixListener)
+			u.SetUnlinkOnClose(false)
+			made = &sock{ln: unixListener{u}}
+		}
+	case 4, 7:
+		pc, perr := net.FilePacketConn(f)
+		if perr != nil {
+			return failed(perr)
+		}
+		if u, ok := pc.(*net.UDPConn); ok {
+			made = &sock{udp: u}
+		} else {
+			made = &sock{ud: pc.(*net.UnixConn)}
+		}
+	}
+	_ = f.Close()
+	it.sh.mu.Lock()
+	it.sh.socks[d] = made
+	it.sh.mu.Unlock()
+	return i32Val(int32(d))
+}
+
+func netPeerCred(it *Interp, a []Value, _ callCtx) []Value {
+	s := it.sockOf(a[0])
+	out := seqOf(acc(a[1]))
+	if out.length() < 3 {
+		return i32Val(-int32(syscall.EINVAL))
+	}
+	if s == nil || s.conn == nil {
+		return i32Val(-int32(syscall.EBADF))
+	}
+	var uid, gid, pid uint32
+	err := s.control(func(fd int) error {
+		var cerr error
+		uid, gid, pid, cerr = peerCred(fd)
+		return cerr
+	})
+	if err != nil {
+		return i32Val(-int32(errnoOf(err)))
+	}
+	for i, v := range [...]uint32{uid, gid, pid} {
+		out.at(i).set(mkInt(tyU32, uint64(v)))
+	}
+	return i32Val(0)
 }

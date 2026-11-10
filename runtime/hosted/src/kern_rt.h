@@ -46,6 +46,14 @@
 #include <netdb.h>
 #include <sys/un.h>
 #include <net/if.h>
+#include <sys/uio.h>
+#if defined(__linux__)
+#include <sys/epoll.h>
+#else
+#include <sys/event.h>
+#include <libproc.h>
+#include <sys/proc_info.h>
+#endif
 #include <sys/file.h>
 #include <sys/random.h>
 #if defined(__linux__)
@@ -279,11 +287,27 @@ int64_t kern_net_connect(const uint8_t *addr, int64_t n, uint64_t ns, uint8_t ti
 int32_t kern_net_unix_listen(const char *p, int64_t n, int32_t backlog);
 // Connects a new Unix-domain stream socket to the path: its descriptor, -errno, or -2^32.
 int64_t kern_net_unix_connect(const char *p, int64_t n, uint64_t ns, uint8_t timed);
+// Makes a readiness queue (epoll on Linux, kqueue on macOS): a descriptor or -errno.
+int32_t kern_net_poller_new(void);
+// Watches fd for reading (interest 1), writing (2) or both (3) under the token, replacing what was asked of it before, or stops watching it (0; -ENOENT when it was not watched): 0 or -errno.
+int32_t kern_net_poller_set(int32_t p, int32_t fd, uint64_t token, int32_t interest);
+// Waits until a watched descriptor is ready and writes (token, flags) pairs into out, flags 1 readable, 2 writable, 4 the peer closed, 8 an error is pending: the number of pairs, 0 when the time passed, or -errno.
+int64_t kern_net_poller_wait(int32_t p, uint64_t *out, int64_t cap, uint64_t ns, uint8_t timed);
+// Sends at least one byte over a Unix-domain stream with the descriptor pass attached to the first: the count or -errno.
+int64_t kern_net_send_fd(int32_t fd, const char *p, int64_t n, int32_t pass);
+// Receives at most n bytes and the first descriptor that came with them into got[0] (-1: none; others are closed), close-on-exec: the count, 0 when the peer closed, -errno, or -2^32.
+int64_t kern_net_recv_fd(int32_t fd, char *buf, int64_t n, int32_t *got, int64_t cap, uint64_t ns, uint8_t timed);
+// Says what an open descriptor is: 1 not a socket, 2 a TCP stream, 3 a TCP listener, 4 a UDP socket, 5 a Unix-domain stream, 6 a Unix-domain listener, 7 a Unix-domain datagram socket, 0 another socket; or -errno.
+int32_t kern_net_fd_kind(int32_t fd);
+// Readies a received descriptor for use as the kind named (as kern_net_fd_kind's): the descriptor, or -EINVAL when it is not of that kind, or -errno; on failure it stays open.
+int32_t kern_net_fd_adopt(int32_t fd, int32_t kind);
+// Writes the user, group and process (0: not known) of a Unix-domain stream's peer, as they were when it connected, into out[0..3]: 0 or -errno.
+int32_t kern_net_peer_cred(int32_t fd, uint32_t *out, int64_t cap);
 // Makes a Unix-domain datagram socket, bound to the path when n > 0: a descriptor or -errno.
 int32_t kern_net_unix_dgram(const char *p, int64_t n);
 // Sends one datagram to the socket bound to the path, waiting while its queue is full: the count or -errno.
 int64_t kern_net_unix_send_to(int32_t fd, const char *p, int64_t n, const char *path, int64_t pn);
-// Receives one datagram, cut to n bytes, and its sender's path (cut at 104 bytes, NUL-terminated, empty for a sender with no path) into from: the count, -errno, or -2^32.
+// Receives one datagram, cut to n bytes, and its sender's path into from, as its length in from[0] and then its bytes (cut at 104; length 0 for a sender with no path): the count, -errno, or -2^32.
 int64_t kern_net_unix_recv_from(int32_t fd, char *buf, int64_t n, char *from, int64_t fcap, uint64_t ns, uint8_t timed);
 // Makes two connected Unix-domain stream sockets into fds[0] and fds[1]: 0 or -errno.
 int32_t kern_net_unix_pair(int32_t *fds, int64_t cap);

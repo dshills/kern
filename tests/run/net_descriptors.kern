@@ -1,0 +1,205 @@
+//! phase: 6
+//! expect: output net_descriptors
+// Descriptors and credentials over a Unix-domain stream (specs/runtime
+// RN2, RN3): an open file and one socket of each kind are sent across a
+// pair, each arrives as a Descriptor the system names rightly, and each
+// becomes its type and works; a descriptor asked to be what it is not is
+// InvalidInput; bytes sent alone bring none; and each end of the pair
+// sees the same user and group at the other.
+module t
+import "std/net"
+import "std/io"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func yes(what: view[]u8, ok: bool) {
+    print_str(what)
+    if ok { say(": yes") } else { say(": NO") }
+}
+func kind_name(k: net.DescriptorKind) {
+    match k {
+        File => print_str("File")
+        TcpStream => print_str("TcpStream")
+        TcpListener => print_str("TcpListener")
+        UdpSocket => print_str("UdpSocket")
+        UnixStream => print_str("UnixStream")
+        UnixListener => print_str("UnixListener")
+        UnixDatagram => print_str("UnixDatagram")
+        Other => print_str("Other")
+    }
+}
+func invalid[T](r: own Result[T, io.IoErr]) -> bool {
+    match r {
+        Ok(v) => { return false }
+        Err(e) => {
+            match io.kind(e) {
+                InvalidInput => { return true }
+                _ => { return false }
+            }
+        }
+    }
+}
+// taken receives one byte and the descriptor that must come with it, and
+// prints what the system says it is.
+func taken(from: edit[net.UnixStream], label: view[]u8) -> Result[net.Descriptor, io.IoErr] {
+    var buf: [8]u8 = zero()
+    print_str(label)
+    print_str(": ")
+    match from.recv_with(buf)? {
+        WithDescriptor(n, d) => {
+            print_u64(u64(n))
+            print_str(" byte, ")
+            kind_name(d.kind()?)
+            println()
+            return Ok(d)
+        }
+        Bytes(n) => {
+            say("no descriptor")
+            return Err(io.error_of(io.ErrKind.Other))
+        }
+    }
+}
+
+func files(a: edit[net.UnixStream], b: edit[net.UnixStream], dir: view[]u8) -> Result[(), io.IoErr] {
+    say("-- a file")
+    path := io.join(dir, "data")
+    io.write_file(path.as_view(), "hello, descriptor")?
+    f := io.open_read(path.as_view())?
+    var head: [7]u8 = zero()
+    n := f.read(head)?
+    sent := a.send_file("f", f)?
+    d := taken(b, "received")?
+    g := d.into_file()?
+    var rest: [32]u8 = zero()
+    m := g.read(rest)?
+    print_str("it reads on from where the sender's file stood: ["); print_str(rest[0usize : m]); say("]")
+    // the two are one open file: the sender's file has moved too
+    k := f.read(rest)?
+    yes("and the sender's file is at the end with it", k == 0usize)
+
+    say("-- what it is not")
+    s2 := a.send_file("f", f)?
+    d2 := taken(b, "received")?
+    yes("a file as a TCP stream is InvalidInput", invalid(d2.into_tcp_stream()))
+    return Ok(())
+}
+
+func sockets(a: edit[net.UnixStream], b: edit[net.UnixStream], dir: view[]u8) -> Result[(), io.IoErr] {
+    var buf: [32]u8 = zero()
+
+    say("-- a TCP listener and a TCP stream")
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    at := l.local_addr()?
+    s0 := a.send_with("l", l)?
+    l2 := taken(b, "received")?.into_tcp_listener()?
+    yes("the listener received listens on the same port", l2.local_addr()?.port == at.port)
+    c := net.TcpStream.connect(at)?
+    served := l2.accept()?
+    s1 := a.send_with("s", served)?
+    drop(served)
+    served2 := taken(b, "received")?.into_tcp_stream()?
+    c.write_all("over tcp")?
+    n := served2.read(buf)?
+    print_str("the stream received reads what its peer wrote: ["); print_str(buf[0usize : n]); say("]")
+
+    say("-- a UDP socket")
+    u := net.UdpSocket.bind(net.loopback_v4(0u16))?
+    s2 := a.send_with("u", u)?
+    u2 := taken(b, "received")?.into_udp_socket()?
+    s3 := u.send_to("to itself", u.local_addr()?)?
+    dg := u2.recv_from(buf)?
+    print_str("the socket received takes the datagram: ["); print_str(buf[0usize : dg.len]); say("]")
+
+    say("-- Unix-domain sockets")
+    match net.UnixStream.pair()? {
+        Ends(x, y) => {
+            s4 := a.send_with("x", x)?
+            drop(x)
+            x2 := taken(b, "received")?.into_unix_stream()?
+            y.write_all("over a pair")?
+            k := x2.read(buf)?
+            print_str("the stream received reads what the other end wrote: ["); print_str(buf[0usize : k]); say("]")
+        }
+    }
+    lp := io.join(dir, "listener")
+    ul := net.UnixListener.bind(lp.as_view())?
+    s5 := a.send_with("L", ul)?
+    ul2 := taken(b, "received")?.into_unix_listener()?
+    uc := net.UnixStream.connect(lp.as_view())?
+    acc := ul2.accept()?
+    uc.write_all("accepted")?
+    j := acc.read(buf)?
+    print_str("the listener received accepts: ["); print_str(buf[0usize : j]); say("]")
+    dp := io.join(dir, "datagrams")
+    ud := net.UnixDatagram.bind(dp.as_view())?
+    s6 := a.send_with("d", ud)?
+    ud2 := taken(b, "received")?.into_unix_datagram()?
+    s7 := ud.send_to("to itself", dp.as_view())?
+    um := ud2.recv_from(buf)?
+    print_str("the datagram socket received receives: ["); print_str(buf[0usize : um.len]); say("]")
+    s8 := a.send_with("d", ud)?
+    wrong := taken(b, "received")?
+    yes("a datagram socket as a stream is InvalidInput", invalid(wrong.into_unix_stream()))
+    return Ok(())
+}
+
+func rules(a: edit[net.UnixStream], b: edit[net.UnixStream]) -> Result[(), io.IoErr] {
+    say("-- the rules")
+    var buf: [8]u8 = zero()
+    a.write_all("plain")?
+    print_str("bytes sent alone: ")
+    match b.recv_with(buf)? {
+        WithDescriptor(n, d) => say("a descriptor")
+        Bytes(n) => { print_u64(u64(n)); say(" bytes, no descriptor") }
+    }
+    u := net.UdpSocket.bind(net.loopback_v4(0u16))?
+    yes("a descriptor with no bytes is InvalidInput", invalid(a.send_with("", u)))
+    yes("so is a receive into no bytes", invalid(b.recv_with(buf[0usize : 0usize])))
+    match b.recv_with_timeout(buf, time.millis(20u64))? {
+        Some(x) => say("something arrived from nowhere")
+        None => say("nothing in 20 ms: None")
+    }
+    // a descriptor read past by an ordinary read is closed, not kept
+    s := a.send_with("z", u)?
+    n := b.read(buf)?
+    yes("an ordinary read takes the byte", n == 1usize)
+    // a descriptor that is never made anything is closed with its Descriptor
+    s2 := a.send_with("q", u)?
+    unused := b.recv_with(buf)?
+    return Ok(())
+}
+
+func credentials(a: view[net.UnixStream], b: view[net.UnixStream]) -> Result[(), io.IoErr] {
+    say("-- credentials")
+    ca := a.peer_credentials()?
+    cb := b.peer_credentials()?
+    yes("each end sees the same user and group at the other", ca.user == cb.user && ca.group == cb.group)
+    yes("and the same process, this one", ca.process == cb.process && ca.process != 0u32)
+    return Ok(())
+}
+
+func run(dir: view[]u8) -> Result[(), io.IoErr] {
+    match net.UnixStream.pair()? {
+        Ends(a, b) => {
+            files(a, b, dir)?
+            sockets(a, b, dir)?
+            rules(a, b)?
+            credentials(a, b)?
+        }
+    }
+    io.remove_dir_all(dir)?
+    return Ok(())
+}
+
+func main() -> i32 {
+    match io.make_temp_dir("kern-fd-") {
+        Ok(dir) => {
+            match run(dir.as_view()) {
+                Ok(u) => say("cleaned up")
+                Err(e) => say("failed")
+            }
+        }
+        Err(e) => say("no temporary directory")
+    }
+    return 0i32
+}

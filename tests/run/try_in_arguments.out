@@ -1,0 +1,37 @@
+destroyed 1
+receiver: ok 2
+destroyed 1
+receiver: err 7
+destroyed 11
+destroyed 10
+owned: ok 22
+destroyed 11
+destroyed 10
+owned: err 7
+destroyed 20
+temporaries: ok 21
+destroyed 20
+temporaries: err 7
+destroyed 31
+destroyed 30
+nested: ok 62
+destroyed 31
+destroyed 30
+nested: err 7
+destroyed 40
+in_struct: ok 1
+destroyed 40
+in_struct: err 7
+destroyed 50
+in_variant: ok 1
+destroyed 50
+in_variant: err 7
+destroyed 60
+moved: ok 61
+destroyed 60
+moved: err 7
+destroyed 72
+destroyed 70
+in_array: ok 72
+destroyed 70
+in_array: err 7

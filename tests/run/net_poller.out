@@ -1,0 +1,34 @@
+-- before anyone connects
+nothing in 30 ms, and the wait took its time: yes
+nothing at a look: yes
+watching for neither reading nor writing is InvalidInput: yes
+-- three clients connect and write
+each wait reported the listener, readable, under its token: yes
+-- the server reads what is ready and answers
+unread bytes are reported by the next wait too: yes
+every connection gave its eight bytes: yes
+no other socket was reported: yes
+once read, nothing is ready: yes
+-- the clients read their answers
+client 0 has its own bytes back: yes
+client 1 has its own bytes back: yes
+client 2 has its own bytes back: yes
+-- watching again replaces what was asked
+a stream with room is writable, under the new token: yes
+asked for reading only, it is not reported: yes
+readable and writable are one report: yes
+-- a peer closes
+its connection is reported readable and closed: yes
+and a read returns the end of the stream: yes
+unwatched, it is not reported again: yes
+-- an unwatched listener
+a connection that waits is not reported: yes
+unwatching what is not watched is NotFound: yes
+watched again, it is, under its new token: yes
+-- a pair, to wake a waiting thread
+a byte written to one end reports the other: yes
+a closed socket is not reported: yes
+-- a UDP socket
+a datagram that arrived reports it: yes
+and once received, no more: yes
+done

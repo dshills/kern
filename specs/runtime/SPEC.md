@@ -1,6 +1,6 @@
 # Spec: the kern runtime, complete
 
-**Version:** 0.8. **Status:** implemented (`specs/runtime/STATUS.md`). **Date:** 2026-11-09.
+**Version:** 0.9. **Status:** implemented (`specs/runtime/STATUS.md`). **Date:** 2026-11-09.
 
 ## 0. Goal
 
@@ -79,11 +79,6 @@ what it does and small for what a release needs:
 - Changing the performance of code that does not use the new facilities:
   the benchmark workloads' release instruction counts stay within 1% (R-P1).
 - Pushing to origin or publishing a release.
-- (Stated in v0.8; never in a requirement.) What exists on one of the two
-  hosts only, such as a Unix-domain name in Linux's abstract namespace:
-  the library is the same on both. Passing descriptors or credentials
-  over a Unix-domain socket: it needs a way to make a `File` or a socket
-  from a descriptor of unknown kind, which the library does not offer.
 
 ## 3. Requirements
 
@@ -721,6 +716,73 @@ by another process to an interpreted program is not seen (the
 interpreter's host runtime keeps it); the reference says so. A program
 run inside another process's interpreter (`kern test`, the test suite)
 leaves that process's signals alone.
+
+### N. Readiness, descriptors, credentials, abstract names (added in v0.9)
+
+Version 0.8 of this spec had gained a non-goal that no requirement had
+ever stated and the owner had not approved: what one host alone has, and
+the passing of descriptors and credentials. It is withdrawn, and what it
+excluded is required here, with the one thing the non-goal for an
+asynchronous scheduler leaves a program without: a way for one thread to
+wait for many sockets.
+
+**RN1. Readiness.** `net.Poller` with `new() -> Result[Poller, IoErr]`,
+`watch[S: Source](s: view[S], token: u64, readable: bool, writable:
+bool)`, `unwatch[S: Source](s: view[S])`, `wait(into: edit[Vec[Ready]])
+-> Result[usize, IoErr]` and `wait_timeout(into, d)`; `Ready { token;
+readable; writable; closed; failed }`; and the interface `Source`, which
+every socket type of `std/net` implements. `watch` on a socket already
+watched replaces its token and what is asked; neither `readable` nor
+`writable` is `InvalidInput`; `unwatch` of a socket not watched is
+`NotFound`. A wait returns the sockets that can be read or written
+without waiting, at most 64 a call, and 0 when its time passed; a
+duration of zero looks once. Readiness is level-triggered on both hosts:
+a socket that is ready is reported by every wait until the program has
+read or written it. A socket ready both ways is one report. A peer's
+close is reported as `readable` and `closed`, and a read then returns
+the end of the stream. A closed socket is no longer watched. The queue
+is the system's (epoll on Linux, kqueue on macOS), so a wait costs the
+same whether ten sockets are watched or ten thousand. It is not a
+scheduler: no code of the program runs but on the thread that calls
+`wait`. A test serves a listener and three connections from one thread,
+and another runs the Poller on a thread that four client threads talk to
+and the main thread stops through a `UnixStream.pair()`.
+
+**RN2. Descriptors over a Unix-domain stream.** `UnixStream.send_with[S:
+Source](data, pass: view[S])` and `send_file(data, pass: view[io.File])`
+send at least one byte with an open socket or file attached;
+`recv_with(buf) -> Result[Received, IoErr]` and `recv_with_timeout`
+receive bytes and the descriptor that came with them, with `union
+Received { Bytes(usize); WithDescriptor(usize, Descriptor) }`. A
+`Descriptor` is closed when destroyed; `kind()` says what the system
+says it is (`File`, `TcpStream`, `TcpListener`, `UdpSocket`,
+`UnixStream`, `UnixListener`, `UnixDatagram`, `Other`), and
+`into_file()`, `into_tcp_stream()` and the five others make it that
+type, or fail with `InvalidInput` when it is not that (and close it). A
+received descriptor is close-on-exec; a socket made of one is
+non-blocking and raises no `SIGPIPE`, as every socket of `std/net`. A
+file received shares its offset with the sender's. Empty data, or an
+empty buffer, is `InvalidInput`. Descriptors after the first in one
+message, and a descriptor that an ordinary read passes over, are closed,
+never leaked. A test passes a file and one socket of each kind across a
+pair and uses each, and another exchanges files with a process that is
+not a kern program.
+
+**RN3. Peer credentials.** `UnixStream.peer_credentials() ->
+Result[Credentials, IoErr]` with `Credentials { user: u32; group: u32;
+process: u32 }`: the peer's user, group and process as the system
+recorded them when the connection (or the pair) was made; `process` is 0
+where the system does not say. A test compares them with the real ids of
+the process at the other end.
+
+**RN4. Abstract names.** Wherever `std/net` takes a Unix-domain path, a
+path whose first byte is zero is a name in Linux's abstract namespace,
+made of the bytes after it: at least one, none of them zero, the whole
+under 104 bytes (`InvalidInput` and, for the length, as RL1). On Linux
+`bind`, `connect`, `send_to` and a datagram's reported sender work with
+such names, a name is in use while its socket is open and free when it
+is closed, and nothing is left in a file system. On macOS, which has no
+such namespace, every such call is `Unsupported` before any system call.
 
 ### P. Performance
 

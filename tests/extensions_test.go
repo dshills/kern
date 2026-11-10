@@ -2,10 +2,12 @@ package tests
 
 import (
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -254,5 +256,236 @@ func TestScopedAddressOnALink(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A program that connects to a Unix-domain listener, sends it an open
+// file, and reads the file it is sent back.
+const descriptorExchange = `module t
+import "std/net"
+import "std/io"
+func say(s: view[]u8) { print_str(s); println() }
+func exchange(sock: view[]u8, file: view[]u8) -> Result[(), io.IoErr] {
+    s := net.UnixStream.connect(sock)?
+    c := s.peer_credentials()?
+    print_str("peer "); print_u64(u64(c.user)); print_str(" "); print_u64(u64(c.group)); print_str(" "); print_u64(u64(c.process)); println()
+    f := io.open_read(file)?
+    n := s.send_file("k", f)?
+    var buf: [64]u8 = zero()
+    match s.recv_with(buf)? {
+        WithDescriptor(k, d) => {
+            g := d.into_file()?
+            m := g.read(buf)?
+            print_str("received a file holding ["); print_str(buf[0usize : m]); say("]")
+        }
+        Bytes(k) => say("no descriptor came")
+    }
+    return Ok(())
+}
+func main() -> i32 {
+    a := io.args()
+    if a.len() < 3usize { return 2i32 }
+    sock := a.get(1usize).clone()
+    file := a.get(2usize).clone()
+    match exchange(sock.as_view(), file.as_view()) {
+        Ok(u) => { }
+        Err(e) => say("failed")
+    }
+    return 0i32
+}
+`
+
+// Descriptors cross between processes (specs/runtime RN2), and a peer's
+// credentials are the other process's (RN3): the test is the peer. It
+// receives the file the program sends and reads it, sends one back for
+// the program to read, and the program reports the test's user, group
+// and process.
+func TestDescriptorsBetweenProcesses(t *testing.T) {
+	for _, engine := range []string{"native", "interpreter"} {
+		t.Run(engine, func(t *testing.T) {
+			dir, err := os.MkdirTemp("", "kfd")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = os.RemoveAll(dir) }()
+			sockPath := filepath.Join(dir, "s")
+			fromKern, fromTest := filepath.Join(dir, "k"), filepath.Join(dir, "t")
+			if err := os.WriteFile(fromKern, []byte("from the program"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(fromTest, []byte("from the test"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			l, err := net.ListenUnix("unix", &net.UnixAddr{Name: sockPath, Net: "unix"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = l.Close() }()
+			got := make(chan string, 1)
+			go func() {
+				c, aerr := l.AcceptUnix()
+				if aerr != nil {
+					got <- "accept: " + aerr.Error()
+					return
+				}
+				defer func() { _ = c.Close() }()
+				_ = c.SetDeadline(time.Now().Add(20 * time.Second))
+				buf, oob := make([]byte, 8), make([]byte, syscall.CmsgSpace(4))
+				_, oobn, _, _, rerr := c.ReadMsgUnix(buf, oob)
+				if rerr != nil {
+					got <- "read: " + rerr.Error()
+					return
+				}
+				msgs, perr := syscall.ParseSocketControlMessage(oob[:oobn])
+				if perr != nil || len(msgs) != 1 {
+					got <- "no control message"
+					return
+				}
+				fds, perr := syscall.ParseUnixRights(&msgs[0])
+				if perr != nil || len(fds) != 1 {
+					got <- "no descriptor"
+					return
+				}
+				f := os.NewFile(uintptr(fds[0]), "received")
+				content, _ := io.ReadAll(f)
+				_ = f.Close()
+				back, oerr := os.Open(fromTest)
+				if oerr != nil {
+					got <- "open: " + oerr.Error()
+					return
+				}
+				defer func() { _ = back.Close() }()
+				if _, _, werr := c.WriteMsgUnix([]byte("t"), syscall.UnixRights(int(back.Fd())), nil); werr != nil {
+					got <- "write: " + werr.Error()
+					return
+				}
+				got <- string(content)
+			}()
+			stdout, stderr, err := ranEngine(t, descriptorExchange, engine == "interpreter", sockPath, fromKern)
+			if err != nil || stderr != "" {
+				t.Fatalf("the program ended with %v and wrote %q to standard error", err, stderr)
+			}
+			select {
+			case content := <-got:
+				if content != "from the program" {
+					t.Errorf("the test received a file holding %q, want the program's file", content)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatal("the test's end never finished")
+			}
+			want := "peer " + strconv.Itoa(os.Getuid()) + " " + strconv.Itoa(os.Getgid()) + " " + strconv.Itoa(os.Getpid()) + "\nreceived a file holding [from the test]\n"
+			if stdout != want {
+				t.Errorf("the program wrote %q, want %q", stdout, want)
+			}
+		})
+	}
+}
+
+// A program that uses names in the abstract namespace: a listener and a
+// connection, and two datagram sockets.
+const abstractNames = `module t
+import "std/net"
+import "std/io"
+func say(s: view[]u8) { print_str(s); println() }
+func named(tag: u8, base: view[]u8) -> Vec[u8] {
+    name := Vec[u8].new()
+    name.push(0u8)
+    name.push(tag)
+    name.extend(base)
+    return name
+}
+func run(base: view[]u8) -> Result[(), io.IoErr] {
+    ln := named(108u8, base)
+    l := net.UnixListener.bind(ln.as_view())?
+    c := net.UnixStream.connect(ln.as_view())?
+    s := l.accept()?
+    c.write_all("abstract")?
+    var buf: [32]u8 = zero()
+    n := s.read(buf)?
+    print_str("a connection by an abstract name carries ["); print_str(buf[0usize : n]); say("]")
+    match net.UnixListener.bind(ln.as_view()) {
+        Ok(x) => say("the name was bound twice")
+        Err(e) => {
+            match io.kind(e) {
+                AddrInUse => say("the name is in use while its socket is open")
+                _ => say("another error")
+            }
+        }
+    }
+    drop(s)
+    drop(l)
+    again := net.UnixListener.bind(ln.as_view())?
+    say("and free once it is closed")
+    an := named(97u8, base)
+    bn := named(98u8, base)
+    a := net.UnixDatagram.bind(an.as_view())?
+    b := net.UnixDatagram.bind(bn.as_view())?
+    k := a.send_to("datagram", bn.as_view())?
+    m := b.recv_from(buf)?
+    var same: bool = m.from.len() == an.len()
+    if same {
+        for i in 0usize..an.len() {
+            if m.from.get(i) != an.get(i) { same = false }
+        }
+    }
+    print_str("a datagram's sender is its abstract name: "); print_bool(same); println()
+    return Ok(())
+}
+func refused(r: own Result[net.UnixListener, io.IoErr]) {
+    match r {
+        Ok(l) => say("accepted")
+        Err(e) => {
+            match io.kind(e) {
+                InvalidInput => say("InvalidInput")
+                Unsupported => say("Unsupported")
+                _ => say("another error")
+            }
+        }
+    }
+}
+func main() -> i32 {
+    a := io.args()
+    if a.len() < 2usize { return 2i32 }
+    with base := a.at(1usize) {
+        match run(base.as_view()) {
+            Ok(u) => { }
+            Err(e) => {
+                match io.kind(e) {
+                    Unsupported => say("abstract names are not supported here")
+                    _ => say("failed")
+                }
+            }
+        }
+    }
+    print_str("a name of no bytes: "); refused(net.UnixListener.bind("\x00"))
+    print_str("a name holding a zero byte: "); refused(net.UnixListener.bind("\x00a\x00b"))
+    return 0i32
+}
+`
+
+// Names in Linux's abstract namespace (specs/runtime RN4): on Linux they
+// work in both engines, for streams and datagrams, and a name is free
+// again when its socket is closed; on macOS every such call is
+// Unsupported in both engines. A malformed name is InvalidInput on both.
+func TestAbstractSocketNames(t *testing.T) {
+	want := "abstract names are not supported here\n"
+	if runtime.GOOS == "linux" {
+		want = "a connection by an abstract name carries [abstract]\n" +
+			"the name is in use while its socket is open\n" +
+			"and free once it is closed\n" +
+			"a datagram's sender is its abstract name: true\n"
+	}
+	want += "a name of no bytes: InvalidInput\na name holding a zero byte: InvalidInput\n"
+	for _, engine := range []string{"native", "interpreter"} {
+		t.Run(engine, func(t *testing.T) {
+			base := "kern-test-" + strconv.Itoa(os.Getpid()) + "-" + engine
+			stdout, stderr, err := ranEngine(t, abstractNames, engine == "interpreter", base)
+			if err != nil || stderr != "" {
+				t.Fatalf("the program ended with %v and wrote %q to standard error", err, stderr)
+			}
+			if stdout != want {
+				t.Errorf("the program wrote %q, want %q", stdout, want)
+			}
+		})
 	}
 }
