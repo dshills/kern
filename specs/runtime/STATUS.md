@@ -40,8 +40,8 @@ reason. Updated at the end of every phase.
 | RH2 TCP | 8 | 407c1e7 | `TcpListener.bind_with_backlog` added |
 | RH3 UDP | 8 | 407c1e7 | `recv_from` returns `Datagram { len, from }`: kern has no tuple type |
 | RH4 rules | 8 | 407c1e7 | A signal interrupting a blocked call is retried in the code but not provoked by a test until phase 9. A connect to a full queue is turned away on macOS and left waiting on Linux; the test accepts both |
-| RI1 std/signal | 9 | PH9 | In the interpreter a signal at its default does what the Go runtime does (User1, User2 and Pipe do nothing), a Pipe sent from outside is not reported, and `reset` cannot undo an ignore inherited at start |
-| RI2 std/rand | 9 | PH9 | `Rng.from_state` and `Rng.state` added |
+| RI1 std/signal | 9 | 6296fee | In the interpreter a signal at its default does what the Go runtime does (User1, User2 and Pipe do nothing), a Pipe sent from outside is not reported, and `reset` cannot undo an ignore inherited at start |
+| RI2 std/rand | 9 | 6296fee | `Rng.from_state` and `Rng.state` added |
 | RJ1 board interface | 10 | | |
 | RJ2 allocator checks | 10 | | |
 | RK1 runtime reference | 11 | | |
@@ -62,4 +62,4 @@ reason. Updated at the end of every phase.
 | The interpreter's `print_str` crashed on a whole array argument | b764316 |
 | String literals had no `\r` and no byte escape; a variant name shared by two unions could not be written bare; `match replace(...)` did not own its payload (language changes) | b764316 |
 | A match on the value `?` unwraps from a call did not own its payload (language change) | 407c1e7 |
-| No way to exchange two move-only elements of a sequence: the prelude gained `swap_at` (language change) | PH9 |
+| No way to exchange two move-only elements of a sequence: the prelude gained `swap_at` (language change) | 6296fee |
