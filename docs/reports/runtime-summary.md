@@ -203,7 +203,8 @@ Publishing is the owner's. `main` was pushed at the owner's word on
 2026-11-10; the first runs on GitHub's hosts found two defects on macOS
 26 that the work's own macOS 27 host had not shown
 (`runtime-poller-descriptors.md`, "After the first push"), and the
-suite passes on all four of them at 665a484. No release was made.
+suite passes on all four of them at 665a484. The work is the content of
+v0.2.0 (`CHANGELOG.md`).
 
 ## Independent checks
 

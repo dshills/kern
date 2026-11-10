@@ -79,7 +79,8 @@ what it does and small for what a release needs:
 - Changing the performance of code that does not use the new facilities:
   the benchmark workloads' release instruction counts stay within 1% (R-P1).
 - Pushing to origin or publishing a release as part of the work (the
-  owner had `main` pushed on 2026-11-10; no release was made).
+  owner had `main` pushed on 2026-11-10; the work is the content of
+  v0.2.0, prepared afterwards).
 
 ## 3. Requirements
 

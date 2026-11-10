@@ -84,7 +84,7 @@ it (`docs/ownership.md` rule 5.6.4).
 
 ## Installing
 
-The current release is **v0.1.0** (`CHANGELOG.md`). The `kern` binary is
+The current release is **v0.2.0** (`CHANGELOG.md`). The `kern` binary is
 self-contained: the standard library and both runtimes are built into it.
 Native builds need `clang` (the hosted runtime is compiled and linked with
 it; the compiled runtime is kept under the user cache directory,
@@ -105,7 +105,7 @@ shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
 ```bash
-tar -xzf kern-v0.1.0-darwin-arm64.tar.gz && sudo install kern-v0.1.0-darwin-arm64/kern /usr/local/bin/
+tar -xzf kern-v0.2.0-darwin-arm64.tar.gz && sudo install kern-v0.2.0-darwin-arm64/kern /usr/local/bin/
 ```
 
 **With Go** (1.25 or newer):
@@ -268,8 +268,10 @@ latency is within the interval of the better of C and Rust on every workload.
 
 ## Status
 
-v0.1.0, the first release, packages the state described here; its
-changelog entry (`CHANGELOG.md`) summarizes it by area, with its known
+v0.2.0 packages the state described here: v0.1.0, the first release, and
+the runtime work that followed it (`specs/runtime`,
+`docs/reports/runtime-summary.md`). Each release's changelog entry
+(`CHANGELOG.md`) summarizes it by area, and v0.1.0's lists the known
 limitations. The implementation went through five planned phases (`specs/initial/PLAN.md`,
 reports in `docs/reports/`): workload design, the core language and
 interpreter, the native backend and ownership checker, concurrency and

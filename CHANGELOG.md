@@ -8,8 +8,21 @@ section of this file into a GitHub release is `docs/releasing.md`.
 
 ## [Unreleased]
 
-The runtime work (`specs/runtime`, `docs/runtime.md`,
-`docs/reports/runtime-summary.md`).
+## [v0.2.0] - 2026-11-10
+
+The runtime: what runs under a kern program, on a host and on a board, and
+the standard library that reaches it (files, sockets, signals, random
+numbers, synchronization, memory). The specification is `specs/runtime`,
+the reference `docs/runtime.md`, the record
+`docs/reports/runtime-summary.md`.
+
+Four changes can alter a program written for v0.1.0, each listed in its
+place below: `io.FileKind` gained `Symlink`, so an exhaustive `match` on it
+needs the arm; a thread that cannot be spawned is `Err(SpawnErr)` where it
+was a trap; a new file's mode is 0666 less the umask; and assignment
+destroys the previous value, so a destructor that did not run now runs.
+`spec/rules.lock` is unchanged, and the machine API answers the schema
+versions it answered in v0.1.0 (0.2 to 0.5).
 
 ### Language
 
@@ -113,6 +126,9 @@ The runtime work (`specs/runtime`, `docs/runtime.md`,
   that signal, as it ends a native one (`User1`, `User2` and `Quit` did
   not); a mapped file is the system's mapping, shared with the file's
   other users; a fault in mapped memory is a trap of kind `unreachable`.
+- `kern run`: `io.list_dir` lists a directory whose entries the system
+  will not describe one by one (`/dev/fd` on macOS 26); the listing
+  failed.
 - `docs/runtime.md`, the runtime's reference, with every entry of both
   runtimes generated from their headers; `docs/freestanding-porting.md`.
 - The fixture corpus runs under AddressSanitizer and
@@ -272,5 +288,6 @@ intend to. Diagnostic codes stay frozen to their rule numbers in
 machine-API versions a release answers, and any change to either is listed
 here.
 
-[Unreleased]: https://github.com/dshills/kern/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/dshills/kern/compare/v0.2.0...HEAD
+[v0.2.0]: https://github.com/dshills/kern/releases/tag/v0.2.0
 [v0.1.0]: https://github.com/dshills/kern/releases/tag/v0.1.0
