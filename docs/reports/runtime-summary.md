@@ -26,7 +26,7 @@ tested in both engines and on both hosts, and documented.
 | 8 | Networking: `std/net` | `runtime-net.md` | `407c1e7` |
 | 9 | Signals and randomness: `std/signal`, `std/rand` | `runtime-signal-rand.md` | `6296fee` |
 | 10 | Freestanding: the board interface, the heap's size, a double-free check | `runtime-board.md` | `a176db2` |
-| 11 | Documentation, the performance check, the final gates | this report | |
+| 11 | Documentation, the performance check, the final gates | this report | `b4f2b5b` |
 
 Every one of the forty-one requirements has a row in the ledger with
 the commit that met it and its deviations from the spec's text.
