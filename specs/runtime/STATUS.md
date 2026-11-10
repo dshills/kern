@@ -9,7 +9,7 @@ reason. Updated at the end of every phase.
 | RA1 source layout | 1 | c45f745 |  |
 | RA2 warning-clean | 1 | c45f745 |  |
 | RA3 ABI conformance | 1 | c45f745 | On Linux the second architecture is checked only when its system headers are installed (CI runs both natively) |
-| RA4 ABI version | 1 | c45f745 |  |
+| RA4 ABI version | 1 | c45f745 | The number is 2 for the whole of this unreleased work: later phases changed entries that earlier phases had added (the address record, a datagram's sender) without a new number |
 | RA5 sanitized runs | 1, final | c45f745 (mode, test, fixes; complete at gate 8) | The list of known reports is empty: RC1's leak has no fixture yet |
 | RA6 static analysis | 1 | c45f745 |  |
 | RB1 configuration | 2 | c62a4d7 | The privileged case is tested through a test hook (`KERN_TEST_PRIVILEGED`) |
@@ -46,7 +46,7 @@ reason. Updated at the end of every phase.
 | RJ2 allocator checks | 10 | a176db2 |  |
 | RK1 runtime reference | 11 | b4f2b5b |  |
 | RK2 other documents | 11 | b4f2b5b | The unsafe audit and the security review are extended by hand; neither is generated |
-| R-P1 performance | 11 | b4f2b5b | Ten workloads at or below v0.1.0. `hash_table` (+2.1%) and `lock_protected_map` (about +8% over fifteen runs) free tables that v0.1.0 leaked (rule 5.1.9, phase 1); `thread_pool` is within its run-to-run spread. `kern_mutex_lock`'s trap tail is shaped differently; the uncontended path and `unlock` are the same instructions |
+| R-P1 performance | 11, final | b4f2b5b; measured again at 6f4dc1f (twelve of thirteen at or below v0.1.0) | At phase 11, ten workloads at or below v0.1.0. `hash_table` (+2.1%) and `lock_protected_map` (about +8% over fifteen runs) free tables that v0.1.0 leaked (rule 5.1.9, phase 1); `thread_pool` is within its run-to-run spread. `kern_mutex_lock`'s trap tail is shaped differently; the uncontended path and `unlock` are the same instructions |
 | RL1 Unix-domain sockets | 12 | 04bdaed | `UnixPair` is a one-variant union (`Ends(a, b)`), which a `match` takes apart: kern cannot move two fields out of a struct. `connect_timeout` added |
 | RL2 directories | 12 | 04bdaed | `io.join` added |
 | RL3 file locks | 12 | 04bdaed | `unlock` returns `Result[(), IoErr]` |
@@ -59,7 +59,7 @@ reason. Updated at the end of every phase.
 | RM4 socket options | 13 | 813cc0f | A hop limit outside 1 to 255 is refused before the system is asked |
 | RM5 the interpreter maps files | 13 | 813cc0f | The interpreter's record of a fault has the span 0-0, where the runtime's names the function when its walk finds one |
 | RM6 the interpreter's signal defaults | 13 | 813cc0f | The interpreter gives a signal the system's default with a raw `sigaction`, and exits with 128 + the signal's number should that fail |
-| RN1 readiness | 14 | 6f4dc1f | `Ready`'s fields are `closed` and `failed`. A wait reports at most 64 sockets |
+| RN1 readiness | 14 | 6f4dc1f | `Ready`'s fields are `closed` and `failed`. A wait reports at most 64 sockets, the ready ones in turn (`net_poller_many.kern`, added with the final gates) |
 | RN2 descriptors over a Unix-domain stream | 14 | 6f4dc1f | `Received` is a union, so that a `match` takes the descriptor out. `io.file_of(fd)` added for the library's use. macOS does not answer `SO_ACCEPTCONN`: a listener is told from a stream there by the process's own descriptor table (`proc_pidfdinfo`) |
 | RN3 peer credentials | 14 | 6f4dc1f |  |
 | RN4 abstract names | 14 | 6f4dc1f | In the interpreter on Linux a file's relative path that begins with `@` is bound as `./@...`: its host's network package reads a leading `@` as an abstract name |

@@ -28,6 +28,9 @@ watched again, it is, under its new token: yes
 -- a pair, to wake a waiting thread
 a byte written to one end reports the other: yes
 a closed socket is not reported: yes
+-- a connection that is reset
+its other end is reported readable and failed: yes
+and a read returns the error: ConnectionReset
 -- a UDP socket
 a datagram that arrived reports it: yes
 and once received, no more: yes

@@ -225,6 +225,54 @@ func serve() -> Result[(), io.IoErr] {
     s2 := p.wait_timeout(events, time.millis(0u64))?
     yes("a closed socket is not reported", s2 == 0usize)
 
+    say("-- a connection that is reset")
+    p.watch(l, 10u64, true, false)?
+    doomed := net.TcpStream.connect(at)?
+    var reset_end: Option[net.TcpStream] = None
+    w0 := p.wait(events)?
+    var accepting: bool = true
+    while accepting {
+        // one that is being made may take a moment to be there to accept
+        match l.accept_timeout(time.millis(200u64))? {
+            Some(c) => {
+                // the connection made earlier and never accepted comes first
+                match replace(reset_end, Some(c)) {
+                    Some(older) => { drop(older) }
+                    None => { }
+                }
+            }
+            None => { accepting = false }
+        }
+    }
+    p.unwatch(l)?
+    match replace(reset_end, None) {
+        Some(victim) => {
+            p.watch(victim, 500u64, true, false)?
+            doomed.set_linger(Some(0u32))?
+            drop(doomed)
+            f0 := p.wait(events)?
+            var flagged: bool = false
+            if events.len() == 1usize {
+                e := events.get(0usize)
+                flagged = e.token == 500u64 && e.failed && e.readable
+            }
+            yes("its other end is reported readable and failed", flagged)
+            match victim.read(buf) {
+                Ok(k) => say("and a read returned without the error")
+                Err(e) => {
+                    match io.kind(e) {
+                        ConnectionReset => say("and a read returns the error: ConnectionReset")
+                        _ => say("and a read returns another error")
+                    }
+                }
+            }
+        }
+        None => {
+            drop(doomed)
+            say("no connection was accepted")
+        }
+    }
+
     say("-- a UDP socket")
     u := net.UdpSocket.bind(net.loopback_v4(0u16))?
     sender := net.UdpSocket.bind(net.loopback_v4(0u16))?

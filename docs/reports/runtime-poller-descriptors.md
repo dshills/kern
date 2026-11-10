@@ -101,6 +101,8 @@ listener a listener.
 | RN1: watching again replaces the token and what is asked; readable and writable are one report | same |
 | RN1: a peer's close is `readable` and `closed`, and a read returns the end; `unwatch`, and `NotFound` for what is not watched; a closed socket is not reported | same |
 | RN1: a Unix-domain pair and a UDP socket are watched as TCP sockets are | same |
+| RN1: with a hundred sockets ready and none read, no wait reports more than 64 and every one comes round again within sixteen waits | `tests/run/net_poller_many.kern` (added with the final gates) |
+| RN1: a reset connection is `readable` and `failed`, and a read returns `ConnectionReset` | `tests/run/net_poller.kern` (added with the final gates) |
 | RN1: a Poller on its own thread serves four client threads (400 messages, 6,400 bytes) and is stopped through a pair | `tests/concurrency/net_poller_threads.kern` (also under the thread sanitizer) |
 | RN2: a file crosses a pair, reads on from the sender's offset, and moves the sender's offset | `tests/run/net_descriptors.kern` |
 | RN2: a TCP listener, a TCP stream, a UDP socket, a Unix-domain stream, listener and datagram socket each cross, are named rightly by `kind`, become their type and work | same |

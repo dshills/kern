@@ -1,0 +1,5 @@
+each of the hundred sockets was reported, none of them read: yes
+no wait reported more than 64: yes
+all hundred, still unread, come round again within sixteen waits: yes
+once all hundred datagrams are received, nothing is ready: yes
+done

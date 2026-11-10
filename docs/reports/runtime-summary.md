@@ -135,6 +135,37 @@ workload carrying 2.4 million instructions more.
   instructions where v0.1.0's retired 16.9 million, and its file is
   54 KB where it was 76 KB.
 
+### Measured again at the head, after phase 14
+
+The table above is phase 11's. Phases 12 to 14 added runtime entries and
+changed how `?` is lowered, so the same measurement was made again with
+the compiler at `6f4dc1f`: the same sources, five interleaved runs each,
+the median of each.
+
+| Workload | v0.1.0 | Head | Ratio | Spread of the runs (v0.1.0 / head) |
+|---|---|---|---|---|
+| `arena_ast` | 112,506,732 | 111,129,928 | 0.9878 | 0.7% / 0.4% |
+| `btree` | 1,426,173,310 | 1,424,989,085 | 0.9992 | 0.1% / 0.2% |
+| `buffer_pool` | 2,513,062,610 | 2,511,855,072 | 0.9995 | 0.0% / 0.0% |
+| `hash_table` | 1,423,397,122 | 1,450,235,423 | 1.0189 | 0.1% / 0.1% |
+| `intrusive_run_queue` | 1,141,318,189 | 1,140,159,459 | 0.9990 | 0.0% / 0.1% |
+| `lock_free_queue` | 335,113,553 | 333,338,989 | 0.9947 | 1.2% / 1.2% |
+| `lock_protected_map` | 1,946,236,230 | 1,938,782,745 | 0.9962 | 17.5% / 16.0% |
+| `packet_parser` | 1,864,726,309 | 1,863,491,058 | 0.9993 | 0.0% / 0.0% |
+| `page_frame_allocator` | 724,302,881 | 722,947,071 | 0.9981 | 0.1% / 0.1% |
+| `ring_buffer` | 1,269,127,197 | 1,267,645,686 | 0.9988 | 0.1% / 0.0% |
+| `thread_pool` | 485,431,070 | 478,552,334 | 0.9858 | 4.2% / 3.9% |
+| `vector` | 356,849,627 | 355,483,649 | 0.9962 | 0.2% / 0.1% |
+| `wal` | 2,185,449,562 | 2,183,740,887 | 0.9992 | 0.1% / 0.1% |
+
+12 of the thirteen workloads retire no more instructions than at v0.1.0.
+`hash_table` is over by the same margin as before and for the same
+reason (it frees the tables v0.1.0 leaked). `lock_protected_map` and
+`thread_pool` came out under this time; their runs differ by more than
+their distance from v0.1.0, as the last column shows. `rt_sync.c` has not
+changed since phase 11, so `kern_mutex_lock` and `kern_mutex_unlock` are
+the instructions compared there.
+
 ## Gate 10: the ledger
 
 `specs/runtime/STATUS.md` lists the fifty-seven requirements, each with
@@ -170,12 +201,25 @@ runtime.
 Publishing is the owner's: nothing has been pushed, by standing
 instruction.
 
+## Independent checks
+
+After phase 14 the project's own conformance tools were run over the
+finished work, and what they found was acted on.
+
+| Tool | Result | What followed |
+|---|---|---|
+| `speccritic` on the spec | two critical findings and eight others from the model, all but four in the text of area N; ninety-six notes from its text lint (acronyms, wording) | `Source` is defined in the spec. A wait's limit of 64 reports and level-triggering were reconciled, with the fairness stated and tested (`net_poller_many.kern`: a hundred ready sockets). What a wait does to its vector, the meaning of each flag of `Ready`, and what `send_with` returns were written down; a reset connection reported as `failed` got a test. Four older clauses were made exact where the code already was: `stack_bytes` is the rounded size, which frames a backtrace leaves out, option validation before `create_new`, and what a failed `BufWriter.flush` keeps |
+| `plancritic` on the plan against the spec | executable; every requirement covered, eight of them partly; seven warnings | The plan's opening named an old version and phase count. The final gates were scheduled in phase 11 and not after the phases added later: the plan now has them at the head, and R-P1 was measured again (above). The interface version's rule across unreleased phases and the `/dev/null` placeholder for a closed standard descriptor are now in the spec. Its concern for a thread dropped after it finished was checked in the code: `kern_thread_drop` joins it |
+| `realitycheck` on the code against both | no drift and no violation found; it could not confirm coverage either, since the code is larger than it summarizes | nothing: the ledger and the tests are the evidence of coverage |
+| `verifier` on the repository | low-severity gaps only: exported functions of the compiler with no unit test of their own | nothing: they are exercised through the fixture corpus, which runs every program in four configurations |
+
 ## Verification
 
-At the head: `go test ./...` passes on macOS, with every freestanding
-image booted under QEMU on both architectures and every concurrency
-fixture marked for it run under the thread sanitizer; the whole fixture
-corpus, the sanitized corpus, the area-A checks and the runtime's Go tests
-pass in the Linux container; `golangci-lint run ./...` reports no issue
-and `gofmt -l` lists nothing; `std/*.kern` and their prelude copies are
-identical.
+At the head, after the final gates: `go test ./...` passes on macOS, with
+every freestanding image booted under QEMU on both architectures and
+every concurrency fixture marked for it run under the thread sanitizer;
+the sanitized corpus passes on macOS; in the Linux container the whole
+suite with the sanitized corpus passes, 2,810 tests, with the tests of
+phases 13 and 14 named so that a skip there fails the gate;
+`golangci-lint run ./...` reports no issue and `gofmt -l` lists nothing;
+`std/*.kern` and their prelude copies are identical.

@@ -129,7 +129,10 @@ The emitter is corrected until the test passes; in particular every `i8`,
 `2`), the hosted and freestanding runtimes define the symbol
 `kern_rt_abi_2`, and every program's entry code references it, so that a
 program linked against a runtime of another ABI version fails to link. The
-number changes when an existing entry's prototype or contract changes.
+number changes when an existing entry's prototype or contract changes
+between releases: v0.1.0 is version 1 and this work, none of whose
+intermediate commits is released, is version 2 throughout, whatever its
+later phases change in entries its earlier phases added.
 
 **RA5. Sanitized runs.** `native.Options` gains a sanitizer mode that builds
 the program and the runtime with ASan and UBSan. A test, run when
@@ -171,7 +174,10 @@ flushed:
 - by `io.flush_stdout()`;
 - when the program ends by returning from `main`, by `exit`, or by a trap.
 Standard error is unbuffered. The interpreter produces the same bytes in the
-same order on each stream.
+same order on each stream. A standard descriptor that was closed when the
+program started is `/dev/null` from startup on (the placeholder rule of
+`specs/std-process`, which keeps a file the program opens from becoming
+its standard output): what is written to it is dropped without an error.
 
 **RB3. Robust writes.** A write to a standard stream is retried when
 interrupted (`EINTR`), continued after a short write, and, when the
@@ -216,7 +222,8 @@ diagnostic `CLI_INVALID_FLAGS`, or `PROJ_MANIFEST_INVALID` for the
 manifest, and nothing is built; the flag overrides the manifest, as for
 every other key); and otherwise 8,388,608, the
 interpreter's default. `thread.stack_bytes() -> usize`
-returns the size the next spawn will use. The setting is process-wide: a
+returns the size the next spawn will use, which is the configured size
+rounded up to a whole page. The setting is process-wide: a
 spawn uses the value of the last `set_stack_bytes` that returned true
 before the spawn began, and when calls race, the value of one of them. When the size comes from the
 environment or the build option, the program's `main` also runs on a thread
@@ -315,8 +322,9 @@ native program writes, after the trap record, one line
 `{"backtrace":{"thread":T,"frames":[{"function":N,"file":F,"line":L},...]}}`:
 the kern functions on the trapping thread's stack, innermost first, at most
 64 (then `"truncated":true` follows `frames`). `N` is the function's
-qualified name, `L` its declaration's line. Frames of library functions and
-of C code are left out. It is enabled by `KERN_BACKTRACE=1` or by building
+qualified name, `L` its declaration's line. Frames of library functions
+(the prelude's and those of the `std` modules: every function not
+declared in the program's own source files) and of C code are left out. It is enabled by `KERN_BACKTRACE=1` or by building
 with `--backtrace`; `KERN_BACKTRACE=0` disables it. The walk reads only
 memory it has verified readable, so it cannot fault. With the same setting
 the interpreter writes a line of the same shape from its own frames. A
@@ -397,7 +405,8 @@ write; truncate with append; `create` or `create_new` without write or
 append) is `Err` of kind `InvalidInput` without a system call.
 `create_new` creates the file and fails with kind `AlreadyExists` when the
 path exists (a symbolic link included); with it, `create` and `truncate`
-have no further effect. `File` has no user-space buffer: `flush` (RG4)
+have no further effect. The invalid option sets above are refused first:
+`create_new` with `truncate` and no `write` is `InvalidInput`. `File` has no user-space buffer: `flush` (RG4)
 does nothing and returns `Ok`, and only `sync` asks the system to make the
 data durable.
 
@@ -445,7 +454,10 @@ ahead are discarded); `BufWriter[W: Writer]` with
 IoErr]` (flushes first; on failure the writer and the unwritten bytes are
 destroyed and the error returned), whose destructor flushes
 and discards a failure of that flush (a program that must see it calls
-`flush` or `into_inner` first; the reference says so).
+`flush` or `into_inner` first; the reference says so). A `flush` or a
+`write` that fails leaves the bytes the writer did not take in the
+buffer, in order, and the `BufWriter` usable: a later `flush` writes
+them, and no byte is written twice.
 `Stdin.read` follows RB2.
 
 ### H. Networking (`std/net`, hosted only)
@@ -728,19 +740,38 @@ wait for many sockets.
 
 **RN1. Readiness.** `net.Poller` with `new() -> Result[Poller, IoErr]`,
 `watch[S: Source](s: view[S], token: u64, readable: bool, writable:
-bool)`, `unwatch[S: Source](s: view[S])`, `wait(into: edit[Vec[Ready]])
--> Result[usize, IoErr]` and `wait_timeout(into, d)`; `Ready { token;
-readable; writable; closed; failed }`; and the interface `Source`, which
-every socket type of `std/net` implements. `watch` on a socket already
-watched replaces its token and what is asked; neither `readable` nor
-`writable` is `InvalidInput`; `unwatch` of a socket not watched is
-`NotFound`. A wait returns the sockets that can be read or written
-without waiting, at most 64 a call, and 0 when its time passed; a
-duration of zero looks once. Readiness is level-triggered on both hosts:
-a socket that is ready is reported by every wait until the program has
-read or written it. A socket ready both ways is one report. A peer's
-close is reported as `readable` and `closed`, and a read then returns
-the end of the stream. A closed socket is no longer watched. The queue
+bool) -> Result[(), IoErr]`, `unwatch[S: Source](s: view[S]) ->
+Result[(), IoErr]`, `wait(into: edit[Vec[Ready]]) -> Result[usize,
+IoErr]` and `wait_timeout(into, d)`; `Ready { token: u64; readable:
+bool; writable: bool; closed: bool; failed: bool }`; and `interface
+Source { func descriptor(view self) -> i32 }`, the system's descriptor
+of an open socket that the value owns, which every socket type of
+`std/net` implements (a type of the program's may implement it for a
+socket or a pipe it owns). The token is the program's own number,
+returned unchanged. `watch` on a socket already watched replaces its
+token and what is asked; neither `readable` nor `writable` is
+`InvalidInput`; `unwatch` of a socket not watched is `NotFound`.
+
+A wait empties `into` and then fills it with the sockets that can be
+read or written without waiting, at most 64 a call, and returns their
+number: 0, with `into` empty, when its time passed; a duration of zero
+looks once; on `Err`, `into` is empty. Readiness is level-triggered on
+both hosts: a socket stays ready until the program has read or written
+it, and while it is ready the waits go on reporting it. When more than
+64 sockets are ready a wait reports 64 of them and the system's queue
+takes the ready sockets in turn, so that one that stays ready is
+reported again within a bounded number of waits (a test holds a hundred
+sockets ready and sees each within sixteen). A socket ready both ways is
+one report.
+
+`readable`: a read returns at once, with bytes, a connection (for a
+listener), a datagram, or the end of the stream. `writable`: a write
+takes at least one byte at once. `closed`: the peer has closed its end
+or its sending side; bytes it sent before are still read first, and
+then a read returns the end of the stream. `failed`: the socket has a
+pending error (a reset connection), which the next read or write
+returns. A peer's close is reported as `readable` and `closed`. A
+socket the program closes is no longer watched. The queue
 is the system's (epoll on Linux, kqueue on macOS), so a wait costs the
 same whether ten sockets are watched or ten thousand. It is not a
 scheduler: no code of the program runs but on the thread that calls
@@ -750,7 +781,11 @@ and the main thread stops through a `UnixStream.pair()`.
 
 **RN2. Descriptors over a Unix-domain stream.** `UnixStream.send_with[S:
 Source](data, pass: view[S])` and `send_file(data, pass: view[io.File])`
-send at least one byte with an open socket or file attached;
+send at most `len(data)` bytes, at least one, with an open socket or
+file attached to the first, and return `Result[usize, IoErr]`: the
+number of bytes the system took, as `write` does. On `Err` nothing was
+sent and the descriptor did not travel; on `Ok(n)` with `n` less than
+`len(data)` it did, and the rest of the bytes are sent with `write`;
 `recv_with(buf) -> Result[Received, IoErr]` and `recv_with_timeout`
 receive bytes and the descriptor that came with them, with `union
 Received { Bytes(usize); WithDescriptor(usize, Descriptor) }`. A

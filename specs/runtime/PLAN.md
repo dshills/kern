@@ -1,7 +1,10 @@
 # Plan: the kern runtime, complete
 
-Implements `specs/runtime/SPEC.md` v0.6 in eleven phases, one or more
-commits each, on `main`, nothing pushed. Each phase ends with the gates of
+Implements `specs/runtime/SPEC.md` (v0.9) in fourteen phases, one or more
+commits each, on `main`, nothing pushed. Phases 1 to 11 are the spec as
+first written (v0.6); phases 12 to 14 each implement an area added after
+the phase before it had reported (L, M, N), and the final gates run again
+after the last of them (see "Final gates"). Each phase ends with the gates of
 spec §4 (1 to 7) and a line per requirement in `specs/runtime/STATUS.md`.
 The order puts the interface checks first, so that every later phase adds
 entries under them, and the documentation last, when everything it
@@ -431,12 +434,24 @@ names for each system in `sys_darwin.go` and `sys_linux.go`),
 arguments).
 
 **Tests.** One thread serving a listener and three connections through a
-Poller; a Poller on its own thread, four client threads and a wake-up
+Poller; a hundred ready sockets reported in turn; a reset connection; a Poller on its own thread, four client threads and a wake-up
 through a pair; a file and a socket of each kind passed over a pair and
 used; files exchanged with the test process, which also checks the
 credentials the program reads; abstract names on Linux and their refusal
 on macOS; and a `?` in an argument, a field and an element with owned
 operands before it.
+
+## Final gates
+
+Gates 8 to 10 of spec §4 belong to the head, not to phase 11 where they
+first ran. After phase 14: the sanitized corpus on both hosts (gate 8,
+which every phase since 11 has also run before its commit); R-P1
+measured again, the head's binaries against v0.1.0's, with
+`kern_mutex_lock` and `kern_mutex_unlock` unchanged since the
+measurement of phase 11 (gate 9); the ledger complete (gate 10); and the
+generated tables (the entry table of `docs/runtime.md`, the hosted-only
+inventory) regenerated, which their tests enforce at every commit. The
+results are in `docs/reports/runtime-summary.md`.
 
 ## Gate policy
 

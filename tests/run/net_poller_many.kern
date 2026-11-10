@@ -1,0 +1,100 @@
+//! phase: 6
+//! expect: output net_poller_many
+// More ready sockets than one wait reports (specs/runtime RN1): a hundred
+// UDP sockets each hold a datagram. A wait reports at most 64 of them;
+// with nothing read, the waits that follow report the others, since the
+// system's queue takes the ready sockets in turn; and once every datagram
+// is received nothing is ready.
+module t
+import "std/net"
+import "std/io"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func yes(what: view[]u8, ok: bool) {
+    print_str(what)
+    if ok { say(": yes") } else { say(": NO") }
+}
+func watch_at(p: edit[net.Poller], socks: edit[Vec[net.UdpSocket]], i: usize) -> Result[(), io.IoErr] {
+    with s := socks.at(i) { return p.watch(s, u64(i), true, false) }
+    return Ok(())
+}
+func addr_at(socks: edit[Vec[net.UdpSocket]], i: usize) -> Result[net.SocketAddr, io.IoErr] {
+    with s := socks.at(i) { return s.local_addr() }
+    return Err(io.error_of(io.ErrKind.Other))
+}
+func recv_at(socks: edit[Vec[net.UdpSocket]], i: usize, buf: edit[]u8) -> Result[usize, io.IoErr] {
+    with s := socks.at(i) {
+        d := s.recv_from(buf)?
+        return Ok(d.len)
+    }
+    return Ok(0usize)
+}
+
+func run() -> Result[(), io.IoErr] {
+    p := net.Poller.new()?
+    sender := net.UdpSocket.bind(net.loopback_v4(0u16))?
+    socks := Vec[net.UdpSocket].new()
+    for i in 0usize..100usize {
+        socks.push(net.UdpSocket.bind(net.loopback_v4(0u16))?)
+        watch_at(p, socks, i)?
+    }
+    for i in 0usize..100usize {
+        n := sender.send_to("x", addr_at(socks, i)?)?
+    }
+    // every datagram has arrived when every socket has been reported once
+    events := Vec[net.Ready].new()
+    seen := Vec[bool].new()
+    seen.resize(100usize, false)
+    var distinct: usize = 0usize
+    var waits: usize = 0usize
+    var most: usize = 0usize
+    start := now_ns()
+    while distinct < 100usize && now_ns() - start < 20000000000u64 {
+        n := p.wait(events)?
+        waits = waits + 1usize
+        if n > most { most = n }
+        for k in 0usize..n {
+            e := events.get(k)
+            if e.token < 100u64 && e.readable && seen.get(usize(e.token)) == false {
+                with s := seen.at(usize(e.token)) { s = true }
+                distinct = distinct + 1usize
+            }
+        }
+    }
+    yes("each of the hundred sockets was reported, none of them read", distinct == 100usize)
+    yes("no wait reported more than 64", most <= 64usize && most > 0usize)
+    // with all hundred ready, the queue takes them in turn: every one is
+    // reported again within a few waits
+    for i in 0usize..100usize {
+        with s := seen.at(i) { s = false }
+    }
+    distinct = 0usize
+    waits = 0usize
+    while distinct < 100usize && waits < 16usize {
+        n := p.wait(events)?
+        waits = waits + 1usize
+        for k in 0usize..n {
+            e := events.get(k)
+            if e.token < 100u64 && seen.get(usize(e.token)) == false {
+                with s := seen.at(usize(e.token)) { s = true }
+                distinct = distinct + 1usize
+            }
+        }
+    }
+    yes("all hundred, still unread, come round again within sixteen waits", distinct == 100usize)
+    var buf: [8]u8 = zero()
+    var bytes: usize = 0usize
+    for i in 0usize..100usize { bytes = bytes + recv_at(socks, i, buf)? }
+    quiet := p.wait_timeout(events, time.millis(0u64))?
+    yes("once all hundred datagrams are received, nothing is ready", bytes == 100usize && quiet == 0usize && events.len() == 0usize)
+    return Ok(())
+}
+
+func main() -> i32 {
+    match run() {
+        Ok(u) => say("done")
+        Err(e) => say("failed")
+    }
+    return 0i32
+}
