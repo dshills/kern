@@ -27,7 +27,7 @@ tested in both engines and on both hosts, and documented.
 | 9 | Signals and randomness: `std/signal`, `std/rand` | `runtime-signal-rand.md` | `6296fee` |
 | 10 | Freestanding: the board interface, the heap's size, a double-free check | `runtime-board.md` | `a176db2` |
 | 11 | Documentation, the performance check, the final gates | this report | `b4f2b5b` |
-| 12 | Extensions: Unix-domain sockets, directory trees, file locks, mapped files, the freestanding stack and start-up code, QEMU in the Linux gate | `runtime-extensions.md` | PH12 |
+| 12 | Extensions: Unix-domain sockets, directory trees, file locks, mapped files, the freestanding stack and start-up code, QEMU in the Linux gate | `runtime-extensions.md` | 04bdaed |
 
 Every one of the forty-seven requirements has a row in the ledger with
 the commit that met it and its deviations from the spec's text.
