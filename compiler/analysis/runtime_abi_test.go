@@ -79,7 +79,7 @@ func TestRuntimeWarningClean(t *testing.T) {
 		}
 	}
 	for _, tr := range fsTriples {
-		for _, f := range []string{"rt.c", "f64text.c"} {
+		for _, f := range []string{"rt.c", "f64text.c", fsBoard(tr)} {
 			for _, defs := range [][]string{nil, {"-DKERN_RELEASE"}} {
 				args := append([]string{"-target", tr, "-ffreestanding", "-fno-builtin", "-fsyntax-only", "-O1"}, defs...)
 				run(fmt.Sprintf("freestanding %s %s %v", tr, f, defs), append(args, filepath.Join(fsDir, f))...)
@@ -202,6 +202,15 @@ func abiUnits(t *testing.T) [][]string {
 	}
 	units = append(units, []string{extra})
 	return units
+}
+
+// fsBoard is the default board file of a freestanding target (specs/runtime
+// RJ1): the checks of the runtime's sources cover it too.
+func fsBoard(triple string) string {
+	if strings.HasPrefix(triple, "x86_64") {
+		return "board_q35.c"
+	}
+	return "board_virt.c"
 }
 
 // compilerDecls lowers the corpus and returns every declaration of a
@@ -423,7 +432,7 @@ func TestRuntimeStaticAnalysis(t *testing.T) {
 		analyze(fmt.Sprintf("hosted %v", defs), append(append([]string{"-o", filepath.Join(dir, "h.plist")}, defs...), filepath.Join(hostedDir, "kern_rt.c"))...)
 	}
 	for _, tr := range fsTriples {
-		for _, f := range []string{"rt.c", "f64text.c"} {
+		for _, f := range []string{"rt.c", "f64text.c", fsBoard(tr)} {
 			analyze("freestanding "+tr+" "+f, "-target", tr, "-ffreestanding", "-fno-builtin", "-o", filepath.Join(dir, "f.plist"), filepath.Join(fsDir, f))
 		}
 	}

@@ -1,0 +1,3 @@
+freed
+{"trap":{"kind":"explicit","file":"freestanding/realloc_freed.kern","span":{"start":666,"end":707},"line":18,"col":23,"thread":0}}
+{"halt":{"code":134}}

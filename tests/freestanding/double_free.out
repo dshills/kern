@@ -1,0 +1,3 @@
+freed once
+{"trap":{"kind":"explicit","file":"freestanding/double_free.kern","span":{"start":728,"end":755},"line":19,"col":25,"thread":0}}
+{"halt":{"code":134}}

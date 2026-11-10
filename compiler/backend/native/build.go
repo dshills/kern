@@ -62,7 +62,20 @@ type Options struct {
 	// NoStackCheck is the unsafe build option that drops the freestanding
 	// prologue check (stack overflow becomes a trusted-boundary obligation).
 	NoStackCheck bool
+	// Board, LinkerScript and HeapBytes configure a freestanding image
+	// (specs/runtime RJ1): a C file that defines the four functions of
+	// kern_board.h, in place of the target's default board; a linker
+	// script in place of the default one; and the size of the system
+	// allocator's arena, a positive multiple of 16 (0 is the default,
+	// 1,048,576).
+	Board        string
+	LinkerScript string
+	HeapBytes    uint64
 }
+
+// HeapBytesValid reports whether n is a size the freestanding arena can
+// have: a positive multiple of 16, at most 1,073,741,824.
+func HeapBytesValid(n uint64) bool { return n >= 16 && n%16 == 0 && n <= 1<<30 }
 
 // sanitizeFlags build with AddressSanitizer and UndefinedBehaviorSanitizer;
 // an undefined-behaviour report is fatal, as an address report is.
@@ -185,7 +198,7 @@ func BuildModule(mod *ir.Module, srcs []*source.File, out string, opts Options) 
 		}
 	}
 	if opts.Freestanding {
-		return buildFreestanding(text, out, triple, opts.Opt == "release")
+		return buildFreestanding(text, out, triple, opts)
 	}
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -538,7 +551,14 @@ func EmitAsm(srcs []*source.File, triple string) (string, []diag.Diagnostic, err
 // four objects (the program, rt.c, the startup code and f64text.c), which
 // the user links with the script shipped in runtime/freestanding/src; an
 // archive's members are linked only when needed, as f64text.c always is.
-func buildFreestanding(text, out, triple string, release bool) error {
+//
+// The machine is the board file's (specs/runtime RJ1): the target's
+// default, virt for AArch64 and q35 for x86-64, or the file opts.Board
+// names, compiled with kern_board.h on its include path. opts.LinkerScript
+// replaces the default script, and opts.HeapBytes sizes the allocator's
+// arena.
+func buildFreestanding(text, out, triple string, opts Options) error {
+	release := opts.Opt == "release"
 	clang, err := exec.LookPath("clang")
 	if err != nil {
 		return ErrNoClang
@@ -548,11 +568,28 @@ func buildFreestanding(text, out, triple string, release bool) error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
-	start, script, x86 := freestanding.StartAArch64, freestanding.VirtLinkerScript, false
+	start, script, board, x86 := freestanding.StartAArch64, freestanding.VirtLinkerScript, freestanding.BoardVirtC, false
 	if strings.HasPrefix(triple, "x86_64") {
-		start, script, x86 = freestanding.StartX8664, freestanding.Q35LinkerScript, true
+		start, script, board, x86 = freestanding.StartX8664, freestanding.Q35LinkerScript, freestanding.BoardQ35C, true
 	}
-	files := map[string]string{"prog.ll": text, "rt.c": freestanding.RuntimeC, "kern_rt_fs.h": freestanding.Header, "f64text.c": freestanding.F64TextC, "start.S": start, "image.ld": script}
+	if opts.Board != "" {
+		b, err := os.ReadFile(opts.Board)
+		if err != nil {
+			return fmt.Errorf("board file: %v", err)
+		}
+		board = string(b)
+	}
+	if opts.LinkerScript != "" {
+		b, err := os.ReadFile(opts.LinkerScript)
+		if err != nil {
+			return fmt.Errorf("linker script: %v", err)
+		}
+		script = string(b)
+	}
+	if opts.HeapBytes != 0 && !HeapBytesValid(opts.HeapBytes) {
+		return fmt.Errorf("the heap must be a positive multiple of 16 bytes, not %d", opts.HeapBytes)
+	}
+	files := map[string]string{"prog.ll": text, "rt.c": freestanding.RuntimeC, "kern_rt_fs.h": freestanding.Header, "kern_board.h": freestanding.BoardHeader, "board.c": board, "f64text.c": freestanding.F64TextC, "start.S": start, "image.ld": script}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			return err
@@ -561,6 +598,9 @@ func buildFreestanding(text, out, triple string, release bool) error {
 	common := []string{"-target", triple, "-ffreestanding", "-nostdlib", "-fno-builtin", "-O1", "-Wno-override-module", "-ffp-model=strict", "-c"}
 	if release {
 		common = append(common, "-DKERN_RELEASE") // identity tags off (PLAN.md 2.2), as in a hosted release build
+	}
+	if opts.HeapBytes != 0 {
+		common = append(common, fmt.Sprintf("-DKERN_HEAP_SIZE=%du", opts.HeapBytes))
 	}
 	if !x86 {
 		// the image runs with the MMU off, where every access is to Device
@@ -573,10 +613,13 @@ func buildFreestanding(text, out, triple string, release bool) error {
 	// are what they were before it existed (specs/freestanding-float R7)
 	var objs []string
 	lazy := ""
-	for _, src := range []string{"prog.ll", "rt.c", "start.S", "f64text.c"} {
+	for _, src := range []string{"prog.ll", "rt.c", "board.c", "start.S", "f64text.c"} {
 		obj := filepath.Join(dir, src+".o")
 		cmd := exec.Command(clang, append(append([]string{}, common...), "-o", obj, filepath.Join(dir, src))...)
 		if msg, err := cmd.CombinedOutput(); err != nil {
+			if src == "board.c" && opts.Board != "" {
+				return fmt.Errorf("board file %s: %v: %s", opts.Board, err, msg)
+			}
 			return fmt.Errorf("clang %s: %v: %s", src, err, msg)
 		}
 		if src == "f64text.c" {

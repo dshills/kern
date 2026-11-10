@@ -1,12 +1,14 @@
 // kern freestanding runtime (PLAN.md 3.1, ADR-011): no OS assumptions, no
-// threads. Output goes to a console device (the QEMU virt PL011 UART on
-// AArch64, the 16550 at port 0x3F8 on x86-64); traps run the handler once
-// and halt; exit and halt write a final `{"halt": {"code": n}}` line and
-// power the machine off. The system allocator behind the library containers
-// is a first-fit free list over a static arena of KERN_HEAP_SIZE bytes.
-// trunc/truncf and the memory routines are the libc symbols LLVM may call
-// for in compiled code.
+// threads. The machine is behind four functions a board file defines
+// (kern_board.h: set-up, a console byte, power-off, the time), so this
+// file has no device in it. Output goes to the board's console; traps run
+// the handler once and halt; exit and halt write a final
+// `{"halt": {"code": n}}` line and power the machine off. The system
+// allocator behind the library containers is a first-fit free list over a
+// static arena of KERN_HEAP_SIZE bytes. trunc/truncf and the memory
+// routines are the libc symbols LLVM may call for in compiled code.
 #include "kern_rt_fs.h"
+#include "kern_board.h"
 
 // kern_rt_abi_2 is the ABI symbol every image references (RA4).
 _Static_assert(KERN_RT_ABI == 2, "the ABI symbol's name carries KERN_RT_ABI");
@@ -21,33 +23,8 @@ static int kern_in_trap = 0;
 // compared in every function prologue (compiler-inserted stack check)
 void *kern_stack_limit = 0;
 
-// ---- console device ----
-#if defined(__aarch64__)
-static void kern_putc(char c) {
-    while (*(volatile uint32_t *)0x09000018u & (1u << 5)) {} // UARTFR.TXFF: wait for FIFO space
-    *(volatile uint32_t *)0x09000000u = (uint32_t)(uint8_t)c;
-}
-static _Noreturn void kern_poweroff(int code) {
-    (void)code;
-    register uint64_t x0 __asm__("x0") = 0x84000008u; // PSCI SYSTEM_OFF
-    __asm__ volatile("hvc #0" : : "r"(x0) : "memory");
-    for (;;) { __asm__ volatile("wfi"); }
-}
-#elif defined(__x86_64__)
-static void kern_outb(uint16_t port, uint8_t v) { __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(port)); }
-static uint8_t kern_inb(uint16_t port) { uint8_t v; __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(port)); return v; }
-static void kern_putc(char c) {
-    while (!(kern_inb(0x3FD) & 0x20)) {} // LSR.THRE: transmitter ready
-    kern_outb(0x3F8, (uint8_t)c);
-}
-static _Noreturn void kern_poweroff(int code) {
-    __asm__ volatile("outw %0, %1" : : "a"((uint16_t)code), "Nd"((uint16_t)0xF4)); // isa-debug-exit: exits with (code << 1) | 1
-    for (;;) { __asm__ volatile("hlt"); }
-}
-#else
-static void kern_putc(char c) { (void)c; }
-static _Noreturn void kern_poweroff(int code) { (void)code; for (;;) {} }
-#endif
+// ---- console ----
+static void kern_putc(char c) { kern_board_putc(c); }
 
 static void kern_puts(const char *s) { while (*s) kern_putc(*s++); }
 // kern_putjson writes s as the body of a JSON string
@@ -77,12 +54,13 @@ static _Noreturn void kern_halt(int code) {
     kern_puts("{\"halt\":{\"code\":");
     kern_putu((uint64_t)(uint32_t)code);
     kern_puts("}}\n");
-    kern_poweroff(code);
+    kern_board_poweroff(code);
 }
 _Noreturn void kern_exit(int32_t code) { kern_halt((int)code); }
 // kern_start is called by the image's entry (kern_main) before the program
-// runs; kern_run_main runs the program's main function.
-void kern_start(const void *abi) { (void)abi; }
+// runs, and sets the board up before anything else uses it; kern_run_main
+// runs the program's main function.
+void kern_start(const void *abi) { (void)abi; kern_board_init(); }
 int32_t kern_run_main(int32_t (*fn)(void)) { return fn(); }
 void kern_yield(void) {}
 void kern_set_file(const char *name) { kern_file = name; }
@@ -230,8 +208,9 @@ uint32_t kern_next_identity(void) {
 // header: free and realloc receive the allocation's size and alignment,
 // the §6 obligation. A request that violates the obligations (alignment
 // not a power of two or above 4096, size not a multiple of it, a pointer
-// the arena does not hold) traps with kind `explicit`; exhaustion returns
-// Err(OutOfMemory) and never traps. Allocations are 16-byte aligned at
+// the arena does not hold, a block that overlaps a free one: a double
+// free) traps with kind `explicit`; exhaustion returns Err(OutOfMemory)
+// and never traps. Allocations are 16-byte aligned at
 // least, as on the hosts.
 #ifndef KERN_HEAP_SIZE
 #define KERN_HEAP_SIZE (1u << 20)
@@ -283,6 +262,15 @@ static void kern_check_request(int64_t size, int64_t align, const kern_loc *at) 
 static void kern_check_block(const void *p, size_t n, const kern_loc *at) {
     uintptr_t a = (uintptr_t)p, lo = (uintptr_t)kern_heap, hi = lo + KERN_HEAP_SIZE;
     if (a < lo || a >= hi || n > hi - a || (a & (KERN_HEAP_GRAIN - 1)) != 0) kern_trap_loc(11, at);
+}
+
+// kern_check_live traps when the n bytes at p overlap a free block: the
+// block, or part of it, was freed already (specs/runtime RJ2). The list
+// is sorted by address, so the walk stops at the first block past p + n.
+static void kern_check_live(const uint8_t *p, size_t n, const kern_loc *at) {
+    for (const kern_free_block *cur = kern_free_head; cur && (const uint8_t *)cur < p + n; cur = cur->next) {
+        if ((const uint8_t *)cur + cur->size > p) kern_trap_loc(11, at);
+    }
 }
 
 // kern_heap_take carves n bytes at alignment al (both multiples of the
@@ -362,6 +350,7 @@ void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t 
     size_t on = kern_block_size(old_size), n = kern_block_size(size), al = kern_block_align(align);
     if (on == 0) kern_trap_loc(11, at); // larger than the arena: not one allocation's size
     kern_check_block(p, on, at);
+    kern_check_live(p, on, at);
     uint8_t *q = p;
     if (n == 0) { out[0] = 1; return; }
     if (n < on) kern_heap_release(q + n, on - n);
@@ -382,66 +371,21 @@ void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align, 
     size_t n = kern_block_size(size);
     if (n == 0) kern_trap_loc(11, at);
     kern_check_block(p, n, at);
+    kern_check_live(p, n, at);
     kern_heap_release(p, n);
 }
 
 // ---- clock (specs/freestanding-clock) ----
-// kern_now_ns is a monotonic clock in nanoseconds: the generic timer on
-// AArch64, the TSC calibrated once against the PIT on x86-64. The split
-// conversion (c / f) * 10^9 + (c % f) * 10^9 / f cannot overflow for a
-// frequency under 18 GHz.
-static uint64_t kern_ticks_to_ns(uint64_t c, uint64_t f) {
-    if (f == 0) return c; // no frequency known: ticks as nanoseconds
-    return (c / f) * 1000000000ull + (c % f) * 1000000000ull / f;
-}
-#if defined(__aarch64__)
-uint64_t kern_now_ns(void) {
-    uint64_t c, f;
-    __asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(c) : : "memory");
-    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
-    return kern_ticks_to_ns(c, f);
-}
-#elif defined(__x86_64__)
-static uint64_t kern_rdtsc(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("lfence\n\trdtsc" : "=a"(lo), "=d"(hi) : : "memory");
-    return ((uint64_t)hi << 32) | lo;
-}
-static uint64_t kern_tsc_hz = 0;   // 0 until calibrated
-static uint64_t kern_tsc_base = 0; // the TSC at calibration
-// kern_tsc_calibrate measures the TSC over 11,932 PIT ticks (10 ms):
-// channel 2 in one-shot mode with its gate high, polling its output on
-// port 0x61 (Linux's pit_calibrate_tsc). A PIT that never fires is given
-// up after 2^32 TSC ticks, and 1 GHz is assumed.
-static void kern_tsc_calibrate(void) {
-    const uint32_t latch = 11932;
-    kern_outb(0x61, (uint8_t)((kern_inb(0x61) & ~0x02) | 0x01)); // gate on, speaker off
-    kern_outb(0x43, 0xb0); // channel 2, lobyte/hibyte, mode 0, binary
-    kern_outb(0x42, (uint8_t)(latch & 0xff));
-    kern_outb(0x42, (uint8_t)(latch >> 8));
-    uint64_t t1 = kern_rdtsc(), t2 = t1;
-    while ((kern_inb(0x61) & 0x20) == 0) {
-        t2 = kern_rdtsc();
-        if (t2 - t1 > 0xffffffffull) break;
-    }
-    uint64_t d = t2 - t1;
-    uint64_t hz = (kern_inb(0x61) & 0x20) != 0 && d > 0 ? d * 1193182ull / latch : 1000000000ull;
-    kern_tsc_base = t2;
-    kern_tsc_hz = hz;
-}
-uint64_t kern_now_ns(void) {
-    if (kern_tsc_hz == 0) kern_tsc_calibrate();
-    return kern_ticks_to_ns(kern_rdtsc() - kern_tsc_base, kern_tsc_hz);
-}
-#else
-uint64_t kern_now_ns(void) { return 0; }
-#endif
+// kern_now_ns is the board's clock, monotonic and in nanoseconds.
+uint64_t kern_now_ns(void) { return kern_board_now_ns(); }
 // kern_time_sleep_ns waits until the clock has advanced by at least ns
-// (busy-waiting: no interrupts are enabled); at is unused, since nothing
-// here can fail.
+// (busy-waiting: no interrupts are enabled). A board without a clock
+// reads 0 always, and the sleep then returns at once; at is unused,
+// since nothing here can fail.
 void kern_time_sleep_ns(uint64_t ns, const kern_loc *at) {
     (void)at;
     if (ns == 0) return;
-    uint64_t start = kern_now_ns();
-    while (kern_now_ns() - start < ns) { }
+    uint64_t start = kern_board_now_ns();
+    if (start == 0 && kern_board_now_ns() == 0) return; // no clock
+    while (kern_board_now_ns() - start < ns) { }
 }

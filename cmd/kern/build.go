@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -13,6 +14,8 @@ import (
 // buildCommand implements `kern build [--target=T] [--opt=O] [--env=E]
 // [--test-hooks] [--emit-llvm=F] [-o out] [files...]`: the files default to
 // the manifest's entry, and -o to its output (specs/module-discovery/SPEC.md).
+// A freestanding build also takes --board=<file.c>, --linker-script=<file.ld>
+// and --heap-bytes=N (specs/runtime RJ1).
 func buildCommand(args []string, stdout, stderr io.Writer) int {
 	out := ""
 	opts := native.Options{}
@@ -61,6 +64,33 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 		opts.StackBytes = uint64(bo.StackBytes)
 	}
 	opts.Backtrace = bo.Backtrace
+	// the board file, the linker script and the heap of a freestanding
+	// image (specs/runtime RJ1): a flag, else the manifest's value, whose
+	// paths are relative to the project root
+	if opts.Freestanding {
+		opts.Board, opts.LinkerScript, opts.HeapBytes = bo.Board, bo.LinkerScript, uint64(bo.HeapBytes)
+		if m := pr.Manifest; m != nil {
+			if !bo.boardFlag && m.Board != nil {
+				opts.Board = filepath.Join(pr.Root, filepath.FromSlash(*m.Board))
+			}
+			if !bo.scriptFlag && m.LinkerScript != nil {
+				opts.LinkerScript = filepath.Join(pr.Root, filepath.FromSlash(*m.LinkerScript))
+			}
+			if !bo.heapFlag && m.HeapBytes != nil {
+				opts.HeapBytes = uint64(*m.HeapBytes)
+			}
+		}
+		for _, f := range []struct{ flag, path string }{{"--board", opts.Board}, {"--linker-script", opts.LinkerScript}} {
+			if f.path == "" {
+				continue
+			}
+			if st, err := os.Stat(f.path); err != nil || st.IsDir() {
+				return fail(stdout, "CLI_INVALID_FLAGS", "%s: %s is not a file", f.flag, f.path)
+			}
+		}
+	} else if bo.boardFlag || bo.scriptFlag || bo.heapFlag {
+		return fail(stdout, "CLI_INVALID_FLAGS", "--board, --linker-script and --heap-bytes configure a freestanding image: they need --env=freestanding")
+	}
 	if out == "" {
 		return fail(stdout, "CLI_INVALID_FLAGS", "build requires -o <out> or an output in %s", project.ManifestName)
 	}

@@ -42,8 +42,8 @@ reason. Updated at the end of every phase.
 | RH4 rules | 8 | 407c1e7 | A signal interrupting a blocked call is retried in the code but not provoked by a test until phase 9. A connect to a full queue is turned away on macOS and left waiting on Linux; the test accepts both |
 | RI1 std/signal | 9 | 6296fee | In the interpreter a signal at its default does what the Go runtime does (User1, User2 and Pipe do nothing), a Pipe sent from outside is not reported, and `reset` cannot undo an ignore inherited at start |
 | RI2 std/rand | 9 | 6296fee | `Rng.from_state` and `Rng.state` added |
-| RJ1 board interface | 10 | | |
-| RJ2 allocator checks | 10 | | |
+| RJ1 board interface | 10 | PH10 | The heap is at most 1,073,741,824 bytes. The interpreter's emulation has no arena limit and no board. The x86-64 clock is calibrated at its first reading, not in `kern_board_init` |
+| RJ2 allocator checks | 10 | PH10 |  |
 | RK1 runtime reference | 11 | | |
 | RK2 other documents | 11 | | |
 | R-P1 performance | 11 | | |

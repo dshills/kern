@@ -40,6 +40,13 @@ type BuildOptions struct {
 	// Backtrace: the default trap handler writes a backtrace unless
 	// KERN_BACKTRACE=0 (specs/runtime RE2)
 	Backtrace bool
+	// Board, LinkerScript and HeapBytes configure a freestanding image
+	// (specs/runtime RJ1); a flag's path is as given, a manifest's is
+	// joined to the project root by the build. boardFlag, scriptFlag and
+	// heapFlag record that a flag set them, which overrides the manifest.
+	Board, LinkerScript             string
+	HeapBytes                       int
+	boardFlag, scriptFlag, heapFlag bool
 }
 
 // applyManifest takes the manifest's opt and env where no flag set them.
@@ -156,9 +163,24 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 			opts.Debug = true
 		case a == "--backtrace":
 			opts.Backtrace = true
-		case strings.HasPrefix(a, "--opt="), strings.HasPrefix(a, "--env="), strings.HasPrefix(a, "--stack-bytes="):
+		case strings.HasPrefix(a, "--opt="), strings.HasPrefix(a, "--env="), strings.HasPrefix(a, "--stack-bytes="), strings.HasPrefix(a, "--board="), strings.HasPrefix(a, "--linker-script="), strings.HasPrefix(a, "--heap-bytes="):
 			k, v, _ := strings.Cut(a, "=")
 			switch k {
+			case "--board", "--linker-script":
+				if v == "" {
+					return opts, nil, nil, fmt.Errorf("%s needs a file", k)
+				}
+				if k == "--board" {
+					opts.Board, opts.boardFlag = v, true
+				} else {
+					opts.LinkerScript, opts.scriptFlag = v, true
+				}
+			case "--heap-bytes":
+				n, err := strconv.Atoi(v)
+				if err != nil || strings.TrimLeft(v, "0123456789") != "" || !project.HeapBytesValid(int64(n)) {
+					return opts, nil, nil, fmt.Errorf("--heap-bytes must be a positive multiple of 16 up to %d", project.HeapBytesMax)
+				}
+				opts.HeapBytes, opts.heapFlag = n, true
 			case "--opt":
 				if v != "debug" && v != "release" {
 					return opts, nil, nil, fmt.Errorf("--opt must be debug or release")
@@ -198,6 +220,9 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 	opts, named, progArgs, err := parseRunArgs(args)
 	if err != nil {
 		return fail(stdout, "CLI_INVALID_FLAGS", "%v", err)
+	}
+	if opts.boardFlag || opts.scriptFlag || opts.heapFlag {
+		return fail(stdout, "CLI_INVALID_FLAGS", "--board, --linker-script and --heap-bytes configure an image: they are options of kern build")
 	}
 	pr, ok := load(named, stdout)
 	if !ok {

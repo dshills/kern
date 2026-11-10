@@ -599,6 +599,13 @@ func freestandingRun(t *testing.T, path string, files []*source.File, h header, 
 // process status keeps the low eight bits (PLAN.md 3.1).
 func qemuRun(t *testing.T, triple, img string, want []byte) {
 	t.Helper()
+	qemuRunCode(t, triple, img, want, haltCode(t, want))
+}
+
+// qemuRunCode is qemuRun for a transcript whose halt code is given, not
+// read from its last line (a board may write the console its own way).
+func qemuRunCode(t *testing.T, triple, img string, want []byte, code int) {
+	t.Helper()
 	emu, args := native.QEMUFor(triple)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
@@ -612,7 +619,7 @@ func qemuRun(t *testing.T, triple, img string, want []byte) {
 	}
 	wantStatus := 0
 	if strings.HasPrefix(triple, "x86_64") {
-		wantStatus = ((haltCode(t, want) << 1) | 1) & 0xff
+		wantStatus = ((code << 1) | 1) & 0xff
 	}
 	status := 0
 	var exitErr *exec.ExitError

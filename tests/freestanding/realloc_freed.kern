@@ -1,0 +1,27 @@
+//! phase: 5
+//! expect: output realloc_freed
+//! env: freestanding
+// realloc of a block that was freed, and free of part of a block that
+// was freed, trap explicit too (specs/runtime RJ2): each overlaps a free
+// block. The twin of both is every other freestanding fixture, whose
+// frees and reallocs name live blocks.
+module fs
+contract { requires "this fixture reallocates a freed block on purpose" }
+func main() -> i32 {
+    a := SystemAllocator.new()
+    unsafe {
+        match a.alloc(128usize, 16usize) {
+            Ok(p) => {
+                a.free(p, 128usize, 16usize)
+                print_str("freed")
+                println()
+                match a.realloc(p, 128usize, 256usize, 16usize) {
+                    Ok(q) => { print_str("a freed block was reallocated"); println() }
+                    Err(e) => { print_str("out of memory"); println() }
+                }
+            }
+            Err(e) => { }
+        }
+    }
+    return 0i32
+}

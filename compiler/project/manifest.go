@@ -35,6 +35,13 @@ type Manifest struct {
 	// StackBytes is the stack size of spawned threads and of main, from
 	// 65,536 to 1,073,741,824 (specs/runtime RC2).
 	StackBytes *int
+	// Board, LinkerScript and HeapBytes configure a freestanding image
+	// (specs/runtime RJ1): a board file and a linker script, as paths
+	// relative to the project root, and the size of the system
+	// allocator's arena, a positive multiple of 16 up to 1,073,741,824.
+	Board        *string
+	LinkerScript *string
+	HeapBytes    *int
 }
 
 // The bounds of a configured stack size, as in the hosted runtime.
@@ -88,7 +95,7 @@ func ParseManifest(path string, b []byte) (*Manifest, []diag.Diagnostic) {
 	}
 	for field := range raw {
 		switch field {
-		case "schema_version", "entry", "opt", "env", "target", "output", "stack_bytes":
+		case "schema_version", "entry", "opt", "env", "target", "output", "stack_bytes", "board", "linker_script", "heap_bytes":
 		default:
 			return nil, invalid("%s: unknown field %q", ManifestName, field)
 		}
@@ -141,27 +148,58 @@ func ParseManifest(path string, b []byte) (*Manifest, []diag.Diagnostic) {
 	if m.Output != nil && (*m.Output == "" || filepath.IsAbs(*m.Output)) {
 		return nil, invalid("%s: field %q must be a relative path", ManifestName, "output")
 	}
-	if v, ok := raw["stack_bytes"]; ok {
+	// whole reads a field that is a JSON number written as one
+	// (encoding/json also reads a number out of a string, which a manifest
+	// may not use here) and accepted by ok.
+	whole := func(field, must string, ok func(int64) bool) (*int, []diag.Diagnostic) {
+		v, present := raw[field]
+		if !present {
+			return nil, nil
+		}
+		bad := invalid("%s: field %q must be %s", ManifestName, field, must)
 		var n json.Number
 		d := json.NewDecoder(bytes.NewReader(v))
 		d.UseNumber()
-		// a JSON number, written as one: encoding/json also reads a number
-		// out of a string, which a manifest may not use here
 		if tv := bytes.TrimSpace(v); len(tv) == 0 || tv[0] < '0' || tv[0] > '9' {
-			return nil, invalid("%s: field %q must be a whole number from %d to %d", ManifestName, "stack_bytes", StackBytesMin, StackBytesMax)
+			return nil, bad
 		}
 		if err := d.Decode(&n); err != nil || n.String() == "" {
-			return nil, invalid("%s: field %q must be a whole number from %d to %d", ManifestName, "stack_bytes", StackBytesMin, StackBytesMax)
+			return nil, bad
 		}
 		i, err := n.Int64()
-		if err != nil || i < StackBytesMin || i > StackBytesMax {
-			return nil, invalid("%s: field %q must be a whole number from %d to %d", ManifestName, "stack_bytes", StackBytesMin, StackBytesMax)
+		if err != nil || !ok(i) {
+			return nil, bad
 		}
-		sb := int(i)
-		m.StackBytes = &sb
+		r := int(i)
+		return &r, nil
+	}
+	if m.StackBytes, ds = whole("stack_bytes", fmt.Sprintf("a whole number from %d to %d", StackBytesMin, StackBytesMax), func(i int64) bool { return i >= StackBytesMin && i <= StackBytesMax }); ds != nil {
+		return nil, ds
+	}
+	if m.HeapBytes, ds = whole("heap_bytes", fmt.Sprintf("a positive multiple of 16 up to %d", HeapBytesMax), HeapBytesValid); ds != nil {
+		return nil, ds
+	}
+	for _, f := range []struct {
+		name string
+		dst  **string
+	}{{"board", &m.Board}, {"linker_script", &m.LinkerScript}} {
+		if *f.dst, ds = str(f.name); ds != nil {
+			return nil, ds
+		}
+		if *f.dst != nil && !relativePath(**f.dst) {
+			return nil, invalid("%s: field %q must be a relative path without \"..\" components", ManifestName, f.name)
+		}
 	}
 	return m, nil
 }
+
+// HeapBytesMax is the largest arena a freestanding image may be given.
+const HeapBytesMax = 1 << 30
+
+// HeapBytesValid reports whether n is a size the freestanding system
+// allocator's arena can have: a positive multiple of 16 up to
+// HeapBytesMax (specs/runtime RJ1).
+func HeapBytesValid(n int64) bool { return n >= 16 && n%16 == 0 && n <= HeapBytesMax }
 
 // relativePath reports whether p is a non-empty relative path with no
 // ".." component.

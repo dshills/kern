@@ -1,0 +1,31 @@
+//! phase: 5
+//! expect: output double_free
+//! env: freestanding
+// The freestanding system allocator traps explicit when free is given a
+// block that is free already (specs/runtime RJ2): the block overlaps the
+// free list. The interpreter's emulation traps on the same call.
+module fs
+contract { requires "this fixture frees one block twice on purpose" }
+func main() -> i32 {
+    a := SystemAllocator.new()
+    unsafe {
+        match a.alloc(64usize, 16usize) {
+            Ok(p) => {
+                match a.alloc(64usize, 16usize) {
+                    Ok(q) => {
+                        a.free(p, 64usize, 16usize)
+                        print_str("freed once")
+                        println()
+                        a.free(p, 64usize, 16usize)
+                        print_str("freed twice")
+                        println()
+                        a.free(q, 64usize, 16usize)
+                    }
+                    Err(e) => { }
+                }
+            }
+            Err(e) => { }
+        }
+    }
+    return 0i32
+}
