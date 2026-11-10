@@ -99,7 +99,8 @@ type sharedState struct {
 	handler       *FuncVal
 	nextIdent     uint32
 	failNextAlloc bool
-	failNextSpawn bool // testing.fail_next_spawn
+	failNextSpawn bool  // testing.fail_next_spawn
+	failRandom    int64 // testing.fail_random: the request of that number fails; 0 when not armed
 	nextTid       uint64
 	fatal         atomic.Pointer[Trap]  // the first trap on a spawned thread: the program terminates
 	exit          atomic.Pointer[int32] // an exit requested on a spawned thread
@@ -424,6 +425,9 @@ func (it *Interp) RunEntry(name string) (status int) {
 // ends the sequence; the status is RunEntry's for the last function run.
 func (it *Interp) RunEntries(names []string) (status int) {
 	it.globals = it.freshGlobals()
+	// a program that traps or exits runs no destructor: what it did to
+	// the process's signals ends with it all the same
+	defer releaseSignals()
 	var entries []*ir.Func
 	for _, name := range names {
 		entry := it.mod.Func(name)

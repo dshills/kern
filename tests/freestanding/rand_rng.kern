@@ -1,0 +1,31 @@
+//! phase: 5
+//! expect: output rand_rng
+//! env: freestanding
+// std/rand's Rng on bare metal (specs/runtime RI2): seeding, the
+// sequence, below and shuffle need no operating system. The numbers are
+// those of tests/run/rand_rng.kern.
+module fs
+import "std/rand"
+
+func row(label: view[]u8, xs: view[]u64) {
+    print_str(label)
+    for x in xs { print_str(" "); print_u64(x) }
+    println()
+}
+
+func main() -> i32 {
+    a := rand.Rng.seeded(42u64)
+    var out5: [5]u64 = zero()
+    for i in 0usize..5usize { out5[i] = a.next_u64() }
+    row("seeded(42):", out5)
+    b := rand.Rng.seeded(7u64)
+    var small: [10]u64 = zero()
+    for i in 0usize..10usize { small[i] = b.below(6u64) }
+    row("below(6) ten times, seeded(7):", small)
+    e := rand.Rng.seeded(99u64)
+    var deck: [10]u64 = zero()
+    for i in 0usize..10usize { deck[i] = u64(i) }
+    e.shuffle(deck)
+    row("shuffle of 0..9, seeded(99):", deck)
+    return 0i32
+}

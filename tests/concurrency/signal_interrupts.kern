@@ -1,0 +1,109 @@
+//! phase: 6
+//! expect: output signal_interrupts
+//! tsan: clean
+// A blocked call that a signal interrupts carries on (specs/runtime RH4,
+// RI1): while the main thread waits in accept, in read, in sleep and on a
+// condition variable, another thread raises a caught signal again and
+// again; each call ends as it would have without the signals.
+module cc
+import "std/signal"
+import "std/net"
+import "std/io"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+// pester raises User1 thirty times, two milliseconds apart.
+func pester() {
+    for i in 0u64..30u64 {
+        signal.raise(signal.Signal.User1)
+        time.sleep(time.millis(2u64))
+    }
+}
+
+// connector raises signals while the main thread waits in accept, then
+// connects; raises more while it waits in read, then writes.
+func connector(at: net.SocketAddr) -> u64 {
+    pester()
+    match net.TcpStream.connect(at) {
+        Ok(c) => {
+            pester()
+            match c.write_all("after the signals") {
+                Ok(u) => { return 1u64 }
+                Err(e) => { return 0u64 }
+            }
+        }
+        Err(e) => { return 0u64 }
+    }
+}
+
+struct Flag { set: bool }
+struct Both { m: Mutex[Flag]; cv: Condvar }
+func setter(x: own Shared[Both]) -> u64 {
+    pester()
+    with p := x.get() {
+        with g := p.m.lock() { g.set = true }
+        p.cv.notify_all()
+    }
+    return 1u64
+}
+
+func sockets() -> Result[(), io.IoErr] {
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    at := l.local_addr()?
+    match thread.spawn(connector, at) {
+        Ok(t) => {
+            s := l.accept()?
+            say("accept returned the connection")
+            var buf: [32]u8 = zero()
+            n := s.read(buf)?
+            print_str("read returned [")
+            print_str(buf[0usize : n])
+            print_str("]")
+            println()
+            r := t.join()
+        }
+        Err(e) => say("no thread")
+    }
+    return Ok(())
+}
+
+func main() -> i32 {
+    with sigs := signal.catch(signal.Signal.User1) {
+        match sockets() {
+            Ok(u) => { }
+            Err(e) => say("a call failed while signals arrived")
+        }
+        // sleep lasts its time
+        match thread.spawn(pester) {
+            Ok(t) => {
+                start := now_ns()
+                time.sleep(time.millis(100u64))
+                print_str("sleep of 100 ms lasted at least that long: ")
+                print_bool(now_ns() - start >= 100000000u64)
+                println()
+                t.join()
+            }
+            Err(e) => say("no thread")
+        }
+        // a condition variable's wait ends with its condition
+        x := Shared[Both].new(Both { m: Mutex[Flag].new(Flag { set: false }), cv: Condvar.new() })
+        match thread.spawn(setter, x.clone()) {
+            Ok(t) => {
+                with p := x.get() {
+                    with g := p.m.lock() {
+                        while !g.set { p.cv.wait(g) }
+                    }
+                }
+                say("the condition variable's wait ended with its condition")
+                r := t.join()
+            }
+            Err(e) => say("no thread")
+        }
+        match sigs.wait_timeout(time.seconds(10u64)) {
+            Some(s) => say("and the signals were recorded")
+            None => say("no signal was recorded")
+        }
+    }
+    return 0i32
+}

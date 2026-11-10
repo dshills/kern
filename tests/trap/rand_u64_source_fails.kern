@@ -1,0 +1,15 @@
+//! phase: 6
+//! expect: trap explicit
+//! twin: rand_u64_source_ok
+//! test-hooks: true
+// rand.u64 has no way to report a failure of the system's generator: it
+// traps explicit (specs/runtime RI2). The hook fails the request.
+module t
+import "std/rand"
+func main() -> i32 {
+    testing.fail_random(0u32)
+    x := rand.u64()   // trap explicit: the generator failed
+    print_str("not reached")
+    println()
+    return 0i32
+}

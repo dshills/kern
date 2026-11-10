@@ -1,0 +1,76 @@
+//! phase: 6
+//! expect: output rand_os
+// std/rand over the system's generator (specs/runtime RI2): fill at the
+// lengths around its 256-byte requests, u64 and below, and an Rng seeded
+// from it. What the generator gives cannot be printed; that two fills of
+// 64 bytes differ is checked (they are equal once in 2^512 runs).
+module t
+import "std/rand"
+import "std/io"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+// filled fills n bytes that start as zeros and reports whether the call
+// succeeded and, for 32 bytes or more, whether any byte changed.
+func filled(n: usize) {
+    buf := Vec[u8].new()
+    buf.resize(n, 0u8)
+    var ok: bool = false
+    with b := buf.as_edit() {
+        match rand.fill(b) {
+            Ok(u) => { ok = true }
+            Err(e) => { }
+        }
+    }
+    var changed: bool = false
+    for x in buf.as_view() {
+        if x != 0u8 { changed = true }
+    }
+    print_str("fill of ")
+    print_u64(u64(n))
+    if ok { print_str(" bytes: ok") } else { print_str(" bytes: failed") }
+    if n >= 32usize {
+        if changed { print_str(", and the bytes are no longer zeros") } else { print_str(", and the bytes are still zeros") }
+    }
+    println()
+}
+
+func run() -> Result[(), io.IoErr] {
+    filled(0usize)
+    filled(1usize)
+    filled(255usize)
+    filled(256usize)
+    filled(257usize)
+    filled(4096usize)
+    var a: [64]u8 = zero()
+    var b: [64]u8 = zero()
+    rand.fill(a)?
+    rand.fill(b)?
+    var same: bool = true
+    for i in 0usize..64usize {
+        if a[i] != b[i] { same = false }
+    }
+    if same { say("two fills of 64 bytes are equal") } else { say("two fills of 64 bytes differ") }
+    x := rand.u64()
+    y := rand.u64()
+    z := rand.u64()
+    if x == y && y == z { say("three numbers are equal") } else { say("u64 gives numbers") }
+    var inside: bool = true
+    for i in 0usize..1000usize {
+        if rand.below(10u64) >= 10u64 { inside = false }
+    }
+    if inside { say("a thousand draws below 10 are below 10") } else { say("below(10) gave 10 or more") }
+    if rand.below(1u64) == 0u64 { say("below(1) is 0") }
+    r := rand.Rng.from_os()?
+    s := rand.Rng.from_os()?
+    if r.next_u64() == s.next_u64() && r.next_u64() == s.next_u64() { say("two generators from the system agree") } else { say("two generators from the system differ") }
+    return Ok(())
+}
+
+func main() -> i32 {
+    match run() {
+        Ok(u) => say("done")
+        Err(e) => say("the system's generator failed")
+    }
+    return 0i32
+}

@@ -635,6 +635,22 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	// std/time (hosted; specs/std-time)
 	case "time_sleep_ns":
 		fe.rt("kern_time_sleep_ns", "void (i64, ptr)", "i64 "+fe.v(a[0])+", ptr "+fe.loc(c.Pos))
+	// std/signal and std/rand (hosted)
+	case "signal_open":
+		setDst(fe.rt("kern_signal_open", "i32 ()", ""))
+	case "signal_catch", "signal_raise":
+		setDst(fe.rt("kern_"+c.Intrinsic, "i32 (i32)", "i32 "+fe.v(a[0])))
+	case "signal_close":
+		fe.rt("kern_signal_close", "void ()", "")
+	case "signal_set":
+		setDst(fe.rt("kern_signal_set", "i32 (i32, i32)", "i32 "+fe.v(a[0])+", i32 "+fe.v(a[1])))
+	case "signal_wait":
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[2]))
+		setDst(fe.rt("kern_signal_wait", "i64 (i32, i64, i8)", "i32 "+fe.v(a[0])+", i64 "+fe.v(a[1])+", i8 "+z))
+	case "rand_fill":
+		p, l := fe.seqParts(a[0])
+		setDst(fe.rt("kern_rand_fill", "i32 (ptr, i64)", "ptr "+p+", i64 "+l))
 	// std/net (hosted): sockets
 	case "net_tcp_listen":
 		p, l := fe.seqParts(a[0])
@@ -714,6 +730,21 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.simdShuffle(c, a)
 	case "simd_reduce_add":
 		fe.simdReduce(c, a)
+	// swap_at: two bounds checks, then the elements' bytes change places
+	case "swap_at":
+		p, l := fe.seqParts(a[0])
+		size := sz(fe.elemType(c, 0))
+		var at [2]string
+		for k := 0; k < 2; k++ {
+			over := fe.next("t")
+			fe.emit("%s = icmp uge i64 %s, %s", over, fe.v(a[1+k]), l)
+			fe.check(over, "bounds", c.Pos)
+			off := fe.next("t")
+			fe.emit("%s = mul i64 %s, %s", off, fe.v(a[1+k]), size)
+			at[k] = fe.next("t")
+			fe.emit("%s = getelementptr i8, ptr %s, i64 %s", at[k], p, off)
+		}
+		fe.rt("kern_swap", "void (ptr, ptr, i64)", "ptr "+at[0]+", ptr "+at[1]+", i64 "+size)
 	// raw pointers (spec §6)
 	case "ptr_null":
 		fe.vals[dst()] = "null"
@@ -1107,6 +1138,8 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.rt("kern_test_fail_next_alloc", "void ()", "")
 	case "testing.fail_next_spawn":
 		fe.rt("kern_test_fail_next_spawn", "void ()", "")
+	case "testing.fail_random":
+		fe.rt("kern_test_fail_random", "void (i32)", "i32 "+fe.v(a[0]))
 	default:
 		fe.fail("intrinsic %s is not supported natively", c.Intrinsic)
 	}

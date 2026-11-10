@@ -1,0 +1,12 @@
+fill of 0 bytes: ok
+fill of 1 bytes: ok
+fill of 255 bytes: ok, and the bytes are no longer zeros
+fill of 256 bytes: ok, and the bytes are no longer zeros
+fill of 257 bytes: ok, and the bytes are no longer zeros
+fill of 4096 bytes: ok, and the bytes are no longer zeros
+two fills of 64 bytes differ
+u64 gives numbers
+a thousand draws below 10 are below 10
+below(1) is 0
+two generators from the system differ
+done

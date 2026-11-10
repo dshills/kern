@@ -1,0 +1,16 @@
+//! phase: 6
+//! expect: trap explicit
+//! twin: signal_second_catch_ok
+// One Signals exists at a time: a catch while another is live traps
+// explicit (specs/runtime RI1).
+module t
+import "std/signal"
+func main() -> i32 {
+    with first := signal.catch(signal.Signal.User1) {
+        with second := signal.catch(signal.Signal.User2) {   // trap explicit
+            print_str("not reached")
+            println()
+        }
+    }
+    return 0i32
+}

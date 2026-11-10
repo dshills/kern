@@ -1,0 +1,112 @@
+//! phase: 6
+//! expect: output rand_rng
+// std/rand's Rng (specs/runtime RI2): splitmix64 and xoshiro256** against
+// their published sequences, seeding, below with its rejection loop at
+// the largest bounds, fill, and shuffle of numbers and of a move-only
+// type. The expected output was computed from the published algorithms
+// outside kern.
+module t
+import "std/rand"
+
+func say(s: view[]u8) { print_str(s); println() }
+func row(label: view[]u8, xs: view[]u64) {
+    print_str(label)
+    for x in xs { print_str(" "); print_u64(x) }
+    println()
+}
+
+struct Tok nocopy { id: u64 }
+
+func main() -> i32 {
+    var out5: [5]u64 = zero()
+    var state: u64 = 1234567u64
+    for i in 0usize..5usize { out5[i] = rand.splitmix64(state) }
+    row("splitmix64(1234567):", out5)
+
+    var st: [4]u64 = zero()
+    st[0usize] = 1u64
+    st[1usize] = 2u64
+    st[2usize] = 3u64
+    st[3usize] = 4u64
+    fixed := rand.Rng.from_state(st)
+    var out10: [10]u64 = zero()
+    for i in 0usize..10usize { out10[i] = fixed.next_u64() }
+    row("xoshiro256** from 1 2 3 4:", out10)
+
+    a := rand.Rng.seeded(42u64)
+    for i in 0usize..5usize { out5[i] = a.next_u64() }
+    row("seeded(42):", out5)
+    again := rand.Rng.seeded(42u64)
+    var same: bool = true
+    for i in 0usize..5usize {
+        if again.next_u64() != out5[i] { same = false }
+    }
+    print_str("the same seed gives the same numbers: ")
+    print_bool(same)
+    println()
+    z := rand.Rng.seeded(0u64)
+    var out3: [3]u64 = zero()
+    for i in 0usize..3usize { out3[i] = z.next_u64() }
+    row("seeded(0):", out3)
+
+    b := rand.Rng.seeded(7u64)
+    var small: [10]u64 = zero()
+    for i in 0usize..10usize { small[i] = b.below(6u64) }
+    row("below(6) ten times, seeded(7):", small)
+    for i in 0usize..10usize { small[i] = b.below(1u64) }
+    row("below(1) ten times:", small)
+    for i in 0usize..5usize { out5[i] = b.below(1000000007u64) }
+    row("below(1000000007):", out5)
+    // the largest bound refuses one value in 2^64, and a bound just over
+    // half the range refuses nearly every second draw
+    c := rand.Rng.seeded(3u64)
+    for i in 0usize..3usize { out3[i] = c.below(18446744073709551615u64) }
+    row("below(2^64 - 1), seeded(3):", out3)
+    for i in 0usize..5usize { out5[i] = c.below(9223372036854775809u64) }
+    row("below(2^63 + 1):", out5)
+    for i in 0usize..3usize { out3[i] = c.next_u64() }
+    row("the numbers after those draws:", out3)
+    // a sequence saved and taken up again
+    saved := c.state()
+    resumed := rand.Rng.from_state(saved)
+    print_str("a generator made from another's state goes on as it does: ")
+    print_bool(resumed.next_u64() == c.next_u64() && resumed.next_u64() == c.next_u64())
+    println()
+
+    d := rand.Rng.seeded(11u64)
+    var bytes: [20]u8 = zero()
+    d.fill(bytes)
+    print_str("fill of 20 bytes, seeded(11):")
+    for x in bytes { print_str(" "); print_u64(u64(x)) }
+    println()
+    var none: [0]u8 = zero()
+    d.fill(none)
+    out3[0usize] = d.next_u64()
+    print_str("the number after it (three were used): ")
+    print_u64(out3[0usize])
+    println()
+
+    e := rand.Rng.seeded(99u64)
+    var deck: [10]u64 = zero()
+    for i in 0usize..10usize { deck[i] = u64(i) }
+    e.shuffle(deck)
+    row("shuffle of 0..9, seeded(99):", deck)
+    var one: [1]u64 = zero()
+    one[0usize] = 5u64
+    e.shuffle(one)
+    var empty: [0]u64 = zero()
+    e.shuffle(empty)
+    print_str("shuffles of one and of no element use no number: ")
+    print_u64(e.next_u64())
+    println()
+
+    // a type that cannot be copied is shuffled all the same
+    toks := Vec[Tok].new()
+    for i in 0u64..6u64 { toks.push(Tok { id: i }) }
+    f := rand.Rng.seeded(5u64)
+    with t := toks.as_edit() { f.shuffle(t) }
+    print_str("shuffle of six move-only values, seeded(5):")
+    for t in toks.as_view() { print_str(" "); print_u64(t.id) }
+    println()
+    return 0i32
+}

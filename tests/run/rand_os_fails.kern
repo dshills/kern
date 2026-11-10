@@ -1,0 +1,52 @@
+//! phase: 6
+//! expect: output rand_os_fails
+//! test-hooks: true
+// The failure of the system's generator (specs/runtime RI2), through the
+// test hook that fails one request: fill and from_os are Err, a fill
+// whose second request fails is Err though its first succeeded, and the
+// call after a failure works again.
+module t
+import "std/rand"
+import "std/io"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+func tried(label: view[]u8, n: usize) {
+    buf := Vec[u8].new()
+    buf.resize(n, 0u8)
+    print_str(label)
+    with b := buf.as_edit() {
+        match rand.fill(b) {
+            Ok(u) => print_str(": ok")
+            Err(e) => {
+                match io.kind(e) {
+                    Other => print_str(": Err of kind Other")
+                    _ => print_str(": Err of another kind")
+                }
+            }
+        }
+    }
+    println()
+}
+
+func main() -> i32 {
+    testing.fail_random(0u32)
+    tried("fill of 16 bytes with the first request failing", 16usize)
+    tried("the fill after it", 16usize)
+    testing.fail_random(1u32)
+    tried("fill of 257 bytes with the second request failing", 257usize)
+    testing.fail_random(1u32)
+    tried("fill of 256 bytes, one request, with the second failing", 256usize)
+    tried("the fill that makes the second request", 1usize)
+    tried("fill of nothing makes no request", 0usize)
+    testing.fail_random(0u32)
+    match rand.Rng.from_os() {
+        Ok(r) => say("from_os with the generator failing: ok")
+        Err(e) => say("from_os with the generator failing: Err")
+    }
+    match rand.Rng.from_os() {
+        Ok(r) => say("from_os after it: ok")
+        Err(e) => say("from_os after it: Err")
+    }
+    return 0i32
+}

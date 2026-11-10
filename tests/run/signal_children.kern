@@ -1,0 +1,43 @@
+//! phase: 6
+//! expect: output signal_children
+// A child process starts with the dispositions std/process gives it,
+// whatever the program has ignored or caught (specs/runtime RI1): a child
+// that sends itself a signal its parent ignores, or has caught, is ended
+// by it.
+module t
+import "std/signal"
+import "std/process"
+import "std/io"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+func child(label: view[]u8, script: view[]u8) {
+    cmd := process.Command.new("sh")
+    cmd.arg("-c")
+    cmd.arg(script)
+    cmd.stdout(process.Stdio.Null)
+    print_str(label)
+    match cmd.status() {
+        Ok(st) => {
+            match st {
+                Exited(code) => { print_str(": the child exited "); print_i64(i64(code)) }
+                Signaled(g) => print_str(": the child was ended by the signal")
+            }
+        }
+        Err(e) => print_str(": no child")
+    }
+    println()
+}
+
+func main() -> i32 {
+    child("nothing ignored", "kill -TERM $$; echo survived")
+    signal.ignore(signal.Signal.Terminate)
+    child("Terminate ignored by the parent", "kill -TERM $$; echo survived")
+    signal.raise(signal.Signal.Terminate)
+    say("the parent itself ignores it")
+    with sigs := signal.catch(signal.Signal.Hangup) {
+        child("Hangup caught by the parent", "kill -HUP $$; echo survived")
+        child("a child that ends by itself", "exit 3")
+    }
+    return 0i32
+}

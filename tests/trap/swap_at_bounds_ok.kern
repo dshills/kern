@@ -1,0 +1,14 @@
+//! phase: 6
+//! expect: output swap_at_bounds_ok
+//! twin: swap_at_bounds
+// The twin: the last valid index.
+module t
+func pick(n: usize) -> usize { return n }
+func main() -> i32 {
+    var xs: [3]u64 = zero()
+    xs[0usize] = 7u64
+    swap_at(xs, 0usize, pick(2usize))
+    print_u64(xs[2usize])
+    println()
+    return 0i32
+}

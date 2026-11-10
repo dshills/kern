@@ -1,0 +1,19 @@
+//! phase: 6
+//! expect: output signal_second_catch_ok
+//! twin: signal_second_catch
+// The twin: the second catch comes after the first Signals is gone, and
+// one Signals holds both signals.
+module t
+import "std/signal"
+func main() -> i32 {
+    with first := signal.catch(signal.Signal.User1) {
+        first.add(signal.Signal.User2)
+        signal.raise(signal.Signal.User2)
+        s := first.wait()
+    }
+    with second := signal.catch(signal.Signal.User2) {
+        print_str("two in turn")
+        println()
+    }
+    return 0i32
+}

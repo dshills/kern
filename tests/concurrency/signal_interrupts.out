@@ -1,0 +1,5 @@
+accept returned the connection
+read returned [after the signals]
+sleep of 100 ms lasted at least that long: true
+the condition variable's wait ended with its condition
+and the signals were recorded

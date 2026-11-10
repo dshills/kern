@@ -189,6 +189,17 @@ void *memmove(void *d, const void *s, size_t n) {
     return d;
 }
 void *memset(void *d, int c, size_t n) { char *dp = d; while (n--) *dp++ = (char)c; return d; }
+// kern_swap exchanges two regions of n bytes (the prelude's swap_at): two
+// elements of one sequence, so the same region or regions that do not
+// overlap.
+void kern_swap(char *a, char *b, int64_t n) {
+    if (a == b) return;
+    while (n-- > 0) {
+        char t = *a;
+        *a++ = *b;
+        *b++ = t;
+    }
+}
 
 // ---- container identity tags (spec §5.6) ----
 

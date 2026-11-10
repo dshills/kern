@@ -1,0 +1,136 @@
+//! phase: 6
+//! expect: output signal_basics
+// std/signal (specs/runtime RI1): each signal raised and caught; several
+// deliveries of one signal are one; the order of signals that wait
+// together; wait_timeout and try_next; an ignored signal; and that
+// destroying a Signals gives its signals back the dispositions they had
+// and forgets what it had recorded.
+module t
+import "std/signal"
+import "std/time"
+import "std/process"
+
+func say(s: view[]u8) { print_str(s); println() }
+func name(s: signal.Signal) {
+    match s {
+        Interrupt => print_str("Interrupt")
+        Terminate => print_str("Terminate")
+        Hangup => print_str("Hangup")
+        Quit => print_str("Quit")
+        User1 => print_str("User1")
+        User2 => print_str("User2")
+        Pipe => print_str("Pipe")
+        Child => print_str("Child")
+    }
+}
+// settle gives a raised signal time to be recorded: delivery to a
+// program with several threads is not immediate.
+func settle() { time.sleep(time.millis(50u64)) }
+
+func got(label: view[]u8, r: Option[signal.Signal]) {
+    print_str(label)
+    print_str(" ")
+    match r {
+        Some(s) => name(s)
+        None => print_str("nothing")
+    }
+    println()
+}
+
+func each() {
+    say("-- each signal, raised and waited for")
+    with sigs := signal.catch(signal.Signal.Interrupt) {
+        sigs.add(signal.Signal.Terminate)
+        sigs.add(signal.Signal.Hangup)
+        sigs.add(signal.Signal.Quit)
+        sigs.add(signal.Signal.User1)
+        sigs.add(signal.Signal.User2)
+        sigs.add(signal.Signal.Pipe)
+        sigs.add(signal.Signal.Child)
+        sigs.add(signal.Signal.User1)
+        for n in 0i64..8i64 {
+            s := signal.at(n)
+            signal.raise(s)
+            name(sigs.wait())
+            print_str(" ")
+        }
+        println()
+
+        say("-- deliveries of one signal while it waits are one")
+        signal.raise(signal.Signal.User1)
+        signal.raise(signal.Signal.User1)
+        signal.raise(signal.Signal.User1)
+        settle()
+        got("wait:", Some(sigs.wait()))
+        got("then:", sigs.try_next())
+
+        say("-- signals that wait together come in the order of Signal")
+        signal.raise(signal.Signal.User2)
+        signal.raise(signal.Signal.Quit)
+        signal.raise(signal.Signal.Interrupt)
+        signal.raise(signal.Signal.Hangup)
+        settle()
+        for i in 0u64..4u64 {
+            name(sigs.wait())
+            print_str(" ")
+        }
+        println()
+
+        say("-- nothing arrives")
+        start := now_ns()
+        r := sigs.wait_timeout(time.millis(30u64))
+        got("wait_timeout of 30 ms:", r)
+        print_str("it lasted at least that long: ")
+        print_bool(now_ns() - start >= 30000000u64)
+        println()
+        got("wait_timeout of nothing:", sigs.wait_timeout(time.nanos(0u64)))
+        got("try_next:", sigs.try_next())
+        signal.raise(signal.Signal.Terminate)
+        got("wait_timeout of 10 s after a raise:", sigs.wait_timeout(time.seconds(10u64)))
+
+        say("-- a child that ends")
+        cmd := process.Command.new("true")
+        match cmd.status() {
+            Ok(st) => { }
+            Err(e) => say("no child")
+        }
+        got("wait_timeout of 10 s:", sigs.wait_timeout(time.seconds(10u64)))
+    }
+}
+
+func dispositions() {
+    say("-- an ignored signal does nothing")
+    signal.ignore(signal.Signal.User2)
+    signal.raise(signal.Signal.User2)
+    settle()
+    say("the program goes on")
+
+    say("-- a Signals gives back the disposition it found")
+    with sigs := signal.catch(signal.Signal.User2) {
+        signal.raise(signal.Signal.User2)
+        got("caught while held:", Some(sigs.wait()))
+    }
+    signal.raise(signal.Signal.User2)
+    settle()
+    say("ignored again once the Signals is gone")
+
+    say("-- and forgets what it had recorded")
+    with first := signal.catch(signal.Signal.User1) {
+        signal.raise(signal.Signal.User1)
+        settle()
+    }
+    signal.ignore(signal.Signal.User1)
+    with second := signal.catch(signal.Signal.User1) {
+        got("a new Signals starts with:", second.try_next())
+        signal.raise(signal.Signal.User1)
+        got("and catches what is raised now:", Some(second.wait()))
+    }
+    signal.reset(signal.Signal.Child)
+    say("reset of a signal that is not held is accepted")
+}
+
+func main() -> i32 {
+    each()
+    dispositions()
+    return 0i32
+}

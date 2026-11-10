@@ -834,6 +834,30 @@ func init() {
 			}
 			return nil
 		},
+		// swap_at exchanges two elements of a sequence
+		"swap_at": func(it *Interp, a []Value, c callCtx) []Value {
+			seq := byteSeq(acc(a[0]))
+			i, j := u64(a[1]), u64(a[2])
+			if i >= uint64(seq.length()) || j >= uint64(seq.length()) {
+				it.trap("bounds", c.pos)
+			}
+			if i != j {
+				x, y := seq.at(int(i)), seq.at(int(j))
+				xv, yv := x.get(), y.get()
+				x.set(yv)
+				y.set(xv)
+			}
+			return nil
+		},
+		"testing.fail_random": func(it *Interp, a []Value, c callCtx) []Value {
+			if !it.TestHooks {
+				it.trap("explicit", c.pos)
+			}
+			it.sh.mu.Lock()
+			it.sh.failRandom = int64(u64(a[0])) + 1
+			it.sh.mu.Unlock()
+			return nil
+		},
 		"testing.fail_next_spawn": func(it *Interp, a []Value, c callCtx) []Value {
 			if !it.TestHooks {
 				it.trap("explicit", c.pos)

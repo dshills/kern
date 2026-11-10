@@ -1,0 +1,14 @@
+//! phase: 6
+//! expect: trap explicit
+//! twin: rand_below_zero_ok
+// There is no number below 0: Rng.below(0) traps explicit (specs/runtime
+// RI2), as rand.below(0) does.
+module t
+import "std/rand"
+func main() -> i32 {
+    r := rand.Rng.seeded(1u64)
+    x := r.below(0u64)   // trap explicit
+    print_str("not reached")
+    println()
+    return 0i32
+}

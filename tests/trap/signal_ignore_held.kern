@@ -1,0 +1,15 @@
+//! phase: 6
+//! expect: trap explicit
+//! twin: signal_ignore_held_ok
+// A signal a live Signals holds has one disposition, caught: ignore and
+// reset of it trap explicit (specs/runtime RI1).
+module t
+import "std/signal"
+func main() -> i32 {
+    with sigs := signal.catch(signal.Signal.User1) {
+        signal.ignore(signal.Signal.User1)   // trap explicit
+        print_str("not reached")
+        println()
+    }
+    return 0i32
+}

@@ -1,0 +1,51 @@
+//! phase: 6
+//! expect: output swap_at
+// The prelude's swap_at exchanges two elements of a sequence whatever
+// their type: numbers, a struct larger than the runtime's 64-byte chunk,
+// and values that cannot be copied; an element with itself is unchanged.
+module run
+struct Big { a: [20]u64; tag: u64 }
+struct Tok nocopy { id: u64 }
+impl Tok {
+    destructor(edit self) { print_str(" drop"); print_u64(self.id) }
+}
+func moved() {
+    toks := Vec[Tok].new()
+    for i in 0u64..4u64 { toks.push(Tok { id: i }) }
+    with t := toks.as_edit() {
+        swap_at(t, 0usize, 3usize)
+        swap_at(t, 1usize, 2usize)
+    }
+    for t in toks.as_view() { print_u64(t.id); print_str(" ") }
+    println()
+    print_str("at the end:")
+}
+func main() -> i32 {
+    var xs: [5]u64 = zero()
+    for i in 0usize..5usize { xs[i] = u64(i) * 10u64 }
+    swap_at(xs, 0usize, 4usize)
+    swap_at(xs, 2usize, 2usize)
+    swap_at(xs[1usize : 4usize], 0usize, 2usize)
+    for x in xs { print_u64(x); print_str(" ") }
+    println()
+
+    var big: [3]Big = zero()
+    for i in 0usize..3usize {
+        big[i].tag = u64(i)
+        for k in 0usize..20usize { big[i].a[k] = u64(i) * 100u64 + u64(k) }
+    }
+    swap_at(big, 0usize, 2usize)
+    for i in 0usize..3usize {
+        print_u64(big[i].tag)
+        print_str(":")
+        print_u64(big[i].a[0usize])
+        print_str("..")
+        print_u64(big[i].a[19usize])
+        print_str(" ")
+    }
+    println()
+
+    moved()
+    println()
+    return 0i32
+}

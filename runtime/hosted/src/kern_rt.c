@@ -16,6 +16,8 @@
 #include "rt_mem.c"
 #include "rt_time.c"
 #include "rt_net.c"
+#include "rt_signal.c"
+#include "rt_rand.c"
 #include "rt_str.c"
 #include "rt_sync.c"
 #include "rt_thread.c"

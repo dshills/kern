@@ -1,0 +1,124 @@
+// std/signal: the signals a program is sent, for hosted programs (a
+// freestanding image has none).
+// Imported with `import "std/signal"` (specs/runtime RI1).
+//
+// A signal has a disposition: the system's default (for most, the end of
+// the program), ignored, or caught. A caught signal is recorded by the
+// runtime and handed to the program when it asks: there are no handler
+// functions, so nothing of the program runs at the moment of delivery,
+// and code that waits for a signal is ordinary code.
+//
+//   with sigs := signal.catch(signal.Signal.Interrupt) {
+//       sigs.add(signal.Signal.Terminate)
+//       s := sigs.wait()      // blocks until one of the two arrives
+//       ...                   // shut down in order
+//   }
+//
+// A child process starts with the dispositions std/process gives it,
+// whatever the program has caught or ignored.
+module signal
+import "std/time"
+
+// Runtime intrinsics (hosted). A signal is its position in Signal.
+func signal_open() -> i32
+func signal_catch(which: u32) -> i32
+func signal_close()
+func signal_set(which: u32, how: i32) -> i32
+func signal_wait(mask: u32, ns: u64, timed: bool) -> i64
+func signal_raise(which: u32) -> i32
+
+// Signal names the signals a program can catch, ignore or raise: an
+// interrupt from the keyboard (SIGINT), a request to end (SIGTERM), the
+// loss of the terminal (SIGHUP), a quit from the keyboard (SIGQUIT), the
+// two user signals (SIGUSR1, SIGUSR2), a write to a pipe nobody reads
+// (SIGPIPE) and a child that changed state (SIGCHLD).
+union Signal { Interrupt; Terminate; Hangup; Quit; User1; User2; Pipe; Child }
+
+// number is a signal's position in Signal, and at the signal at a
+// position.
+func number(s: Signal) -> u32 {
+    match s {
+        Interrupt => { return 0u32 }
+        Terminate => { return 1u32 }
+        Hangup => { return 2u32 }
+        Quit => { return 3u32 }
+        User1 => { return 4u32 }
+        User2 => { return 5u32 }
+        Pipe => { return 6u32 }
+        Child => { return 7u32 }
+    }
+}
+func at(n: i64) -> Signal {
+    if n == 0i64 { return Interrupt }
+    if n == 1i64 { return Terminate }
+    if n == 2i64 { return Hangup }
+    if n == 3i64 { return Quit }
+    if n == 4i64 { return User1 }
+    if n == 5i64 { return User2 }
+    if n == 6i64 { return Pipe }
+    return Child
+}
+
+// ignore makes the program ignore a signal, and reset gives a signal the
+// system's default again. Either traps explicit for a signal a live
+// Signals holds.
+func ignore(s: Signal) {
+    if signal_set(number(s), 1i32) != 0i32 { trap_kind(explicit) }
+}
+func reset(s: Signal) {
+    if signal_set(number(s), 0i32) != 0i32 { trap_kind(explicit) }
+}
+
+// raise sends a signal to the program's own process: any of its threads
+// may be the one that takes it.
+func raise(s: Signal) {
+    if signal_raise(number(s)) != 0i32 { trap_kind(explicit) }
+}
+
+// Signals is the set of signals the program has caught. One exists at a
+// time: a catch while another is live traps explicit. Destroying it gives
+// each of its signals the disposition it had when it was caught or
+// added, and discards the deliveries it had recorded.
+struct Signals nocopy { mask: u32 }
+
+// catch makes the runtime record deliveries of s instead of acting on
+// them.
+func catch(s: Signal) -> Signals {
+    if signal_open() != 0i32 { trap_kind(explicit) }
+    if signal_catch(number(s)) != 0i32 {
+        signal_close()
+        trap_kind(explicit)
+    }
+    return Signals { mask: 1u32 << number(s) }
+}
+
+impl Signals {
+    // add catches one more signal; a signal already held stays as it is.
+    func add(edit self, s: Signal) {
+        if signal_catch(number(s)) != 0i32 { trap_kind(explicit) }
+        self.mask = self.mask | (1u32 << number(s))
+    }
+
+    // wait blocks until one of the caught signals has arrived and returns
+    // it. Deliveries of one signal while it is waiting to be returned are
+    // one; when several signals are waiting, the one declared first in
+    // Signal comes first.
+    func wait(edit self) -> Signal { return at(signal_wait(self.mask, 0u64, false)) }
+
+    // wait_timeout is wait for at most d: None when no caught signal
+    // arrived in that time. A duration of zero looks once.
+    func wait_timeout(edit self, d: time.Duration) -> Option[Signal] {
+        r := signal_wait(self.mask, d.ns, true)
+        if r < 0i64 { return None }
+        return Some(at(r))
+    }
+
+    // try_next returns a caught signal that has arrived, without waiting.
+    func try_next(edit self) -> Option[Signal] {
+        r := signal_wait(self.mask, 0u64, true)
+        if r < 0i64 { return None }
+        return Some(at(r))
+    }
+
+    destructor(edit self) { signal_close() }
+}

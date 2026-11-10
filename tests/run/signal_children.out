@@ -1,0 +1,5 @@
+nothing ignored: the child was ended by the signal
+Terminate ignored by the parent: the child was ended by the signal
+the parent itself ignores it
+Hangup caught by the parent: the child was ended by the signal
+a child that ends by itself: the child exited 3

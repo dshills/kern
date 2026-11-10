@@ -59,11 +59,11 @@ func (s kindSet) list() []string {
 var trapping = map[string]kindSet{
 	"Mutex.lock": kindsOf("explicit"), "Condvar.wait": kindsOf("explicit"), "Condvar.wait_ns": kindsOf("explicit"), "Shared.clone": kindsOf("overflow"),
 	"SystemAllocator.alloc": kindsOf("explicit"), "SystemAllocator.realloc": kindsOf("explicit"), "SystemAllocator.alloc_zeroed": kindsOf("explicit"), "SystemAllocator.free": kindsOf("explicit"),
-	"simd_shuffle": kindsOf("bounds"), "asm": allKinds,
+	"simd_shuffle": kindsOf("bounds"), "swap_at": kindsOf("bounds"), "asm": allKinds,
 	"ptr_load": kindsOf("explicit"), "ptr_store": kindsOf("explicit"), "ptr_take": kindsOf("explicit"), "ptr_load_volatile": kindsOf("explicit"), "ptr_store_volatile": kindsOf("explicit"), "ptr_copy": kindsOf("explicit"), "ptr_store_seq": kindsOf("explicit"),
 	"ptr_view": kindsOf("explicit"), "ptr_edit": kindsOf("explicit"), "ptr_view_seq": kindsOf("explicit"), "ptr_edit_seq": kindsOf("explicit"), "ptr_edit2": kindsOf("explicit"), "ptr_view2": kindsOf("explicit"), "ptr_view_edit": kindsOf("explicit"),
 	"testing.require_hooks": kindsOf("explicit"), "testing.seed_shared_count": kindsOf("explicit", "overflow"),
-	"testing.fail_next_alloc": kindsOf("explicit"), "testing.fail_next_spawn": kindsOf("explicit"),
+	"testing.fail_next_alloc": kindsOf("explicit"), "testing.fail_next_spawn": kindsOf("explicit"), "testing.fail_random": kindsOf("explicit"),
 	// the runtime objects: kern_alloc (natively) and runtimeAlloc (in the
 	// interpreter) trap oom when their storage cannot be allocated
 	"Shared.new": kindsOf("oom"), "Mutex.new": kindsOf("oom"), "Condvar.new": kindsOf("oom"),

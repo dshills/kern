@@ -1,0 +1,24 @@
+-- each signal, raised and waited for
+Interrupt Terminate Hangup Quit User1 User2 Pipe Child 
+-- deliveries of one signal while it waits are one
+wait: User1
+then: nothing
+-- signals that wait together come in the order of Signal
+Interrupt Hangup Quit User2 
+-- nothing arrives
+wait_timeout of 30 ms: nothing
+it lasted at least that long: true
+wait_timeout of nothing: nothing
+try_next: nothing
+wait_timeout of 10 s after a raise: Terminate
+-- a child that ends
+wait_timeout of 10 s: Child
+-- an ignored signal does nothing
+the program goes on
+-- a Signals gives back the disposition it found
+caught while held: User2
+ignored again once the Signals is gone
+-- and forgets what it had recorded
+a new Signals starts with: nothing
+and catches what is raised now: User1
+reset of a signal that is not held is accepted

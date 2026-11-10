@@ -1,0 +1,13 @@
+//! phase: 6
+//! expect: trap bounds
+//! twin: swap_at_bounds_ok
+// swap_at traps bounds when an index is not below the sequence's length.
+module t
+func pick(n: usize) -> usize { return n }
+func main() -> i32 {
+    var xs: [3]u64 = zero()
+    swap_at(xs, 0usize, pick(3usize))   // trap bounds
+    print_str("not reached")
+    println()
+    return 0i32
+}

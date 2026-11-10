@@ -1,0 +1,12 @@
+//! phase: 6
+//! expect: output rand_below_zero_ok
+//! twin: rand_below_zero
+// The twin: the smallest bound there is.
+module t
+import "std/rand"
+func main() -> i32 {
+    r := rand.Rng.seeded(1u64)
+    print_u64(r.below(1u64))
+    println()
+    return 0i32
+}

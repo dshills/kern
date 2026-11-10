@@ -74,6 +74,10 @@ func ptr_init_ctx[T, C, E](p: RawPtr[T], init: func(out T, view[C]) -> Result[()
 // copy: natively one memcpy, in the interpreter an element-wise encode (a
 // view of an array local has no raw address there).
 func ptr_store_seq[T](p: RawPtr[T], src: view[]T)
+// swap_at exchanges the elements i and j of a sequence, whatever their
+// type (a move-only element cannot be copied out and back); it traps
+// bounds when either index is not below len(xs).
+func swap_at[T](xs: edit[]T, i: usize, j: usize)
 // size_of and align_of are the §4.1 size and alignment of T in bytes.
 func size_of[T]() -> usize
 func align_of[T]() -> usize
@@ -175,6 +179,9 @@ impl testing {
     // the next thread.spawn or Scope.spawn fails with ResourceExhausted
     // before any thread exists, so that its own arguments are destroyed
     func fail_next_spawn()
+    // the system's source of random bytes serves after more requests of
+    // at most 256 bytes and fails the one that follows, once (std/rand)
+    func fail_random(after: u32)
 }
 
 union Option[T] { Some(T); None }

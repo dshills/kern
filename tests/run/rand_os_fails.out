@@ -1,0 +1,8 @@
+fill of 16 bytes with the first request failing: Err of kind Other
+the fill after it: ok
+fill of 257 bytes with the second request failing: Err of kind Other
+fill of 256 bytes, one request, with the second failing: ok
+the fill that makes the second request: Err of kind Other
+fill of nothing makes no request: ok
+from_os with the generator failing: Err
+from_os after it: ok

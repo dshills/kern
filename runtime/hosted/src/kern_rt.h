@@ -44,6 +44,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <netdb.h>
+#include <sys/random.h>
 #if defined(__linux__)
 #include <sys/auxv.h>
 #include <features.h>
@@ -227,6 +228,8 @@ void kern_test_fail_next_alloc(void);
 // Exists only with test hooks, so a program using them without the flag fails to link.
 void kern_test_require_hooks(void);
 #endif
+// Exchanges two regions of n bytes that are the same region or do not overlap.
+void kern_swap(char *a, char *b, int64_t n);
 // Issues the next container identity tag: from 1 in a debug build, 0 (unchecked) in a release build or after wrap-around.
 uint32_t kern_next_identity(void);
 // Returns the system allocator, a process-wide object.
@@ -279,6 +282,31 @@ int64_t kern_net_recv_from(int32_t fd, char *buf, int64_t n, uint8_t *from, int6
 int32_t kern_net_close(int32_t fd);
 // Resolves a host name: its addresses' records, each with the port, into recs while they fit; the bytes they need, or -errno.
 int64_t kern_net_resolve(const char *host, int64_t n, uint16_t port, uint8_t *recs, int64_t cap);
+
+// ---- rt_signal.c: std/signal ----
+// A signal is its position in std/signal's Signal: 0 Interrupt, 1 Terminate, 2 Hangup, 3 Quit, 4 User1, 5 User2, 6 Pipe, 7 Child.
+
+// Claims the one live Signals: 0, -EBUSY when one is live, or -errno.
+int32_t kern_signal_open(void);
+// Records deliveries of the signal from now on, remembering its disposition: 0 or -errno.
+int32_t kern_signal_catch(int32_t which);
+// Restores every caught signal's earlier disposition, discards the records and frees the claim.
+void kern_signal_close(void);
+// Makes the signal ignored (how 1) or default (how 0): 0, -EBUSY when the live Signals holds it, or -errno.
+int32_t kern_signal_set(int32_t which, int32_t how);
+// Returns the first recorded signal of mask and forgets it, waiting for one (at most ns nanoseconds when timed, then -2^32).
+int64_t kern_signal_wait(uint32_t mask, uint64_t ns, uint8_t timed);
+// Sends the signal to the program's own process: 0 or -errno.
+int32_t kern_signal_raise(int32_t which);
+
+// ---- rt_rand.c: std/rand ----
+
+// Fills n bytes from the system's random generator: 0 or -errno.
+int32_t kern_rand_fill(char *buf, int64_t n);
+#ifdef KERN_TEST_HOOKS
+// Arms a failure of the random source: the request numbered after + 1 fails, once.
+void kern_test_fail_random(uint32_t after);
+#endif
 
 // ---- rt_time.c: clocks ----
 

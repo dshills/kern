@@ -1,0 +1,154 @@
+// std/rand: random numbers.
+// Imported with `import "std/rand"` (specs/runtime RI2).
+//
+// Two sources. The functions fill, u64 and below draw from the operating
+// system's generator, which is fit for keys and tokens; they are hosted
+// only. Rng is a small, fast generator whose sequence is fixed by its
+// seed, the same in both engines and on every platform: fit for
+// simulations, tests and shuffles, never for secrets. Rng works in a
+// freestanding image too, except for from_os.
+module rand
+import "std/io"
+
+// Runtime intrinsic (hosted): fills buf from the system's generator, 0 or
+// -errno.
+func rand_fill(buf: edit[]u8) -> i32
+
+// fill fills buf with random bytes from the system's generator.
+func fill(buf: edit[]u8) -> Result[(), io.IoErr] { return io.status(rand_fill(buf)) }
+
+// system_u64 is eight bytes of the system's generator as a number; it
+// traps explicit when the generator fails.
+func system_u64() -> u64 {
+    var b: [8]u8 = zero()
+    if rand_fill(b) != 0i32 { trap_kind(explicit) }
+    return load_le(b)
+}
+
+// load_le is the first eight bytes of b as a number, low byte first.
+func load_le(b: view[]u8) -> u64 {
+    var v: u64 = 0u64
+    for i in 0usize..8usize { v = v | (u64(b[i]) << (truncate[u32](i) * 8u32)) }
+    return v
+}
+
+// u64 is a random number from the system's generator; it traps explicit
+// when the generator fails. (Written rand.u64() by a program; inside
+// this module u64(x) is the conversion, so the work is in system_u64.)
+func u64() -> u64 { return system_u64() }
+
+// threshold is 2^64 mod n: a draw below it is one of the leftover values
+// that would make some results more likely than others.
+func threshold(n: u64) -> u64 { return wrapping_neg(n) % n }
+
+// below is a random number from the system's generator that is at least
+// 0 and less than n, each value as likely as any other. It traps explicit
+// when n is 0 or the generator fails.
+func below(n: u64) -> u64 {
+    if n == 0u64 { trap_kind(explicit) }
+    t := threshold(n)
+    while true {
+        r := system_u64()
+        if r >= t { return r % n }
+    }
+    return 0u64
+}
+
+// Rng is a generator whose sequence is fixed by its state: xoshiro256**,
+// its four words filled from a seed by splitmix64. The same seed gives
+// the same numbers everywhere. It is not for secrets: its state can be
+// worked out from its output.
+struct Rng nocopy { s: [4]u64 }
+
+// splitmix64 advances a state and returns its next number.
+func splitmix64(state: edit[u64]) -> u64 {
+    state = wrapping_add(state, 11400714819323198485u64)
+    var z: u64 = state
+    z = wrapping_mul(z ^ (z >> 30u32), 13787848793156543929u64)
+    z = wrapping_mul(z ^ (z >> 27u32), 10723151780598845931u64)
+    return z ^ (z >> 31u32)
+}
+
+// rotl turns x left by k bits (1 to 63); `<<` alone would trap on the
+// bits that leave at the top.
+func rotl(x: u64, k: u32) -> u64 { return wrapping_shl(x, k) | (x >> (64u32 - k)) }
+
+impl Rng {
+    // seeded is the generator that seed stands for.
+    func seeded(seed: u64) -> Rng {
+        var state: u64 = seed
+        var s: [4]u64 = zero()
+        for i in 0usize..4usize { s[i] = splitmix64(state) }
+        return Rng { s: s }
+    }
+
+    // from_state is the generator with the given four words of state,
+    // and state gives a generator's words back: a sequence can be saved
+    // and taken up again. The words must not all be zero (such a
+    // generator would give zeros for ever): that traps explicit.
+    func from_state(s: [4]u64) -> Rng {
+        if s[0usize] == 0u64 && s[1usize] == 0u64 && s[2usize] == 0u64 && s[3usize] == 0u64 { trap_kind(explicit) }
+        return Rng { s: s }
+    }
+    func state(view self) -> [4]u64 { return self.s }
+
+    // from_os is a generator seeded from the system's generator.
+    func from_os() -> Result[Rng, io.IoErr] {
+        var b: [8]u8 = zero()
+        fill(b)?
+        return Ok(Rng.seeded(load_le(b)))
+    }
+
+    // next_u64 is the next number of the sequence.
+    func next_u64(edit self) -> u64 {
+        result := wrapping_mul(rotl(wrapping_mul(self.s[1usize], 5u64), 7u32), 9u64)
+        t := wrapping_shl(self.s[1usize], 17u32)
+        self.s[2usize] = self.s[2usize] ^ self.s[0usize]
+        self.s[3usize] = self.s[3usize] ^ self.s[1usize]
+        self.s[1usize] = self.s[1usize] ^ self.s[2usize]
+        self.s[0usize] = self.s[0usize] ^ self.s[3usize]
+        self.s[2usize] = self.s[2usize] ^ t
+        self.s[3usize] = rotl(self.s[3usize], 45u32)
+        return result
+    }
+
+    // below is the next number of the sequence that is at least 0 and
+    // less than n, each value as likely as any other; it may use several
+    // numbers of the sequence. It traps explicit when n is 0.
+    func below(edit self, n: u64) -> u64 {
+        if n == 0u64 { trap_kind(explicit) }
+        t := threshold(n)
+        while true {
+            r := self.next_u64()
+            if r >= t { return r % n }
+        }
+        return 0u64
+    }
+
+    // fill fills buf from the sequence: each number gives eight bytes,
+    // low byte first, and the last number as many as are left.
+    func fill(edit self, buf: edit[]u8) {
+        var i: usize = 0usize
+        while i < len(buf) {
+            var r: u64 = self.next_u64()
+            var k: usize = 0usize
+            while k < 8usize && i < len(buf) {
+                buf[i] = truncate[u8](r & 255u64)
+                r = r >> 8u32
+                i = i + 1usize
+                k = k + 1usize
+            }
+        }
+    }
+
+    // shuffle puts the elements of xs in a random order, each order as
+    // likely as any other (as far as the sequence goes).
+    func shuffle[T](edit self, xs: edit[]T) {
+        var i: usize = len(xs)
+        while i > 1usize {
+            i = i - 1usize
+            j := self.below(u64(i) + 1u64)
+            swap_at(xs, i, truncate[usize](j))
+        }
+    }
+}

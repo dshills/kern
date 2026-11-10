@@ -1,0 +1,18 @@
+//! phase: 6
+//! expect: output rand_u64_source_ok
+//! twin: rand_u64_source_fails
+//! test-hooks: true
+// The twin: the hook fails the request after the one u64 makes, so u64
+// returns; the fill that follows meets the failure.
+module t
+import "std/rand"
+func main() -> i32 {
+    testing.fail_random(1u32)
+    x := rand.u64()
+    var b: [4]u8 = zero()
+    match rand.fill(b) {
+        Ok(u) => { print_str("the hook did not fire"); println() }
+        Err(e) => { print_str("u64 returned; the next request failed"); println() }
+    }
+    return 0i32
+}

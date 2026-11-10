@@ -1,0 +1,19 @@
+//! phase: 6
+//! expect: output signal_ignore_held_ok
+//! twin: signal_ignore_held
+// The twin: a signal the Signals does not hold may be ignored and reset
+// while it lives, and the held one once it is gone.
+module t
+import "std/signal"
+func main() -> i32 {
+    with sigs := signal.catch(signal.Signal.User1) {
+        signal.ignore(signal.Signal.User2)
+        signal.raise(signal.Signal.User2)
+        signal.reset(signal.Signal.Child)
+    }
+    signal.ignore(signal.Signal.User1)
+    signal.raise(signal.Signal.User1)
+    print_str("accepted")
+    println()
+    return 0i32
+}
