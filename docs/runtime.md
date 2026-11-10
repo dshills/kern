@@ -279,8 +279,14 @@ The modules hold the policy.
   expects; the runtime asks the system what it is and refuses a wrong
   claim. On macOS, which will not say through a socket option whether a
   socket is listening, the runtime reads that from the process's own
-  descriptor table. `peer_credentials` is the system's record of the
-  user, group and process at the other end.
+  descriptor table. A descriptor the program does not take is closed:
+  those after the first in a message, and any that come with bytes an
+  ordinary `read` takes or with a datagram. Linux does that itself;
+  macOS opens every descriptor sent before it looks at the room a
+  receive gave, so the runtime gives room for all a message can carry
+  on every receive from a Unix-domain socket and closes the rest.
+  `peer_credentials` is the system's record of the user, group and
+  process at the other end.
 - **A Unix-domain path whose first byte is zero** names a socket in
   Linux's abstract namespace, which is in no file system. macOS has no
   such namespace, and the same call there is `Unsupported`.
@@ -550,13 +556,13 @@ entry raises its traps.
 | `int32_t kern_net_poller_set(int32_t p, int32_t fd, uint64_t token, int32_t interest)` | Watches fd for reading (interest 1), writing (2) or both (3) under the token, replacing what was asked of it before, or stops watching it (0; -ENOENT when it was not watched): 0 or -errno. |
 | `int64_t kern_net_poller_wait(int32_t p, uint64_t *out, int64_t cap, uint64_t ns, uint8_t timed)` | Waits until a watched descriptor is ready and writes (token, flags) pairs into out, flags 1 readable, 2 writable, 4 the peer closed, 8 an error is pending: the number of pairs, 0 when the time passed, or -errno. |
 | `int64_t kern_net_send_fd(int32_t fd, const char *p, int64_t n, int32_t pass)` | Sends at least one byte over a Unix-domain stream with the descriptor pass attached to the first: the count or -errno. |
-| `int64_t kern_net_recv_fd(int32_t fd, char *buf, int64_t n, int32_t *got, int64_t cap, uint64_t ns, uint8_t timed)` | Receives at most n bytes and the first descriptor that came with them into got[0] (-1: none; others are closed), close-on-exec: the count, 0 when the peer closed, -errno, or -2^32. |
+| `int64_t kern_net_recv_fd(int32_t fd, char *buf, int64_t n, int32_t *got, int64_t cap, uint64_t ns, uint8_t timed)` | Receives at most n bytes and the first descriptor that came with them into got[0] (-1: none; any other is closed, with room for all one message can carry), close-on-exec: the count, 0 when the peer closed, -errno, or -2^32. |
 | `int32_t kern_net_fd_kind(int32_t fd)` | Says what an open descriptor is: 1 not a socket, 2 a TCP stream, 3 a TCP listener, 4 a UDP socket, 5 a Unix-domain stream, 6 a Unix-domain listener, 7 a Unix-domain datagram socket, 0 another socket; or -errno. |
 | `int32_t kern_net_fd_adopt(int32_t fd, int32_t kind)` | Readies a received descriptor for use as the kind named (as kern_net_fd_kind's): the descriptor, or -EINVAL when it is not of that kind, or -errno; on failure it stays open. |
 | `int32_t kern_net_peer_cred(int32_t fd, uint32_t *out, int64_t cap)` | Writes the user, group and process (0: not known) of a Unix-domain stream's peer, as they were when it connected, into out[0..3]: 0 or -errno. |
 | `int32_t kern_net_unix_dgram(const char *p, int64_t n)` | Makes a Unix-domain datagram socket, bound to the path when n > 0: a descriptor or -errno. |
 | `int64_t kern_net_unix_send_to(int32_t fd, const char *p, int64_t n, const char *path, int64_t pn)` | Sends one datagram to the socket bound to the path, waiting while its queue is full: the count or -errno. |
-| `int64_t kern_net_unix_recv_from(int32_t fd, char *buf, int64_t n, char *from, int64_t fcap, uint64_t ns, uint8_t timed)` | Receives one datagram, cut to n bytes, and its sender's path into from, as its length in from[0] and then its bytes (cut at 104; length 0 for a sender with no path): the count, -errno, or -2^32. |
+| `int64_t kern_net_unix_recv_from(int32_t fd, char *buf, int64_t n, char *from, int64_t fcap, uint64_t ns, uint8_t timed)` | Receives one datagram, cut to n bytes, and its sender's path into from, as its length in from[0] and then its bytes (cut at 104; length 0 for a sender with no path), closing any descriptor sent with it: the count, -errno, or -2^32. |
 | `int32_t kern_net_unix_pair(int32_t *fds, int64_t cap)` | Makes two connected Unix-domain stream sockets into fds[0] and fds[1]: 0 or -errno. |
 | `int64_t kern_net_recv(int32_t fd, char *buf, int64_t n, uint64_t ns, uint8_t timed)` | Receives at most n bytes: the count, 0 when the peer closed, -errno, or -2^32. |
 | `int64_t kern_net_send(int32_t fd, const char *p, int64_t n)` | Sends at most n bytes, waiting while the socket's buffer is full: the count or -errno (never a SIGPIPE). |

@@ -312,6 +312,42 @@ int64_t kern_net_unix_send_to(int32_t fd, const char *p, int64_t n, const char *
         (void)nanosleep(&nap, NULL);
     }
 }
+// A message over a Unix-domain socket can carry descriptors, and what a
+// receive does with those it has no room for differs: Linux closes them;
+// macOS has already opened every one in this process and reports only
+// those that fit, so one read with no room for them, or with too little,
+// leaves descriptors open that nothing names. Every receive on a
+// Unix-domain socket therefore gives room for the most one message can
+// carry (253 on Linux, 254 on macOS) and closes what its caller does not
+// take.
+#define KERN_RIGHTS_ROOM CMSG_SPACE(sizeof(int) * 256)
+#if defined(MSG_CMSG_CLOEXEC)
+#define KERN_RECV_RIGHTS MSG_CMSG_CLOEXEC // atomically: no child of another thread inherits one
+#else
+#define KERN_RECV_RIGHTS 0
+#endif
+// kern_net_take_rights walks the control data a recvmsg filled: with
+// keep, the first descriptor is returned, close-on-exec; every other is
+// closed. It returns -1 when there is none to return.
+static int kern_net_take_rights(struct msghdr *m, int keep) {
+    int first = -1;
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(m); c != NULL; c = CMSG_NXTHDR(m, c)) {
+        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS || c->cmsg_len < CMSG_LEN(0)) continue;
+        size_t count = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        for (size_t i = 0; i < count; i++) {
+            int d;
+            memcpy(&d, CMSG_DATA(c) + i * sizeof(int), sizeof d);
+            if (keep && first < 0) {
+                (void)fcntl(d, F_SETFD, FD_CLOEXEC);
+                first = d;
+            } else {
+                close(d);
+            }
+        }
+    }
+    return first;
+}
+
 // kern_net_unix_recv_from receives one datagram, cut to n bytes, and
 // writes its sender's path into from: its length in the first byte, then
 // its bytes, which begin with a NUL for a name in the abstract
@@ -321,10 +357,23 @@ int64_t kern_net_unix_recv_from(int32_t fd, char *buf, int64_t n, char *from, in
     uint64_t start = timed ? kern_now_ns() : 0;
     for (;;) {
         struct sockaddr_un sa;
-        socklen_t len = sizeof sa;
         memset(&sa, 0, sizeof sa);
-        ssize_t r = recvfrom(fd, buf, (size_t)n, 0, (struct sockaddr *)&sa, &len);
+        struct iovec iov = {buf, (size_t)n};
+        union { struct cmsghdr h; char buf[KERN_RIGHTS_ROOM]; } u;
+        struct msghdr m;
+        memset(&m, 0, sizeof m);
+        m.msg_name = &sa;
+        m.msg_namelen = sizeof sa;
+        m.msg_iov = &iov;
+        m.msg_iovlen = 1;
+        m.msg_control = u.buf;
+        m.msg_controllen = sizeof u.buf;
+        ssize_t r = recvmsg(fd, &m, KERN_RECV_RIGHTS);
         if (r >= 0) {
+            // a datagram carries no descriptor a program can take: one a
+            // sender attached is closed, not left open with no name
+            (void)kern_net_take_rights(&m, 0);
+            socklen_t len = m.msg_namelen;
             size_t have = len > offsetof(struct sockaddr_un, sun_path) ? len - offsetof(struct sockaddr_un, sun_path) : 0;
             if (have > sizeof sa.sun_path) have = sizeof sa.sun_path;
             // a path ends at its NUL; where there is an abstract namespace,
@@ -380,35 +429,17 @@ int64_t kern_net_recv_fd(int32_t fd, char *buf, int64_t n, int32_t *got, int64_t
     uint64_t start = timed ? kern_now_ns() : 0;
     for (;;) {
         struct iovec iov = {buf, (size_t)n};
-        // room for eight descriptors: the first is the caller's, the
-        // others are closed here, and the system closes what did not fit
-        union { struct cmsghdr h; char buf[CMSG_SPACE(sizeof(int) * 8)]; } u;
+        // the first descriptor is the caller's; the others are closed
+        union { struct cmsghdr h; char buf[KERN_RIGHTS_ROOM]; } u;
         struct msghdr m;
         memset(&m, 0, sizeof m);
         m.msg_iov = &iov;
         m.msg_iovlen = 1;
         m.msg_control = u.buf;
         m.msg_controllen = sizeof u.buf;
-#if defined(MSG_CMSG_CLOEXEC)
-        ssize_t r = recvmsg(fd, &m, MSG_CMSG_CLOEXEC); // atomically: no child of another thread inherits it
-#else
-        ssize_t r = recvmsg(fd, &m, 0);
-#endif
+        ssize_t r = recvmsg(fd, &m, KERN_RECV_RIGHTS);
         if (r >= 0) {
-            for (struct cmsghdr *c = CMSG_FIRSTHDR(&m); c != NULL; c = CMSG_NXTHDR(&m, c)) {
-                if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS || c->cmsg_len < CMSG_LEN(0)) continue;
-                size_t count = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-                for (size_t i = 0; i < count; i++) {
-                    int d;
-                    memcpy(&d, CMSG_DATA(c) + i * sizeof(int), sizeof d);
-                    if (got[0] < 0) {
-                        (void)fcntl(d, F_SETFD, FD_CLOEXEC);
-                        got[0] = d;
-                    } else {
-                        close(d);
-                    }
-                }
-            }
+            got[0] = kern_net_take_rights(&m, 1);
             return (int64_t)r;
         }
         if (errno == EINTR) continue;

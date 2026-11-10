@@ -989,9 +989,22 @@ impl Descriptor {
     }
 }
 
+// unix_recv reads from a Unix-domain stream and closes a descriptor that
+// came with the bytes. A read that gave it no room would leave it to the
+// system, and not every system closes it: some open it in this process
+// first, where nothing would name it again.
+func unix_recv(fd: i32, buf: edit[]u8, ns: u64, timed: bool) -> i64 {
+    if len(buf) == 0usize { return net_recv(fd, buf, ns, timed) }
+    var got: [1]i32 = zero()
+    got[0usize] = 0i32 - 1i32 // none, should the receive fail before it says so
+    r := net_recv_fd(fd, buf, got, ns, timed)
+    if r >= 0i64 && got[0usize] >= 0i32 { c := net_close(got[0usize]) }
+    return r
+}
+
 impl io.Reader for UnixStream {
     func read(edit self, buf: edit[]u8) -> Result[usize, io.IoErr] {
-        r := net_recv(self.fd, buf, 0u64, false)
+        r := unix_recv(self.fd, buf, 0u64, false)
         if r < 0i64 { return Err(io.neg(r)) }
         return Ok(usize(r))
     }
@@ -1031,7 +1044,7 @@ impl UnixStream {
     }
 
     func read_timeout(edit self, buf: edit[]u8, d: time.Duration) -> Result[Option[usize], io.IoErr] {
-        r := net_recv(self.fd, buf, d.ns, true)
+        r := unix_recv(self.fd, buf, d.ns, true)
         if r == io.timed_out() { return Ok(None) }
         if r < 0i64 { return Err(io.neg(r)) }
         return Ok(Some(usize(r)))

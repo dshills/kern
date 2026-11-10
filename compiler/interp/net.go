@@ -851,7 +851,10 @@ func netUnixRecvFrom(it *Interp, a []Value, _ callCtx) []Value {
 	want := byteSeq(acc(a[1])).length()
 	buf := make([]byte, max(want, 1)) // a datagram is taken off the queue even into no bytes
 	_ = s.ud.SetReadDeadline(deadline(a[3], a[4]))
-	n, from, err := s.ud.ReadFromUnix(buf)
+	// a descriptor a sender attached is closed, as the runtime closes it
+	oob := make([]byte, rightsRoom)
+	n, oobn, _, from, err := s.ud.ReadMsgUnix(buf, oob)
+	takeRights(oob[:max(oobn, 0)], false)
 	if err != nil {
 		return i64Val(netErr(err))
 	}
@@ -994,6 +997,38 @@ func netSendFD(it *Interp, a []Value, _ callCtx) []Value {
 	return i64Val(int64(n))
 }
 
+// rightsRoom is room for the most descriptors one message can carry, as
+// the runtime's receives give (rt_net.c says why: a system that opens
+// every descriptor sent and reports only those that fit would otherwise
+// leave some open with nothing to name them).
+var rightsRoom = syscall.CmsgSpace(4 * 256)
+
+// takeRights walks the control data of a received message: with keep, the
+// first descriptor is returned, close-on-exec; every other is closed. It
+// returns -1 when there is none to return.
+func takeRights(oob []byte, keep bool) int {
+	first := -1
+	msgs, err := syscall.ParseSocketControlMessage(oob)
+	if err != nil {
+		return first
+	}
+	for i := range msgs {
+		fds, rerr := syscall.ParseUnixRights(&msgs[i])
+		if rerr != nil {
+			continue
+		}
+		for _, fd := range fds {
+			if keep && first < 0 {
+				syscall.CloseOnExec(fd)
+				first = fd
+			} else {
+				_ = syscall.Close(fd)
+			}
+		}
+	}
+	return first
+}
+
 func netRecvFD(it *Interp, a []Value, _ callCtx) []Value {
 	s := it.sockOf(a[0])
 	want := byteSeq(acc(a[1])).length()
@@ -1010,7 +1045,7 @@ func netRecvFD(it *Interp, a []Value, _ callCtx) []Value {
 	}
 	got.at(0).set(mkInt(tyI32, uint64(uint32(0xFFFFFFFF))))
 	buf := make([]byte, want)
-	oob := make([]byte, syscall.CmsgSpace(4*8)) // room for eight descriptors, as the runtime's
+	oob := make([]byte, rightsRoom)
 	_ = uc.SetReadDeadline(deadline(a[3], a[4]))
 	n, oobn, _, _, err := uc.ReadMsgUnix(buf, oob)
 	n, oobn = max(n, 0), max(oobn, 0) // a call that failed reports -1
@@ -1020,24 +1055,7 @@ func netRecvFD(it *Interp, a []Value, _ callCtx) []Value {
 		}
 		return i64Val(netErr(err))
 	}
-	// the first descriptor is the program's; any other is closed
-	first := -1
-	if msgs, perr := syscall.ParseSocketControlMessage(oob[:oobn]); perr == nil {
-		for i := range msgs {
-			fds, rerr := syscall.ParseUnixRights(&msgs[i])
-			if rerr != nil {
-				continue
-			}
-			for _, fd := range fds {
-				if first < 0 {
-					syscall.CloseOnExec(fd)
-					first = fd
-				} else {
-					_ = syscall.Close(fd)
-				}
-			}
-		}
-	}
+	first := takeRights(oob[:oobn], true)
 	if first >= 0 {
 		d := it.addSock(&sock{raw: first, hasRaw: true})
 		got.at(0).set(mkInt(tyI32, uint64(uint32(d))))

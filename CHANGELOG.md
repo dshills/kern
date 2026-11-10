@@ -65,7 +65,9 @@ The runtime work (`specs/runtime`, `docs/runtime.md`,
   thread waits for many sockets and serves those that are ready.
   `UnixStream.send_with`, `send_file` and `recv_with` pass open sockets
   and files between processes; a received `Descriptor` becomes the type
-  the program names, checked against what the system says it is.
+  the program names, checked against what the system says it is; a
+  descriptor the program does not take is closed, on macOS too, where
+  the system would leave it open in the receiving process.
   `UnixStream.peer_credentials`. On Linux, a Unix-domain path that
   begins with a zero byte is a name in the abstract namespace.
 - `std/sync` (new): `RwLock`, `Once`, `WaitGroup`, a bounded `Channel`.

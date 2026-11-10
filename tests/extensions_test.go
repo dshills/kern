@@ -381,6 +381,249 @@ func TestDescriptorsBetweenProcesses(t *testing.T) {
 	}
 }
 
+// A program that is sent more descriptors than it takes: twelve with one
+// message it receives with a descriptor, three with a message it reads as
+// bytes, two with a datagram. It counts its open descriptors after each.
+const descriptorsNotTaken = `module t
+import "std/net"
+import "std/io"
+import "std/time"
+func say(s: view[]u8) { print_str(s); println() }
+func flag(label: view[]u8, b: bool) { print_str(label); print_str(" "); print_bool(b); println() }
+func fds() -> usize {
+    with ls := io.list_dir("/dev/fd") {
+        match ls {
+            Ok(names) => { return names.len() }
+            Err(e) => { return 0usize }
+        }
+    }
+}
+func run(dir: view[]u8) -> Result[(), io.IoErr] {
+    dp := io.join(dir, "d")
+    ud := net.UnixDatagram.bind(dp.as_view())?
+    sp := io.join(dir, "s")
+    c := net.UnixStream.connect(sp.as_view())?
+    var buf: [8]u8 = zero()
+    base := fds()
+    // each wait is bounded, so that the program ends whatever its peer does
+    limit := time.seconds(10u64)
+    match c.recv_with_timeout(buf, limit)? {
+        Some(r) => {
+            match move r {
+                WithDescriptor(n, d) => say("of twelve descriptors sent, one is the program's")
+                Bytes(n) => say("no descriptor came")
+            }
+        }
+        None => say("no message came")
+    }
+    flag("and with it closed none is left open:", fds() == base)
+    c.write_all("1")?
+    match c.read_timeout(buf, limit)? {
+        Some(n) => flag("an ordinary read leaves none open:", fds() == base)
+        None => say("no second message came")
+    }
+    c.write_all("2")?
+    match ud.recv_from_timeout(buf, limit)? {
+        Some(m) => flag("nor does a datagram:", fds() == base)
+        None => say("no datagram came")
+    }
+    c.write_all("3")?
+    return Ok(())
+}
+func main() -> i32 {
+    a := io.args()
+    if a.len() < 2usize { return 2i32 }
+    with dir := a.at(1usize) {
+        match run(dir.as_view()) {
+            Ok(u) => { }
+            Err(e) => say("failed")
+        }
+    }
+    return 0i32
+}
+`
+
+// Descriptors a program does not take are closed (specs/runtime RN2),
+// whoever sent them and however many. Linux closes those a receive has no
+// room for; macOS opens every one in the receiving process first and
+// reports only those that fit, so the runtime's receives on a Unix-domain
+// socket give room for all a message can carry and close the rest.
+func TestDescriptorsNotTakenAreClosed(t *testing.T) {
+	for _, engine := range []string{"native", "interpreter"} {
+		t.Run(engine, func(t *testing.T) {
+			dir, err := os.MkdirTemp("", "kfd")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = os.RemoveAll(dir) }()
+			l, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(dir, "s"), Net: "unix"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = l.Close() }()
+			null, err := os.Open(os.DevNull)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = null.Close() }()
+			rights := func(n int) []byte {
+				fds := make([]int, n)
+				for i := range fds {
+					fds[i] = int(null.Fd())
+				}
+				return syscall.UnixRights(fds...)
+			}
+			done := make(chan string, 1)
+			go func() {
+				c, aerr := l.AcceptUnix()
+				if aerr != nil {
+					done <- "accept: " + aerr.Error()
+					return
+				}
+				defer func() { _ = c.Close() }()
+				_ = c.SetDeadline(time.Now().Add(20 * time.Second))
+				ack := make([]byte, 1)
+				step := func(name string, send func() error) bool {
+					if serr := send(); serr != nil {
+						done <- name + ": " + serr.Error()
+						return false
+					}
+					if _, rerr := io.ReadFull(c, ack); rerr != nil {
+						done <- name + ", waiting for the program: " + rerr.Error()
+						return false
+					}
+					return true
+				}
+				ok := step("twelve descriptors", func() error {
+					_, _, werr := c.WriteMsgUnix([]byte("a"), rights(12), nil)
+					return werr
+				}) && step("three descriptors", func() error {
+					_, _, werr := c.WriteMsgUnix([]byte("b"), rights(3), nil)
+					return werr
+				}) && step("a datagram with two", func() error {
+					// the network package sends no control data on a
+					// datagram socket it connected
+					d, derr := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+					if derr != nil {
+						return derr
+					}
+					defer func() { _ = syscall.Close(d) }()
+					return syscall.Sendmsg(d, []byte("c"), rights(2), &syscall.SockaddrUnix{Name: filepath.Join(dir, "d")}, 0)
+				})
+				if ok {
+					done <- ""
+				}
+			}()
+			stdout, stderr, err := ranEngine(t, descriptorsNotTaken, engine == "interpreter", dir)
+			if err != nil || stderr != "" {
+				t.Fatalf("the program ended with %v and wrote %q to standard error", err, stderr)
+			}
+			select {
+			case problem := <-done:
+				if problem != "" {
+					t.Errorf("the test's end: %s", problem)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatal("the test's end never finished")
+			}
+			want := "of twelve descriptors sent, one is the program's\n" +
+				"and with it closed none is left open: true\n" +
+				"an ordinary read leaves none open: true\n" +
+				"nor does a datagram: true\n"
+			if stdout != want {
+				t.Errorf("the program wrote %q, want %q", stdout, want)
+			}
+		})
+	}
+}
+
+// A program that makes connections that are given up, turned away or
+// timed out, and counts its open descriptors around each kind.
+const connectsThatFail = `module t
+import "std/net"
+import "std/io"
+import "std/time"
+func fds() -> usize {
+    with ls := io.list_dir("/dev/fd") {
+        match ls {
+            Ok(names) => { return names.len() }
+            Err(e) => { return 0usize }
+        }
+    }
+}
+func counted(label: view[]u8, open: usize, due: usize) {
+    print_str(label)
+    if open == due {
+        print_str(": balanced")
+    } else {
+        print_str(": "); print_u64(u64(open)); print_str(" descriptors open, "); print_u64(u64(due)); print_str(" due")
+    }
+    println()
+}
+// tried makes n attempts at an address, keeps the connections made and
+// returns how many descriptors are open beyond those.
+func tried(label: view[]u8, at: net.SocketAddr, n: u64, d: time.Duration) {
+    kept := Vec[net.TcpStream].new()
+    start := fds()
+    for i in 0u64..n {
+        match net.TcpStream.connect_timeout(at, d) {
+            Ok(r) => {
+                match move r {
+                    Some(c) => { kept.push(c) }
+                    None => { }
+                }
+            }
+            Err(e) => { }
+        }
+    }
+    counted(label, fds(), start + kept.len())
+}
+func run() -> Result[(), io.IoErr] {
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    tried("given up at once", l.local_addr()?, 20u64, time.nanos(0u64))
+    q := net.TcpListener.bind_with_backlog(net.loopback_v4(0u16), 1u32)?
+    tried("to a full queue", q.local_addr()?, 12u64, time.millis(100u64))
+    // an address reserved for documentation: nothing answers there, and a
+    // host with no route to it refuses the attempt at once
+    tried("to an address nothing answers at", net.addr(net.v4(192u8, 0u8, 2u8, 1u8), 9u16), 4u64, time.millis(50u64))
+    closed := l.local_addr()?
+    drop(l)
+    tried("to a port nobody listens on", closed, 4u64, time.millis(50u64))
+    return Ok(())
+}
+func main() -> i32 {
+    match run() {
+        Ok(u) => { }
+        Err(e) => { print_str("failed"); println() }
+    }
+    return 0i32
+}
+`
+
+// A connection attempt that does not become a connection leaves no
+// descriptor (specs/runtime RH2), whichever way it ends, in both engines.
+// The program runs as its own process, where the count of descriptors is
+// its own: the fixture tests/run/net_timeouts.kern makes the same count
+// inside the test binary, whose own descriptors come and go, and so has
+// to take a count again when it does not balance.
+func TestConnectsThatFailLeaveNoDescriptor(t *testing.T) {
+	want := "given up at once: balanced\n" +
+		"to a full queue: balanced\n" +
+		"to an address nothing answers at: balanced\n" +
+		"to a port nobody listens on: balanced\n"
+	for _, engine := range []string{"native", "interpreter"} {
+		t.Run(engine, func(t *testing.T) {
+			stdout, stderr, err := ranEngine(t, connectsThatFail, engine == "interpreter")
+			if err != nil || stderr != "" {
+				t.Fatalf("the program ended with %v and wrote %q to standard error", err, stderr)
+			}
+			if stdout != want {
+				t.Errorf("the program wrote %q, want %q", stdout, want)
+			}
+		})
+	}
+}
+
 // A program that uses names in the abstract namespace: a listener and a
 // connection, and two datagram sockets.
 const abstractNames = `module t

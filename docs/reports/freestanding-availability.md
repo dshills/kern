@@ -271,7 +271,7 @@ The two freestanding targets give the same list.
 | `UnixStream.destructor` | `kern_net_close` |
 | `UnixStream.pair` | `kern_net_unix_pair` |
 | `UnixStream.peer_credentials` | `kern_net_peer_cred` |
-| `UnixStream.read` | `kern_net_recv` |
+| `UnixStream.read` | `kern_net_close`, `kern_net_recv`, `kern_net_recv_fd` |
 | `UnixStream.recv_buffer` | `kern_io_err_code`, `kern_net_get_opt` |
 | `UnixStream.recv_with` | `kern_net_recv_fd` |
 | `UnixStream.recv_with_timeout` | `kern_net_recv_fd` |
@@ -344,6 +344,7 @@ The two freestanding targets give the same list.
 | `net.parse_scope` | `kern_net_if_index` |
 | `net.resolve` | `kern_io_err_code`, `kern_net_resolve` |
 | `net.sock_addr` | `kern_net_addr` |
+| `net.unix_recv` | `kern_net_close`, `kern_net_recv`, `kern_net_recv_fd` |
 | `process.env` | `kern_proc_env_at`, `kern_proc_env_count` |
 | `process.env_entry` | `kern_proc_env_at` |
 | `process.errno_err` | `kern_proc_errno` |

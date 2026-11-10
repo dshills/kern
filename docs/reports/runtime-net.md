@@ -64,7 +64,7 @@ have an IPv6 loopback, so the IPv6 paths ran on both.
 | RH2: `accept_timeout` gives up after its duration (and not before); a duration of zero looks once; a pending connection is accepted | `tests/run/net_timeouts.kern` (`waits`) |
 | RH2: `read_timeout` likewise; the socket reads and writes after a timeout; an empty buffer | same (`talk`) |
 | RH2: `connect` and `connect_timeout` to a closed port are `ConnectionRefused`, not a timeout | same (`refused`) |
-| RH2: `connect_timeout` that gives up returns `None` and leaves no descriptor: with a duration of zero, and to a listener whose queue is full | same (`given_up`: the count of `/dev/fd` before and after) |
+| RH2: `connect_timeout` that gives up returns `None` and leaves no descriptor: with a duration of zero, and to a listener whose queue is full | same (`given_up`: the count of `/dev/fd` before and after), and `TestConnectsThatFailLeaveNoDescriptor`, which makes the count in a process of the program's own, in both engines, and adds attempts that time out and that are refused |
 | RH2, RH3: destructors close | same (the descriptor counts) |
 | RH3: `send_to`, `recv_from` with the sender's address, an answer to it; a datagram longer than the buffer is cut and its rest lost; an empty datagram; 8,000 bytes; a socket to itself | `tests/run/net_udp.kern` |
 | RH3: `recv_from_timeout` gives up and the socket goes on working; zero looks once | same |

@@ -798,10 +798,18 @@ received descriptor is close-on-exec; a socket made of one is
 non-blocking and raises no `SIGPIPE`, as every socket of `std/net`. A
 file received shares its offset with the sender's. Empty data, or an
 empty buffer, is `InvalidInput`. Descriptors after the first in one
-message, and a descriptor that an ordinary read passes over, are closed,
-never leaked. A test passes a file and one socket of each kind across a
-pair and uses each, and another exchanges files with a process that is
-not a kern program.
+message, and every descriptor that came with bytes an ordinary read took
+or with a datagram, are closed, never leaked, however many the sender
+attached: the count of the receiving process's open descriptors is then
+what it was. (Linux closes what a receive has no room for. macOS opens
+every descriptor sent in the receiving process and reports those that
+fit, so each receive on a Unix-domain socket gives room for the most one
+message can carry and closes what the program did not take.) A test
+passes a file and one socket of each kind across a pair and uses each,
+another exchanges files with a process that is not a kern program, and a
+third has such a process send twelve descriptors with a message received
+with one, three with a message read as bytes and two with a datagram,
+and counts the program's descriptors after each.
 
 **RN3. Peer credentials.** `UnixStream.peer_credentials() ->
 Result[Credentials, IoErr]` with `Credentials { user: u32; group: u32;

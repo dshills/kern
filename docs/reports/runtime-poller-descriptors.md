@@ -39,8 +39,20 @@ one thread to wait for many sockets.
   fails with `InvalidInput`.
   - A received descriptor is close-on-exec from the moment it exists
     (`MSG_CMSG_CLOEXEC` on Linux). Descriptors after the first in a
-    message, and one an ordinary read passes over, are closed, so a peer
-    cannot fill the program's descriptor table.
+    message, and those that come with bytes an ordinary read takes or
+    with a datagram, are closed, so a peer cannot fill the program's
+    descriptor table. As first written this held on Linux only, where
+    the system closes what a receive has no room for. macOS opens every
+    descriptor sent in the receiving process before it looks at the
+    room, and reports those that fit: a plain `read` left one descriptor
+    open per message, with no number the program ever saw, and a message
+    with twelve left four. It was found while a descriptor count that
+    did not balance on GitHub's macOS host was looked into (see below).
+    Every receive on a Unix-domain socket now gives room for the most one
+    message can carry (253 descriptors on Linux, 254 on macOS) and
+    closes what its caller does not take, in both engines;
+    `TestDescriptorsNotTakenAreClosed` has a program that is not kern
+    send twelve, three and two and counts.
   - macOS defines the socket option that tells a listener from a stream
     and refuses to read it. The runtime reads the same bit from the
     process's descriptor table there (`proc_pidfdinfo`), and the
@@ -124,6 +136,46 @@ listener a listener.
 - **In the interpreter on Linux** a file's relative path that begins
   with `@` is bound as `./@...`, because its host's network package
   reads a leading `@` as an abstract name.
+
+## After the first push
+
+The work was first run on GitHub's hosts when `main` was pushed at
+327b07d. Both Linux hosts and the sanitized corpus passed. The macOS
+host (macOS 26; this work was done on macOS 27) failed one line of one
+fixture, twice in two runs: `tests/run/net_timeouts.kern`, run by the
+interpreter inside the test binary, counted the process's descriptors
+around twelve connection attempts to a full queue and the count did not
+balance.
+
+- **What it led to.** Looking for a descriptor that outlives its owner
+  found the one described above: on macOS a descriptor sent over a
+  Unix-domain socket and not taken stayed open in the receiver. That is
+  fixed and tested (`TestDescriptorsNotTakenAreClosed`), and is not what
+  the fixture counted.
+- **What the fixture counted is not reproduced here.** On macOS 27, with
+  the Go release the hosts use, the fixture balances in every run, in
+  both engines, and so does a program that forces attempts to time out,
+  to be refused and to be turned away. What differs on macOS 27 is the
+  system: an attempt to a full queue is reset at once, where the
+  fixture's time on the macOS 26 host says attempts waited there. The
+  count is of the whole process, and the test binary is not the
+  program's own process: the system's name resolver, which an earlier
+  fixture uses, leaves two sockets of its own open in it (seen here),
+  and may close them at a time of its own (not seen here). A count over
+  a second of waiting is exposed to that where a count over a
+  millisecond is not, which fits the line that failed; it is a reading
+  of the evidence, not something observed.
+- **What changed.** The fixture takes a count again when it does not
+  balance, up to three times, and prints both numbers when it never
+  does, so a run on that host now says which way the count is off. The
+  retry cannot hide a leak from the suite: `TestConnectsThatFailLeaveNoDescriptor`
+  makes the same counts, with no retry, in a process of the program's
+  own, in both engines, with attempts given up at once, turned away by a
+  full queue, timed out and refused.
+
+With these changes `go test ./...` and the sanitized corpus pass on
+macOS 27, and the Linux container's gate passes with 2,816 tests, the
+two new tests named in it. The macOS 26 host has not run them yet.
 
 ## Verification
 
