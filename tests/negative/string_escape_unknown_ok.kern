@@ -1,0 +1,8 @@
+//! phase: 6
+//! expect: accept
+//! twin: string_escape_unknown
+// Every escape there is.
+module m
+func f() -> usize {
+    return len("\n\t\r\0\"\\") + len("\x40\xfF")
+}

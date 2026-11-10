@@ -1,0 +1,52 @@
+//! phase: 6
+//! expect: output match_replace_owned
+// What take and replace move out of a place is an owned value, so a match
+// on it moves the payload into the arm (docs/ownership.md, the forms that
+// bind an access): the way a wrapper hands back what it wraps, as
+// std/io's BufReader.into_inner does.
+module run
+interface Src { func get(edit self) -> u64 }
+struct One nocopy { n: u64 }
+impl One {
+    destructor(edit self) { print_str("drop One "); print_u64(self.n); println() }
+}
+impl Src for One {
+    func get(edit self) -> u64 {
+        self.n = self.n + 1u64
+        return self.n
+    }
+}
+struct Wrap[S: Src] nocopy { s: Option[S]; calls: u64 }
+impl[S: Src] Wrap[S] {
+    func new(s: own S) -> Wrap[S] { return Wrap[S] { s: Some(s), calls: 0u64 } }
+    func into_inner(own self) -> S {
+        match replace(self.s, None) {
+            Some(s) => { return s }
+            None => { trap() }
+        }
+        trap()
+    }
+    destructor(edit self) { print_str("drop Wrap after "); print_u64(self.calls); println() }
+}
+impl[S: Src] Src for Wrap[S] {
+    func get(edit self) -> u64 {
+        self.calls = self.calls + 1u64
+        match self.s {
+            Some(s) => { return s.get() + 100u64 }
+            None => { return 0u64 }
+        }
+    }
+}
+func pull[S: Src](s: edit[S]) -> u64 { return s.get() }
+func main() -> i32 {
+    w := Wrap[One].new(One { n: 1u64 })
+    print_u64(pull(w))
+    println()
+    o := w.into_inner()
+    print_u64(pull(o))
+    println()
+    nested := Wrap[Wrap[One]].new(Wrap[One].new(One { n: 50u64 }))
+    print_u64(pull(nested))
+    println()
+    return 0i32
+}

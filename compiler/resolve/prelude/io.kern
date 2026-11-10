@@ -10,7 +10,9 @@ import "std/time"
 union IoErr { NotFound; Permission; Exists; Other(code: i32) }
 
 // Runtime intrinsics (hosted).
-func io_open(path: view[]u8, write: bool) -> i32
+// io_open opens path with OpenOptions as bits: 1 read, 2 write, 4 append,
+// 8 create, 16 trunc, 32 create_new.
+func io_open(path: view[]u8, opts: u32) -> i32
 func io_read(fd: i32, buf: edit[]u8) -> i64
 // io_read_timeout waits at most ns nanoseconds for fd to be ready, then
 // reads once: bytes, 0 at end of file or for an empty buf, timed_out when
@@ -31,6 +33,30 @@ func io_arg(i: usize, buf: edit[]u8) -> usize
 func io_flush_stdout() -> i32
 // io_is_terminal is 1 when standard stream 0, 1 or 2 is a terminal, else 0.
 func io_is_terminal(stream: i32) -> i32
+// Files beyond read and write, metadata and paths (specs/runtime RG2,
+// RG3): each is one system call and returns its value or -errno.
+// io_seek's whence is 0 from the start, 1 from the offset, 2 from the end.
+func io_seek(fd: i32, off: i64, whence: i32) -> i64
+func io_sync(fd: i32) -> i32
+func io_set_len(fd: i32, n: u64) -> i32
+// io_stat and io_fstat write four numbers into raw: the kind (1 a regular
+// file, 2 a directory, 3 anything else, 4 a symbolic link), the size, the
+// modification time in nanoseconds since the Unix epoch, the mode bits.
+func io_stat(path: view[]u8, follow: bool, raw: edit[]u64) -> i32
+func io_fstat(fd: i32, raw: edit[]u64) -> i32
+func io_rename(from: view[]u8, to: view[]u8) -> i32
+func io_link(src: view[]u8, dst: view[]u8) -> i32
+func io_symlink(target: view[]u8, link: view[]u8) -> i32
+func io_chmod(path: view[]u8, mode: u32) -> i32
+// io_readlink, io_realpath and io_getcwd write their text into buf when
+// it fits and return its length.
+func io_readlink(path: view[]u8, buf: edit[]u8) -> i64
+func io_realpath(path: view[]u8, buf: edit[]u8) -> i64
+func io_getcwd(buf: edit[]u8) -> i64
+// io_err_kind is the ordinal of the ErrKind of a system error number, and
+// io_err_code the host's number of the error that names a kind.
+func io_err_kind(code: i32) -> i32
+func io_err_code(kind: i32) -> i32
 
 func err_of(code: i32) -> IoErr {
     if code == 2i32 { return NotFound }
@@ -54,7 +80,7 @@ func read_from(fd: i32) -> Result[Vec[u8], IoErr] {
 
 // read_file reads the whole file at path.
 func read_file(path: view[]u8) -> Result[Vec[u8], IoErr] {
-    fd := io_open(path, false)
+    fd := io_open(path, 1u32)
     if fd < 0i32 { return Err(err_of(0i32 - fd)) }
     r := read_from(fd)
     c := io_close(fd)
@@ -91,7 +117,7 @@ func write_all(fd: i32, data: view[]u8) -> Result[(), IoErr] {
 
 // write_file creates or truncates the file at path and writes data to it.
 func write_file(path: view[]u8, data: view[]u8) -> Result[(), IoErr] {
-    fd := io_open(path, true)
+    fd := io_open(path, 26u32)
     if fd < 0i32 { return Err(err_of(0i32 - fd)) }
     r := write_all(fd, data)
     c := io_close(fd)
@@ -147,8 +173,9 @@ func remove_file(path: view[]u8) -> Result[(), IoErr] {
     return Ok(())
 }
 
-// FileKind is what a path names, symbolic links followed.
-union FileKind { RegularFile; Directory; OtherFile }
+// FileKind is what a path names. Symlink is reported only by
+// symlink_metadata, which does not follow a final symbolic link.
+union FileKind { RegularFile; Directory; OtherFile; Symlink }
 
 // kind_of reports what path names.
 func kind_of(path: view[]u8) -> Result[FileKind, IoErr] {
@@ -238,4 +265,660 @@ func args() -> Vec[Vec[u8]] {
         i = i + 1usize
     }
     return list
+}
+
+// ---- error kinds (specs/runtime RG1) ----
+
+// ErrKind says what kind of failure an IoErr is. An IoErr carries the
+// system's error number, which differs between hosts; its kind is the
+// same for the same failure on every host and in both engines.
+union ErrKind { NotFound; PermissionDenied; AlreadyExists; InvalidInput; IsADirectory; NotADirectory; DirectoryNotEmpty; BrokenPipe; ConnectionRefused; ConnectionReset; ConnectionAborted; NotConnected; AddrInUse; AddrNotAvailable; TimedOut; Interrupted; WouldBlock; OutOfMemory; Unsupported; Other }
+
+// kind classifies an error.
+func kind(e: view[IoErr]) -> ErrKind {
+    match e {
+        NotFound => { return ErrKind.NotFound }
+        Permission => { return PermissionDenied }
+        Exists => { return AlreadyExists }
+        Other(code) => { return kind_at(io_err_kind(code)) }
+    }
+}
+
+// kind_at and kind_ordinal convert between an ErrKind and its position in
+// the declaration, which is what the runtime speaks.
+func kind_at(n: i32) -> ErrKind {
+    if n == 0i32 { return ErrKind.NotFound }
+    if n == 1i32 { return PermissionDenied }
+    if n == 2i32 { return AlreadyExists }
+    if n == 3i32 { return InvalidInput }
+    if n == 4i32 { return IsADirectory }
+    if n == 5i32 { return NotADirectory }
+    if n == 6i32 { return DirectoryNotEmpty }
+    if n == 7i32 { return BrokenPipe }
+    if n == 8i32 { return ConnectionRefused }
+    if n == 9i32 { return ConnectionReset }
+    if n == 10i32 { return ConnectionAborted }
+    if n == 11i32 { return NotConnected }
+    if n == 12i32 { return AddrInUse }
+    if n == 13i32 { return AddrNotAvailable }
+    if n == 14i32 { return TimedOut }
+    if n == 15i32 { return Interrupted }
+    if n == 16i32 { return WouldBlock }
+    if n == 17i32 { return ErrKind.OutOfMemory }
+    if n == 18i32 { return Unsupported }
+    return ErrKind.Other
+}
+func kind_ordinal(k: ErrKind) -> i32 {
+    match k {
+        NotFound => { return 0i32 }
+        PermissionDenied => { return 1i32 }
+        AlreadyExists => { return 2i32 }
+        InvalidInput => { return 3i32 }
+        IsADirectory => { return 4i32 }
+        NotADirectory => { return 5i32 }
+        DirectoryNotEmpty => { return 6i32 }
+        BrokenPipe => { return 7i32 }
+        ConnectionRefused => { return 8i32 }
+        ConnectionReset => { return 9i32 }
+        ConnectionAborted => { return 10i32 }
+        NotConnected => { return 11i32 }
+        AddrInUse => { return 12i32 }
+        AddrNotAvailable => { return 13i32 }
+        TimedOut => { return 14i32 }
+        Interrupted => { return 15i32 }
+        WouldBlock => { return 16i32 }
+        OutOfMemory => { return 17i32 }
+        Unsupported => { return 18i32 }
+        Other => { return 19i32 }
+    }
+}
+
+// error_of is an IoErr of the given kind: how a Reader or Writer written
+// in kern reports a failure of its own.
+func error_of(k: ErrKind) -> IoErr { return err_of(io_err_code(kind_ordinal(k))) }
+
+// neg is the IoErr of a runtime call's negative result.
+func neg(r: i64) -> IoErr { return err_of(truncate[i32](0i64 - r)) }
+
+// ---- readers and writers (specs/runtime RG4) ----
+
+// Reader is a source of bytes. read fills at most len(buf) bytes and
+// returns how many: 0 at the end of the source, or for an empty buf.
+interface Reader {
+    func read(edit self, buf: edit[]u8) -> Result[usize, IoErr]
+}
+
+// Writer is a sink of bytes. write takes at most len(data) bytes and
+// returns how many it took; flush hands whatever the writer buffers to
+// what lies under it.
+interface Writer {
+    func write(edit self, data: view[]u8) -> Result[usize, IoErr]
+    func flush(edit self) -> Result[(), IoErr]
+}
+
+// write_to writes all of data to a Writer, calling write until it is
+// taken. A write that takes nothing of a non-empty rest is an error of
+// kind Other.
+func write_to[W: Writer](w: edit[W], data: view[]u8) -> Result[(), IoErr] {
+    var off: usize = 0usize
+    while off < len(data) {
+        n := w.write(data[off : len(data)])?
+        if n == 0usize { return Err(error_of(ErrKind.Other)) }
+        off = off + n
+    }
+    return Ok(())
+}
+
+// read_to_end reads a Reader to its end, appending to into, and returns
+// the number of bytes appended.
+func read_to_end[R: Reader](r: edit[R], into: edit[Vec[u8]]) -> Result[usize, IoErr] {
+    var buf: [4096]u8 = zero()
+    var total: usize = 0usize
+    while true {
+        n := r.read(buf)?
+        if n == 0usize { break }
+        into.extend(buf[0usize : n])
+        total = total + n
+    }
+    return Ok(total)
+}
+
+// ---- files (specs/runtime RG2) ----
+
+// OpenOptions says how open opens a file: for reading, for writing, with
+// every write at the end (append); creating it when it is missing
+// (create), emptying it (trunc: `truncate` is a reserved word), or
+// creating it and failing when the path exists, a symbolic link included
+// (create_new).
+struct OpenOptions { read: bool; write: bool; append: bool; create: bool; trunc: bool; create_new: bool }
+
+// options is an OpenOptions with nothing set, to fill in:
+// `o := io.options(); o.read = true; o.write = true`.
+func options() -> OpenOptions {
+    return OpenOptions { read: false, write: false, append: false, create: false, trunc: false, create_new: false }
+}
+
+// SeekFrom is where File.seek moves to: a byte offset from the start, or
+// a distance from the current offset or from the end.
+union SeekFrom { Start(u64); Current(i64); End(i64) }
+
+// Metadata is what the system records about a file: its kind, its size in
+// bytes, when it was last modified (nanoseconds since the Unix epoch: 0
+// for an earlier time, the largest u64 for one too late to represent) and
+// its permission bits (the low 12 bits of the mode).
+struct Metadata { kind: FileKind; size: u64; modified_ns: u64; mode: u32 }
+
+func meta_of(raw: view[]u64) -> Metadata {
+    var k: FileKind = OtherFile
+    if raw[0usize] == 1u64 { k = RegularFile }
+    if raw[0usize] == 2u64 { k = Directory }
+    if raw[0usize] == 4u64 { k = Symlink }
+    return Metadata { kind: k, size: raw[1usize], modified_ns: raw[2usize], mode: truncate[u32](raw[3usize]) }
+}
+
+// File is an open file. It has no buffer of its own: every read and write
+// is a system call (wrap it in a BufReader or BufWriter for many small
+// ones), flush does nothing, and only sync asks the system to make the
+// data durable. The file is closed when the File is destroyed; close does
+// it earlier and reports the system's verdict, which the destructor
+// cannot. A File's descriptor is not inherited by a child process.
+struct File nocopy { fd: i32 }
+
+// open opens the file at path as o says. An option set that names no
+// access (neither read, write nor append), truncates without write or
+// with append, or creates without write or append, is an error of kind
+// InvalidInput, and no system call is made.
+func open(path: view[]u8, o: OpenOptions) -> Result[File, IoErr] {
+    if !o.read && !o.write && !o.append { return Err(error_of(InvalidInput)) }
+    if o.trunc && (!o.write || o.append) { return Err(error_of(InvalidInput)) }
+    if (o.create || o.create_new) && !o.write && !o.append { return Err(error_of(InvalidInput)) }
+    var bits: u32 = 0u32
+    if o.read { bits = bits | 1u32 }
+    if o.write { bits = bits | 2u32 }
+    if o.append { bits = bits | 4u32 }
+    if o.create { bits = bits | 8u32 }
+    if o.trunc { bits = bits | 16u32 }
+    if o.create_new { bits = bits | 32u32 }
+    fd := io_open(path, bits)
+    if fd < 0i32 { return Err(err_of(0i32 - fd)) }
+    return Ok(File { fd: fd })
+}
+
+// open_read opens an existing file for reading.
+func open_read(path: view[]u8) -> Result[File, IoErr] {
+    o := options()
+    o.read = true
+    return open(path, o)
+}
+
+// create opens a file for writing, creating it when it is missing and
+// emptying it when it exists.
+func create(path: view[]u8) -> Result[File, IoErr] {
+    o := options()
+    o.write = true
+    o.create = true
+    o.trunc = true
+    return open(path, o)
+}
+
+// open_append opens a file whose every write goes to its end, creating it
+// when it is missing and keeping what it holds.
+func open_append(path: view[]u8) -> Result[File, IoErr] {
+    o := options()
+    o.append = true
+    o.create = true
+    return open(path, o)
+}
+
+impl Reader for File {
+    func read(edit self, buf: edit[]u8) -> Result[usize, IoErr] {
+        n := io_read(self.fd, buf)
+        if n < 0i64 { return Err(neg(n)) }
+        return Ok(usize(n))
+    }
+}
+
+impl Writer for File {
+    func write(edit self, data: view[]u8) -> Result[usize, IoErr] {
+        n := io_write(self.fd, data)
+        if n < 0i64 { return Err(neg(n)) }
+        return Ok(usize(n))
+    }
+    func flush(edit self) -> Result[(), IoErr] { return Ok(()) }
+}
+
+impl File {
+    // write_all writes all of data, however many writes that takes.
+    func write_all(edit self, data: view[]u8) -> Result[(), IoErr] { return write_all(self.fd, data) }
+
+    // read_all reads from the file's offset to its end.
+    func read_all(edit self) -> Result[Vec[u8], IoErr] { return read_from(self.fd) }
+
+    // seek moves the offset the next read or write starts at and returns
+    // it, counted from the start. An offset past the end is permitted (a
+    // write there leaves a gap that reads as zeros); one before the start
+    // is an error of kind InvalidInput.
+    func seek(edit self, to: SeekFrom) -> Result[u64, IoErr] {
+        var off: i64 = 0i64
+        var whence: i32 = 0i32
+        match to {
+            Start(n) => {
+                if n > 9223372036854775807u64 { return Err(error_of(InvalidInput)) }
+                off = i64(n)
+            }
+            Current(d) => {
+                off = d
+                whence = 1i32
+            }
+            End(d) => {
+                off = d
+                whence = 2i32
+            }
+        }
+        r := io_seek(self.fd, off, whence)
+        if r < 0i64 { return Err(neg(r)) }
+        return Ok(u64(r))
+    }
+
+    // sync returns when the system reports the file's data and metadata
+    // durable: on the device, not only in the system's memory.
+    func sync(edit self) -> Result[(), IoErr] {
+        r := io_sync(self.fd)
+        if r < 0i32 { return Err(err_of(0i32 - r)) }
+        return Ok(())
+    }
+
+    // set_len makes the file n bytes long: cut when it was longer, filled
+    // with zeros when it was shorter. The offset does not move.
+    func set_len(edit self, n: u64) -> Result[(), IoErr] {
+        r := io_set_len(self.fd, n)
+        if r < 0i32 { return Err(err_of(0i32 - r)) }
+        return Ok(())
+    }
+
+    // metadata is the open file's own, whatever its path names by now.
+    func metadata(view self) -> Result[Metadata, IoErr] {
+        var raw: [4]u64 = zero()
+        r := io_fstat(self.fd, raw)
+        if r < 0i32 { return Err(err_of(0i32 - r)) }
+        return Ok(meta_of(raw))
+    }
+
+    // close closes the file and returns the system's verdict: a write the
+    // system had only queued can fail here.
+    func close(own self) -> Result[(), IoErr] {
+        fd := self.fd
+        self.fd = 0i32 - 1i32
+        r := io_close(fd)
+        if r < 0i32 { return Err(err_of(0i32 - r)) }
+        return Ok(())
+    }
+
+    destructor(edit self) {
+        if self.fd >= 0i32 { r := io_close(self.fd) }
+    }
+}
+
+// ---- metadata and paths (specs/runtime RG3) ----
+
+// metadata describes what path names, following symbolic links;
+// symlink_metadata describes a final symbolic link itself.
+func metadata(path: view[]u8) -> Result[Metadata, IoErr] {
+    var raw: [4]u64 = zero()
+    r := io_stat(path, true, raw)
+    if r < 0i32 { return Err(err_of(0i32 - r)) }
+    return Ok(meta_of(raw))
+}
+func symlink_metadata(path: view[]u8) -> Result[Metadata, IoErr] {
+    var raw: [4]u64 = zero()
+    r := io_stat(path, false, raw)
+    if r < 0i32 { return Err(err_of(0i32 - r)) }
+    return Ok(meta_of(raw))
+}
+
+// exists is true exactly when metadata(path) succeeds.
+func exists(path: view[]u8) -> bool {
+    match metadata(path) {
+        Ok(m) => { return true }
+        Err(e) => { return false }
+    }
+}
+
+// status is Ok for a runtime call that returned 0, else its error.
+func status(r: i32) -> Result[(), IoErr] {
+    if r < 0i32 { return Err(err_of(0i32 - r)) }
+    return Ok(())
+}
+
+// rename gives the file or directory at from the name to, replacing a
+// file that is there (on one file system, atomically).
+func rename(from: view[]u8, to: view[]u8) -> Result[(), IoErr] { return status(io_rename(from, to)) }
+
+// hard_link makes dst another name of the file src.
+func hard_link(src: view[]u8, dst: view[]u8) -> Result[(), IoErr] { return status(io_link(src, dst)) }
+
+// symlink makes link a symbolic link whose text is target; target need
+// not exist.
+func symlink(target: view[]u8, link: view[]u8) -> Result[(), IoErr] { return status(io_symlink(target, link)) }
+
+// set_mode sets the permission bits (the low 12 bits of mode) of the file
+// at path, following symbolic links.
+func set_mode(path: view[]u8, mode: u32) -> Result[(), IoErr] { return status(io_chmod(path, mode)) }
+
+// text_of collects the text a runtime call writes into a buffer, growing
+// the buffer until it fits. which: 0 read_link, 1 canonicalize, 2
+// current_dir.
+func text_of(which: u8, path: view[]u8) -> Result[Vec[u8], IoErr] {
+    buf := Vec[u8].new()
+    buf.resize(1024usize, 0u8)
+    while true {
+        var n: i64 = 0i64
+        with e := buf.as_edit() {
+            if which == 0u8 { n = io_readlink(path, e) }
+            if which == 1u8 { n = io_realpath(path, e) }
+            if which == 2u8 { n = io_getcwd(e) }
+        }
+        if n < 0i64 { return Err(neg(n)) }
+        if usize(n) <= buf.len() {
+            text := Vec[u8].new()
+            with b := buf.as_view() { text.extend(b[0usize : usize(n)]) }
+            return Ok(text)
+        }
+        buf.resize(usize(n), 0u8)
+    }
+    return Err(error_of(ErrKind.Other))
+}
+
+// read_link is the text of the symbolic link at path.
+func read_link(path: view[]u8) -> Result[Vec[u8], IoErr] { return text_of(0u8, path) }
+
+// canonicalize is the absolute path of what path names, with every
+// symbolic link, `.` and `..` resolved; the path must exist.
+func canonicalize(path: view[]u8) -> Result[Vec[u8], IoErr] { return text_of(1u8, path) }
+
+// current_dir is the absolute path of the working directory.
+func current_dir() -> Result[Vec[u8], IoErr] {
+    var none: [0]u8 = zero()
+    return text_of(2u8, none)
+}
+
+// copy_file copies the bytes of the file at from into the file at to,
+// which it creates or empties, and returns how many it copied. On failure
+// to may hold a prefix. The new file's mode is the default of create, not
+// from's.
+func copy_file(from: view[]u8, to: view[]u8) -> Result[u64, IoErr] {
+    src := open_read(from)?
+    dst := create(to)?
+    buf := Vec[u8].new()
+    buf.resize(65536usize, 0u8)
+    var total: u64 = 0u64
+    while true {
+        var n: usize = 0usize
+        with e := buf.as_edit() { n = src.read(e)? }
+        if n == 0usize { break }
+        with b := buf.as_view() { dst.write_all(b[0usize : n])? }
+        total = total + u64(n)
+    }
+    dst.close()?
+    return Ok(total)
+}
+
+// ---- the standard streams as readers and writers ----
+
+// Stdin, Stdout and Stderr are the process's standard streams. They hold
+// nothing: every value of one names the same stream, and destroying one
+// closes nothing.
+struct Stdin { }
+struct Stdout { }
+struct Stderr { }
+func stdin() -> Stdin { return Stdin { } }
+func stdout() -> Stdout { return Stdout { } }
+func stderr() -> Stderr { return Stderr { } }
+
+// Reading standard input first writes out what the program has printed.
+impl Reader for Stdin {
+    func read(edit self, buf: edit[]u8) -> Result[usize, IoErr] {
+        n := io_read(0i32, buf)
+        if n < 0i64 { return Err(neg(n)) }
+        return Ok(usize(n))
+    }
+}
+
+// Standard output is buffered with print_str, in order with it: write
+// takes all of data and cannot fail, and flush is flush_stdout, with the
+// failure it remembers.
+impl Writer for Stdout {
+    func write(edit self, data: view[]u8) -> Result[usize, IoErr] {
+        n := io_write(1i32, data)
+        if n < 0i64 { return Err(neg(n)) }
+        return Ok(usize(n))
+    }
+    func flush(edit self) -> Result[(), IoErr] { return flush_stdout() }
+}
+
+// Standard error is not buffered: write is the system's, and flush has
+// nothing to do.
+impl Writer for Stderr {
+    func write(edit self, data: view[]u8) -> Result[usize, IoErr] {
+        n := io_write(2i32, data)
+        if n < 0i64 { return Err(neg(n)) }
+        return Ok(usize(n))
+    }
+    func flush(edit self) -> Result[(), IoErr] { return Ok(()) }
+}
+
+// ---- buffered readers and writers ----
+
+// BufReader reads from a Reader through a buffer of 8,192 bytes, so that
+// many small reads, and reading by lines, cost few reads of what lies
+// under it.
+struct BufReader[R: Reader] nocopy { r: Option[R]; buf: Vec[u8]; pos: usize; end: usize }
+
+impl[R: Reader] BufReader[R] {
+    func new(r: own R) -> BufReader[R] { return BufReader[R].with_capacity(r, 8192usize) }
+
+    // with_capacity is new with a buffer of n bytes (at least one).
+    func with_capacity(r: own R, n: usize) -> BufReader[R] {
+        buf := Vec[u8].new()
+        var size: usize = n
+        if size == 0usize { size = 1usize }
+        buf.resize(size, 0u8)
+        return BufReader[R] { r: Some(r), buf: buf, pos: 0usize, end: 0usize }
+    }
+
+    // fill makes sure the buffer holds unread bytes, reading once when it
+    // is empty, and returns how many it holds: 0 at the end.
+    func fill(edit self) -> Result[usize, IoErr] {
+        if self.pos < self.end { return Ok(self.end - self.pos) }
+        self.pos = 0usize
+        self.end = 0usize
+        var n: usize = 0usize
+        match self.r {
+            Some(r) => {
+                with b := self.buf.as_edit() { n = r.read(b)? }
+            }
+            None => { }
+        }
+        self.end = n
+        return Ok(n)
+    }
+
+    // read_line appends the next line to line, without its terminator,
+    // which is "\n" or "\r\n", and returns true; a last line with no
+    // terminator is a line. It returns false at the end, when there was
+    // nothing to read.
+    func read_line(edit self, line: edit[Vec[u8]]) -> Result[bool, IoErr] {
+        first := line.len()
+        var any: bool = false
+        while true {
+            n := self.fill()?
+            if n == 0usize { return Ok(any) }
+            any = true
+            var i: usize = self.pos
+            with b := self.buf.as_view() {
+                while i < self.end && b[i] != 10u8 { i = i + 1usize }
+                line.extend(b[self.pos : i])
+            }
+            if i < self.end {
+                self.pos = i + 1usize
+                break
+            }
+            self.pos = self.end
+        }
+        // the terminator was "\n": a "\r" before it belongs to it
+        var cr: bool = false
+        if line.len() > first {
+            with last := line.get(line.len() - 1usize) { cr = last == 13u8 }
+        }
+        if cr { gone := line.pop() }
+        return Ok(true)
+    }
+
+    // into_inner gives the reader back. Bytes the buffer had read ahead
+    // are discarded.
+    func into_inner(own self) -> R {
+        match replace(self.r, None) {
+            Some(r) => { return r }
+            None => { trap() }
+        }
+        trap()
+    }
+}
+
+impl[R: Reader] Reader for BufReader[R] {
+    func read(edit self, buf: edit[]u8) -> Result[usize, IoErr] {
+        if len(buf) == 0usize { return Ok(0usize) }
+        if self.pos == self.end && len(buf) >= self.buf.len() {
+            // nothing buffered and a caller's buffer at least as large:
+            // read straight into it
+            match self.r {
+                Some(r) => { return r.read(buf) }
+                None => { return Ok(0usize) }
+            }
+        }
+        var n: usize = self.fill()?
+        if n > len(buf) { n = len(buf) }
+        with b := self.buf.as_view() {
+            for i in 0usize..n { buf[i] = b[self.pos + i] }
+        }
+        self.pos = self.pos + n
+        return Ok(n)
+    }
+}
+
+// BufWriter writes to a Writer through a buffer of 8,192 bytes, so that
+// many small writes cost few writes of what lies under it. Nothing
+// reaches the writer until the buffer fills, flush is called, into_inner
+// is called, or the BufWriter is destroyed. The destructor's flush
+// cannot report a failure: a program that must know calls flush or
+// into_inner first.
+struct BufWriter[W: Writer] nocopy { w: Option[W]; buf: Vec[u8]; cap: usize }
+
+impl[W: Writer] BufWriter[W] {
+    func new(w: own W) -> BufWriter[W] { return BufWriter[W].with_capacity(w, 8192usize) }
+
+    // with_capacity is new with a buffer of n bytes (at least one).
+    func with_capacity(w: own W, n: usize) -> BufWriter[W] {
+        var size: usize = n
+        if size == 0usize { size = 1usize }
+        return BufWriter[W] { w: Some(w), buf: Vec[u8].with_capacity(size), cap: size }
+    }
+
+    // buffered is the number of bytes waiting in the buffer.
+    func buffered(view self) -> usize { return self.buf.len() }
+
+    // drain writes the buffered bytes to the writer. On failure the bytes
+    // the writer did not take stay buffered.
+    func drain(edit self) -> Result[(), IoErr] {
+        var done: usize = 0usize
+        var failed: Option[IoErr] = None
+        match self.w {
+            Some(w) => {
+                with b := self.buf.as_view() {
+                    while done < len(b) {
+                        match w.write(b[done : len(b)]) {
+                            Ok(n) => {
+                                if n == 0usize {
+                                    failed = Some(error_of(ErrKind.Other))
+                                    break
+                                }
+                                done = done + n
+                            }
+                            Err(e) => {
+                                failed = Some(e)
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+            None => { }
+        }
+        // keep what was not written at the front of the buffer
+        left := self.buf.len() - done
+        if done > 0usize {
+            with b := self.buf.as_edit() {
+                for i in 0usize..left { b[i] = b[done + i] }
+            }
+            self.buf.resize(left, 0u8)
+        }
+        match failed {
+            Some(e) => { return Err(e) }
+            None => { return Ok(()) }
+        }
+    }
+
+    // into_inner flushes and gives the writer back. When the flush fails
+    // the writer and the bytes it did not take are destroyed, and the
+    // error is returned.
+    func into_inner(own self) -> Result[W, IoErr] {
+        match self.flush() {
+            Ok(u) => { }
+            Err(e) => {
+                // nothing more is written: the bytes go, and the writer
+                // is destroyed here, before the BufWriter's destructor
+                self.buf.clear()
+                gone := replace(self.w, None)
+                return Err(e)
+            }
+        }
+        match replace(self.w, None) {
+            Some(inner) => { return Ok(inner) }
+            None => { trap() }
+        }
+        trap()
+    }
+
+    destructor(edit self) {
+        match self.flush() {
+            Ok(u) => { }
+            Err(e) => { }
+        }
+    }
+}
+
+impl[W: Writer] Writer for BufWriter[W] {
+    // write buffers data and returns len(data); data at least as large as
+    // the buffer goes straight to the writer once the buffer is empty,
+    // and the result is then what the writer took.
+    func write(edit self, data: view[]u8) -> Result[usize, IoErr] {
+        if self.buf.len() + len(data) > self.cap { self.drain()? }
+        if len(data) >= self.cap {
+            match self.w {
+                Some(w) => { return w.write(data) }
+                None => { return Err(error_of(BrokenPipe)) }
+            }
+        }
+        self.buf.extend(data)
+        return Ok(len(data))
+    }
+
+    // flush writes the buffered bytes to the writer and flushes it.
+    func flush(edit self) -> Result[(), IoErr] {
+        self.drain()?
+        match self.w {
+            Some(w) => { return w.flush() }
+            None => { return Ok(()) }
+        }
+    }
 }

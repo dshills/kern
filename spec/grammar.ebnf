@@ -109,5 +109,7 @@ place         = ident { "." ident | "[" expr "]" } ;
 
 int_lit       = digit { digit | "_" } [ prim_type ] ;   (* 0u64, 42, 1_000i32 *)
 float_lit     = digit { digit } "." digit { digit } [ "f32" | "f64" ] ;
-string_lit    = '"' { character } '"' ;
+string_lit    = '"' { character | escape } '"' ;
+escape        = "\\" ( "n" | "t" | "r" | "0" | '"' | "\\" | "x" hex_digit hex_digit ) ;   (* \xHH is the byte with that value *)
+hex_digit     = digit | "a" | "b" | "c" | "d" | "e" | "f" | "A" | "B" | "C" | "D" | "E" | "F" ;
 ident         = ( letter | "_" ) { letter | digit | "_" } ;

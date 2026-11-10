@@ -1,0 +1,252 @@
+//! phase: 6
+//! expect: output io_file
+// std/io's File (specs/runtime RG2), in a fresh temporary directory:
+// writing, reading, seeking around the end, appending, create_new, the
+// option sets open refuses without a system call, set_len, and the kind
+// of each failure.
+module t
+import "std/io"
+
+func join(dir: view[]u8, name: view[]u8) -> Vec[u8] {
+    p := Vec[u8].new()
+    p.extend(dir)
+    p.push(47u8)
+    p.extend(name)
+    return p
+}
+func say(s: view[]u8) { print_str(s); println() }
+func num(label: view[]u8, n: u64) { print_str(label); print_str(" "); print_u64(n); println() }
+func text(label: view[]u8, bytes: view[]u8) { print_str(label); print_str(" ["); print_str(bytes); print_str("]"); println() }
+func kind_name(k: io.ErrKind) {
+    match k {
+        NotFound => print_str("NotFound")
+        PermissionDenied => print_str("PermissionDenied")
+        AlreadyExists => print_str("AlreadyExists")
+        InvalidInput => print_str("InvalidInput")
+        IsADirectory => print_str("IsADirectory")
+        NotADirectory => print_str("NotADirectory")
+        DirectoryNotEmpty => print_str("DirectoryNotEmpty")
+        BrokenPipe => print_str("BrokenPipe")
+        _ => print_str("another kind")
+    }
+}
+// fails prints the kind of the failure a step is expected to end in.
+func fails[T](label: view[]u8, r: own Result[T, io.IoErr]) {
+    print_str(label)
+    print_str(": ")
+    match r {
+        Ok(v) => print_str("no failure")
+        Err(e) => kind_name(io.kind(e))
+    }
+    println()
+}
+
+func basics(dir: view[]u8) -> Result[(), io.IoErr] {
+    say("-- write, read, seek")
+    p := join(dir, "a.txt")
+    f := io.create(p.as_view())?
+    f.write_all("hello, world")?
+    num("write returns", u64(f.write("!!")?))
+    num("offset after the writes", f.seek(io.SeekFrom.Current(0i64))?)
+    f.flush()?
+    f.sync()?
+    m := f.metadata()?
+    num("size by the open file", m.size)
+    f.close()?
+
+    var buf: [64]u8 = zero()
+    g := io.open_read(p.as_view())?
+    n := g.read(buf)?
+    text("read", buf[0usize : n])
+    num("read at the end", u64(g.read(buf)?))
+    num("seek to 7", g.seek(io.SeekFrom.Start(7u64))?)
+    k := g.read(buf)?
+    text("from 7", buf[0usize : k])
+    num("seek to 3 before the end", g.seek(io.SeekFrom.End(-3i64))?)
+    rest := g.read_all()?
+    text("read_all from there", rest.as_view())
+    num("seek back 5", g.seek(io.SeekFrom.Current(-5i64))?)
+    num("seek past the end", g.seek(io.SeekFrom.Start(100u64))?)
+    num("read past the end", u64(g.read(buf)?))
+    fails("seek before the start", g.seek(io.SeekFrom.Current(-1000i64)))
+    fails("seek beyond the largest offset", g.seek(io.SeekFrom.Start(18446744073709551615u64)))
+    by_path := io.metadata(p.as_view())?
+    num("size by the path", by_path.size)
+    return Ok(())
+}
+
+func appending(dir: view[]u8) -> Result[(), io.IoErr] {
+    say("-- append")
+    p := join(dir, "a.txt")
+    a := io.open_append(p.as_view())?
+    a.write_all("+one")?
+    // the offset may be moved, but a write still goes to the end
+    num("seek to the start", a.seek(io.SeekFrom.Start(0u64))?)
+    a.write_all("+two")?
+    a.close()?
+    all := io.read_file(p.as_view())?
+    text("after two appends", all.as_view())
+    fresh := join(dir, "log.txt")
+    b := io.open_append(fresh.as_view())?
+    b.write_all("made by append")?
+    b.close()?
+    made := io.read_file(fresh.as_view())?
+    text("a file append created", made.as_view())
+    return Ok(())
+}
+
+func exclusive(dir: view[]u8) -> Result[(), io.IoErr] {
+    say("-- create_new")
+    q := join(dir, "new.txt")
+    o := io.options()
+    o.write = true
+    o.create_new = true
+    f := io.open(q.as_view(), o)?
+    f.write_all("first")?
+    f.close()?
+    fails("create_new on a file that exists", io.open(q.as_view(), o))
+    kept := io.read_file(q.as_view())?
+    text("the file is untouched", kept.as_view())
+    link := join(dir, "dangling")
+    io.symlink("nowhere", link.as_view())?
+    fails("create_new on a symbolic link to nothing", io.open(link.as_view(), o))
+    // with create_new, create and truncate change nothing
+    o.create = true
+    o.trunc = true
+    fails("create_new with create and truncate", io.open(q.as_view(), o))
+    return Ok(())
+}
+
+func refused(dir: view[]u8) {
+    say("-- option sets open refuses")
+    p := join(dir, "a.txt")
+    fails("no access at all", io.open(p.as_view(), io.options()))
+    t := io.options()
+    t.read = true
+    t.trunc = true
+    fails("truncate without write", io.open(p.as_view(), t))
+    ta := io.options()
+    ta.write = true
+    ta.append = true
+    ta.trunc = true
+    fails("truncate with append", io.open(p.as_view(), ta))
+    c := io.options()
+    c.read = true
+    c.create = true
+    fails("create without write or append", io.open(p.as_view(), c))
+    n := io.options()
+    n.read = true
+    n.create_new = true
+    fails("create_new without write or append", io.open(p.as_view(), n))
+    // none of them reached the file
+    match io.read_file(p.as_view()) {
+        Ok(all) => text("the file is as it was", all.as_view())
+        Err(e) => say("the file is gone")
+    }
+}
+
+func lengths(dir: view[]u8) -> Result[(), io.IoErr] {
+    say("-- set_len and gaps")
+    p := join(dir, "len.txt")
+    io.write_file(p.as_view(), "0123456789")?
+    o := io.options()
+    o.read = true
+    o.write = true
+    f := io.open(p.as_view(), o)?
+    f.set_len(4u64)?
+    cut := f.read_all()?
+    text("cut to 4", cut.as_view())
+    f.set_len(6u64)?
+    num("offset is unmoved by set_len", f.seek(io.SeekFrom.Current(0i64))?)
+    grown := f.read_all()?
+    num("grown to 6: bytes read from 4", u64(grown.len()))
+    with z := grown.get(0usize) { num("a byte of the growth", u64(z)) }
+    num("seek 3 past the end", f.seek(io.SeekFrom.End(3i64))?)
+    f.write_all("Z")?
+    m := f.metadata()?
+    num("size after a write past the end", m.size)
+    num("seek to the gap", f.seek(io.SeekFrom.Start(7u64))?)
+    var one: [1]u8 = zero()
+    got := f.read(one)?
+    num("a byte of the gap", u64(one[0usize]))
+    f.close()?
+    r := io.open_read(p.as_view())?
+    fails("write to a file opened for reading", r.write("x"))
+    w := io.create(join(dir, "w.txt").as_view())?
+    var buf: [8]u8 = zero()
+    fails("read of a file opened for writing", w.read(buf))
+    return Ok(())
+}
+
+func failures(dir: view[]u8) {
+    say("-- the kind of each failure")
+    file := join(dir, "a.txt")
+    fails("open of a missing file", io.open_read(join(dir, "missing").as_view()))
+    fails("create under a missing directory", io.create(join(dir, "no/x").as_view()))
+    fails("create over a directory", io.create(dir))
+    fails("a path through a file", io.open_read(join(file.as_view(), "x").as_view()))
+    long := Vec[u8].new()
+    for i in 0usize..300usize { long.push(97u8) }
+    fails("a name of 300 bytes", io.open_read(join(dir, long.as_view()).as_view()))
+    huge := Vec[u8].new()
+    for i in 0usize..5000usize { huge.push(97u8) }
+    fails("a path of 5000 bytes", io.open_read(huge.as_view()))
+    var nul: [3]u8 = zero()
+    nul[0usize] = 97u8
+    nul[2usize] = 98u8
+    fails("a path with a NUL byte", io.open_read(nul))
+    match io.open_read(dir) {
+        Ok(d) => {
+            var buf: [8]u8 = zero()
+            fails("read of a directory", d.read(buf))
+        }
+        Err(e) => say("a directory cannot be opened for reading")
+    }
+}
+
+func cleanup(dir: view[]u8) {
+    with ls := io.list_dir(dir) {
+        match ls {
+            Ok(names) => {
+                for n in names.as_view() {
+                    match io.remove_file(join(dir, n.as_view()).as_view()) {
+                        Ok(u) => { }
+                        Err(e) => say("could not remove a file")
+                    }
+                }
+            }
+            Err(e) => say("could not list the directory")
+        }
+    }
+    match io.remove_dir(dir) {
+        Ok(u) => say("cleaned up")
+        Err(e) => say("could not remove the directory")
+    }
+}
+
+func step(r: own Result[(), io.IoErr]) {
+    match r {
+        Ok(u) => { }
+        Err(e) => {
+            print_str("unexpected failure: ")
+            kind_name(io.kind(e))
+            println()
+        }
+    }
+}
+
+func main() -> i32 {
+    match io.make_temp_dir("kern-file-") {
+        Ok(dir) => {
+            step(basics(dir.as_view()))
+            step(appending(dir.as_view()))
+            step(exclusive(dir.as_view()))
+            refused(dir.as_view())
+            step(lengths(dir.as_view()))
+            failures(dir.as_view())
+            cleanup(dir.as_view())
+        }
+        Err(e) => say("no temporary directory")
+    }
+    return 0i32
+}

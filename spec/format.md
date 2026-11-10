@@ -86,7 +86,10 @@ contract, or a statement block.
   `truncate[u8](x)` have no inner spaces.
 - Integer and float literals keep their source text, including `_`
   separators and type suffixes. String literals are re-escaped with the
-  escapes the lexer accepts (`\n`, `\t`, `\"`, `\\`, `\0`).
+  escapes the lexer accepts: `\n`, `\t`, `\r`, `\"`, `\\`, `\0`, and `\xHH`
+  (two lowercase hexadecimal digits) for every other control byte and for
+  a byte that is not part of a UTF-8 sequence. A byte written `\xHH` that
+  has a shorter spelling is printed in it (`"\x41"` becomes `"A"`).
 
 ## Comments
 

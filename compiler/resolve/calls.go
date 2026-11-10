@@ -63,20 +63,7 @@ func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 				c.errorf("NAME_UNRESOLVED", fn.Pos, "%s is a union; construct a variant", fn.Name)
 				return &Bad{}
 			}
-			var found *TypeDecl
-			var vd *VariantDecl
-			count := 0
-			for _, td := range c.m.Types {
-				if td.Kind != KindUnion {
-					continue
-				}
-				for _, v := range td.Variants {
-					if v.Name == fn.Name {
-						found, vd = td, v
-						count++
-					}
-				}
-			}
+			found, vd, count := c.findVariant(fn.Name, want)
 			if count == 1 {
 				c.r.prog.Info.Idents[fn] = &Symbol{Kind: SymType, Name: found.Name, TDecl: found}
 				return c.variantCtor(sc, x.Pos, found, vd, nil, want, x.Args)

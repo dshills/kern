@@ -32,7 +32,17 @@ impl P {
             if c == 92u8 {
                 var d: u8 = 0u8
                 with b := self.src.get(i + 1usize) { d = b }
-                if d == 110u8 { c = 10u8 } else if d == 116u8 { c = 9u8 } else if d == 48u8 { c = 0u8 } else { c = d }
+                var hi: u8 = 16u8
+                var lo: u8 = 16u8
+                if d == 120u8 && i + 3usize < end {
+                    with b := self.src.get(i + 2usize) { hi = hex_digit(b) }
+                    with b := self.src.get(i + 3usize) { lo = hex_digit(b) }
+                }
+                if hi < 16u8 && lo < 16u8 {
+                    // \xHH: a byte by its two hexadecimal digits
+                    c = hi * 16u8 + lo
+                    i = i + 2usize
+                } else if d == 110u8 { c = 10u8 } else if d == 116u8 { c = 9u8 } else if d == 114u8 { c = 13u8 } else if d == 48u8 { c = 0u8 } else { c = d }
                 i = i + 1usize
             }
             hex_byte(c, o)

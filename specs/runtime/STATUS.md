@@ -32,10 +32,10 @@ reason. Updated at the end of every phase.
 | RF1 checked allocator | 6 | baf1818 | When the table cannot record a block that `realloc` already moved, unknown addresses stop being errors (no trap is added) |
 | RF2 allocation report | 6 | baf1818 | A scope's table of joins is not counted; a thread became one allocation |
 | RF3 page allocator | 6 | baf1818 | `alloc` traps `explicit` for a request that breaks an allocator's obligations |
-| RG1 error kinds | 7 | | |
-| RG2 File | 7 | | |
-| RG3 metadata and paths | 7 | | |
-| RG4 readers and writers | 7 | | |
+| RG1 error kinds | 7 | PH7 | `io.error_of(kind)` added; `EACCES` has no test of a real failure (the container runs as root) |
+| RG2 File | 7 | PH7 | The option is `trunc`: `truncate` is a reserved word. `io.options()` added |
+| RG3 metadata and paths | 7 | PH7 | `copy_file` copies bytes, not the mode |
+| RG4 readers and writers | 7 | PH7 | `write_to`, `read_to_end`, `with_capacity` and `BufWriter.buffered` added; `net.TcpStream` joins in phase 8 |
 | RH1 addresses | 8 | | |
 | RH2 TCP | 8 | | |
 | RH3 UDP | 8 | | |
@@ -58,3 +58,6 @@ reason. Updated at the end of every phase.
 | Small integer arguments passed without the extension the C side assumes on x86-64 and Apple arm64 | c45f745 |
 | The interpreter decremented a `Shared` count without the lock that guards its increment | 4dd62e2 |
 | An owned `match` on a union refused payloads whose types have destructors; the rule refuses only a union that declares one itself | 5d37494 |
+| The IR validator's worklist bound was too small for a long inlined function (`ownership state does not converge` on correct code) | PH7 |
+| The interpreter's `print_str` crashed on a whole array argument | PH7 |
+| String literals had no `\r` and no byte escape; a variant name shared by two unions could not be written bare; `match replace(...)` did not own its payload (language changes) | PH7 |

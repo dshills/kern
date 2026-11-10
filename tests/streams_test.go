@@ -507,3 +507,65 @@ func TestExitBehaviour(t *testing.T) {
 		t.Errorf("trap: status %v output %q stderr %q, want SIGABRT after the flushed output and the record", ws, ob.String(), eb.String())
 	}
 }
+
+// The standard streams as std/io's Reader and Writers (specs/runtime RG4):
+// lines of standard input through a BufReader, standard output through
+// Stdout (buffered, in order with print_str), standard error through
+// Stderr (the system's write). A fixture cannot feed standard input or
+// write standard error.
+const streamsProgram = `module t
+import "std/io"
+func run() -> Result[(), io.IoErr] {
+    r := io.BufReader[io.Stdin].new(io.stdin())
+    so := io.stdout()
+    er := io.stderr()
+    while true {
+        line := Vec[u8].new()
+        if !r.read_line(line)? { break }
+        io.write_to(so, line.as_view())?
+        print_str("|")
+    }
+    println()
+    n := er.write("to standard error\n")?
+    er.flush()?
+    print_u64(u64(n))
+    println()
+    so.flush()?
+    return Ok(())
+}
+func main() -> i32 {
+    match run() {
+        Ok(u) => { }
+        Err(e) => { print_str("failed"); println() }
+    }
+    return 0i32
+}
+`
+
+func TestStandardStreamsAsReadersAndWriters(t *testing.T) {
+	const input = "one\r\ntwo\n\nlast, with no end"
+	const wantOut = "one|two||last, with no end|\n18\n"
+	const wantErr = "to standard error\n"
+	check := func(t *testing.T, cmd *exec.Cmd) {
+		t.Helper()
+		cmd.Stdin = strings.NewReader(input)
+		var ob, eb bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &ob, &eb
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("run: %v, stderr %q", err, eb.String())
+		}
+		if ob.String() != wantOut || eb.String() != wantErr {
+			t.Errorf("stdout %q, stderr %q; want %q and %q", ob.String(), eb.String(), wantOut, wantErr)
+		}
+	}
+	t.Run("native", func(t *testing.T) {
+		check(t, exec.Command(buildProgram(t, streamsProgram, native.Options{})))
+	})
+	t.Run("interpreter", func(t *testing.T) {
+		src := filepath.Join(t.TempDir(), "t.kern")
+		if err := os.WriteFile(src, []byte(streamsProgram), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		check(t, exec.Command(kernBinary(t), "run", src))
+	})
+}

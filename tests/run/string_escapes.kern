@@ -1,0 +1,16 @@
+//! phase: 6
+//! expect: output string_escapes
+// The escapes of a string literal (spec/grammar.ebnf): \n \t \r \0 \" \\
+// and \xHH, the byte with that value, in either case of digit.
+module run
+func bytes(s: view[]u8) {
+    print_u64(u64(len(s)))
+    print_str(":")
+    for b in s { print_str(" "); print_u64(u64(b)) }
+    println()
+}
+func main() -> i32 {
+    bytes("a\r\n\x41\x00\xff\x7fz\t\"\\")
+    bytes("\x0d\x0A\xFf")
+    return 0i32
+}

@@ -36,6 +36,7 @@ func kind(p: view[]u8) {
                 RegularFile => say("file")
                 Directory => say("directory")
                 OtherFile => say("other kind")
+                Symlink => say("a link")
             }
         }
         Err(e) => err_name(e)

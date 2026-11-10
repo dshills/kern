@@ -1,0 +1,86 @@
+-- read_line: both terminators, an empty line, no final terminator
+  [one]
+  [two]
+  []
+  [four]
+  []
+  [last]
+  lines: 6
+-- the same, one byte a read through a buffer of two
+  [one]
+  [two]
+  []
+  [four]
+  []
+  [last]
+  lines: 6
+-- the same, three bytes a read through a buffer of four
+  [one]
+  [two]
+  []
+  [four]
+  []
+  [last]
+  lines: 6
+-- a carriage return that is not a terminator stays
+  [a<CR>b]
+  [c<CR>]
+  lines: 2
+-- a final terminator makes no extra line; no bytes, no lines
+  [x]
+  [y]
+  lines: 2
+  lines: 0
+-- read_line appends, and leaves what the line held
+  [kept<CR>]
+  [kept<CR>next]
+-- read through the buffer, around it, and into_inner
+  three bytes [012]
+  three more, from the buffer [345]
+  a large read takes what is buffered [67]
+  then reads past the buffer [89abcdefghij]
+  at the end 0
+  an empty buffer 0
+  reads of the inner reader 3
+  into_inner after three of eight bytes: the reader is at 8
+-- small writes gather; a full buffer goes out in one write
+  write returns 3
+  write returns 3
+  buffered 6
+  write returns 3
+  buffered after the third 3
+-- a write as large as the buffer goes straight through
+  write returns 10
+  buffered 0
+  sink 1 holds [abcdefghi0123456789] after 3 writes and 2 flushes
+-- write_to through a writer that takes two bytes a call
+  sink 2 holds [hello, writer] after 7 writes and 1 flushes
+-- the destructor flushes
+  sink 2 destroyed holding [hello, writer]
+  sink 1 destroyed holding [abcdefghi0123456789]
+  sink 3 destroyed holding [left in the buffer]
+-- a writer that fails after five bytes
+  write returns 10
+  flush: BrokenPipe
+  still buffered 5
+  flush again: BrokenPipe
+  sink 4 destroyed holding [01234]
+  into_inner: BrokenPipe
+  (the writer is gone, and nothing more was written)
+-- a writer that takes nothing
+  write returns 6
+  flush: Other
+  still buffered 4
+-- its destructor's flush fails too, and says nothing
+  sink 5 destroyed holding [ab]
+-- a file through both
+  bytes written 37500
+  lines read 5000
+  bytes in them 30000
+  read_to_end 37500
+-- standard output as a Writer
+  written through Stdout
+  write returns 25
+  printed: first
+  buffered: second
+  printed: third

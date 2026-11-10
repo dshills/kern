@@ -110,8 +110,8 @@ int32_t kern_io_is_terminal(int32_t stream);
 
 // Records the program's arguments for kern_io_argc and kern_io_arg; called by the entry code before kern_start.
 void kern_set_args(int32_t argc, char **argv);
-// Opens the path for reading, or for writing (created, truncated): a descriptor above 2, close-on-exec, or -errno.
-int32_t kern_io_open(const char *p, int64_t n, uint8_t write);
+// Opens the path with std/io's OpenOptions as bits (1 read, 2 write, 4 append, 8 create, 16 truncate, 32 create_new): a descriptor above 2, close-on-exec, or -errno.
+int32_t kern_io_open(const char *p, int64_t n, uint32_t opts);
 // Reads up to n bytes from fd: the count, 0 at end of file, or -errno.
 int64_t kern_io_read(int32_t fd, char *buf, int64_t n);
 // Reads once after waiting up to ns nanoseconds for fd to be ready: the count, 0 at end of file, -2^32 on timeout, or -errno.
@@ -120,6 +120,34 @@ int64_t kern_io_read_timeout(int32_t fd, char *buf, int64_t n, uint64_t ns);
 int64_t kern_io_write(int32_t fd, const char *p, int64_t n);
 // Closes a descriptor the program opened: 0 or -errno.
 int32_t kern_io_close(int32_t fd);
+// Moves a descriptor's offset (whence 0 start, 1 current, 2 end): the new offset or -errno.
+int64_t kern_io_seek(int32_t fd, int64_t off, int32_t whence);
+// Asks the system to make a file's data durable: 0 or -errno.
+int32_t kern_io_sync(int32_t fd);
+// Sets a file's length to n bytes, zero-filling growth: 0 or -errno.
+int32_t kern_io_set_len(int32_t fd, uint64_t n);
+// Writes a path's metadata (kind, size, modified_ns, mode) into out[0..4], following a final link when follow is set: 0 or -errno.
+int32_t kern_io_stat(const char *p, int64_t n, uint8_t follow, uint64_t *out, int64_t cap);
+// As kern_io_stat for an open descriptor.
+int32_t kern_io_fstat(int32_t fd, uint64_t *out, int64_t cap);
+// Renames p to q, replacing q: 0 or -errno.
+int32_t kern_io_rename(const char *p, int64_t n, const char *q, int64_t m);
+// Makes q another name of the file p: 0 or -errno.
+int32_t kern_io_link(const char *p, int64_t n, const char *q, int64_t m);
+// Makes q a symbolic link whose text is p: 0 or -errno.
+int32_t kern_io_symlink(const char *p, int64_t n, const char *q, int64_t m);
+// Sets the low 12 mode bits of the file at p: 0 or -errno.
+int32_t kern_io_chmod(const char *p, int64_t n, uint32_t mode);
+// Writes a symbolic link's text into buf when it fits in cap bytes and returns its length, or -errno.
+int64_t kern_io_readlink(const char *p, int64_t n, char *buf, int64_t cap);
+// Writes the absolute path of p, links resolved, into buf when it fits in cap bytes and returns its length, or -errno.
+int64_t kern_io_realpath(const char *p, int64_t n, char *buf, int64_t cap);
+// Writes the working directory into buf when it fits in cap bytes and returns its length, or -errno.
+int64_t kern_io_getcwd(char *buf, int64_t cap);
+// Returns the ordinal of std/io's ErrKind for a system error number.
+int32_t kern_io_err_kind(int32_t code);
+// Returns the host's error number that names an ErrKind ordinal (EIO for Other).
+int32_t kern_io_err_code(int32_t kind);
 // Removes the file at the path: 0 or -errno.
 int32_t kern_io_remove(const char *p, int64_t n);
 // Creates the directory at the path: 0 or -errno.

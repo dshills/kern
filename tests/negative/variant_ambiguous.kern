@@ -1,0 +1,11 @@
+//! expect: reject NAME_UNRESOLVED rule=T.1
+//! twin: variant_ambiguous_ok
+// Two unions declare NotFound, and nothing says which one the binding
+// wants: the name must be qualified (spec/types.md §1).
+module m
+union A { NotFound; Other(code: i32) }
+union B { NotFound; Timeout }
+func f() -> u64 {
+    x := NotFound   // NAME_UNRESOLVED: ambiguous
+    return 0u64
+}

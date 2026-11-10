@@ -202,6 +202,19 @@ func (l *lexer) lexNumber() {
 	l.emit(k, start, l.pos, string(l.src[start:l.pos]))
 }
 
+// hexVal is the value of a hexadecimal digit, or -1.
+func hexVal(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
+}
+
 func (l *lexer) lexString() {
 	start := l.pos
 	l.pos++ // opening quote
@@ -224,6 +237,16 @@ func (l *lexer) lexString() {
 				sb.WriteByte('\n')
 			case 't':
 				sb.WriteByte('\t')
+			case 'r':
+				sb.WriteByte('\r')
+			case 'x':
+				// \xHH: the byte with that value, two hexadecimal digits
+				if l.pos+2 < len(l.src) && hexVal(l.src[l.pos+1]) >= 0 && hexVal(l.src[l.pos+2]) >= 0 {
+					sb.WriteByte(byte(hexVal(l.src[l.pos+1])<<4 | hexVal(l.src[l.pos+2])))
+					l.pos += 2
+				} else {
+					l.errs = append(l.errs, Error{l.pos - 1, l.pos + 1, "unknown escape"})
+				}
 			case '"':
 				sb.WriteByte('"')
 			case '\\':

@@ -1,0 +1,53 @@
+-- write, read, seek
+write returns 2
+offset after the writes 14
+size by the open file 14
+read [hello, world!!]
+read at the end 0
+seek to 7 7
+from 7 [world!!]
+seek to 3 before the end 11
+read_all from there [d!!]
+seek back 5 9
+seek past the end 100
+read past the end 0
+seek before the start: InvalidInput
+seek beyond the largest offset: InvalidInput
+size by the path 14
+-- append
+seek to the start 0
+after two appends [hello, world!!+one+two]
+a file append created [made by append]
+-- create_new
+create_new on a file that exists: AlreadyExists
+the file is untouched [first]
+create_new on a symbolic link to nothing: AlreadyExists
+create_new with create and truncate: AlreadyExists
+-- option sets open refuses
+no access at all: InvalidInput
+truncate without write: InvalidInput
+truncate with append: InvalidInput
+create without write or append: InvalidInput
+create_new without write or append: InvalidInput
+the file is as it was [hello, world!!+one+two]
+-- set_len and gaps
+cut to 4 [0123]
+offset is unmoved by set_len 4
+grown to 6: bytes read from 4 2
+a byte of the growth 0
+seek 3 past the end 9
+size after a write past the end 10
+seek to the gap 7
+a byte of the gap 0
+write to a file opened for reading: another kind
+read of a file opened for writing: another kind
+-- the kind of each failure
+open of a missing file: NotFound
+create under a missing directory: NotFound
+create over a directory: IsADirectory
+a path through a file: NotADirectory
+a name of 300 bytes: InvalidInput
+a path of 5000 bytes: InvalidInput
+a path with a NUL byte: InvalidInput
+read of a directory: IsADirectory
+cleaned up

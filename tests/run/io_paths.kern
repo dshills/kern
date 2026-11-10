@@ -1,0 +1,278 @@
+//! phase: 6
+//! expect: output io_paths
+// std/io's metadata and path operations (specs/runtime RG3) in a fresh
+// temporary directory: metadata of a file, a directory and a symbolic
+// link, with and without following it; rename, hard_link, symlink,
+// read_link, set_mode, canonicalize, current_dir, exists, copy_file; and
+// the kind of each failure. ErrKind round-trips through error_of (RG1).
+module t
+import "std/io"
+import "std/str"
+
+func join(dir: view[]u8, name: view[]u8) -> Vec[u8] {
+    p := Vec[u8].new()
+    p.extend(dir)
+    p.push(47u8)
+    p.extend(name)
+    return p
+}
+func say(s: view[]u8) { print_str(s); println() }
+func num(label: view[]u8, n: u64) { print_str(label); print_str(" "); print_u64(n); println() }
+func flag(label: view[]u8, b: bool) { print_str(label); print_str(" "); print_bool(b); println() }
+func text(label: view[]u8, bytes: view[]u8) { print_str(label); print_str(" ["); print_str(bytes); print_str("]"); println() }
+func kind_name(k: io.ErrKind) {
+    match k {
+        NotFound => print_str("NotFound")
+        PermissionDenied => print_str("PermissionDenied")
+        AlreadyExists => print_str("AlreadyExists")
+        InvalidInput => print_str("InvalidInput")
+        IsADirectory => print_str("IsADirectory")
+        NotADirectory => print_str("NotADirectory")
+        DirectoryNotEmpty => print_str("DirectoryNotEmpty")
+        _ => print_str("another kind")
+    }
+}
+func fails[T](label: view[]u8, r: own Result[T, io.IoErr]) {
+    print_str(label)
+    print_str(": ")
+    match r {
+        Ok(v) => print_str("no failure")
+        Err(e) => kind_name(io.kind(e))
+    }
+    println()
+}
+func file_kind(label: view[]u8, k: io.FileKind) {
+    print_str(label)
+    match k {
+        RegularFile => say(" is a file")
+        Directory => say(" is a directory")
+        Symlink => say(" is a symbolic link")
+        OtherFile => say(" is something else")
+    }
+}
+
+func meta(dir: view[]u8) -> Result[(), io.IoErr] {
+    say("-- metadata")
+    f := join(dir, "f.txt")
+    io.write_file(f.as_view(), "twelve bytes")?
+    m := io.metadata(f.as_view())?
+    file_kind("f.txt", m.kind)
+    num("size", m.size)
+    // written a moment ago: after 2020-01-01 and before 2100-01-01
+    flag("modified in this century", m.modified_ns > 1577836800000000000u64 && m.modified_ns < 4102444800000000000u64)
+    d := io.metadata(dir)?
+    file_kind("the directory", d.kind)
+
+    link := join(dir, "to-f")
+    io.symlink("f.txt", link.as_view())?
+    followed := io.metadata(link.as_view())?
+    file_kind("to-f, followed,", followed.kind)
+    num("its size is the file's", followed.size)
+    itself := io.symlink_metadata(link.as_view())?
+    file_kind("to-f itself", itself.kind)
+    num("its size is its text's", itself.size)
+    target := io.read_link(link.as_view())?
+    text("read_link", target.as_view())
+    plain := io.symlink_metadata(f.as_view())?
+    file_kind("f.txt, not followed,", plain.kind)
+
+    dangling := join(dir, "to-nothing")
+    io.symlink("nothing/here", dangling.as_view())?
+    fails("metadata through a link to nothing", io.metadata(dangling.as_view()))
+    lone := io.symlink_metadata(dangling.as_view())?
+    file_kind("the link to nothing itself", lone.kind)
+    flag("exists(f.txt)", io.exists(f.as_view()))
+    flag("exists(to-f)", io.exists(link.as_view()))
+    flag("exists(to-nothing)", io.exists(dangling.as_view()))
+    flag("exists(missing)", io.exists(join(dir, "missing").as_view()))
+
+    io.set_mode(f.as_view(), 384u32)?
+    num("mode after set_mode 0600", u64(io.metadata(f.as_view())?.mode))
+    io.set_mode(f.as_view(), 420u32)?
+    num("mode after set_mode 0644", u64(io.metadata(f.as_view())?.mode))
+    // through the link: the file's mode changes, not the link's
+    io.set_mode(link.as_view(), 416u32)?
+    num("mode after set_mode 0640 through the link", u64(io.metadata(f.as_view())?.mode))
+    return Ok(())
+}
+
+func names(dir: view[]u8) -> Result[(), io.IoErr] {
+    say("-- rename, hard_link, copy_file")
+    f := join(dir, "f.txt")
+    g := join(dir, "g.txt")
+    io.rename(f.as_view(), g.as_view())?
+    flag("the old name exists", io.exists(f.as_view()))
+    moved := io.read_file(g.as_view())?
+    text("the new name holds", moved.as_view())
+    io.write_file(f.as_view(), "another")?
+    io.rename(g.as_view(), f.as_view())?
+    replaced := io.read_file(f.as_view())?
+    text("rename replaced a file", replaced.as_view())
+
+    h := join(dir, "h.txt")
+    io.hard_link(f.as_view(), h.as_view())?
+    a := io.open_append(h.as_view())?
+    a.write_all(", twice")?
+    a.close()?
+    both := io.read_file(f.as_view())?
+    text("written through the second name", both.as_view())
+
+    c := join(dir, "copy.txt")
+    io.write_file(c.as_view(), "this is longer than what replaces it, and it goes")?
+    num("copy_file returns", io.copy_file(f.as_view(), c.as_view())?)
+    copied := io.read_file(c.as_view())?
+    text("the copy", copied.as_view())
+    // a file of several buffers
+    big := join(dir, "big")
+    data := Vec[u8].new()
+    for i in 0usize..200000usize { data.push(truncate[u8](i % 251usize)) }
+    io.write_file(big.as_view(), data.as_view())?
+    big2 := join(dir, "big2")
+    num("copy_file of 200000 bytes returns", io.copy_file(big.as_view(), big2.as_view())?)
+    back := io.read_file(big2.as_view())?
+    flag("the bytes are the same", str.equal(back.as_view(), data.as_view()))
+    return Ok(())
+}
+
+func places(dir: view[]u8) -> Result[(), io.IoErr] {
+    say("-- canonicalize, current_dir")
+    real := io.canonicalize(dir)?
+    sub := join(dir, "sub")
+    io.make_dir(sub.as_view())?
+    io.write_file(join(sub.as_view(), "x").as_view(), "x")?
+    io.symlink("sub", join(dir, "alias").as_view())?
+    // through a link, a `.` and a `..`
+    odd := join(dir, "alias/./../alias/x")
+    resolved := io.canonicalize(odd.as_view())?
+    want := join(real.as_view(), "sub/x")
+    flag("links, . and .. are resolved", str.equal(resolved.as_view(), want.as_view()))
+    with r := resolved.get(0usize) { flag("the result is absolute", r == 47u8) }
+    fails("canonicalize of a missing path", io.canonicalize(join(dir, "missing").as_view()))
+    here := io.current_dir()?
+    with c := here.get(0usize) { flag("current_dir is absolute", c == 47u8) }
+    dot := io.canonicalize(".")?
+    flag("current_dir is canonicalize(.)", str.equal(here.as_view(), dot.as_view()))
+    return Ok(())
+}
+
+func failures(dir: view[]u8) {
+    say("-- the kind of each failure")
+    f := join(dir, "f.txt")
+    missing := join(dir, "missing")
+    sub := join(dir, "sub")
+    fails("metadata of a missing path", io.metadata(missing.as_view()))
+    fails("symlink_metadata of a missing path", io.symlink_metadata(missing.as_view()))
+    fails("metadata through a file", io.metadata(join(f.as_view(), "x").as_view()))
+    fails("rename of a missing path", io.rename(missing.as_view(), join(dir, "m2").as_view()))
+    fails("rename of a file onto a directory", io.rename(f.as_view(), sub.as_view()))
+    fails("rename of a directory onto a file", io.rename(sub.as_view(), f.as_view()))
+    fails("hard_link onto a name that exists", io.hard_link(f.as_view(), join(dir, "h.txt").as_view()))
+    fails("hard_link of a missing file", io.hard_link(missing.as_view(), join(dir, "h2").as_view()))
+    fails("hard_link of a directory", io.hard_link(sub.as_view(), join(dir, "sub2").as_view()))
+    fails("symlink onto a name that exists", io.symlink("x", f.as_view()))
+    fails("read_link of a file", io.read_link(f.as_view()))
+    fails("read_link of a missing path", io.read_link(missing.as_view()))
+    fails("set_mode of a missing path", io.set_mode(missing.as_view(), 420u32))
+    fails("copy_file from a missing file", io.copy_file(missing.as_view(), join(dir, "c2").as_view()))
+    fails("copy_file onto a directory", io.copy_file(f.as_view(), sub.as_view()))
+    fails("remove_dir of a directory that is not empty", io.remove_dir(sub.as_view()))
+    fails("make_dir over a file", io.make_dir(f.as_view()))
+    fails("remove_file of a missing path", io.remove_file(missing.as_view()))
+    var nul: [3]u8 = zero()
+    nul[0usize] = 97u8
+    nul[2usize] = 98u8
+    fails("metadata of a path with a NUL byte", io.metadata(nul))
+    fails("rename to a path with a NUL byte", io.rename(f.as_view(), nul))
+}
+
+// Every kind survives the trip through an IoErr made for it, whatever
+// number the host gives the error.
+func round_trip() {
+    say("-- kinds through error_of")
+    var same: u64 = 0u64
+    for n in 0i32..20i32 {
+        k := io.kind_at(n)
+        e := io.error_of(k)
+        if io.kind_ordinal(io.kind(e)) == n { same = same + 1u64 }
+    }
+    num("kinds that round-trip, of 20:", same)
+    nf := io.error_of(io.ErrKind.NotFound)
+    match nf {
+        NotFound => say("error_of(NotFound) is IoErr.NotFound")
+        Permission => say("error_of(NotFound) is Permission")
+        Exists => say("error_of(NotFound) is Exists")
+        Other(c) => say("error_of(NotFound) is Other")
+    }
+    pd := io.error_of(io.ErrKind.PermissionDenied)
+    match pd {
+        Permission => say("error_of(PermissionDenied) is IoErr.Permission")
+        _ => say("error_of(PermissionDenied) is something else")
+    }
+    ae := io.error_of(io.ErrKind.AlreadyExists)
+    match ae {
+        Exists => say("error_of(AlreadyExists) is IoErr.Exists")
+        _ => say("error_of(AlreadyExists) is something else")
+    }
+}
+
+func remove_all(dir: view[]u8) {
+    with ls := io.list_dir(dir) {
+        match ls {
+            Ok(names) => {
+                for n in names.as_view() {
+                    p := join(dir, n.as_view())
+                    var is_dir: bool = false
+                    match io.symlink_metadata(p.as_view()) {
+                        Ok(m) => {
+                            match m.kind {
+                                Directory => { is_dir = true }
+                                _ => { }
+                            }
+                        }
+                        Err(e) => { }
+                    }
+                    if is_dir {
+                        remove_all(p.as_view())
+                    } else {
+                        match io.remove_file(p.as_view()) {
+                            Ok(u) => { }
+                            Err(e) => say("could not remove a file")
+                        }
+                    }
+                }
+            }
+            Err(e) => say("could not list a directory")
+        }
+    }
+    match io.remove_dir(dir) {
+        Ok(u) => { }
+        Err(e) => say("could not remove a directory")
+    }
+}
+
+func step(r: own Result[(), io.IoErr]) {
+    match r {
+        Ok(u) => { }
+        Err(e) => {
+            print_str("unexpected failure: ")
+            kind_name(io.kind(e))
+            println()
+        }
+    }
+}
+
+func main() -> i32 {
+    match io.make_temp_dir("kern-paths-") {
+        Ok(dir) => {
+            step(meta(dir.as_view()))
+            step(names(dir.as_view()))
+            step(places(dir.as_view()))
+            failures(dir.as_view())
+            remove_all(dir.as_view())
+            flag("the directory is gone", !io.exists(dir.as_view()))
+        }
+        Err(e) => say("no temporary directory")
+    }
+    round_trip()
+    return 0i32
+}

@@ -6,9 +6,11 @@ package format
 
 import (
 	"bytes"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/diag"
@@ -1163,10 +1165,23 @@ func quote(s string) string {
 			sb.WriteString(`\"`)
 		case '\\':
 			sb.WriteString(`\\`)
+		case '\r':
+			sb.WriteString(`\r`)
 		case 0:
 			sb.WriteString(`\0`)
 		default:
-			sb.WriteByte(c)
+			// a control byte, and a byte that is not part of a UTF-8
+			// sequence, are written by value; text stays text
+			if c < 0x20 || c == 0x7f {
+				fmt.Fprintf(&sb, `\x%02x`, c)
+			} else if c < 0x80 {
+				sb.WriteByte(c)
+			} else if r, n := utf8.DecodeRuneInString(s[i:]); r == utf8.RuneError && n <= 1 {
+				fmt.Fprintf(&sb, `\x%02x`, c)
+			} else {
+				sb.WriteString(s[i : i+n])
+				i += n - 1
+			}
 		}
 	}
 	sb.WriteByte('"')

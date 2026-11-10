@@ -307,9 +307,29 @@ func (c *fnCtx) ident(sc *scope, x *ast.Ident, want Type) Type {
 	return &Unit{}
 }
 
-// bareVariant resolves `Variant(args)` or `Variant` without a union qualifier
-// when exactly one union in scope declares the variant.
+// bareVariant resolves `Variant(args)` or `Variant` without a union
+// qualifier (findVariant); nil when no union declares the name, and an
+// error when several do and the expected type does not choose.
 func (c *fnCtx) bareVariant(sc *scope, x *ast.Ident, want Type, args []*ast.Arg) Type {
+	found, vd, count := c.findVariant(x.Name, want)
+	if count == 0 {
+		return nil
+	}
+	if count > 1 {
+		c.errorf("NAME_UNRESOLVED", x.Pos, "variant %s is ambiguous; qualify it with the union name", x.Name)
+		return &Bad{}
+	}
+	c.r.prog.Info.Idents[x] = &Symbol{Kind: SymType, Name: found.Name, TDecl: found}
+	return c.variantCtor(sc, x.Pos, found, vd, nil, want, args)
+}
+
+// findVariant finds the union in scope that declares a variant of this
+// name, and how many do. A name that several unions declare is the
+// expected type's, when that type is one of them: `return NotFound` in a
+// function that returns IoErr is IoErr's NotFound even though ErrKind has
+// one too (the result's count is then 1). Without such an expected type
+// the name is ambiguous and must be qualified.
+func (c *fnCtx) findVariant(name string, want Type) (*TypeDecl, *VariantDecl, int) {
 	var found *TypeDecl
 	var vd *VariantDecl
 	count := 0
@@ -318,17 +338,22 @@ func (c *fnCtx) bareVariant(sc *scope, x *ast.Ident, want Type, args []*ast.Arg)
 			continue
 		}
 		for _, v := range td.Variants {
-			if v.Name == x.Name {
+			if v.Name == name {
 				found, vd = td, v
 				count++
 			}
 		}
 	}
-	if count != 1 {
-		return nil
+	if count > 1 {
+		if n, ok := valueOf(want).(*Named); ok && n.Decl.Kind == KindUnion {
+			for _, v := range n.Decl.Variants {
+				if v.Name == name {
+					return n.Decl, v, 1
+				}
+			}
+		}
 	}
-	c.r.prog.Info.Idents[x] = &Symbol{Kind: SymType, Name: found.Name, TDecl: found}
-	return c.variantCtor(sc, x.Pos, found, vd, nil, want, args)
+	return found, vd, count
 }
 
 // variantCtor types a variant constructor, inferring type arguments from

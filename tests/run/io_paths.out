@@ -1,0 +1,62 @@
+-- metadata
+f.txt is a file
+size 12
+modified in this century true
+the directory is a directory
+to-f, followed, is a file
+its size is the file's 12
+to-f itself is a symbolic link
+its size is its text's 5
+read_link [f.txt]
+f.txt, not followed, is a file
+metadata through a link to nothing: NotFound
+the link to nothing itself is a symbolic link
+exists(f.txt) true
+exists(to-f) true
+exists(to-nothing) false
+exists(missing) false
+mode after set_mode 0600 384
+mode after set_mode 0644 420
+mode after set_mode 0640 through the link 416
+-- rename, hard_link, copy_file
+the old name exists false
+the new name holds [twelve bytes]
+rename replaced a file [twelve bytes]
+written through the second name [twelve bytes, twice]
+copy_file returns 19
+the copy [twelve bytes, twice]
+copy_file of 200000 bytes returns 200000
+the bytes are the same true
+-- canonicalize, current_dir
+links, . and .. are resolved true
+the result is absolute true
+canonicalize of a missing path: NotFound
+current_dir is absolute true
+current_dir is canonicalize(.) true
+-- the kind of each failure
+metadata of a missing path: NotFound
+symlink_metadata of a missing path: NotFound
+metadata through a file: NotADirectory
+rename of a missing path: NotFound
+rename of a file onto a directory: IsADirectory
+rename of a directory onto a file: NotADirectory
+hard_link onto a name that exists: AlreadyExists
+hard_link of a missing file: NotFound
+hard_link of a directory: PermissionDenied
+symlink onto a name that exists: AlreadyExists
+read_link of a file: InvalidInput
+read_link of a missing path: NotFound
+set_mode of a missing path: NotFound
+copy_file from a missing file: NotFound
+copy_file onto a directory: IsADirectory
+remove_dir of a directory that is not empty: DirectoryNotEmpty
+make_dir over a file: AlreadyExists
+remove_file of a missing path: NotFound
+metadata of a path with a NUL byte: InvalidInput
+rename to a path with a NUL byte: InvalidInput
+the directory is gone true
+-- kinds through error_of
+kinds that round-trip, of 20: 20
+error_of(NotFound) is IoErr.NotFound
+error_of(PermissionDenied) is IoErr.Permission
+error_of(AlreadyExists) is IoErr.Exists

@@ -47,21 +47,41 @@ static int kern_open_above2(const char *path, int flags, mode_t mode) {
 static int kern_argc = 0;
 static char **kern_argv = NULL;
 void kern_set_args(int32_t argc, char **argv) { kern_argc = argc; kern_argv = argv; }
-int32_t kern_io_open(const char *p, int64_t n, uint8_t write) {
-    char path[4096];
-    if (n < 0 || (size_t)n >= sizeof path) return -ENAMETOOLONG;
-    if (n > 0 && memchr(p, 0, (size_t)n) != NULL) return -EINVAL; // an embedded NUL would cut the path
+// kern_cpath copies a kern path into a NUL-terminated buffer of 4096
+// bytes: 0, or -ENAMETOOLONG or -EINVAL (an embedded NUL would cut the
+// path).
+static int kern_cpath(char path[4096], const char *p, int64_t n) {
+    if (n < 0 || n >= 4096) return -ENAMETOOLONG;
+    if (n > 0 && memchr(p, 0, (size_t)n) != NULL) return -EINVAL;
     kern_copy(path, p, (size_t)n);
     path[n] = 0;
-    // close-on-exec from the start, so that no child inherits the file
-    // (specs/std-process R6), and above 2: when a standard stream was
-    // closed at startup, keep opened files above the descriptors the
-    // output buffer and the kern side treat specially
-    return kern_open_above2(path, write ? O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC : O_RDONLY | O_CLOEXEC, 0644);
+    return 0;
 }
+// kern_io_open opens the file at a path. opts are std/io's OpenOptions as
+// bits (1 read, 2 write, 4 append, 8 create, 16 truncate, 32 create_new),
+// which the kern side has validated. The descriptor is close-on-exec from
+// the start, so that no child inherits the file (specs/std-process R6),
+// and above 2: when a standard stream was closed at startup, opened files
+// stay above the descriptors the output buffer and the kern side treat
+// specially. A new file's mode is 0666 less the process's umask.
+int32_t kern_io_open(const char *p, int64_t n, uint32_t opts) {
+    char path[4096];
+    int e = kern_cpath(path, p, n);
+    if (e < 0) return e;
+    int flags = O_CLOEXEC | ((opts & (2u | 4u)) == 0 ? O_RDONLY : (opts & 1u) ? O_RDWR : O_WRONLY);
+    if (opts & 4u) flags |= O_APPEND;
+    if (opts & 32u) flags |= O_CREAT | O_EXCL; // fails on anything that exists, a symbolic link included
+    else flags |= ((opts & 8u) ? O_CREAT : 0) | ((opts & 16u) ? O_TRUNC : 0);
+    int fd;
+    do fd = kern_open_above2(path, flags, 0666); while (fd == -EINTR);
+    return fd;
+}
+// A read or a write that a signal interrupts before it moved a byte is
+// made again: std/signal's handlers do not show through as short calls.
 int64_t kern_io_read(int32_t fd, char *buf, int64_t n) {
     if (fd == 0) kern_flush(); // what the program wrote is seen before it waits for input (RB2)
-    ssize_t r = read(fd, buf, (size_t)n);
+    ssize_t r;
+    do r = read(fd, buf, (size_t)n); while (r < 0 && errno == EINTR);
     return r < 0 ? -errno : (int64_t)r;
 }
 // kern_io_read_timeout waits up to ns nanoseconds for fd to be ready
@@ -100,20 +120,174 @@ int64_t kern_io_read_timeout(int32_t fd, char *buf, int64_t n, uint64_t ns) {
 }
 int64_t kern_io_write(int32_t fd, const char *p, int64_t n) {
     if (fd == 1) { kern_out(p, (size_t)n); return n; }
-    ssize_t r = write(fd, p, (size_t)n);
+    ssize_t r;
+    do r = write(fd, p, (size_t)n); while (r < 0 && errno == EINTR);
     return r < 0 ? -errno : (int64_t)r;
 }
 // kern_io_close closes a descriptor the program opened (the kern side never
 // passes the standard streams); a delayed write error surfaces here.
 int32_t kern_io_close(int32_t fd) { if (fd < 0) return -EBADF; return close(fd) < 0 ? -errno : 0; }
-// kern_cpath copies a kern path into a NUL-terminated buffer of 4096
-// bytes: 0, or -ENAMETOOLONG or -EINVAL (an embedded NUL).
-static int kern_cpath(char path[4096], const char *p, int64_t n) {
-    if (n < 0 || n >= 4096) return -ENAMETOOLONG;
-    if (n > 0 && memchr(p, 0, (size_t)n) != NULL) return -EINVAL;
-    kern_copy(path, p, (size_t)n);
-    path[n] = 0;
+// ---- files beyond read and write (specs/runtime RG2, RG3) ----
+
+// kern_io_seek moves a descriptor's offset: whence 0 from the start, 1
+// from the current offset, 2 from the end; the new offset, or -errno
+// (-EINVAL for any other whence).
+int64_t kern_io_seek(int32_t fd, int64_t off, int32_t whence) {
+    if (whence < 0 || whence > 2) return -EINVAL;
+    off_t r = lseek(fd, (off_t)off, whence == 0 ? SEEK_SET : whence == 1 ? SEEK_CUR : SEEK_END);
+    return r < 0 ? -errno : (int64_t)r;
+}
+// kern_io_sync asks the system to make a file's data and metadata
+// durable. On macOS fsync only hands the data to the drive; F_FULLFSYNC
+// asks the drive to write it, and file systems without it fall back.
+int32_t kern_io_sync(int32_t fd) {
+    int r;
+#if defined(__APPLE__)
+    do r = fcntl(fd, F_FULLFSYNC); while (r < 0 && errno == EINTR);
+    if (r == 0) return 0;
+    if (errno == EBADF) return -EBADF;
+#endif
+    do r = fsync(fd); while (r < 0 && errno == EINTR);
+    return r < 0 ? -errno : 0;
+}
+int32_t kern_io_set_len(int32_t fd, uint64_t n) {
+    if (n > (uint64_t)INT64_MAX) return -EINVAL;
+    int r;
+    do r = ftruncate(fd, (off_t)n); while (r < 0 && errno == EINTR);
+    return r < 0 ? -errno : 0;
+}
+// kern_stat_out writes std/io's Metadata as four numbers: the kind (1 a
+// regular file, 2 a directory, 3 anything else, 4 a symbolic link), the
+// size in bytes, the modification time in nanoseconds since the Unix
+// epoch (0 for an earlier time, the largest u64 for one too late to
+// represent) and the low 12 bits of the mode.
+static void kern_stat_out(const struct stat *st, uint64_t out[4]) {
+    out[0] = S_ISREG(st->st_mode) ? 1 : S_ISDIR(st->st_mode) ? 2 : S_ISLNK(st->st_mode) ? 4 : 3;
+    out[1] = st->st_size < 0 ? 0 : (uint64_t)st->st_size;
+#if defined(__APPLE__)
+    const struct timespec m = st->st_mtimespec;
+#else
+    const struct timespec m = st->st_mtim;
+#endif
+    if (m.tv_sec < 0) out[2] = 0;
+    else if ((uint64_t)m.tv_sec > (UINT64_MAX - 999999999ull) / 1000000000ull) out[2] = UINT64_MAX;
+    else out[2] = (uint64_t)m.tv_sec * 1000000000ull + (uint64_t)m.tv_nsec;
+    out[3] = (uint64_t)(st->st_mode & 07777);
+}
+// kern_io_stat reads the metadata of a path into out (at least four
+// numbers, kern_stat_out), following a final symbolic link when follow is
+// set: 0 or -errno.
+int32_t kern_io_stat(const char *p, int64_t n, uint8_t follow, uint64_t *out, int64_t cap) {
+    char path[4096];
+    int e = kern_cpath(path, p, n);
+    if (e < 0) return e;
+    if (cap < 4) return -EINVAL;
+    struct stat st;
+    if ((follow ? stat(path, &st) : lstat(path, &st)) < 0) return -errno;
+    kern_stat_out(&st, out);
     return 0;
+}
+int32_t kern_io_fstat(int32_t fd, uint64_t *out, int64_t cap) {
+    if (cap < 4) return -EINVAL;
+    struct stat st;
+    if (fstat(fd, &st) < 0) return -errno;
+    kern_stat_out(&st, out);
+    return 0;
+}
+// kern_two_paths runs a system call that takes two paths: 0 or -errno.
+static int32_t kern_two_paths(const char *p, int64_t n, const char *q, int64_t m, int (*call)(const char *, const char *)) {
+    char a[4096], b[4096];
+    int e = kern_cpath(a, p, n);
+    if (e == 0) e = kern_cpath(b, q, m);
+    if (e < 0) return e;
+    return call(a, b) < 0 ? -errno : 0;
+}
+int32_t kern_io_rename(const char *p, int64_t n, const char *q, int64_t m) { return kern_two_paths(p, n, q, m, rename); }
+int32_t kern_io_link(const char *p, int64_t n, const char *q, int64_t m) { return kern_two_paths(p, n, q, m, link); }
+int32_t kern_io_symlink(const char *p, int64_t n, const char *q, int64_t m) { return kern_two_paths(p, n, q, m, symlink); }
+int32_t kern_io_chmod(const char *p, int64_t n, uint32_t mode) {
+    char path[4096];
+    int e = kern_cpath(path, p, n);
+    if (e < 0) return e;
+    return chmod(path, (mode_t)(mode & 07777)) < 0 ? -errno : 0;
+}
+// kern_text_out copies a NUL-terminated text into buf when its bytes fit
+// in cap, and returns how many it has: a caller with too small a buffer
+// asks again with one that size.
+static int64_t kern_text_out(const char *text, char *buf, int64_t cap) {
+    size_t l = strlen(text);
+    if ((int64_t)l <= cap) kern_copy(buf, text, l);
+    return (int64_t)l;
+}
+int64_t kern_io_readlink(const char *p, int64_t n, char *buf, int64_t cap) {
+    char path[4096], target[4096];
+    int e = kern_cpath(path, p, n);
+    if (e < 0) return e;
+    ssize_t r = readlink(path, target, sizeof target - 1); // no system's link is longer
+    if (r < 0) return -errno;
+    target[r] = 0;
+    if ((int64_t)r <= cap) kern_copy(buf, target, (size_t)r); // by length: a link's text may hold any byte but NUL
+    return (int64_t)r;
+}
+int64_t kern_io_realpath(const char *p, int64_t n, char *buf, int64_t cap) {
+    char path[4096];
+    int e = kern_cpath(path, p, n);
+    if (e < 0) return e;
+    char *real = realpath(path, NULL);
+    if (real == NULL) return -errno;
+    int64_t l = kern_text_out(real, buf, cap);
+    free(real);
+    return l;
+}
+int64_t kern_io_getcwd(char *buf, int64_t cap) {
+    char *dir = getcwd(NULL, 0); // allocated to fit, on glibc and on macOS
+    if (dir == NULL) return -errno;
+    int64_t l = kern_text_out(dir, buf, cap);
+    free(dir);
+    return l;
+}
+
+// ---- error kinds (specs/runtime RG1) ----
+
+// kern_io_err_kind is the ordinal of std/io's ErrKind for a system error
+// number, by the error's name: the numbers differ between hosts, the
+// names do not.
+int32_t kern_io_err_kind(int32_t code) {
+    switch (code) {
+    case ENOENT: return 0;
+    case EACCES: case EPERM: return 1;
+    case EEXIST: return 2;
+    case EINVAL: case ENAMETOOLONG: return 3;
+    case EISDIR: return 4;
+    case ENOTDIR: return 5;
+    case ENOTEMPTY: return 6;
+    case EPIPE: return 7;
+    case ECONNREFUSED: return 8;
+    case ECONNRESET: return 9;
+    case ECONNABORTED: return 10;
+    case ENOTCONN: return 11;
+    case EADDRINUSE: return 12;
+    case EADDRNOTAVAIL: return 13;
+    case ETIMEDOUT: return 14;
+    case EINTR: return 15;
+    case EAGAIN: return 16;
+#if EWOULDBLOCK != EAGAIN
+    case EWOULDBLOCK: return 16;
+#endif
+    case ENOMEM: return 17;
+    case ENOSYS: case ENOTSUP: return 18;
+#if EOPNOTSUPP != ENOTSUP
+    case EOPNOTSUPP: return 18;
+#endif
+    default: return 19;
+    }
+}
+// kern_io_err_code is the host's number of the error that names a kind
+// (the first of kern_io_err_kind's list), EIO for Other: how kern code
+// makes an IoErr of a kind without writing a number.
+int32_t kern_io_err_code(int32_t kind) {
+    static const int codes[] = {ENOENT, EACCES, EEXIST, EINVAL, EISDIR, ENOTDIR, ENOTEMPTY, EPIPE, ECONNREFUSED, ECONNRESET, ECONNABORTED, ENOTCONN, EADDRINUSE, EADDRNOTAVAIL, ETIMEDOUT, EINTR, EAGAIN, ENOMEM, ENOTSUP};
+    return kind >= 0 && kind < (int32_t)(sizeof codes / sizeof codes[0]) ? codes[kind] : EIO;
 }
 int32_t kern_io_remove(const char *p, int64_t n) {
     char path[4096];

@@ -1,0 +1,13 @@
+//! phase: 6
+//! expect: accept
+//! twin: variant_ambiguous
+// The same binding with the union named, and one whose declared type
+// chooses.
+module m
+union A { NotFound; Other(code: i32) }
+union B { NotFound; Timeout }
+func f() -> u64 {
+    x := A.NotFound
+    var y: B = NotFound
+    return 0u64
+}

@@ -115,9 +115,13 @@ func (v *validator) run() []error {
 		}
 	}
 	v.in = map[*Block]*vstate{v.f.Entry: entry}
-	// worklist over the CFG; joins must agree (static moves), so a block's
-	// state settles after each predecessor has contributed once, plus a
-	// few iterations for the loops it is in
+	// worklist over the CFG. A block is visited again only when its
+	// incoming state changed, and a correct function's state changes at
+	// most once per local (owned becomes moved; a temporary or a trivial
+	// local may disagree between paths without an error) on top of each
+	// predecessor's first contribution. The bound below is that count with
+	// a margin; only a function with an access open on one path and closed
+	// on another, already reported, can exceed it by flipping forever.
 	preds := map[*Block]int{}
 	for _, b := range v.f.Blocks {
 		for _, succ := range successors(b) {
@@ -130,7 +134,7 @@ func (v *validator) run() []error {
 		b := work[0]
 		work = work[1:]
 		visited[b]++
-		if visited[b] > 8+preds[b] {
+		if visited[b] > 8+preds[b]+len(v.f.Locals)+len(v.f.Params) {
 			v.errorf("%s: ownership state does not converge", blockName(b))
 			continue
 		}

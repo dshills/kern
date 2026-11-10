@@ -519,9 +519,39 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	// std/io (hosted): descriptor-level calls into the runtime
 	case "io_open":
 		p, l := fe.seqParts(a[0])
+		setDst(fe.rt("kern_io_open", "i32 (ptr, i64, i32)", "ptr "+p+", i64 "+l+", i32 "+fe.v(a[1])))
+	// files beyond read and write, metadata and paths (specs/runtime RG2, RG3)
+	case "io_seek":
+		setDst(fe.rt("kern_io_seek", "i64 (i32, i64, i32)", "i32 "+fe.v(a[0])+", i64 "+fe.v(a[1])+", i32 "+fe.v(a[2])))
+	case "io_sync":
+		setDst(fe.rt("kern_io_sync", "i32 (i32)", "i32 "+fe.v(a[0])))
+	case "io_set_len":
+		setDst(fe.rt("kern_io_set_len", "i32 (i32, i64)", "i32 "+fe.v(a[0])+", i64 "+fe.v(a[1])))
+	case "io_stat":
+		p, l := fe.seqParts(a[0])
 		z := fe.next("t")
 		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[1]))
-		setDst(fe.rt("kern_io_open", "i32 (ptr, i64, i8)", "ptr "+p+", i64 "+l+", i8 "+z))
+		op, ol := fe.seqParts(a[2])
+		setDst(fe.rt("kern_io_stat", "i32 (ptr, i64, i8, ptr, i64)", "ptr "+p+", i64 "+l+", i8 "+z+", ptr "+op+", i64 "+ol))
+	case "io_fstat":
+		op, ol := fe.seqParts(a[1])
+		setDst(fe.rt("kern_io_fstat", "i32 (i32, ptr, i64)", "i32 "+fe.v(a[0])+", ptr "+op+", i64 "+ol))
+	case "io_rename", "io_link", "io_symlink":
+		p, l := fe.seqParts(a[0])
+		q, m := fe.seqParts(a[1])
+		setDst(fe.rt("kern_"+c.Intrinsic, "i32 (ptr, i64, ptr, i64)", "ptr "+p+", i64 "+l+", ptr "+q+", i64 "+m))
+	case "io_chmod":
+		p, l := fe.seqParts(a[0])
+		setDst(fe.rt("kern_io_chmod", "i32 (ptr, i64, i32)", "ptr "+p+", i64 "+l+", i32 "+fe.v(a[1])))
+	case "io_readlink", "io_realpath":
+		p, l := fe.seqParts(a[0])
+		bp, bl := fe.seqParts(a[1])
+		setDst(fe.rt("kern_"+c.Intrinsic, "i64 (ptr, i64, ptr, i64)", "ptr "+p+", i64 "+l+", ptr "+bp+", i64 "+bl))
+	case "io_getcwd":
+		bp, bl := fe.seqParts(a[0])
+		setDst(fe.rt("kern_io_getcwd", "i64 (ptr, i64)", "ptr "+bp+", i64 "+bl))
+	case "io_err_kind", "io_err_code":
+		setDst(fe.rt("kern_"+c.Intrinsic, "i32 (i32)", "i32 "+fe.v(a[0])))
 	case "io_read", "io_write":
 		p, l := fe.seqParts(a[1])
 		setDst(fe.rt("kern_"+c.Intrinsic, "i64 (i32, ptr, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l))

@@ -135,7 +135,7 @@ func threads(base: view[]u8, short: own process.Child) -> Result[Counts, SpawnEr
 func held(base: view[]u8) -> Result[(), io.IoErr] {
     path := io.make_temp_file("kern-std-process-threads-")?
     var fd: i32 = -1i32
-    with p := path.as_view() { fd = io.io_open(p, false) }
+    with p := path.as_view() { fd = io.io_open(p, 1u32) }
     holder := process.Command.new("cat")
     holder.stdin(process.Stdio.Piped)
     holder.stdout(process.Stdio.Piped)

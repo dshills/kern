@@ -71,22 +71,13 @@ func init() {
 			return nil
 		},
 		"print_bool": func(it *Interp, a []Value, _ callCtx) []Value { _, _ = fmt.Fprint(it.out, fmtValue(a[0])); return nil },
+		// seqBytes: the argument may be a slice or a whole array
 		"print_str": func(it *Interp, a []Value, _ callCtx) []Value {
-			s := acc(a[0]).Seq
-			b := make([]byte, s.length())
-			for i := range b {
-				b[i] = byte(s.at(i).get().(Int).Bits)
-			}
-			_, _ = fmt.Fprint(it.out, string(b))
+			_, _ = it.out.Write(seqBytes(acc(a[0])))
 			return nil
 		},
 		"eprint_str": func(it *Interp, a []Value, _ callCtx) []Value {
-			s := acc(a[0]).Seq
-			b := make([]byte, s.length())
-			for i := range b {
-				b[i] = byte(s.at(i).get().(Int).Bits)
-			}
-			_, _ = it.errOut.Write(b)
+			_, _ = it.errOut.Write(seqBytes(acc(a[0])))
 			return nil
 		},
 		"println": func(it *Interp, a []Value, _ callCtx) []Value { _, _ = fmt.Fprintln(it.out); return nil },
@@ -120,12 +111,11 @@ func init() {
 		// table (0, 1 and 2 are the standard streams, 1 and 2 through the
 		// interpreter's writers); errors are negative errno values
 		"io_open": func(it *Interp, a []Value, _ callCtx) []Value {
-			path := string(seqBytes(acc(a[0])))
-			flags := os.O_RDONLY
-			if a[1].(Bool) {
-				flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+			path, e := cPath(seqBytes(acc(a[0])))
+			if e != 0 {
+				return []Value{mkInt(tyI32, uint64(uint32(-e)))}
 			}
-			f, err := os.OpenFile(path, flags, 0o644)
+			f, err := os.OpenFile(path, openFlags(uint32(a[1].(Int).Bits)), 0o666)
 			if err != nil {
 				return []Value{mkInt(tyI32, uint64(uint32(-errnoOf(err))))}
 			}

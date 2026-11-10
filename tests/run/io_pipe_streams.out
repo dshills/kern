@@ -1,0 +1,8 @@
+  line [first line]
+  line [second, with a carriage return]
+  lines back: 100
+  cat exited 0
+done
+  reading the write end is an error
+  writing the read end is an error
+done

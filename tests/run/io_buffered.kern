@@ -1,0 +1,296 @@
+//! phase: 6
+//! expect: output io_buffered
+// std/io's Reader and Writer with BufReader and BufWriter (specs/runtime
+// RG4): lines with both terminators across every chunk boundary, reads
+// through and around the buffer, buffered and direct writes, flush,
+// into_inner, the destructor's flush, a writer that fails, and the
+// standard output as a Writer.
+module t
+import "std/io"
+
+func say(s: view[]u8) { print_str(s); println() }
+func num(label: view[]u8, n: u64) { print_str(label); print_str(" "); print_u64(n); println() }
+func text(label: view[]u8, bytes: view[]u8) { print_str(label); print_str(" ["); print_str(bytes); print_str("]"); println() }
+func kind_name(k: io.ErrKind) {
+    match k {
+        BrokenPipe => print_str("BrokenPipe")
+        Other => print_str("Other")
+        _ => print_str("another kind")
+    }
+}
+func fails[T](label: view[]u8, r: own Result[T, io.IoErr]) {
+    print_str(label)
+    print_str(": ")
+    match r {
+        Ok(v) => print_str("no failure")
+        Err(e) => kind_name(io.kind(e))
+    }
+    println()
+}
+// show prints bytes with the carriage returns and line feeds visible.
+func show(label: view[]u8, bytes: view[]u8) {
+    print_str(label)
+    print_str(" [")
+    for b in bytes {
+        if b == 13u8 { print_str("<CR>") } else if b == 10u8 { print_str("<LF>") } else {
+            var one: [1]u8 = zero()
+            one[0usize] = b
+            print_str(one)
+        }
+    }
+    print_str("]")
+    println()
+}
+
+// Mem is a Reader over bytes in memory that hands out at most step bytes
+// a call, and counts its calls.
+struct Mem nocopy { data: Vec[u8]; pos: usize; step: usize; calls: u64 }
+func mem(data: view[]u8, step: usize) -> Mem {
+    v := Vec[u8].new()
+    v.extend(data)
+    return Mem { data: v, pos: 0usize, step: step, calls: 0u64 }
+}
+impl io.Reader for Mem {
+    func read(edit self, buf: edit[]u8) -> Result[usize, io.IoErr] {
+        self.calls = self.calls + 1u64
+        var n: usize = self.data.len() - self.pos
+        if n > self.step { n = self.step }
+        if n > len(buf) { n = len(buf) }
+        with d := self.data.as_view() {
+            for i in 0usize..n { buf[i] = d[self.pos + i] }
+        }
+        self.pos = self.pos + n
+        return Ok(n)
+    }
+}
+
+// Sink is a Writer that keeps what it is given: at most limit bytes a
+// call, and nothing after it has taken fail_at bytes, when every write
+// fails with kind BrokenPipe (or returns Ok(0), with stall set).
+struct Sink nocopy { got: Vec[u8]; limit: usize; fail_at: usize; stall: bool; writes: u64; flushes: u64; name: u64 }
+func sink(name: u64, limit: usize, fail_at: usize) -> Sink {
+    return Sink { got: Vec[u8].new(), limit: limit, fail_at: fail_at, stall: false, writes: 0u64, flushes: 0u64, name: name }
+}
+impl io.Writer for Sink {
+    func write(edit self, data: view[]u8) -> Result[usize, io.IoErr] {
+        self.writes = self.writes + 1u64
+        if self.got.len() >= self.fail_at {
+            if self.stall { return Ok(0usize) }
+            return Err(io.error_of(io.ErrKind.BrokenPipe))
+        }
+        var n: usize = len(data)
+        if n > self.limit { n = self.limit }
+        if n > self.fail_at - self.got.len() { n = self.fail_at - self.got.len() }
+        self.got.extend(data[0usize : n])
+        return Ok(n)
+    }
+    func flush(edit self) -> Result[(), io.IoErr] {
+        self.flushes = self.flushes + 1u64
+        return Ok(())
+    }
+}
+impl Sink {
+    func report(view self) {
+        print_str("  sink ")
+        print_u64(self.name)
+        print_str(" holds [")
+        print_str(self.got.as_view())
+        print_str("] after ")
+        print_u64(self.writes)
+        print_str(" writes and ")
+        print_u64(self.flushes)
+        print_str(" flushes")
+        println()
+    }
+    destructor(edit self) {
+        print_str("  sink ")
+        print_u64(self.name)
+        print_str(" destroyed holding [")
+        print_str(self.got.as_view())
+        print_str("]")
+        println()
+    }
+}
+
+// lines reads data by lines through a buffer of cap bytes over a reader
+// that gives step bytes a call, and prints each line.
+func lines(data: view[]u8, step: usize, cap: usize) -> Result[(), io.IoErr] {
+    r := io.BufReader[Mem].with_capacity(mem(data, step), cap)
+    var count: u64 = 0u64
+    while true {
+        line := Vec[u8].new()
+        if !r.read_line(line)? { break }
+        show(" ", line.as_view())
+        count = count + 1u64
+    }
+    num("  lines:", count)
+    extra := Vec[u8].new()
+    if r.read_line(extra)? { say("  a line after the end") }
+    return Ok(())
+}
+
+func reading() -> Result[(), io.IoErr] {
+    say("-- read_line: both terminators, an empty line, no final terminator")
+    lines("one\ntwo\r\n\nfour\r\n\r\nlast", 64usize, 64usize)?
+    say("-- the same, one byte a read through a buffer of two")
+    lines("one\ntwo\r\n\nfour\r\n\r\nlast", 1usize, 2usize)?
+    say("-- the same, three bytes a read through a buffer of four")
+    lines("one\ntwo\r\n\nfour\r\n\r\nlast", 3usize, 4usize)?
+    say("-- a carriage return that is not a terminator stays")
+    lines("a\rb\nc\r", 2usize, 3usize)?
+    say("-- a final terminator makes no extra line; no bytes, no lines")
+    lines("x\ny\n", 64usize, 64usize)?
+    lines("", 64usize, 64usize)?
+
+    say("-- read_line appends, and leaves what the line held")
+    r := io.BufReader[Mem].new(mem("\nnext\n", 64usize))
+    held := Vec[u8].new()
+    held.extend("kept\r")
+    got := r.read_line(held)?
+    show(" ", held.as_view())
+    got2 := r.read_line(held)?
+    show(" ", held.as_view())
+
+    say("-- read through the buffer, around it, and into_inner")
+    b := io.BufReader[Mem].with_capacity(mem("0123456789abcdefghij", 64usize), 8usize)
+    var small: [3]u8 = zero()
+    n := b.read(small)?
+    text("  three bytes", small[0usize : n])
+    n2 := b.read(small)?
+    text("  three more, from the buffer", small[0usize : n2])
+    var big: [16]u8 = zero()
+    n3 := b.read(big)?
+    text("  a large read takes what is buffered", big[0usize : n3])
+    n4 := b.read(big)?
+    text("  then reads past the buffer", big[0usize : n4])
+    num("  at the end", u64(b.read(big)?))
+    var none: [0]u8 = zero()
+    num("  an empty buffer", u64(b.read(none)?))
+    inner := b.into_inner()
+    num("  reads of the inner reader", inner.calls)
+
+    ahead := io.BufReader[Mem].with_capacity(mem("abcdefgh", 64usize), 8usize)
+    n5 := ahead.read(small)?
+    back := ahead.into_inner()
+    num("  into_inner after three of eight bytes: the reader is at", u64(back.pos))
+    return Ok(())
+}
+
+func writing() -> Result[(), io.IoErr] {
+    say("-- small writes gather; a full buffer goes out in one write")
+    w := io.BufWriter[Sink].with_capacity(sink(1u64, 64usize, 1000usize), 8usize)
+    num("  write returns", u64(w.write("abc")?))
+    num("  write returns", u64(w.write("def")?))
+    num("  buffered", u64(w.buffered()))
+    num("  write returns", u64(w.write("ghi")?))
+    num("  buffered after the third", u64(w.buffered()))
+    say("-- a write as large as the buffer goes straight through")
+    num("  write returns", u64(w.write("0123456789")?))
+    num("  buffered", u64(w.buffered()))
+    w.flush()?
+    s := w.into_inner()?
+    s.report()
+
+    say("-- write_to through a writer that takes two bytes a call")
+    slow := io.BufWriter[Sink].with_capacity(sink(2u64, 2usize, 1000usize), 4usize)
+    io.write_to(slow, "hello, writer")?
+    s2 := slow.into_inner()?
+    s2.report()
+
+    say("-- the destructor flushes")
+    return Ok(())
+}
+
+func dropped() -> Result[(), io.IoErr] {
+    w := io.BufWriter[Sink].new(sink(3u64, 64usize, 1000usize))
+    w.write("left in the buffer")?
+    return Ok(())
+}
+
+func failing() -> Result[(), io.IoErr] {
+    say("-- a writer that fails after five bytes")
+    w := io.BufWriter[Sink].with_capacity(sink(4u64, 3usize, 5usize), 16usize)
+    num("  write returns", u64(w.write("0123456789")?))
+    fails("  flush", w.flush())
+    num("  still buffered", u64(w.buffered()))
+    fails("  flush again", w.flush())
+    fails("  into_inner", w.into_inner())
+    say("  (the writer is gone, and nothing more was written)")
+
+    say("-- a writer that takes nothing")
+    stuck := sink(5u64, 3usize, 2usize)
+    stuck.stall = true
+    z := io.BufWriter[Sink].with_capacity(stuck, 16usize)
+    num("  write returns", u64(z.write("abcdef")?))
+    fails("  flush", z.flush())
+    num("  still buffered", u64(z.buffered()))
+    say("-- its destructor's flush fails too, and says nothing")
+    return Ok(())
+}
+
+func files() -> Result[(), io.IoErr] {
+    say("-- a file through both")
+    dir := io.make_temp_dir("kern-buffered-")?
+    path := Vec[u8].new()
+    path.extend(dir.as_view())
+    path.extend("/lines.txt")
+    w := io.BufWriter[io.File].new(io.create(path.as_view())?)
+    for i in 0u64..5000u64 {
+        if i % 2u64 == 0u64 { io.write_to(w, "even\n")? } else { io.write_to(w, "odd line\r\n")? }
+    }
+    f := w.into_inner()?
+    m := f.metadata()?
+    num("  bytes written", m.size)
+    f.close()?
+    r := io.BufReader[io.File].new(io.open_read(path.as_view())?)
+    var count: u64 = 0u64
+    var bytes: u64 = 0u64
+    while true {
+        line := Vec[u8].new()
+        if !r.read_line(line)? { break }
+        count = count + 1u64
+        bytes = bytes + u64(line.len())
+    }
+    num("  lines read", count)
+    num("  bytes in them", bytes)
+    whole := Vec[u8].new()
+    again := io.open_read(path.as_view())?
+    num("  read_to_end", u64(io.read_to_end(again, whole)?))
+    io.remove_file(path.as_view())?
+    io.remove_dir(dir.as_view())?
+    return Ok(())
+}
+
+func standard() -> Result[(), io.IoErr] {
+    say("-- standard output as a Writer")
+    so := io.stdout()
+    num("  write returns", u64(so.write("  written through Stdout\n")?))
+    so.flush()?
+    w := io.BufWriter[io.Stdout].new(io.stdout())
+    io.write_to(w, "  buffered: second\n")?
+    say("  printed: first")
+    w.flush()?
+    say("  printed: third")
+    return Ok(())
+}
+
+func step(r: own Result[(), io.IoErr]) {
+    match r {
+        Ok(u) => { }
+        Err(e) => {
+            print_str("unexpected failure: ")
+            kind_name(io.kind(e))
+            println()
+        }
+    }
+}
+
+func main() -> i32 {
+    step(reading())
+    step(writing())
+    step(dropped())
+    step(failing())
+    step(files())
+    step(standard())
+    return 0i32
+}

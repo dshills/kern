@@ -418,7 +418,12 @@ func lex(src: view[]u8, toks: edit[Vec[Tok]], errs: edit[Vec[LexErr]]) -> bool {
                         pos = pos + 1usize
                     } else {
                         e := src[pos + 1usize]
-                        if e != 110u8 && e != 116u8 && e != 34u8 && e != 92u8 && e != 48u8 { errs.push(LexErr { s: pos, e: pos + 2usize, k: LE_ESCAPE }) }
+                        if e == 120u8 && pos + 3usize < n && hex_digit(src[pos + 2usize]) < 16u8 && hex_digit(src[pos + 3usize]) < 16u8 {
+                            // \xHH: a byte by its two hexadecimal digits
+                            pos = pos + 2usize
+                        } else if e != 110u8 && e != 116u8 && e != 114u8 && e != 34u8 && e != 92u8 && e != 48u8 {
+                            errs.push(LexErr { s: pos, e: pos + 2usize, k: LE_ESCAPE })
+                        }
                         pos = pos + 2usize
                     }
                 } else if d == 10u8 {
@@ -470,4 +475,12 @@ func lex(src: view[]u8, toks: edit[Vec[Tok]], errs: edit[Vec[LexErr]]) -> bool {
     if allows_nl(toks) { emit(toks, NL, pos, pos) }
     emit(toks, EOF, pos, pos)
     return true
+}
+
+// hex_digit is the value of a hexadecimal digit, or 16 for any other byte.
+func hex_digit(c: u8) -> u8 {
+    if c >= 48u8 && c <= 57u8 { return c - 48u8 }
+    if c >= 97u8 && c <= 102u8 { return c - 87u8 }
+    if c >= 65u8 && c <= 70u8 { return c - 55u8 }
+    return 16u8
 }

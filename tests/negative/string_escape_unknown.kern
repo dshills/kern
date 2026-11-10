@@ -1,0 +1,8 @@
+//! expect: reject SYNTAX rule=4.0
+//! twin: string_escape_unknown_ok
+// \x needs two hexadecimal digits; any other unlisted escape is refused
+// the same way.
+module m
+func f() -> usize {
+    return len("\x4")   // SYNTAX: unknown escape
+}

@@ -577,7 +577,11 @@ impl Child {
 // from its stdout (1) or stderr (2, both read). Its destructor closes it.
 struct Pipe nocopy { fd: i32; kind: u8 }
 
-impl Pipe {
+// A Pipe is an io.Reader when it is the read end of the child's standard
+// output or error, and an io.Writer when it is the write end of the
+// child's standard input; used against its direction, either returns the
+// system's error for a descriptor that is not open that way.
+impl io.Reader for Pipe {
     // read reads at most len(buf) bytes and returns how many: 0 at end of
     // file (the child closed its end) or for an empty buf.
     func read(edit self, buf: edit[]u8) -> Result[usize, io.IoErr] {
@@ -588,7 +592,25 @@ impl Pipe {
         if n < 0i64 { return Err(neg_err(n)) }
         return Ok(usize(n))
     }
+}
 
+impl io.Writer for Pipe {
+    // write writes at most len(data) bytes and returns how many the pipe
+    // took. Writing to a child that closed its stdin is an error of kind
+    // BrokenPipe; it never ends the program.
+    func write(edit self, data: view[]u8) -> Result[usize, io.IoErr] {
+        if self.kind != 0u8 { return Err(errno_err(2u8)) }
+        f := proc_fault_take(self.kind)
+        if f != 0i32 { return Err(io.err_of(f)) }
+        n := proc_write(self.fd, data)
+        if n < 0i64 { return Err(neg_err(n)) }
+        return Ok(usize(n))
+    }
+    // flush does nothing: a pipe has no buffer on this side.
+    func flush(edit self) -> Result[(), io.IoErr] { return Ok(()) }
+}
+
+impl Pipe {
     // read_timeout is read waiting at most d for data (specs/std-timeouts):
     // Some(n) for n bytes (0 at end of file or for an empty buf), None
     // when none arrived in time, with nothing read.

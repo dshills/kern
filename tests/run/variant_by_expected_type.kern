@@ -1,0 +1,42 @@
+//! phase: 6
+//! expect: output variant_by_expected_type
+// Two unions of one module declare NotFound and Other. Written without
+// its union, such a name is the variant of the expected type: a return
+// value, an argument, a payload, an assignment to a typed variable
+// (spec/types.md §1). A pattern takes its variants from the subject.
+module run
+union A { NotFound; Other(code: i32) }
+union B { NotFound; Timeout; Other }
+func fa() -> A { return NotFound }
+func fb() -> B { return NotFound }
+func wrap(code: i32) -> Result[u64, A] {
+    if code == 0i32 { return Err(NotFound) }
+    return Err(Other(code))
+}
+func kb(e: view[A]) -> B {
+    match e {
+        NotFound => { return NotFound }
+        Other(code) => { return Other }
+    }
+}
+func name(b: B) -> u64 {
+    match b {
+        NotFound => { return 1u64 }
+        Timeout => { return 2u64 }
+        Other => { return 3u64 }
+    }
+}
+func main() -> i32 {
+    a := fa()
+    print_u64(name(kb(a))); println()
+    print_u64(name(fb())); println()
+    print_u64(name(NotFound)); println()
+    var b: B = Other
+    b = Timeout
+    print_u64(name(b)); println()
+    match wrap(7i32) {
+        Ok(n) => { }
+        Err(e) => { print_u64(name(kb(e))); println() }
+    }
+    return 0i32
+}

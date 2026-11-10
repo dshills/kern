@@ -1,0 +1,83 @@
+//! phase: 6
+//! expect: output io_pipe_streams
+// A child's pipes as io.Reader and io.Writer (specs/runtime RG4): lines
+// written to cat through a BufWriter over its stdin pipe come back, line
+// by line, through a BufReader over its stdout pipe; a pipe used against
+// its direction returns the system's error through the interfaces too.
+module t
+import "std/io"
+import "std/process"
+
+func say(s: view[]u8) { print_str(s); println() }
+func text(label: view[]u8, bytes: view[]u8) { print_str(label); print_str(" ["); print_str(bytes); print_str("]"); println() }
+
+// count_lines works on any Reader.
+func count_lines[R: io.Reader](r: own R) -> Result[u64, io.IoErr] {
+    b := io.BufReader[R].new(r)
+    var n: u64 = 0u64
+    while true {
+        line := Vec[u8].new()
+        if !b.read_line(line)? { break }
+        if n < 2u64 { text("  line", line.as_view()) }
+        n = n + 1u64
+    }
+    return Ok(n)
+}
+
+func run() -> Result[(), io.IoErr] {
+    cmd := process.Command.new("cat")
+    cmd.stdin(process.Stdio.Piped)
+    cmd.stdout(process.Stdio.Piped)
+    c := cmd.spawn()?
+    w := io.BufWriter[process.Pipe].new(c.take_stdin()?)
+    io.write_to(w, "first line\n")?
+    io.write_to(w, "second, with a carriage return\r\n")?
+    for i in 0u64..98u64 { io.write_to(w, "more\n")? }
+    // into_inner flushes; destroying the pipe closes cat's input
+    pipe := w.into_inner()?
+    drop(pipe)
+    lines := count_lines(c.take_stdout()?)?
+    print_str("  lines back: ")
+    print_u64(lines)
+    println()
+    status := c.wait()?
+    match status {
+        Exited(code) => { print_str("  cat exited "); print_i64(i64(code)); println() }
+        Signaled(g) => say("  cat was signaled")
+    }
+    return Ok(())
+}
+
+func against() -> Result[(), io.IoErr] {
+    cmd := process.Command.new("cat")
+    cmd.stdin(process.Stdio.Piped)
+    cmd.stdout(process.Stdio.Piped)
+    c := cmd.spawn()?
+    to_child := c.take_stdin()?
+    from_child := c.take_stdout()?
+    var buf: [8]u8 = zero()
+    match to_child.read(buf) {
+        Ok(n) => say("  read from the write end")
+        Err(e) => say("  reading the write end is an error")
+    }
+    match io.write_to(from_child, "x") {
+        Ok(u) => say("  wrote to the read end")
+        Err(e) => say("  writing the read end is an error")
+    }
+    to_child.flush()?
+    drop(to_child)
+    status := c.wait()?
+    return Ok(())
+}
+
+func main() -> i32 {
+    match run() {
+        Ok(u) => say("done")
+        Err(e) => say("failed")
+    }
+    match against() {
+        Ok(u) => say("done")
+        Err(e) => say("failed")
+    }
+    return 0i32
+}
