@@ -170,18 +170,27 @@ int64_t kern_net_accept(int32_t fd, uint64_t ns, uint8_t timed) {
         if (w < 0) return w;
     }
 }
-// kern_net_connect makes one connect call; when the connection is still
-// being made it waits until the socket is writable, and SO_ERROR is then
-// the result. A descriptor the caller never saw is closed on every path
-// that does not return it.
-int64_t kern_net_connect(const uint8_t *addr, int64_t n, uint64_t ns, uint8_t timed) {
-    struct sockaddr_storage ss;
-    socklen_t len = kern_net_to_sa(addr, n, &ss);
-    if (len == 0) return -EINVAL;
+// kern_net_connect_to makes one connect call on a new stream socket of
+// the family; when the connection is still being made it waits until the
+// socket is writable, and SO_ERROR is then the result. A Unix-domain
+// socket whose listener's queue is full answers EAGAIN and makes no
+// connection in the background: the call is made again, a millisecond
+// later, until the time has passed. A descriptor the caller never saw is
+// closed on every path that does not return it.
+static int64_t kern_net_connect_to(int family, const struct sockaddr *sa, socklen_t len, uint64_t ns, uint8_t timed) {
     uint64_t start = timed ? kern_now_ns() : 0;
-    int fd = kern_net_socket(ss.ss_family, SOCK_STREAM);
+    int fd = kern_net_socket(family, SOCK_STREAM);
     if (fd < 0) return fd;
-    if (connect(fd, (struct sockaddr *)&ss, len) == 0) return fd;
+    for (;;) {
+        if (connect(fd, sa, len) == 0) return fd;
+        if (errno != EAGAIN || family != AF_UNIX) break;
+        if (timed && kern_now_ns() - start >= ns) {
+            close(fd);
+            return KERN_TIMED_OUT;
+        }
+        struct timespec nap = {0, 1000000};
+        (void)nanosleep(&nap, NULL);
+    }
     // an interrupted connect goes on being made, as one in progress does
     if (errno != EINPROGRESS && errno != EINTR) {
         int e = errno;
@@ -202,6 +211,59 @@ int64_t kern_net_connect(const uint8_t *addr, int64_t n, uint64_t ns, uint8_t ti
     }
     return fd;
 }
+int64_t kern_net_connect(const uint8_t *addr, int64_t n, uint64_t ns, uint8_t timed) {
+    struct sockaddr_storage ss;
+    socklen_t len = kern_net_to_sa(addr, n, &ss);
+    if (len == 0) return -EINVAL;
+    return kern_net_connect_to(ss.ss_family, (struct sockaddr *)&ss, len, ns, timed);
+}
+
+// ---- Unix-domain sockets (specs/runtime RL1) ----
+
+// kern_net_unix_sa fills a Unix-domain address from a path: its length,
+// or a negative error for a path that cannot be one (empty or holding a
+// NUL: -EINVAL; 104 bytes or more, the smallest limit of the supported
+// hosts: -ENAMETOOLONG).
+static int kern_net_unix_sa(const char *p, int64_t n, struct sockaddr_un *sa) {
+    if (n <= 0 || memchr(p, 0, (size_t)n) != NULL) return -EINVAL;
+    if (n >= 104 || (size_t)n >= sizeof sa->sun_path) return -ENAMETOOLONG;
+    memset(sa, 0, sizeof *sa);
+    sa->sun_family = AF_UNIX;
+    memcpy(sa->sun_path, p, (size_t)n);
+    return (int)(offsetof(struct sockaddr_un, sun_path) + (size_t)n + 1);
+}
+int32_t kern_net_unix_listen(const char *p, int64_t n, int32_t backlog) {
+    struct sockaddr_un sa;
+    int len = kern_net_unix_sa(p, n, &sa);
+    if (len < 0) return len;
+    int fd = kern_net_socket(AF_UNIX, SOCK_STREAM);
+    if (fd < 0) return fd;
+    if (bind(fd, (struct sockaddr *)&sa, (socklen_t)len) < 0 || listen(fd, backlog < 0 ? 0 : backlog) < 0) {
+        int e = errno;
+        close(fd);
+        return -e;
+    }
+    return fd;
+}
+int64_t kern_net_unix_connect(const char *p, int64_t n, uint64_t ns, uint8_t timed) {
+    struct sockaddr_un sa;
+    int len = kern_net_unix_sa(p, n, &sa);
+    if (len < 0) return len;
+    return kern_net_connect_to(AF_UNIX, (struct sockaddr *)&sa, (socklen_t)len, ns, timed);
+}
+int32_t kern_net_unix_pair(int32_t *fds, int64_t cap) {
+    if (cap < 2) return -EINVAL;
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) return -errno;
+    int a = kern_net_ready(sv[0]);
+    if (a < 0) { close(sv[1]); return a; }
+    int b = kern_net_ready(sv[1]);
+    if (b < 0) { close(a); return b; }
+    fds[0] = a;
+    fds[1] = b;
+    return 0;
+}
+
 int64_t kern_net_recv(int32_t fd, char *buf, int64_t n, uint64_t ns, uint8_t timed) {
     if (n <= 0) return 0;
     uint64_t start = timed ? kern_now_ns() : 0;

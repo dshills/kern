@@ -2,6 +2,7 @@
 // (a freestanding image has no operating system to ask).
 // Imported with `import "std/mem"` (specs/runtime RF3).
 module mem
+import "std/io"
 
 // Runtime intrinsics (hosted).
 // mem_page_size is the size in bytes of a page of the machine's memory.
@@ -14,6 +15,13 @@ func mem_map(bytes: usize) -> RawPtr[u8]
 // mem_unmap returns to the system the bytes at p that one mem_map call
 // mapped. An unsafe operation: nothing uses the memory afterwards.
 func mem_unmap(p: RawPtr[u8], bytes: usize)
+
+// mem_map_file maps the first bytes bytes of an open file, shared, and
+// returns the address or -errno; mem_sync writes a mapping's changes to
+// its file. Unsafe operations: the mapping is the caller's to unmap, and
+// it is exactly as long as asked.
+func mem_map_file(fd: i32, bytes: usize, writable: bool) -> i64
+func mem_sync(p: RawPtr[u8], bytes: usize) -> i32
 
 // page_size is the size in bytes of a page of the machine's memory: a
 // power of two, 4,096 or 16,384 on the supported hosts.
@@ -65,4 +73,65 @@ impl Allocator for PageAllocator {
             None => { }
         }
     }
+}
+
+// ---- mapped files (specs/runtime RL4) ----
+
+// Mapping is a file's bytes in memory: reading them reads the file, and
+// writing them, in a writable mapping, writes the file, for every program
+// that has it mapped. The system writes changes back in its own time;
+// sync waits until it has. The mapping is as long as the file was when
+// it was made and does not follow the file's growth; cutting the file
+// short under a live mapping makes the bytes past its new end fault. It
+// is unmapped when the Mapping is destroyed, and outlives the File.
+struct Mapping nocopy { p: RawPtr[u8]; n: usize; writable: bool }
+
+// map_file maps the whole of an open file. The file must be open for
+// reading, and for writing too when writable is set. An empty file gives
+// an empty mapping.
+contract { ensures "p addresses n mapped bytes until release, or n is 0" }
+func map_file(f: view[io.File], writable: bool) -> Result[Mapping, io.IoErr] {
+    m := f.metadata()?
+    if m.size == 0u64 { return Ok(Mapping { p: zero(), n: 0usize, writable: writable }) }
+    if m.size > 9223372036854775807u64 { return Err(io.error_of(io.ErrKind.InvalidInput)) }
+    unsafe {
+        r := mem_map_file(f.raw_fd(), usize(m.size), writable)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Mapping { p: ptr_from_addr[u8](usize(r)), n: usize(m.size), writable: writable })
+    }
+}
+
+impl Mapping {
+    func len(view self) -> usize { return self.n }
+
+    // bytes is the file's content.
+    contract { requires "p addresses n mapped bytes, or n is 0" }
+    func bytes(view self) -> view[]u8 {
+        unsafe { return ptr_view_seq(self.p, self.n) }
+    }
+
+    // bytes_mut is the file's content to change; it traps explicit on a
+    // mapping that was not made writable.
+    contract { requires "p addresses n mapped, writable bytes, or n is 0" }
+    func bytes_mut(edit self) -> edit[]u8 {
+        if !self.writable { trap_kind(explicit) }
+        unsafe { return ptr_edit_seq(self.p, self.n) }
+    }
+
+    // sync returns when the system has written the mapping's changes to
+    // the file.
+    contract { requires "p addresses n mapped bytes, or n is 0" }
+    func sync(edit self) -> Result[(), io.IoErr] {
+        if self.n == 0usize { return Ok(()) }
+        unsafe { return io.status(mem_sync(self.p, self.n)) }
+    }
+
+    contract { requires "p addresses n mapped bytes that nothing uses after this, or n is 0" }
+    func release(edit self) {
+        if self.n > 0usize {
+            unsafe { mem_unmap(self.p, self.n) }
+            self.n = 0usize
+        }
+    }
+    destructor(edit self) { self.release() }
 }

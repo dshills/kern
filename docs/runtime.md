@@ -259,9 +259,13 @@ The modules hold the policy.
   other.
 - **A call that a signal interrupts is made again.** No `Interrupted`
   error reaches a program from the runtime's own calls.
-- **Sockets** are non-blocking inside the runtime; a call that waits
-  polls with the time that is left, so a timed call never outlasts its
-  duration.
+- **Sockets**, TCP, UDP and Unix-domain, are non-blocking inside the
+  runtime; a call that waits polls with the time that is left, so a timed
+  call never outlasts its duration.
+- **A file lock** (`File.lock`) is advisory and belongs to the open
+  file: it ends when the file is closed.
+- **A mapped file** (`mem.map_file`) is the file's own pages: a write
+  through a writable mapping is a write to the file.
 - **A caught signal runs no code of the program.** The runtime's handler
   sets a bit and writes a byte to a pipe; `Signals.wait` returns it.
 - **Random bytes** come from `getentropy`.
@@ -289,11 +293,12 @@ is named).
 |---|---|---|
 | `--opt=debug\|release` | `opt` | the checks of section 1 |
 | `--env=hosted\|freestanding` | `env` | which runtime |
-| `--stack-bytes=N` | `stack_bytes` | section 5 |
+| `--stack-bytes=N` | `stack_bytes` | hosted: section 5; freestanding: the size of the image's one stack, by default 65536 |
 | `--backtrace` | | section 4 |
 | `--test-hooks` | | links the `testing.*` entries (debug only) |
 | `--board=<file.c>` | `board` | a freestanding image's board file (section 11) |
 | `--linker-script=<file.ld>` | `linker_script` | a freestanding image's layout |
+| `--startup=<file.S>` | `startup` | a freestanding image's start-up code, in place of the architecture's |
 | `--heap-bytes=N` | `heap_bytes` | a freestanding image's heap: a positive multiple of 16 up to 1073741824, by default 1048576 |
 
 ## 10. Signals the runtime touches
@@ -346,7 +351,7 @@ compile time, with a diagnostic naming the call.
 
 Every test of the runtime runs on macOS arm64 and, in a container, on
 Linux arm64; CI adds Linux x86-64. Freestanding images boot under QEMU
-for both architectures.
+for both architectures on both hosts.
 
 **The interpreter** behaves as the hosted runtime does, with these
 differences, each from its being a program of another runtime:
@@ -408,6 +413,7 @@ entry raises its traps.
 | `int64_t kern_io_seek(int32_t fd, int64_t off, int32_t whence)` | Moves a descriptor's offset (whence 0 start, 1 current, 2 end): the new offset or -errno. |
 | `int32_t kern_io_sync(int32_t fd)` | Asks the system to make a file's data durable: 0 or -errno. |
 | `int32_t kern_io_set_len(int32_t fd, uint64_t n)` | Sets a file's length to n bytes, zero-filling growth: 0 or -errno. |
+| `int32_t kern_io_flock(int32_t fd, int32_t op)` | Takes (op 0 shared, 1 exclusive) or gives up (2) an advisory lock on an open file; 4 added returns -EWOULDBLOCK instead of waiting: 0 or -errno. |
 | `int32_t kern_io_stat(const char *p, int64_t n, uint8_t follow, uint64_t *out, int64_t cap)` | Writes a path's metadata (kind, size, modified_ns, mode) into out[0..4], following a final link when follow is set: 0 or -errno. |
 | `int32_t kern_io_fstat(int32_t fd, uint64_t *out, int64_t cap)` | As kern_io_stat for an open descriptor. |
 | `int32_t kern_io_rename(const char *p, int64_t n, const char *q, int64_t m)` | Renames p to q, replacing q: 0 or -errno. |
@@ -477,7 +483,9 @@ entry raises its traps.
 |---|---|
 | `int64_t kern_mem_page_size(void)` | Returns the size of a page of memory in bytes. |
 | `void *kern_mem_map(int64_t bytes)` | Maps bytes (a positive multiple of the page size) of zeroed, readable and writable memory: its address, or NULL. |
-| `void kern_mem_unmap(void *p, int64_t bytes)` | Unmaps the bytes at p that one kern_mem_map call mapped. |
+| `void kern_mem_unmap(void *p, int64_t bytes)` | Unmaps the bytes at p that one kern_mem_map or kern_mem_map_file call mapped. |
+| `int64_t kern_mem_map_file(int32_t fd, int64_t len, uint8_t writable)` | Maps the first len bytes of an open file, shared, for reading or for reading and writing: the address or -errno. |
+| `int32_t kern_mem_sync(void *p, int64_t len)` | Writes a file mapping's changed pages to its file: 0 or -errno. |
 
 **rt_net.c: sockets (std/net)**
 
@@ -487,6 +495,9 @@ entry raises its traps.
 | `int32_t kern_net_udp_bind(const uint8_t *addr, int64_t n)` | Makes a UDP socket bound to the address: a descriptor or -errno. |
 | `int64_t kern_net_accept(int32_t fd, uint64_t ns, uint8_t timed)` | Accepts the next connection of a listening socket: its descriptor, -errno, or -2^32. |
 | `int64_t kern_net_connect(const uint8_t *addr, int64_t n, uint64_t ns, uint8_t timed)` | Connects a new TCP socket to the address: its descriptor, -errno, or -2^32 (the socket is then closed). |
+| `int32_t kern_net_unix_listen(const char *p, int64_t n, int32_t backlog)` | Makes a Unix-domain stream socket bound to the path and listening with the backlog: a descriptor or -errno. |
+| `int64_t kern_net_unix_connect(const char *p, int64_t n, uint64_t ns, uint8_t timed)` | Connects a new Unix-domain stream socket to the path: its descriptor, -errno, or -2^32. |
+| `int32_t kern_net_unix_pair(int32_t *fds, int64_t cap)` | Makes two connected Unix-domain stream sockets into fds[0] and fds[1]: 0 or -errno. |
 | `int64_t kern_net_recv(int32_t fd, char *buf, int64_t n, uint64_t ns, uint8_t timed)` | Receives at most n bytes: the count, 0 when the peer closed, -errno, or -2^32. |
 | `int64_t kern_net_send(int32_t fd, const char *p, int64_t n)` | Sends at most n bytes, waiting while the socket's buffer is full: the count or -errno (never a SIGPIPE). |
 | `int32_t kern_net_shutdown(int32_t fd, int32_t how)` | Shuts down reading (0), writing (1) or both (2): 0 or -errno. |

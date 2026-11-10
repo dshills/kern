@@ -523,6 +523,8 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	// files beyond read and write, metadata and paths (specs/runtime RG2, RG3)
 	case "io_seek":
 		setDst(fe.rt("kern_io_seek", "i64 (i32, i64, i32)", "i32 "+fe.v(a[0])+", i64 "+fe.v(a[1])+", i32 "+fe.v(a[2])))
+	case "io_flock":
+		setDst(fe.rt("kern_io_flock", "i32 (i32, i32)", "i32 "+fe.v(a[0])+", i32 "+fe.v(a[1])))
 	case "io_sync":
 		setDst(fe.rt("kern_io_sync", "i32 (i32)", "i32 "+fe.v(a[0])))
 	case "io_set_len":
@@ -667,6 +669,17 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		z := fe.next("t")
 		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[2]))
 		setDst(fe.rt("kern_net_connect", "i64 (ptr, i64, i64, i8)", "ptr "+p+", i64 "+l+", i64 "+fe.v(a[1])+", i8 "+z))
+	case "net_unix_listen":
+		p, l := fe.seqParts(a[0])
+		setDst(fe.rt("kern_net_unix_listen", "i32 (ptr, i64, i32)", "ptr "+p+", i64 "+l+", i32 "+fe.v(a[1])))
+	case "net_unix_connect":
+		p, l := fe.seqParts(a[0])
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[2]))
+		setDst(fe.rt("kern_net_unix_connect", "i64 (ptr, i64, i64, i8)", "ptr "+p+", i64 "+l+", i64 "+fe.v(a[1])+", i8 "+z))
+	case "net_unix_pair":
+		p, l := fe.seqParts(a[0])
+		setDst(fe.rt("kern_net_unix_pair", "i32 (ptr, i64)", "ptr "+p+", i64 "+l))
 	case "net_recv":
 		p, l := fe.seqParts(a[1])
 		z := fe.next("t")
@@ -708,6 +721,12 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		setDst(fe.rt("kern_mem_map", "ptr (i64)", "i64 "+fe.v(a[0])))
 	case "mem_unmap":
 		fe.rt("kern_mem_unmap", "void (ptr, i64)", "ptr "+fe.v(a[0])+", i64 "+fe.v(a[1]))
+	case "mem_map_file":
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[2]))
+		setDst(fe.rt("kern_mem_map_file", "i64 (i32, i64, i8)", "i32 "+fe.v(a[0])+", i64 "+fe.v(a[1])+", i8 "+z))
+	case "mem_sync":
+		setDst(fe.rt("kern_mem_sync", "i32 (ptr, i64)", "ptr "+fe.v(a[0])+", i64 "+fe.v(a[1])))
 	case "time_wall_ns":
 		setDst(fe.rt("kern_time_wall_ns", "i64 (ptr)", "ptr "+fe.loc(c.Pos)))
 	case "yield_now":

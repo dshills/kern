@@ -150,7 +150,7 @@ var allocating = map[string]bool{
 	"Vec.push": false, "Pool.alloc": false, "Arena.alloc": false, "thread.spawn": false, "scope.spawn": false,
 	"SystemAllocator.alloc": false, "SystemAllocator.realloc": false, "SystemAllocator.alloc_zeroed": false, "clone": false,
 	// std/mem: pages mapped from the operating system
-	"mem_map": false,
+	"mem_map": false, "mem_map_file": false,
 }
 
 // Allocations reports every allocation site of the user functions

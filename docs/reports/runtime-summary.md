@@ -1,7 +1,7 @@
 # The runtime work: summary
 
 **Date:** 2026-11-09. **Spec:** `specs/runtime/SPEC.md` v0.6. **Plan:**
-`specs/runtime/PLAN.md`, eleven phases. **Ledger:**
+`specs/runtime/PLAN.md`, twelve phases. **Ledger:**
 `specs/runtime/STATUS.md`, one row per requirement. **Reference:**
 `docs/runtime.md`. **Hosts:** macOS 27.2 on arm64 and Ubuntu 24.04 on
 arm64 in the `kern-linux-check` container.
@@ -27,8 +27,9 @@ tested in both engines and on both hosts, and documented.
 | 9 | Signals and randomness: `std/signal`, `std/rand` | `runtime-signal-rand.md` | `6296fee` |
 | 10 | Freestanding: the board interface, the heap's size, a double-free check | `runtime-board.md` | `a176db2` |
 | 11 | Documentation, the performance check, the final gates | this report | `b4f2b5b` |
+| 12 | Extensions: Unix-domain sockets, directory trees, file locks, mapped files, the freestanding stack and start-up code, QEMU in the Linux gate | `runtime-extensions.md` | PH12 |
 
-Every one of the forty-one requirements has a row in the ledger with
+Every one of the forty-seven requirements has a row in the ledger with
 the commit that met it and its deviations from the spec's text.
 
 ## What the work found in the compiler
@@ -129,28 +130,35 @@ workload carrying 2.4 million instructions more.
 
 ## Gate 10: the ledger
 
-`specs/runtime/STATUS.md` lists the forty-one requirements, each with
+`specs/runtime/STATUS.md` lists the forty-seven requirements, each with
 its commit and its deviations, and what was found along the way.
 
-## What is not done
+## What is not done, and why
 
-Stated in the phase reports and the ledger; the ones a user would meet:
+Two things were decided against in the spec (§2, Non-goals), not left
+over:
 
 - **No asynchronous I/O.** A call that waits blocks its thread
-  (ADR-017). Sockets are non-blocking inside the runtime, which leaves
-  room for a reactor later.
-- **No TLS, no Unix-domain sockets, no IPv6 scope identifiers, no socket
-  options beyond `TCP_NODELAY`.**
-- **No directory iteration beyond `list_dir`**, no file locking, no
-  memory-mapped files.
+  (ADR-017, decision 1). Sockets are non-blocking inside the runtime,
+  which leaves room for a reactor without changing an entry's contract.
+- **No TLS, and nothing above the transport layer.** Encryption belongs
+  in a library with its own review, not in a runtime's first release.
+
+And a third is the owner's to do: nothing has been pushed or published.
+
+What the first eleven phases had left for a user to miss was added as a
+twelfth (`docs/reports/runtime-extensions.md`): Unix-domain sockets,
+directory trees, file locks, mapped files, the freestanding stack's size
+and start-up code, and QEMU in the Linux gate.
+
+What remains is small and stated where it applies:
+
 - **The interpreter is not the system** for signals at their default
-  disposition, and it writes no allocation report.
-- **A freestanding image has one stack of 64 KiB**, fixed by the start-up
-  code, and its start-up code is not replaceable by a flag.
+  disposition, it writes no allocation report, and a mapping there is a
+  copy written back at `sync` and when it is destroyed.
+- **No IPv6 scope identifiers; no socket options beyond `TCP_NODELAY`.**
 - **`OpenOptions.trunc`**, not `truncate`: a reserved word cannot name a
   field.
-- **The Linux container has no QEMU**, so freestanding images are booted
-  on macOS and in CI, and linked but not booted there.
 
 ## Verification
 

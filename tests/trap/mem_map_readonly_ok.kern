@@ -1,0 +1,25 @@
+//! phase: 6
+//! expect: output mem_map_readonly_ok
+//! twin: mem_map_readonly_mut
+// The twin: the same mapping read, which a mapping that is not writable
+// allows.
+module t
+import "std/io"
+import "std/mem"
+func run() -> Result[u64, io.IoErr] {
+    path := io.make_temp_file("kern-map-ro-")?
+    io.write_file(path.as_view(), "read only")?
+    f := io.open_read(path.as_view())?
+    m := mem.map_file(f, false)?
+    io.remove_file(path.as_view())?
+    var first: u64 = 0u64
+    with b := m.bytes() { first = u64(b[0usize]) }
+    return Ok(first)
+}
+func main() -> i32 {
+    match run() {
+        Ok(n) => { print_u64(n); println() }
+        Err(e) => { print_str("failed"); println() }
+    }
+    return 0i32
+}

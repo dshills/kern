@@ -1,0 +1,12 @@
+a holds the exclusive lock
+b, exclusive: held by another
+b, shared: held by another
+a let go
+b, shared: taken
+a, shared beside it: taken
+b, exclusive, with nobody holding: taken
+while b holds it, the waiter has the lock: false
+after b let go the waiter returned 1
+a, exclusive, after the holder's file was closed: taken
+b, exclusive, after a's file was closed: taken
+cleaned up

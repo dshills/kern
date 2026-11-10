@@ -44,9 +44,9 @@ type BuildOptions struct {
 	// (specs/runtime RJ1); a flag's path is as given, a manifest's is
 	// joined to the project root by the build. boardFlag, scriptFlag and
 	// heapFlag record that a flag set them, which overrides the manifest.
-	Board, LinkerScript             string
-	HeapBytes                       int
-	boardFlag, scriptFlag, heapFlag bool
+	Board, LinkerScript, Startup                 string
+	HeapBytes                                    int
+	boardFlag, scriptFlag, heapFlag, startupFlag bool
 }
 
 // applyManifest takes the manifest's opt and env where no flag set them.
@@ -163,17 +163,20 @@ func parseRunArgs(args []string) (BuildOptions, []string, []string, error) {
 			opts.Debug = true
 		case a == "--backtrace":
 			opts.Backtrace = true
-		case strings.HasPrefix(a, "--opt="), strings.HasPrefix(a, "--env="), strings.HasPrefix(a, "--stack-bytes="), strings.HasPrefix(a, "--board="), strings.HasPrefix(a, "--linker-script="), strings.HasPrefix(a, "--heap-bytes="):
+		case strings.HasPrefix(a, "--opt="), strings.HasPrefix(a, "--env="), strings.HasPrefix(a, "--stack-bytes="), strings.HasPrefix(a, "--board="), strings.HasPrefix(a, "--linker-script="), strings.HasPrefix(a, "--heap-bytes="), strings.HasPrefix(a, "--startup="):
 			k, v, _ := strings.Cut(a, "=")
 			switch k {
-			case "--board", "--linker-script":
+			case "--board", "--linker-script", "--startup":
 				if v == "" {
 					return opts, nil, nil, fmt.Errorf("%s needs a file", k)
 				}
-				if k == "--board" {
+				switch k {
+				case "--board":
 					opts.Board, opts.boardFlag = v, true
-				} else {
+				case "--linker-script":
 					opts.LinkerScript, opts.scriptFlag = v, true
+				default:
+					opts.Startup, opts.startupFlag = v, true
 				}
 			case "--heap-bytes":
 				n, err := strconv.Atoi(v)
@@ -221,8 +224,8 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stdout, "CLI_INVALID_FLAGS", "%v", err)
 	}
-	if opts.boardFlag || opts.scriptFlag || opts.heapFlag {
-		return fail(stdout, "CLI_INVALID_FLAGS", "--board, --linker-script and --heap-bytes configure an image: they are options of kern build")
+	if opts.boardFlag || opts.scriptFlag || opts.heapFlag || opts.startupFlag {
+		return fail(stdout, "CLI_INVALID_FLAGS", "--board, --linker-script, --startup and --heap-bytes configure an image: they are options of kern build")
 	}
 	pr, ok := load(named, stdout)
 	if !ok {

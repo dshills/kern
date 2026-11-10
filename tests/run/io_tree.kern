@@ -1,0 +1,101 @@
+//! phase: 6
+//! expect: output io_tree
+// std/io's directory trees (specs/runtime RL2): create_dir_all makes a
+// path's missing parents, read_dir lists entries with their kinds,
+// remove_dir_all removes a tree and leaves what a symbolic link in it
+// points to.
+module t
+import "std/io"
+
+func say(s: view[]u8) { print_str(s); println() }
+func flag(label: view[]u8, b: bool) { print_str(label); print_str(" "); print_bool(b); println() }
+func kind_name(k: io.ErrKind) {
+    match k {
+        NotFound => print_str("NotFound")
+        AlreadyExists => print_str("AlreadyExists")
+        InvalidInput => print_str("InvalidInput")
+        NotADirectory => print_str("NotADirectory")
+        _ => print_str("another kind")
+    }
+}
+func fails[T](label: view[]u8, r: own Result[T, io.IoErr]) {
+    print_str(label)
+    print_str(": ")
+    match r {
+        Ok(v) => print_str("no failure")
+        Err(e) => kind_name(io.kind(e))
+    }
+    println()
+}
+
+func run(dir: view[]u8) -> Result[(), io.IoErr] {
+    say("-- create_dir_all")
+    deep := io.join(dir, "tree/a/b/c")
+    io.create_dir_all(deep.as_view())?
+    flag("tree/a/b/c exists:", io.exists(deep.as_view()))
+    io.create_dir_all(deep.as_view())?
+    say("a second time is no error")
+    io.create_dir_all(io.join(dir, "tree/a/x///").as_view())?
+    flag("slashes at the end are ignored:", io.exists(io.join(dir, "tree/a/x").as_view()))
+    file := io.join(dir, "tree/file")
+    io.write_file(file.as_view(), "content")?
+    fails("over a file", io.create_dir_all(file.as_view()))
+    fails("under a file", io.create_dir_all(io.join(file.as_view(), "sub").as_view()))
+    fails("of nothing", io.create_dir_all(""))
+
+    say("-- read_dir")
+    // outside the tree, and a link to it from inside
+    kept := io.join(dir, "kept")
+    io.make_dir(kept.as_view())?
+    io.write_file(io.join(kept.as_view(), "precious").as_view(), "untouched")?
+    tree := io.join(dir, "tree")
+    io.symlink(kept.as_view(), io.join(tree.as_view(), "link-out").as_view())?
+    io.symlink("file", io.join(tree.as_view(), "link-to-file").as_view())?
+    io.write_file(io.join(tree.as_view(), "a/b/c/leaf").as_view(), "leaf")?
+    entries := io.read_dir(tree.as_view())?
+    for e in entries.as_view() {
+        print_str(e.name.as_view())
+        match e.kind {
+            RegularFile => say(": a file")
+            Directory => say(": a directory")
+            Symlink => say(": a symbolic link")
+            OtherFile => say(": something else")
+        }
+    }
+    none := io.read_dir(io.join(tree.as_view(), "a/b/c").as_view())?
+    print_str("entries of tree/a/b/c: ")
+    print_u64(u64(none.len()))
+    println()
+    fails("of a missing directory", io.read_dir(io.join(dir, "missing").as_view()))
+    fails("of a file", io.read_dir(file.as_view()))
+
+    say("-- remove_dir_all")
+    fails("of a file", io.remove_dir_all(file.as_view()))
+    fails("of a missing path", io.remove_dir_all(io.join(dir, "missing").as_view()))
+    fails("of a link to a directory", io.remove_dir_all(io.join(tree.as_view(), "link-out").as_view()))
+    io.remove_dir_all(tree.as_view())?
+    flag("the tree is gone:", !io.exists(tree.as_view()))
+    back := io.read_file(io.join(kept.as_view(), "precious").as_view())?
+    print_str("what the link pointed to is ")
+    print_str(back.as_view())
+    println()
+    io.remove_dir_all(kept.as_view())?
+    return Ok(())
+}
+
+func main() -> i32 {
+    match io.make_temp_dir("kern-tree-") {
+        Ok(dir) => {
+            match run(dir.as_view()) {
+                Ok(u) => { }
+                Err(e) => { print_str("failed: "); kind_name(io.kind(e)); println() }
+            }
+            match io.remove_dir(dir.as_view()) {
+                Ok(u) => say("cleaned up")
+                Err(e) => say("the directory is not empty")
+            }
+        }
+        Err(e) => say("no temporary directory")
+    }
+    return 0i32
+}

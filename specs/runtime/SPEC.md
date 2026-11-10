@@ -1,6 +1,6 @@
 # Spec: the kern runtime, complete
 
-**Version:** 0.6. **Status:** draft. **Date:** 2026-11-09.
+**Version:** 0.7. **Status:** implemented (`specs/runtime/STATUS.md`). **Date:** 2026-11-09.
 
 ## 0. Goal
 
@@ -581,6 +581,50 @@ builds); `docs/ownership.md` for every language-visible addition; the
 security review, the unsafe audit, the hosted-only inventory, the README
 and `CHANGELOG.md` (`Unreleased`) updated; one report per phase under
 `docs/reports/runtime-*.md`.
+
+### L. Extensions (added in v0.7, after the first eleven phases)
+
+The first complete pass left six things a program would miss. They are
+requirements too.
+
+**RL1. Unix-domain sockets.** `std/net` gains `UnixListener` (`bind(path:
+view[]u8)`, `bind_with_backlog`, `accept`, `accept_timeout`) and
+`UnixStream` (`connect(path)`, `pair() -> Result[UnixPair, IoErr]` with
+`union UnixPair { Ends(UnixStream, UnixStream) }`, which a `match` takes apart, `read`, `read_timeout`,
+`write`, `write_all`, `shutdown`, `Reader` and `Writer`). A path of 104
+bytes or more, an empty one or one with a NUL byte is `InvalidInput`
+before any system call. `bind` fails with `AddrInUse` when the path
+exists; a listener does not remove its path. RH4's rules hold.
+
+**RL2. Directories.** `io.read_dir(path) -> Result[Vec[DirEntry], IoErr]`
+with `DirEntry { name: Vec[u8]; kind: FileKind }`, entries in bytewise
+order, the kind not following a symbolic link; `io.create_dir_all(path)`
+creates the directory and every missing parent and succeeds when it
+exists; `io.remove_dir_all(path)` removes a directory and everything
+under it without following symbolic links.
+
+**RL3. File locks.** `File.lock(edit self, exclusive: bool) -> Result[(),
+IoErr]` blocks until the advisory lock is held; `File.try_lock(edit self,
+exclusive: bool) -> Result[bool, IoErr]` returns false when another open
+file holds a conflicting lock; `File.unlock(edit self)`. The lock belongs
+to the open file and ends when it is closed.
+
+**RL4. Mapped files.** `std/mem`: `map_file(f: view[io.File], writable:
+bool) -> Result[Mapping, io.IoErr]` maps the whole file, shared, so that a
+write through the mapping is a write to the file. `Mapping` has `len`,
+`bytes(view self) -> view[]u8`, `bytes_mut(edit self) -> edit[]u8` (traps
+`explicit` on a mapping that is not writable), `sync(edit self) ->
+Result[(), io.IoErr]`; its destructor unmaps. An empty file gives an empty
+mapping. `File.raw_fd(view self) -> i32` is the descriptor.
+
+**RL5. Freestanding stack and start-up.** A freestanding build's
+`--stack-bytes=N` (`stack_bytes`) is the size of the image's stack, in
+RC2's range, by default 65,536. `--startup=<file.S>` (`startup`) replaces
+the architecture's start-up code.
+
+**RL6. The Linux gate boots images.** The `kern-linux-check` container has
+QEMU for both architectures, and the freestanding fixtures and board tests
+boot there.
 
 ### P. Performance
 

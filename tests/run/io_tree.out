@@ -1,0 +1,22 @@
+-- create_dir_all
+tree/a/b/c exists: true
+a second time is no error
+slashes at the end are ignored: true
+over a file: AlreadyExists
+under a file: NotADirectory
+of nothing: InvalidInput
+-- read_dir
+a: a directory
+file: a file
+link-out: a symbolic link
+link-to-file: a symbolic link
+entries of tree/a/b/c: 1
+of a missing directory: NotFound
+of a file: NotADirectory
+-- remove_dir_all
+of a file: NotADirectory
+of a missing path: NotFound
+of a link to a directory: NotADirectory
+the tree is gone: true
+what the link pointed to is untouched
+cleaned up

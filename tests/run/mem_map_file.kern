@@ -1,0 +1,106 @@
+//! phase: 6
+//! expect: output mem_map_file
+// Mapped files (specs/runtime RL4): a file's bytes read through a
+// mapping; a writable mapping whose changes reach the file at sync and
+// when it is destroyed, also after its File was closed; an empty file;
+// and the mappings the system refuses.
+module t
+import "std/io"
+import "std/mem"
+
+func say(s: view[]u8) { print_str(s); println() }
+func num(label: view[]u8, n: u64) { print_str(label); print_str(" "); print_u64(n); println() }
+func text(label: view[]u8, bytes: view[]u8) { print_str(label); print_str(" ["); print_str(bytes); print_str("]"); println() }
+func kind_name(k: io.ErrKind) {
+    match k {
+        PermissionDenied => print_str("PermissionDenied")
+        InvalidInput => print_str("InvalidInput")
+        _ => print_str("another kind")
+    }
+}
+func fails[T](label: view[]u8, r: own Result[T, io.IoErr]) {
+    print_str(label)
+    print_str(": ")
+    match r {
+        Ok(v) => print_str("no failure")
+        Err(e) => kind_name(io.kind(e))
+    }
+    println()
+}
+func sum(bytes: view[]u8) -> u64 {
+    var s: u64 = 0u64
+    for b in bytes { s = s + u64(b) }
+    return s
+}
+
+func run(dir: view[]u8) -> Result[(), io.IoErr] {
+    say("-- reading through a mapping")
+    path := io.join(dir, "data")
+    content := Vec[u8].new()
+    for i in 0usize..20000usize { content.push(truncate[u8](i % 251usize)) }
+    io.write_file(path.as_view(), content.as_view())?
+    f := io.open_read(path.as_view())?
+    m := mem.map_file(f, false)?
+    num("length", u64(m.len()))
+    with b := m.bytes() {
+        print_str("the bytes are the file's: ")
+        print_bool(sum(b) == sum(content.as_view()) && b[0usize] == 0u8 && b[19999usize] == truncate[u8](19999usize % 251usize))
+        println()
+    }
+    fails("a writable mapping of a file opened for reading", mem.map_file(f, true))
+    drop(m)
+    drop(f)
+
+    say("-- writing through a mapping")
+    small := io.join(dir, "small")
+    io.write_file(small.as_view(), "hello, mapped file")?
+    o := io.options()
+    o.read = true
+    o.write = true
+    rw := io.open(small.as_view(), o)?
+    w := mem.map_file(rw, true)?
+    with b := w.bytes_mut() {
+        b[0usize] = 72u8
+        b[7usize] = 77u8
+    }
+    w.sync()?
+    after_sync := io.read_file(small.as_view())?
+    text("the file after sync", after_sync.as_view())
+    // the mapping outlives its File
+    rw.close()?
+    with b := w.bytes_mut() { b[14usize] = 70u8 }
+    drop(w)
+    after_drop := io.read_file(small.as_view())?
+    text("the file after the mapping is gone", after_drop.as_view())
+
+    say("-- an empty file")
+    empty := io.join(dir, "empty")
+    io.write_file(empty.as_view(), "")?
+    e := io.open_read(empty.as_view())?
+    em := mem.map_file(e, false)?
+    num("length", u64(em.len()))
+    with b := em.bytes() { num("bytes", u64(len(b))) }
+    drop(em)
+    drop(e)
+
+    say("-- what the system refuses")
+    wo := io.create(io.join(dir, "write-only").as_view())?
+    wo.write_all("abc")?
+    fails("a mapping of a file opened for writing only", mem.map_file(wo, false))
+    drop(wo)
+    io.remove_dir_all(dir)?
+    return Ok(())
+}
+
+func main() -> i32 {
+    match io.make_temp_dir("kern-map-") {
+        Ok(dir) => {
+            match run(dir.as_view()) {
+                Ok(u) => say("cleaned up")
+                Err(e) => { print_str("failed: "); kind_name(io.kind(e)); println() }
+            }
+        }
+        Err(e) => say("no temporary directory")
+    }
+    return 0i32
+}

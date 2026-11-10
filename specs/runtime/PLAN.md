@@ -377,6 +377,22 @@ interleaved runs each, and the disassembly of `kern_mutex_lock` and
 `kern_mutex_unlock` in a release build at both commits, which must be the
 same instructions); gate 10.
 
+## Phase 12: extensions (RL1 to RL6)
+
+**Files.** `rt_net.c` (two entries: a Unix-domain listener and connect;
+a socket pair), `rt_io.c` (`flock`), `rt_mem.c` (file mappings),
+`std/net.kern`, `std/io.kern`, `std/mem.kern`, `compiler/interp`,
+`start_*.S` (the stack's size as a macro), `compiler/backend/native`,
+`cmd/kern`, `compiler/project`, `scripts/linux-check.sh`.
+
+**Tests.** A Unix-domain echo between two threads and the kinds of its
+failures; a tree made by `create_dir_all`, read by `read_dir` and removed
+by `remove_dir_all` with a symbolic link out of it left alone; two opens
+of one file contending for a lock; a file changed through a mapping and
+read back; an image with a stack of 1 MiB that recurses deeper than the
+default allows, and one with start-up code of the test's own; the
+freestanding fixtures booted in the container.
+
 ## Gate policy
 
 Every gate is mandatory. The standing exception is the `race_raw_ptr`

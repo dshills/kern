@@ -71,6 +71,10 @@ type Options struct {
 	Board        string
 	LinkerScript string
 	HeapBytes    uint64
+	// Startup is a file of start-up code that replaces the
+	// architecture's own in a freestanding image (specs/runtime RL5). A
+	// freestanding image's StackBytes is the size of its one stack.
+	Startup string
 }
 
 // HeapBytesValid reports whether n is a size the freestanding arena can
@@ -605,6 +609,13 @@ func buildFreestanding(text, out, triple string, opts Options) error {
 		}
 		script = string(b)
 	}
+	if opts.Startup != "" {
+		b, err := os.ReadFile(opts.Startup)
+		if err != nil {
+			return fmt.Errorf("start-up file: %v", err)
+		}
+		start = string(b)
+	}
 	if opts.HeapBytes != 0 && !HeapBytesValid(opts.HeapBytes) {
 		return fmt.Errorf("the heap must be a positive multiple of 16 bytes, not %d", opts.HeapBytes)
 	}
@@ -620,6 +631,10 @@ func buildFreestanding(text, out, triple string, opts Options) error {
 	}
 	if opts.HeapBytes != 0 {
 		common = append(common, fmt.Sprintf("-DKERN_HEAP_SIZE=%du", opts.HeapBytes))
+	}
+	if opts.StackBytes != 0 {
+		// the start-up code's stack, in whole 16-byte units
+		common = append(common, fmt.Sprintf("-DKERN_STACK_SIZE=%d", (opts.StackBytes+15)/16*16))
 	}
 	if !x86 {
 		// the image runs with the MMU off, where every access is to Device
@@ -638,6 +653,9 @@ func buildFreestanding(text, out, triple string, opts Options) error {
 		if msg, err := cmd.CombinedOutput(); err != nil {
 			if src == "board.c" && opts.Board != "" {
 				return fmt.Errorf("board file %s: %v: %s", opts.Board, err, msg)
+			}
+			if src == "start.S" && opts.Startup != "" {
+				return fmt.Errorf("start-up file %s: %v: %s", opts.Startup, err, msg)
 			}
 			return fmt.Errorf("clang %s: %v: %s", src, err, msg)
 		}

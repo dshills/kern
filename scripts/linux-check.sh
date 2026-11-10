@@ -40,7 +40,7 @@ image=kern-linux-check:go1.25
 docker build -q -t "$image" - >/dev/null <<'EOF'
 FROM golang:1.25 AS go
 FROM ubuntu:24.04
-RUN apt-get update && apt-get install -y --no-install-recommends clang lld libclang-rt-18-dev llvm jq ca-certificates git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends clang lld libclang-rt-18-dev llvm jq ca-certificates git qemu-system-arm qemu-system-x86 && rm -rf /var/lib/apt/lists/*
 COPY --from=go /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
 EOF
@@ -51,6 +51,7 @@ docker run --rm \
   -e GOCACHE=/cache/build -e GOMODCACHE=/cache/mod -e HOME=/tmp/home \
   -e GOFLAGS=-buildvcs=false -e GOTOOLCHAIN=local \
   -e KERN_SANITIZE="${KERN_SANITIZE:-}" -e LINUX_CHECK_RUNS="$groups" \
+  -e KERN_REQUIRE_QEMU=1 \
   -w /src "$image" bash -c '
 set -uo pipefail
 mkdir -p "$HOME"

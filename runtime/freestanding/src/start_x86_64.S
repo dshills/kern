@@ -6,6 +6,11 @@
 // 64-bit entry, which sets up the stack and limit, runs the program and halts
 // with its result.
 
+// The stack's size in bytes, a multiple of 16: --stack-bytes sets it.
+#ifndef KERN_STACK_SIZE
+#define KERN_STACK_SIZE 65536
+#endif
+
     // Multiboot 1 header (must lie in the first 8 KiB of the image; the
     // linker script places this section first)
     .section .multiboot, "a"
@@ -94,6 +99,6 @@ _kern_pd:
     .balign 16
     .globl _kern_stack_bottom
 _kern_stack_bottom:
-    .space 65536
+    .space KERN_STACK_SIZE
     .globl _kern_stack_top
 _kern_stack_top:

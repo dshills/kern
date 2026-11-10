@@ -17,10 +17,11 @@ started from the one of its architecture.
 | Piece | Whose | How it is chosen |
 |---|---|---|
 | The architecture | kern's: AArch64 or x86-64 | `--target=aarch64-unknown-none-elf` (the default) or `x86_64-unknown-none-elf` |
-| The start-up code | kern's, one per architecture | by the target |
+| The start-up code | kern's, one per architecture; yours when the board is not entered the way kern's expects | by the target, or `--startup=<file.S>` (`startup`) |
 | The board file | yours | `--board=<file.c>`, or `board` in `kern.mod` |
 | The linker script | yours, when the default layout does not fit | `--linker-script=<file.ld>`, or `linker_script` |
 | The heap's size | yours | `--heap-bytes=N`, or `heap_bytes`; 1,048,576 by default |
+| The stack's size | yours | `--stack-bytes=N`, or `stack_bytes`; 65,536 by default |
 
 ```
 kern build --env=freestanding --board=boards/myboard.c \
@@ -117,7 +118,7 @@ script of your own must keep four promises the start-up code relies on.
    loader that jumps to the load address. On x86-64 the `.multiboot`
    section comes before everything, within the first 8 KiB of the image.
 2. **`.bss` and `COMMON` are in the image's memory**, after the data. The
-   boot stack (65,536 bytes) and the heap live there.
+   stack and the heap live there.
 3. **`.bss` reads as zeros when `_start` runs.** An ELF loader does this
    (QEMU's `-kernel` does). A loader that copies a raw binary must zero
    the range itself, or the board cannot rely on the heap.
@@ -142,8 +143,13 @@ registers accessible) with the MMU off. It enables floating point and
 SIMD (`CPACR_EL1.FPEN`), sets the stack pointer to the top of the boot
 stack and the stack limit one page above its bottom, calls the program,
 and powers off with its result. A board that is entered at EL2 or EL3 and
-must drop to EL1 needs start-up code of its own, which is outside what
-`--board` replaces.
+must drop to EL1 needs start-up code of its own: `--startup=<file.S>`
+compiles yours in place of kern's. Start from `start_aarch64.S`; what the
+rest of the runtime needs of it is the symbol `_start` in the section
+`.text._start`, a stack with `kern_stack_limit` set a page above its
+lowest address, a call of `kern_main` and then of `kern_exit` with its
+result. The file is preprocessed, and `KERN_STACK_SIZE` is defined when
+`--stack-bytes` is given.
 
 **x86-64.** Entered by a Multiboot 1 loader in 32-bit protected mode. It
 identity-maps the first gibibyte, enables long mode and SSE, and
@@ -170,11 +176,12 @@ The size is a positive multiple of 16, at most 1,073,741,824.
 
 ## The stack
 
-One stack of 65,536 bytes, in `.bss`, with the lowest page as a guard
-the program never reaches: every function's prologue compares the stack
-pointer with the limit and traps `stack` below it, with the function's
-location. `--unsafe-no-stack-check` drops the comparison; overflow is
-then the program's own risk. The size is fixed by the start-up code.
+One stack, in `.bss`, of 65,536 bytes or what `--stack-bytes=N` says
+(65,536 to 1,073,741,824), with the lowest page as a guard the program
+never reaches: every function's prologue compares the stack pointer with
+the limit and traps `stack` below it, with the function's location.
+`--unsafe-no-stack-check` drops the comparison; overflow is then the
+program's own risk.
 
 ## What a freestanding program can use
 

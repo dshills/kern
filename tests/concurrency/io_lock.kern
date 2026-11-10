@@ -1,0 +1,97 @@
+//! phase: 6
+//! expect: output io_lock
+//! tsan: clean
+// Advisory file locks (specs/runtime RL3): two opens of one file contend;
+// try_lock reports a conflict without waiting; shared locks coexist; lock
+// waits until the holder lets go; closing the file ends its lock.
+module cc
+import "std/io"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func tried(label: view[]u8, r: own Result[bool, io.IoErr]) {
+    print_str(label)
+    match r {
+        Ok(got) => { if got { say(": taken") } else { say(": held by another") } }
+        Err(e) => say(": an error")
+    }
+}
+
+// waiter opens the file itself, waits for the exclusive lock and records
+// that it has it.
+func waiter(path: own Vec[u8], has: view[Atomic[u32]]) -> u64 {
+    match io.open_append(path.as_view()) {
+        Ok(f) => {
+            match f.lock(true) {
+                Ok(u) => {
+                    has.store(1u32, Ordering.seq_cst)
+                    return 1u64
+                }
+                Err(e) => { return 0u64 }
+            }
+        }
+        Err(e) => { return 0u64 }
+    }
+}
+
+func run(dir: view[]u8) -> Result[(), io.IoErr] {
+    path := io.join(dir, "locked")
+    io.write_file(path.as_view(), "x")?
+    a := io.open_read(path.as_view())?
+    b := io.open_read(path.as_view())?
+    a.lock(true)?
+    say("a holds the exclusive lock")
+    tried("b, exclusive", b.try_lock(true))
+    tried("b, shared", b.try_lock(false))
+    a.unlock()?
+    say("a let go")
+    tried("b, shared", b.try_lock(false))
+    tried("a, shared beside it", a.try_lock(false))
+    b.unlock()?
+    a.unlock()?
+    tried("b, exclusive, with nobody holding", b.try_lock(true))
+
+    // a thread waits for the lock b holds
+    has := Atomic[u32].new(0u32)
+    with s := thread.scope() {
+        copy_of := Vec[u8].new()
+        copy_of.extend(path.as_view())
+        match s.spawn(waiter, copy_of, has) {
+            Ok(j) => {
+                time.sleep(time.millis(100u64))
+                print_str("while b holds it, the waiter has the lock: ")
+                print_bool(has.load(Ordering.seq_cst) == 1u32)
+                println()
+                b.unlock()?
+                print_str("after b let go the waiter returned ")
+                print_u64(j.get())
+                println()
+            }
+            Err(e) => say("no thread")
+        }
+    }
+    // the waiter's file is closed, and its lock with it
+    tried("a, exclusive, after the holder's file was closed", a.try_lock(true))
+    drop(a)
+    tried("b, exclusive, after a's file was closed", b.try_lock(true))
+    drop(b)
+    io.remove_file(path.as_view())?
+    return Ok(())
+}
+
+func main() -> i32 {
+    match io.make_temp_dir("kern-lock-") {
+        Ok(dir) => {
+            match run(dir.as_view()) {
+                Ok(u) => { }
+                Err(e) => say("failed")
+            }
+            match io.remove_dir(dir.as_view()) {
+                Ok(u) => say("cleaned up")
+                Err(e) => say("the directory is not empty")
+            }
+        }
+        Err(e) => say("no temporary directory")
+    }
+    return 0i32
+}

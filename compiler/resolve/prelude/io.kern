@@ -39,6 +39,10 @@ func io_is_terminal(stream: i32) -> i32
 func io_seek(fd: i32, off: i64, whence: i32) -> i64
 func io_sync(fd: i32) -> i32
 func io_set_len(fd: i32, n: u64) -> i32
+// io_flock takes (op 0 shared, 1 exclusive) or gives up (2) an advisory
+// lock on an open file; 4 added to either of the first two makes it
+// return the would-block error where it would wait.
+func io_flock(fd: i32, op: i32) -> i32
 // io_stat and io_fstat write four numbers into raw: the kind (1 a regular
 // file, 2 a directory, 3 anything else, 4 a symbolic link), the size, the
 // modification time in nanoseconds since the Unix epoch, the mode bits.
@@ -544,6 +548,38 @@ impl File {
         return Ok(meta_of(raw))
     }
 
+    // raw_fd is the file's descriptor, for what this module does not
+    // offer (std/mem maps a file by it). The File still owns it.
+    func raw_fd(view self) -> i32 { return self.fd }
+
+    // lock waits until this open file holds an advisory lock on the file:
+    // one that many may share, or with exclusive set one that excludes
+    // every other. The lock binds only programs that ask for it. It
+    // belongs to this open file and ends with unlock or when the File is
+    // closed; taking the other kind converts it.
+    func lock(edit self, exclusive: bool) -> Result[(), IoErr] {
+        var op: i32 = 0i32
+        if exclusive { op = 1i32 }
+        return status(io_flock(self.fd, op))
+    }
+
+    // try_lock is lock that does not wait: false when another open file
+    // holds a lock that conflicts.
+    func try_lock(edit self, exclusive: bool) -> Result[bool, IoErr] {
+        var op: i32 = 4i32
+        if exclusive { op = 5i32 }
+        r := io_flock(self.fd, op)
+        if r == 0i32 { return Ok(true) }
+        e := err_of(0i32 - r)
+        match kind(e) {
+            WouldBlock => { return Ok(false) }
+            _ => { return Err(e) }
+        }
+    }
+
+    // unlock gives the lock up.
+    func unlock(edit self) -> Result[(), IoErr] { return status(io_flock(self.fd, 2i32)) }
+
     // close closes the file and returns the system's verdict: a write the
     // system had only queued can fail here.
     func close(own self) -> Result[(), IoErr] {
@@ -661,6 +697,115 @@ func copy_file(from: view[]u8, to: view[]u8) -> Result[u64, IoErr] {
     }
     dst.close()?
     return Ok(total)
+}
+
+// ---- directories as trees (specs/runtime RL2) ----
+
+// join is dir, a "/" and name; no "/" is added to a dir that ends in one
+// or is empty.
+func join(dir: view[]u8, name: view[]u8) -> Vec[u8] {
+    p := Vec[u8].new()
+    p.extend(dir)
+    if len(dir) > 0usize && dir[len(dir) - 1usize] != 47u8 { p.push(47u8) }
+    p.extend(name)
+    return p
+}
+
+// DirEntry is one entry of a directory: its name and what it is, a
+// symbolic link being a Symlink whatever it points to.
+struct DirEntry { name: Vec[u8]; kind: FileKind }
+
+// read_dir returns a directory's entries, `.` and `..` left out, in
+// bytewise order of their names. An entry that vanishes while the
+// directory is read is left out.
+func read_dir(path: view[]u8) -> Result[Vec[DirEntry], IoErr] {
+    names := list_dir(path)?
+    entries := Vec[DirEntry].new()
+    for n in names.as_view() {
+        full := join(path, n.as_view())
+        match symlink_metadata(full.as_view()) {
+            Ok(m) => {
+                name := Vec[u8].new()
+                name.extend(n.as_view())
+                entries.push(DirEntry { name: name, kind: m.kind })
+            }
+            Err(e) => { }
+        }
+    }
+    return Ok(entries)
+}
+
+// create_dir_all creates the directory at path and every parent that is
+// missing; a directory that is there already is no error.
+func create_dir_all(path: view[]u8) -> Result[(), IoErr] {
+    // without the slashes at its end, but never down to nothing
+    var end: usize = len(path)
+    while end > 1usize && path[end - 1usize] == 47u8 { end = end - 1usize }
+    if end == 0usize { return Err(error_of(InvalidInput)) }
+    return make_tree(path[0usize : end])
+}
+
+// make_tree is create_dir_all for a path with no slash at its end.
+func make_tree(p: view[]u8) -> Result[(), IoErr] {
+    match make_dir(p) {
+        Ok(u) => { return Ok(()) }
+        Err(e) => {
+            match kind(e) {
+                AlreadyExists => { return is_dir(p, e) }
+                NotFound => { }
+                _ => { return Err(e) }
+            }
+        }
+    }
+    // a parent is missing: make it, then this
+    var cut: usize = len(p)
+    while cut > 0usize && p[cut - 1usize] != 47u8 { cut = cut - 1usize }
+    if cut <= 1usize { return Err(error_of(ErrKind.NotFound)) }
+    create_dir_all(p[0usize : cut - 1usize])?
+    match make_dir(p) {
+        Ok(u) => { return Ok(()) }
+        Err(e) => {
+            // another thread or process may have made it meanwhile
+            match kind(e) {
+                AlreadyExists => { return is_dir(p, e) }
+                _ => { return Err(e) }
+            }
+        }
+    }
+}
+
+// is_dir is Ok when path names a directory, else the error e.
+func is_dir(path: view[]u8, e: IoErr) -> Result[(), IoErr] {
+    match metadata(path) {
+        Ok(m) => {
+            match m.kind {
+                Directory => { return Ok(()) }
+                _ => { return Err(e) }
+            }
+        }
+        Err(other) => { return Err(e) }
+    }
+}
+
+// remove_dir_all removes the directory at path and everything in it. A
+// symbolic link is removed, not followed: nothing outside the tree is
+// touched. A path that is not a directory is an error of kind
+// NotADirectory.
+func remove_dir_all(path: view[]u8) -> Result[(), IoErr] {
+    m := symlink_metadata(path)?
+    match m.kind {
+        Directory => { }
+        _ => { return Err(error_of(NotADirectory)) }
+    }
+    entries := read_dir(path)?
+    for e in entries.as_view() {
+        full := join(path, e.name.as_view())
+        match e.kind {
+            Directory => { remove_dir_all(full.as_view())? }
+            _ => { remove_file(full.as_view())? }
+        }
+    }
+    return remove_dir(path)
 }
 
 // ---- the standard streams as readers and writers ----

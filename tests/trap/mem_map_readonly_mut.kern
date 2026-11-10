@@ -1,0 +1,26 @@
+//! phase: 6
+//! expect: trap explicit
+//! twin: mem_map_readonly_ok
+// bytes_mut of a mapping that was not made writable traps explicit
+// (specs/runtime RL4): the system would fault on the first write.
+module t
+import "std/io"
+import "std/mem"
+func run() -> Result[(), io.IoErr] {
+    path := io.make_temp_file("kern-map-ro-")?
+    io.write_file(path.as_view(), "read only")?
+    f := io.open_read(path.as_view())?
+    m := mem.map_file(f, false)?
+    io.remove_file(path.as_view())?
+    with b := m.bytes_mut() { b[0usize] = 0u8 }   // trap explicit
+    return Ok(())
+}
+func main() -> i32 {
+    match run() {
+        Ok(u) => { }
+        Err(e) => { }
+    }
+    print_str("not reached")
+    println()
+    return 0i32
+}

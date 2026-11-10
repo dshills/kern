@@ -68,7 +68,7 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 	// image (specs/runtime RJ1): a flag, else the manifest's value, whose
 	// paths are relative to the project root
 	if opts.Freestanding {
-		opts.Board, opts.LinkerScript, opts.HeapBytes = bo.Board, bo.LinkerScript, uint64(bo.HeapBytes)
+		opts.Board, opts.LinkerScript, opts.HeapBytes, opts.Startup = bo.Board, bo.LinkerScript, uint64(bo.HeapBytes), bo.Startup
 		if m := pr.Manifest; m != nil {
 			if !bo.boardFlag && m.Board != nil {
 				opts.Board = filepath.Join(pr.Root, filepath.FromSlash(*m.Board))
@@ -79,8 +79,11 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 			if !bo.heapFlag && m.HeapBytes != nil {
 				opts.HeapBytes = uint64(*m.HeapBytes)
 			}
+			if !bo.startupFlag && m.Startup != nil {
+				opts.Startup = filepath.Join(pr.Root, filepath.FromSlash(*m.Startup))
+			}
 		}
-		for _, f := range []struct{ flag, path string }{{"--board", opts.Board}, {"--linker-script", opts.LinkerScript}} {
+		for _, f := range []struct{ flag, path string }{{"--board", opts.Board}, {"--linker-script", opts.LinkerScript}, {"--startup", opts.Startup}} {
 			if f.path == "" {
 				continue
 			}
@@ -88,8 +91,8 @@ func buildCommand(args []string, stdout, stderr io.Writer) int {
 				return fail(stdout, "CLI_INVALID_FLAGS", "%s: %s is not a file", f.flag, f.path)
 			}
 		}
-	} else if bo.boardFlag || bo.scriptFlag || bo.heapFlag {
-		return fail(stdout, "CLI_INVALID_FLAGS", "--board, --linker-script and --heap-bytes configure a freestanding image: they need --env=freestanding")
+	} else if bo.boardFlag || bo.scriptFlag || bo.heapFlag || bo.startupFlag {
+		return fail(stdout, "CLI_INVALID_FLAGS", "--board, --linker-script, --startup and --heap-bytes configure a freestanding image: they need --env=freestanding")
 	}
 	if out == "" {
 		return fail(stdout, "CLI_INVALID_FLAGS", "build requires -o <out> or an output in %s", project.ManifestName)

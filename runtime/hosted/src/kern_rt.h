@@ -44,6 +44,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <netdb.h>
+#include <sys/un.h>
+#include <sys/file.h>
 #include <sys/random.h>
 #if defined(__linux__)
 #include <sys/auxv.h>
@@ -131,6 +133,8 @@ int64_t kern_io_seek(int32_t fd, int64_t off, int32_t whence);
 int32_t kern_io_sync(int32_t fd);
 // Sets a file's length to n bytes, zero-filling growth: 0 or -errno.
 int32_t kern_io_set_len(int32_t fd, uint64_t n);
+// Takes (op 0 shared, 1 exclusive) or gives up (2) an advisory lock on an open file; 4 added returns -EWOULDBLOCK instead of waiting: 0 or -errno.
+int32_t kern_io_flock(int32_t fd, int32_t op);
 // Writes a path's metadata (kind, size, modified_ns, mode) into out[0..4], following a final link when follow is set: 0 or -errno.
 int32_t kern_io_stat(const char *p, int64_t n, uint8_t follow, uint64_t *out, int64_t cap);
 // As kern_io_stat for an open descriptor.
@@ -249,8 +253,12 @@ void kern_sysalloc_free(kern_sysalloc *a, void *p, int64_t size, int64_t align, 
 int64_t kern_mem_page_size(void);
 // Maps bytes (a positive multiple of the page size) of zeroed, readable and writable memory: its address, or NULL.
 void *kern_mem_map(int64_t bytes);
-// Unmaps the bytes at p that one kern_mem_map call mapped.
+// Unmaps the bytes at p that one kern_mem_map or kern_mem_map_file call mapped.
 void kern_mem_unmap(void *p, int64_t bytes);
+// Maps the first len bytes of an open file, shared, for reading or for reading and writing: the address or -errno.
+int64_t kern_mem_map_file(int32_t fd, int64_t len, uint8_t writable);
+// Writes a file mapping's changed pages to its file: 0 or -errno.
+int32_t kern_mem_sync(void *p, int64_t len);
 
 // ---- rt_net.c: sockets (std/net) ----
 // An address is a record of 19 bytes: the family (4 or 6), 16 bytes of address (IPv4 in the first four), the port high byte first.
@@ -264,6 +272,12 @@ int32_t kern_net_udp_bind(const uint8_t *addr, int64_t n);
 int64_t kern_net_accept(int32_t fd, uint64_t ns, uint8_t timed);
 // Connects a new TCP socket to the address: its descriptor, -errno, or -2^32 (the socket is then closed).
 int64_t kern_net_connect(const uint8_t *addr, int64_t n, uint64_t ns, uint8_t timed);
+// Makes a Unix-domain stream socket bound to the path and listening with the backlog: a descriptor or -errno.
+int32_t kern_net_unix_listen(const char *p, int64_t n, int32_t backlog);
+// Connects a new Unix-domain stream socket to the path: its descriptor, -errno, or -2^32.
+int64_t kern_net_unix_connect(const char *p, int64_t n, uint64_t ns, uint8_t timed);
+// Makes two connected Unix-domain stream sockets into fds[0] and fds[1]: 0 or -errno.
+int32_t kern_net_unix_pair(int32_t *fds, int64_t cap);
 // Receives at most n bytes: the count, 0 when the peer closed, -errno, or -2^32.
 int64_t kern_net_recv(int32_t fd, char *buf, int64_t n, uint64_t ns, uint8_t timed);
 // Sends at most n bytes, waiting while the socket's buffer is full: the count or -errno (never a SIGPIPE).

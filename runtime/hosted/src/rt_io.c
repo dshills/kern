@@ -156,6 +156,18 @@ int32_t kern_io_set_len(int32_t fd, uint64_t n) {
     do r = ftruncate(fd, (off_t)n); while (r < 0 && errno == EINTR);
     return r < 0 ? -errno : 0;
 }
+// kern_io_flock takes or gives up an advisory lock on an open file
+// (specs/runtime RL3): op 0 shared, 1 exclusive, 2 unlock, and 4 added to
+// either of the first two returns -EWOULDBLOCK where the call would wait.
+// The lock is the open file's and ends when it is closed.
+int32_t kern_io_flock(int32_t fd, int32_t op) {
+    int how = (op & 3) == 0 ? LOCK_SH : (op & 3) == 1 ? LOCK_EX : LOCK_UN;
+    if ((op & 3) == 3 || op < 0 || op > 5) return -EINVAL;
+    if (op & 4) how |= LOCK_NB;
+    int r;
+    do r = flock(fd, how); while (r < 0 && errno == EINTR);
+    return r < 0 ? -errno : 0;
+}
 // kern_stat_out writes std/io's Metadata as four numbers: the kind (1 a
 // regular file, 2 a directory, 3 anything else, 4 a symbolic link), the
 // size in bytes, the modification time in nanoseconds since the Unix

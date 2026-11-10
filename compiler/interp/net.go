@@ -19,11 +19,37 @@ import (
 // An address crosses as a record of 19 bytes: the family (4 or 6), 16
 // bytes of address (IPv4 in the first four), the port high byte first.
 
-// sock is one open socket: exactly one of its fields is set.
+// sock is one open socket: a listener, a stream or a datagram socket.
+// tcp is set beside conn for a TCP stream, which alone has TCP's options.
 type sock struct {
-	ln  *net.TCPListener
-	tcp *net.TCPConn
-	udp *net.UDPConn
+	ln   listener
+	conn stream
+	tcp  *net.TCPConn
+	udp  *net.UDPConn
+}
+
+// listener is a TCP or a Unix-domain listener, and stream a connection
+// of either: what the two families share is all std/net asks of them.
+type listener interface {
+	Accept() (net.Conn, error)
+	SetDeadline(time.Time) error
+	Addr() net.Addr
+	Close() error
+}
+
+type stream interface {
+	net.Conn
+	CloseRead() error
+	CloseWrite() error
+}
+
+// streamSock is the socket of a connection.
+func streamSock(c net.Conn) *sock {
+	if t, ok := c.(*net.TCPConn); ok {
+		_ = t.SetNoDelay(false) // Go turns TCP_NODELAY on for every connection, the system leaves it off
+		return &sock{conn: t, tcp: t}
+	}
+	return &sock{conn: c.(stream)}
 }
 
 const (
@@ -33,19 +59,22 @@ const (
 
 func init() {
 	for k, v := range map[string]func(*Interp, []Value, callCtx) []Value{
-		"net_tcp_listen":  netTCPListen,
-		"net_udp_bind":    netUDPBind,
-		"net_accept":      netAccept,
-		"net_connect":     netConnect,
-		"net_recv":        netRecv,
-		"net_send":        netSend,
-		"net_shutdown":    netShutdown,
-		"net_set_nodelay": netSetNodelay,
-		"net_addr":        netAddr,
-		"net_send_to":     netSendTo,
-		"net_recv_from":   netRecvFrom,
-		"net_close":       netClose,
-		"net_resolve":     netResolve,
+		"net_tcp_listen":   netTCPListen,
+		"net_udp_bind":     netUDPBind,
+		"net_accept":       netAccept,
+		"net_connect":      netConnect,
+		"net_unix_listen":  netUnixListen,
+		"net_unix_connect": netUnixConnect,
+		"net_unix_pair":    netUnixPair,
+		"net_recv":         netRecv,
+		"net_send":         netSend,
+		"net_shutdown":     netShutdown,
+		"net_set_nodelay":  netSetNodelay,
+		"net_addr":         netAddr,
+		"net_send_to":      netSendTo,
+		"net_recv_from":    netRecvFrom,
+		"net_close":        netClose,
+		"net_resolve":      netResolve,
 	} {
 		intrinsics[k] = v
 	}
@@ -164,7 +193,7 @@ func netTCPListen(it *Interp, a []Value, _ callCtx) []Value {
 	if raw, rerr := ln.SyscallConn(); rerr == nil {
 		_ = raw.Control(func(fd uintptr) { _ = syscall.Listen(int(fd), backlog) })
 	}
-	return i32Val(int32(it.addSock(&sock{ln: ln})))
+	return i32Val(int32(it.addSock(&sock{ln: tcpListener{ln}})))
 }
 
 func netUDPBind(it *Interp, a []Value, _ callCtx) []Value {
@@ -179,24 +208,17 @@ func netUDPBind(it *Interp, a []Value, _ callCtx) []Value {
 	return i32Val(int32(it.addSock(&sock{udp: u})))
 }
 
-// plain makes a connection behave as the runtime's does: Go turns
-// TCP_NODELAY on for every connection, the system leaves it off.
-func plain(c *net.TCPConn) *net.TCPConn {
-	_ = c.SetNoDelay(false)
-	return c
-}
-
 func netAccept(it *Interp, a []Value, _ callCtx) []Value {
 	s := it.sockOf(a[0])
 	if s == nil || s.ln == nil {
 		return i64Val(-int64(syscall.EBADF))
 	}
 	_ = s.ln.SetDeadline(deadline(a[1], a[2]))
-	c, err := s.ln.AcceptTCP()
+	c, err := s.ln.Accept()
 	if err != nil {
 		return i64Val(netErr(err))
 	}
-	return i64Val(it.addSock(&sock{tcp: plain(c)}))
+	return i64Val(it.addSock(streamSock(c)))
 }
 
 func netConnect(it *Interp, a []Value, _ callCtx) []Value {
@@ -214,20 +236,118 @@ func netConnect(it *Interp, a []Value, _ callCtx) []Value {
 	if err != nil {
 		return i64Val(netErr(err))
 	}
-	return i64Val(it.addSock(&sock{tcp: plain(c.(*net.TCPConn))}))
+	return i64Val(it.addSock(streamSock(c)))
+}
+
+// unixPath checks a Unix-domain path as the runtime's kern_net_unix_sa
+// does: 0, or the error number.
+func unixPath(b []byte) (string, syscall.Errno) {
+	if len(b) == 0 {
+		return "", syscall.EINVAL
+	}
+	for _, c := range b {
+		if c == 0 {
+			return "", syscall.EINVAL
+		}
+	}
+	if len(b) >= 104 {
+		return "", syscall.ENAMETOOLONG
+	}
+	return string(b), 0
+}
+
+func netUnixListen(it *Interp, a []Value, _ callCtx) []Value {
+	path, e := unixPath(seqBytes(acc(a[0])))
+	if e != 0 {
+		return i32Val(-int32(e))
+	}
+	backlog := int(int32(a[1].(Int).Bits))
+	if backlog < 0 {
+		backlog = 0
+	}
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		return i32Val(-int32(errnoOf(err)))
+	}
+	l.SetUnlinkOnClose(false) // the path is the program's to remove, as natively
+	if raw, rerr := l.SyscallConn(); rerr == nil {
+		_ = raw.Control(func(fd uintptr) { _ = syscall.Listen(int(fd), backlog) })
+	}
+	return i32Val(int32(it.addSock(&sock{ln: unixListener{l}})))
+}
+
+// unixListener gives a Unix-domain listener the listener interface's
+// Accept.
+type unixListener struct{ *net.UnixListener }
+
+func (u unixListener) Accept() (net.Conn, error) { return u.AcceptUnix() }
+
+// tcpListener does the same for TCP.
+type tcpListener struct{ *net.TCPListener }
+
+func (t tcpListener) Accept() (net.Conn, error) { return t.AcceptTCP() }
+
+func netUnixConnect(it *Interp, a []Value, _ callCtx) []Value {
+	path, e := unixPath(seqBytes(acc(a[0])))
+	if e != 0 {
+		return i64Val(-int64(e))
+	}
+	d := net.Dialer{}
+	timed := bool(a[2].(Bool))
+	end := time.Now().Add(time.Duration(min(a[1].(Int).Bits, uint64(1<<62))))
+	for {
+		c, err := d.Dial("unix", path)
+		if err == nil {
+			return i64Val(it.addSock(streamSock(c)))
+		}
+		// a listener whose queue is full: the call is made again, as the
+		// runtime makes it, until the time has passed
+		if errnoOf(err) != int(syscall.EAGAIN) {
+			return i64Val(netErr(err))
+		}
+		if timed && !time.Now().Before(end) {
+			return i64Val(timedOut)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func netUnixPair(it *Interp, a []Value, _ callCtx) []Value {
+	seq := byteSeq(acc(a[0]))
+	if seq.length() < 2 {
+		return i32Val(-int32(syscall.EINVAL))
+	}
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		return i32Val(-int32(errnoOf(err)))
+	}
+	for i, fd := range fds {
+		syscall.CloseOnExec(fd)
+		f := os.NewFile(uintptr(fd), "socketpair")
+		c, cerr := net.FileConn(f) // a duplicate that the poller owns
+		_ = f.Close()
+		if cerr != nil {
+			if i == 0 {
+				_ = syscall.Close(fds[1])
+			}
+			return i32Val(-int32(errnoOf(cerr)))
+		}
+		seq.at(i).set(mkInt(tyI32, uint64(uint32(it.addSock(streamSock(c))))))
+	}
+	return i32Val(0)
 }
 
 func netRecv(it *Interp, a []Value, _ callCtx) []Value {
 	s := it.sockOf(a[0])
-	if s == nil || s.tcp == nil {
+	if s == nil || s.conn == nil {
 		return i64Val(-int64(syscall.EBADF))
 	}
 	buf := make([]byte, byteSeq(acc(a[1])).length())
 	if len(buf) == 0 {
 		return i64Val(0)
 	}
-	_ = s.tcp.SetReadDeadline(deadline(a[2], a[3]))
-	n, err := s.tcp.Read(buf)
+	_ = s.conn.SetReadDeadline(deadline(a[2], a[3]))
+	n, err := s.conn.Read(buf)
 	if n > 0 {
 		putBytes(a[1], buf[:n])
 		return i64Val(int64(n))
@@ -240,15 +360,15 @@ func netRecv(it *Interp, a []Value, _ callCtx) []Value {
 
 func netSend(it *Interp, a []Value, _ callCtx) []Value {
 	s := it.sockOf(a[0])
-	if s == nil || s.tcp == nil {
+	if s == nil || s.conn == nil {
 		return i64Val(-int64(syscall.EBADF))
 	}
 	data := seqBytes(acc(a[1]))
 	if len(data) == 0 {
 		return i64Val(0)
 	}
-	_ = s.tcp.SetWriteDeadline(time.Time{})
-	n, err := s.tcp.Write(data)
+	_ = s.conn.SetWriteDeadline(time.Time{})
+	n, err := s.conn.Write(data)
 	if n > 0 {
 		return i64Val(int64(n))
 	}
@@ -260,18 +380,18 @@ func netSend(it *Interp, a []Value, _ callCtx) []Value {
 
 func netShutdown(it *Interp, a []Value, _ callCtx) []Value {
 	s := it.sockOf(a[0])
-	if s == nil || s.tcp == nil {
+	if s == nil || s.conn == nil {
 		return i32Val(-int32(syscall.EBADF))
 	}
 	var err error
 	switch int32(a[1].(Int).Bits) {
 	case 0:
-		err = s.tcp.CloseRead()
+		err = s.conn.CloseRead()
 	case 1:
-		err = s.tcp.CloseWrite()
+		err = s.conn.CloseWrite()
 	case 2:
-		if err = s.tcp.CloseRead(); err == nil {
-			err = s.tcp.CloseWrite()
+		if err = s.conn.CloseRead(); err == nil {
+			err = s.conn.CloseWrite()
 		}
 	default:
 		return i32Val(-int32(syscall.EINVAL))
@@ -306,10 +426,10 @@ func netAddr(it *Interp, a []Value, _ callCtx) []Value {
 	switch {
 	case s.ln != nil && !peer:
 		addr = s.ln.Addr()
-	case s.tcp != nil && peer:
-		addr = s.tcp.RemoteAddr()
-	case s.tcp != nil:
-		addr = s.tcp.LocalAddr()
+	case s.conn != nil && peer:
+		addr = s.conn.RemoteAddr()
+	case s.conn != nil:
+		addr = s.conn.LocalAddr()
 	case s.udp != nil && !peer:
 		addr = s.udp.LocalAddr()
 	}
@@ -372,8 +492,8 @@ func netClose(it *Interp, a []Value, _ callCtx) []Value {
 		return i32Val(-int32(syscall.EBADF))
 	case s.ln != nil:
 		err = s.ln.Close()
-	case s.tcp != nil:
-		err = s.tcp.Close()
+	case s.conn != nil:
+		err = s.conn.Close()
 	case s.udp != nil:
 		err = s.udp.Close()
 	}

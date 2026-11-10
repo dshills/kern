@@ -1,0 +1,160 @@
+//! phase: 6
+//! expect: output net_unix
+//! tsan: clean
+// Unix-domain sockets (specs/runtime RL1): a listener on a path in a fresh
+// temporary directory and a client on the main thread; a pair of
+// connected streams; and the kind of each failure.
+module cc
+import "std/net"
+import "std/io"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func text(label: view[]u8, bytes: view[]u8) { print_str(label); print_str(" ["); print_str(bytes); print_str("]"); println() }
+func kind_name(k: io.ErrKind) {
+    match k {
+        NotFound => print_str("NotFound")
+        InvalidInput => print_str("InvalidInput")
+        AddrInUse => print_str("AddrInUse")
+        ConnectionRefused => print_str("ConnectionRefused")
+        _ => print_str("another kind")
+    }
+}
+func fails[T](label: view[]u8, r: own Result[T, io.IoErr]) {
+    print_str(label)
+    print_str(": ")
+    match r {
+        Ok(v) => print_str("no failure")
+        Err(e) => kind_name(io.kind(e))
+    }
+    println()
+}
+
+// serve echoes one connection until its peer stops writing.
+func serve(l: own net.UnixListener) -> u64 {
+    var total: u64 = 0u64
+    match l.accept() {
+        Ok(c) => {
+            var buf: [256]u8 = zero()
+            while true {
+                match c.read(buf) {
+                    Ok(k) => {
+                        if k == 0usize { break }
+                        match c.write_all(buf[0usize : k]) {
+                            Ok(u) => { }
+                            Err(e) => { break }
+                        }
+                        total = total + u64(k)
+                    }
+                    Err(e) => { break }
+                }
+            }
+        }
+        Err(e) => { }
+    }
+    return total
+}
+
+func echo(dir: view[]u8) -> Result[(), io.IoErr] {
+    say("-- a listener on a path")
+    path := io.join(dir, "sock")
+    l := net.UnixListener.bind(path.as_view())?
+    fails("a second bind of the path", net.UnixListener.bind(path.as_view()))
+    start := now_ns()
+    match l.accept_timeout(time.millis(30u64))? {
+        Some(c) => say("accepted a connection nobody made")
+        None => { print_str("accept_timeout: nothing in 30 ms, after at least that long: "); print_bool(now_ns() - start >= 30000000u64); println() }
+    }
+    match thread.spawn(serve, l) {
+        Ok(server) => {
+            c := net.UnixStream.connect(path.as_view())?
+            io.write_to(c, "over a path\n")?
+            c.write_all("line two")?
+            c.shutdown(net.Shutdown.Write)?
+            r := io.BufReader[net.UnixStream].new(c)
+            while true {
+                line := Vec[u8].new()
+                if !r.read_line(line)? { break }
+                text("echoed", line.as_view())
+            }
+            drop(r)
+            print_str("bytes the server echoed: ")
+            print_u64(server.join())
+            println()
+        }
+        Err(e) => say("no thread")
+    }
+    // the listener is gone; its path is the program's to remove
+    print_str("the path is still there: ")
+    print_bool(io.exists(path.as_view()))
+    println()
+    fails("connect with no listener behind the path", net.UnixStream.connect(path.as_view()))
+    io.remove_file(path.as_view())?
+    fails("connect to a path that is gone", net.UnixStream.connect(path.as_view()))
+    again := net.UnixListener.bind(path.as_view())?
+    say("bind after the path was removed")
+    drop(again)
+    io.remove_file(path.as_view())?
+    return Ok(())
+}
+
+func pair() -> Result[(), io.IoErr] {
+    say("-- a pair")
+    match net.UnixStream.pair()? {
+        Ends(a, b) => { return talk(a, b) }
+    }
+}
+
+func talk(a: own net.UnixStream, b: own net.UnixStream) -> Result[(), io.IoErr] {
+    a.write_all("from a")?
+    var buf: [16]u8 = zero()
+    n := b.read(buf)?
+    text("b reads", buf[0usize : n])
+    b.write_all("from b")?
+    k := a.read(buf)?
+    text("a reads", buf[0usize : k])
+    match a.read_timeout(buf, time.millis(20u64))? {
+        Some(m) => say("a read bytes nobody sent")
+        None => say("read_timeout: nothing in 20 ms")
+    }
+    drop(b)
+    print_str("a read after b is gone returns ")
+    print_u64(u64(a.read(buf)?))
+    println()
+    return Ok(())
+}
+
+func refusals() {
+    say("-- paths that cannot be one")
+    fails("an empty path", net.UnixListener.bind(""))
+    long := Vec[u8].new()
+    for i in 0usize..104usize { long.push(97u8) }
+    fails("a path of 104 bytes", net.UnixListener.bind(long.as_view()))
+    fails("connect to a path of 104 bytes", net.UnixStream.connect(long.as_view()))
+    var nul: [3]u8 = zero()
+    nul[0usize] = 97u8
+    nul[2usize] = 98u8
+    fails("a path with a NUL byte", net.UnixStream.connect(nul))
+}
+
+func main() -> i32 {
+    match io.make_temp_dir("ku-") {
+        Ok(dir) => {
+            match echo(dir.as_view()) {
+                Ok(u) => { }
+                Err(e) => { print_str("failed: "); kind_name(io.kind(e)); println() }
+            }
+            match io.remove_dir(dir.as_view()) {
+                Ok(u) => { }
+                Err(e) => say("the directory is not empty")
+            }
+        }
+        Err(e) => say("no temporary directory")
+    }
+    match pair() {
+        Ok(u) => { }
+        Err(e) => say("the pair failed")
+    }
+    refusals()
+    return 0i32
+}

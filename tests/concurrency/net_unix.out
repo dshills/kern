@@ -1,0 +1,20 @@
+-- a listener on a path
+a second bind of the path: AddrInUse
+accept_timeout: nothing in 30 ms, after at least that long: true
+echoed [over a path]
+echoed [line two]
+bytes the server echoed: 20
+the path is still there: true
+connect with no listener behind the path: ConnectionRefused
+connect to a path that is gone: NotFound
+bind after the path was removed
+-- a pair
+b reads [from a]
+a reads [from b]
+read_timeout: nothing in 20 ms
+a read after b is gone returns 0
+-- paths that cannot be one
+an empty path: InvalidInput
+a path of 104 bytes: InvalidInput
+connect to a path of 104 bytes: InvalidInput
+a path with a NUL byte: InvalidInput

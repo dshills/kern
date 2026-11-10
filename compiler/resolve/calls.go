@@ -14,7 +14,7 @@ func isUnsafeOp(f *FuncDecl) bool {
 	if f.Module == "mem" && f.Receiver == nil {
 		// std/mem's page mapping: memory the caller must unmap, and
 		// memory that must not be used afterwards
-		return f.Name == "mem_map" || f.Name == "mem_unmap"
+		return f.Name == "mem_map" || f.Name == "mem_unmap" || f.Name == "mem_map_file" || f.Name == "mem_sync"
 	}
 	if f.Module != "core" {
 		return false

@@ -21,6 +21,9 @@ func net_tcp_listen(addr: view[]u8, backlog: i32) -> i32
 func net_udp_bind(addr: view[]u8) -> i32
 func net_accept(fd: i32, ns: u64, timed: bool) -> i64
 func net_connect(addr: view[]u8, ns: u64, timed: bool) -> i64
+func net_unix_listen(path: view[]u8, backlog: i32) -> i32
+func net_unix_connect(path: view[]u8, ns: u64, timed: bool) -> i64
+func net_unix_pair(fds: edit[]i32) -> i32
 func net_recv(fd: i32, buf: edit[]u8, ns: u64, timed: bool) -> i64
 func net_send(fd: i32, data: view[]u8) -> i64
 func net_shutdown(fd: i32, how: i32) -> i32
@@ -567,6 +570,128 @@ impl TcpStream {
     // peer_addr and local_addr are the addresses of the two ends.
     func peer_addr(view self) -> Result[SocketAddr, io.IoErr] { return sock_addr(self.fd, true) }
     func local_addr(view self) -> Result[SocketAddr, io.IoErr] { return sock_addr(self.fd, false) }
+
+    destructor(edit self) {
+        if self.fd >= 0i32 { r := net_close(self.fd) }
+    }
+}
+
+// ---- Unix-domain sockets (RL1) ----
+
+// A Unix-domain socket is named by a path in the file system and joins
+// programs on one machine. The path is at most 103 bytes. bind creates
+// it and fails with kind AddrInUse when it exists; nothing removes it
+// but the program (io.remove_file), before the next bind.
+
+// UnixListener accepts connections made to a path.
+struct UnixListener nocopy { fd: i32 }
+
+impl UnixListener {
+    func bind(path: view[]u8) -> Result[UnixListener, io.IoErr] { return UnixListener.bind_with_backlog(path, 128u32) }
+
+    func bind_with_backlog(path: view[]u8, backlog: u32) -> Result[UnixListener, io.IoErr] {
+        var queue: u32 = backlog
+        if queue > 65535u32 { queue = 65535u32 }
+        fd := net_unix_listen(path, truncate[i32](queue))
+        if fd < 0i32 { return Err(io.err_of(0i32 - fd)) }
+        return Ok(UnixListener { fd: fd })
+    }
+
+    // accept waits for the next connection; accept_timeout waits at most
+    // d and returns None when none arrived.
+    func accept(edit self) -> Result[UnixStream, io.IoErr] {
+        r := net_accept(self.fd, 0u64, false)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(UnixStream { fd: truncate[i32](r) })
+    }
+    func accept_timeout(edit self, d: time.Duration) -> Result[Option[UnixStream], io.IoErr] {
+        r := net_accept(self.fd, d.ns, true)
+        if r == io.timed_out() { return Ok(None) }
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Some(UnixStream { fd: truncate[i32](r) }))
+    }
+
+    destructor(edit self) {
+        if self.fd >= 0i32 { r := net_close(self.fd) }
+    }
+}
+
+// UnixStream is one end of a Unix-domain connection: an io.Reader and an
+// io.Writer, with TcpStream's reading, writing and shutdown.
+struct UnixStream nocopy { fd: i32 }
+
+// UnixPair is two streams connected to each other. It is a union of one
+// variant so that a match takes both ends out of it:
+// `match net.UnixStream.pair()? { Ends(a, b) => { ... } }`.
+union UnixPair { Ends(UnixStream, UnixStream) }
+
+impl io.Reader for UnixStream {
+    func read(edit self, buf: edit[]u8) -> Result[usize, io.IoErr] {
+        r := net_recv(self.fd, buf, 0u64, false)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(usize(r))
+    }
+}
+
+impl io.Writer for UnixStream {
+    func write(edit self, data: view[]u8) -> Result[usize, io.IoErr] {
+        r := net_send(self.fd, data)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(usize(r))
+    }
+    func flush(edit self) -> Result[(), io.IoErr] { return Ok(()) }
+}
+
+impl UnixStream {
+    // connect makes a connection to the listener at path;
+    // connect_timeout waits at most d for a listener whose queue is full.
+    func connect(path: view[]u8) -> Result[UnixStream, io.IoErr] {
+        r := net_unix_connect(path, 0u64, false)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(UnixStream { fd: truncate[i32](r) })
+    }
+    func connect_timeout(path: view[]u8, d: time.Duration) -> Result[Option[UnixStream], io.IoErr] {
+        r := net_unix_connect(path, d.ns, true)
+        if r == io.timed_out() { return Ok(None) }
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Some(UnixStream { fd: truncate[i32](r) }))
+    }
+
+    // pair makes two streams connected to each other, with no path: what
+    // one writes the other reads.
+    func pair() -> Result[UnixPair, io.IoErr] {
+        var fds: [2]i32 = zero()
+        r := net_unix_pair(fds)
+        if r < 0i32 { return Err(io.err_of(0i32 - r)) }
+        return Ok(Ends(UnixStream { fd: fds[0usize] }, UnixStream { fd: fds[1usize] }))
+    }
+
+    func read_timeout(edit self, buf: edit[]u8, d: time.Duration) -> Result[Option[usize], io.IoErr] {
+        r := net_recv(self.fd, buf, d.ns, true)
+        if r == io.timed_out() { return Ok(None) }
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Some(usize(r)))
+    }
+
+    func write_all(edit self, data: view[]u8) -> Result[(), io.IoErr] {
+        var off: usize = 0usize
+        while off < len(data) {
+            r := net_send(self.fd, data[off : len(data)])
+            if r < 0i64 { return Err(io.neg(r)) }
+            off = off + usize(r)
+        }
+        return Ok(())
+    }
+
+    func shutdown(edit self, how: Shutdown) -> Result[(), io.IoErr] {
+        var n: i32 = 2i32
+        match how {
+            Read => { n = 0i32 }
+            Write => { n = 1i32 }
+            Both => { n = 2i32 }
+        }
+        return io.status(net_shutdown(self.fd, n))
+    }
 
     destructor(edit self) {
         if self.fd >= 0i32 { r := net_close(self.fd) }

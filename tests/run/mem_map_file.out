@@ -1,0 +1,13 @@
+-- reading through a mapping
+length 20000
+the bytes are the file's: true
+a writable mapping of a file opened for reading: PermissionDenied
+-- writing through a mapping
+the file after sync [Hello, Mapped file]
+the file after the mapping is gone [Hello, Mapped File]
+-- an empty file
+length 0
+bytes 0
+-- what the system refuses
+a mapping of a file opened for writing only: PermissionDenied
+cleaned up

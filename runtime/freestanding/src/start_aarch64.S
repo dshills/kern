@@ -2,6 +2,11 @@
 // (CPACR_EL1.FPEN is clear at reset and compiled code uses the vector
 // registers), set up the stack and the stack limit, then run the program;
 // the return value halts the machine.
+// The stack's size in bytes, a multiple of 16: --stack-bytes sets it.
+#ifndef KERN_STACK_SIZE
+#define KERN_STACK_SIZE 65536
+#endif
+
     .section .text._start, "ax"
     .globl _start
 _start:
@@ -23,6 +28,6 @@ _start:
     .balign 16
     .globl _kern_stack_bottom
 _kern_stack_bottom:
-    .space 65536
+    .space KERN_STACK_SIZE
     .globl _kern_stack_top
 _kern_stack_top:

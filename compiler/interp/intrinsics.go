@@ -128,6 +128,10 @@ func init() {
 				fd++
 			}
 			it.sh.files[fd] = f
+			if it.sh.fileOpts == nil {
+				it.sh.fileOpts = map[int64]uint32{}
+			}
+			it.sh.fileOpts[fd] = uint32(a[1].(Int).Bits)
 			it.sh.mu.Unlock()
 			return []Value{mkInt(tyI32, uint64(fd))}
 		},
@@ -404,6 +408,7 @@ func init() {
 			return []Value{mkInt(tyUsize, addr)}
 		},
 		"mem_unmap": func(it *Interp, a []Value, c callCtx) []Value {
+			it.unmapFile(u64(a[0])) // a file mapping's changes go to its file first
 			if !it.heap.is(u64(a[0]), u64(a[1]), uint64(os.Getpagesize())) || !it.heap.free(u64(a[0])) {
 				it.trap("explicit", c.pos) // not a live mapping of this size
 			}

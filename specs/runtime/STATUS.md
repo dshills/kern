@@ -47,6 +47,12 @@ reason. Updated at the end of every phase.
 | RK1 runtime reference | 11 | b4f2b5b |  |
 | RK2 other documents | 11 | b4f2b5b | The unsafe audit and the security review are extended by hand; neither is generated |
 | R-P1 performance | 11 | b4f2b5b | Ten workloads at or below v0.1.0. `hash_table` (+2.1%) and `lock_protected_map` (about +8% over fifteen runs) free tables that v0.1.0 leaked (rule 5.1.9, phase 1); `thread_pool` is within its run-to-run spread. `kern_mutex_lock`'s trap tail is shaped differently; the uncontended path and `unlock` are the same instructions |
+| RL1 Unix-domain sockets | 12 | PH12 | `UnixPair` is a one-variant union (`Ends(a, b)`), which a `match` takes apart: kern cannot move two fields out of a struct. `connect_timeout` added |
+| RL2 directories | 12 | PH12 | `io.join` added |
+| RL3 file locks | 12 | PH12 | `unlock` returns `Result[(), IoErr]` |
+| RL4 mapped files | 12 | PH12 | In the interpreter a mapping is a copy, written back at `sync` and when it is destroyed |
+| RL5 freestanding stack and start-up | 12 | PH12 |  |
+| RL6 the Linux gate boots images | 12 | PH12 | The container requires QEMU (`KERN_REQUIRE_QEMU=1`): a missing emulator fails the gate |
 
 ## Found along the way
 

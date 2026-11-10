@@ -42,6 +42,9 @@ type Manifest struct {
 	Board        *string
 	LinkerScript *string
 	HeapBytes    *int
+	// Startup is a file of start-up code for a freestanding image, in
+	// place of the architecture's own (specs/runtime RL5).
+	Startup *string
 }
 
 // The bounds of a configured stack size, as in the hosted runtime.
@@ -95,7 +98,7 @@ func ParseManifest(path string, b []byte) (*Manifest, []diag.Diagnostic) {
 	}
 	for field := range raw {
 		switch field {
-		case "schema_version", "entry", "opt", "env", "target", "output", "stack_bytes", "board", "linker_script", "heap_bytes":
+		case "schema_version", "entry", "opt", "env", "target", "output", "stack_bytes", "board", "linker_script", "heap_bytes", "startup":
 		default:
 			return nil, invalid("%s: unknown field %q", ManifestName, field)
 		}
@@ -182,7 +185,7 @@ func ParseManifest(path string, b []byte) (*Manifest, []diag.Diagnostic) {
 	for _, f := range []struct {
 		name string
 		dst  **string
-	}{{"board", &m.Board}, {"linker_script", &m.LinkerScript}} {
+	}{{"board", &m.Board}, {"linker_script", &m.LinkerScript}, {"startup", &m.Startup}} {
 		if *f.dst, ds = str(f.name); ds != nil {
 			return nil, ds
 		}

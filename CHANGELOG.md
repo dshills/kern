@@ -41,7 +41,12 @@ The runtime work (`specs/runtime`, `docs/runtime.md`,
   failure on every host; `flush_stdout`, `is_terminal`. `FileKind` gained
   `Symlink`: an exhaustive `match` on it needs the new arm.
 - `std/net` (new): IPv4 and IPv6 addresses, TCP listeners and streams,
-  UDP sockets, with a timed form of every call that waits.
+  UDP sockets, Unix-domain listeners, streams and pairs, with a timed
+  form of every call that waits.
+- `std/io`: `read_dir` (entries with their kinds), `create_dir_all`,
+  `remove_dir_all`, `join`; `File.lock`, `try_lock`, `unlock` (advisory
+  locks), `File.raw_fd`.
+- `std/mem`: `map_file` and `Mapping`, a file's bytes in memory.
 - `std/sync` (new): `RwLock`, `Once`, `WaitGroup`, a bounded `Channel`.
 - `std/signal` (new): `catch`, `ignore`, `reset`, `raise`, and `Signals`
   to wait for what was caught.
@@ -71,9 +76,10 @@ The runtime work (`specs/runtime`, `docs/runtime.md`,
 - `--stack-bytes=N` (`stack_bytes` in `kern.mod`) and `KERN_STACK_BYTES`
   give spawned threads and `main` a stack of N bytes.
 - The freestanding runtime's devices are a board file's
-  (`kern_board.h`): `--board`, `--linker-script` and `--heap-bytes`
-  (`board`, `linker_script`, `heap_bytes` in `kern.mod`). Its allocator
-  traps on a double free.
+  (`kern_board.h`): `--board`, `--linker-script`, `--startup` and
+  `--heap-bytes` (`board`, `linker_script`, `startup`, `heap_bytes` in
+  `kern.mod`), and `--stack-bytes` sizes its stack. Its allocator traps
+  on a double free.
 - The link drops the runtime code a program does not reach.
 - The runtime's interface has a version (`kern_rt_abi_2`); a program and
   a runtime of different versions do not link.
