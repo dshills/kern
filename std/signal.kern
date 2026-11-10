@@ -70,7 +70,9 @@ func reset(s: Signal) {
 }
 
 // raise sends a signal to the program's own process: any of its threads
-// may be the one that takes it.
+// may be the one that takes it. What the program wrote to standard
+// output is flushed first, so that it is seen even when the signal's
+// disposition ends the program.
 func raise(s: Signal) {
     if signal_raise(number(s)) != 0i32 { trap_kind(explicit) }
 }

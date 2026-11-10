@@ -16,15 +16,24 @@ import (
 // interpreter's. A caught signal is recorded as a bit; os/signal delivers
 // to a channel that one goroutine turns into bits.
 //
-// The interpreter is a Go program, and three things follow. A signal left
-// at its default does what the Go runtime does with it: Interrupt,
-// Terminate and Hangup end the program, Quit ends it with the runtime's
-// stack dump, and User1, User2 and Pipe do nothing, where the system
-// would end the program. A Pipe signal sent by another process is kept
-// by the Go runtime and never reported. And an ignored signal is one the
-// interpreter receives and drops, not one the system discards: a
-// disposition of "ignored" set in the system would pass to every child,
-// which std/process promises a child does not see.
+// The interpreter is a Go program, and the Go runtime has its own way
+// with signals: left alone it ends the program on Interrupt, Terminate
+// and Hangup, as the system does, writes a stack dump on Quit, and lets
+// User1, User2 and Pipe pass, where the system would end the program.
+// When the interpreted program is all the process is for (`kern run`,
+// SetOwnsProcess) the interpreter gives those four the system's default
+// (specs/runtime RM6). Quit, User1 and User2 it asks for, and one that
+// the program neither catches nor ignores ends the process by that
+// signal; Pipe cannot be asked for (see below), so it is the program's
+// own raise of it that ends the process. A program run inside another
+// process (a test) leaves the process's signals alone.
+//
+// An ignored signal is one the interpreter receives and drops, not one
+// the system discards: a disposition of "ignored" set in the system
+// would pass to every child, which std/process promises a child does not
+// see. And the Go runtime keeps a Pipe signal that another process
+// sends, whatever was asked: a program sees its own raise of Pipe, and a
+// write to a closed pipe or socket is an error here as it is natively.
 
 var sigNumbers = [...]syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGPIPE, syscall.SIGCHLD}
 
@@ -33,8 +42,72 @@ var sigs struct {
 	live    bool
 	held    uint32
 	pending uint32
+	ignored uint32 // the signals the program ignores
 	ch      chan os.Signal
 	wake    chan struct{}
+	own     bool           // the program owns the process's signals
+	dflt    chan os.Signal // the signals asked for so as to give them the system's default
+}
+
+// sigFatal are the signals whose default the interpreter must supply:
+// the Go runtime's own default for them is not the system's.
+var sigFatal = []os.Signal{syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGQUIT}
+
+// defaultSignals makes the system's default the default of the signals
+// the Go runtime would treat otherwise, for a program that owns the
+// process.
+func defaultSignals() {
+	sigs.mu.Lock()
+	defer sigs.mu.Unlock()
+	if sigs.dflt == nil {
+		sigs.dflt = make(chan os.Signal, 8)
+		go func() {
+			for s := range sigs.dflt {
+				sigs.mu.Lock()
+				fatal := sigs.own
+				for i, n := range sigNumbers {
+					if s == n && (sigs.held|sigs.ignored)&(1<<i) != 0 {
+						fatal = false
+					}
+				}
+				sigs.mu.Unlock()
+				if fatal {
+					dieBySignal(s.(syscall.Signal))
+				}
+			}
+		}()
+	}
+	sigs.own = true
+	signal.Notify(sigs.dflt, sigFatal...)
+}
+
+// dieBySignal ends the process as the system's default for the signal
+// does: the signal gets that default back from the Go runtime and is
+// sent. Should that fail, the process exits with the status a shell
+// gives a program a signal ended.
+func dieBySignal(sig syscall.Signal) {
+	signal.Reset(sig)
+	if setSigDefault(sig) == nil && syscall.Kill(syscall.Getpid(), sig) == nil {
+		time.Sleep(time.Second) // the signal ends the process before this returns
+	}
+	os.Exit(128 + int(sig))
+}
+
+// ownDefault reports whether the signal is one whose default the
+// interpreter itself supplies for this program. Such a signal is always
+// asked for through sigs.dflt, and ignoring it is a bit the reader of
+// that channel consults: no change of what the Go runtime is asked
+// leaves a moment in which the signal would pass.
+func ownDefault(sig syscall.Signal) bool {
+	if !sigs.own {
+		return false
+	}
+	for _, s := range sigFatal {
+		if s == sig {
+			return true
+		}
+	}
+	return false
 }
 
 // sigDrop receives the signals the program ignores; nothing reads it, and
@@ -65,7 +138,10 @@ func releaseSignals() {
 		signal.Stop(sigs.ch)
 	}
 	signal.Stop(sigDrop)
-	sigs.held, sigs.pending, sigs.live = 0, 0, false
+	if sigs.dflt != nil {
+		signal.Stop(sigs.dflt)
+	}
+	sigs.held, sigs.pending, sigs.ignored, sigs.live, sigs.own = 0, 0, 0, false, false
 }
 
 func signalOpen(_ *Interp, _ []Value, _ callCtx) []Value {
@@ -135,9 +211,15 @@ func signalSet(_ *Interp, a []Value, _ callCtx) []Value {
 		return i32Val(-int32(syscall.EBUSY))
 	}
 	if how == 1 {
-		signal.Notify(sigDrop, sigNumbers[i])
+		sigs.ignored |= 1 << i
+		if !ownDefault(sigNumbers[i]) {
+			signal.Notify(sigDrop, sigNumbers[i])
+		}
 	} else {
-		signal.Reset(sigNumbers[i]) // no channel asks for it any more
+		sigs.ignored &^= 1 << i
+		if !ownDefault(sigNumbers[i]) {
+			signal.Reset(sigNumbers[i]) // no channel asks for it any more
+		}
 	}
 	return i32Val(0)
 }
@@ -185,13 +267,18 @@ func signalRaise(_ *Interp, a []Value, _ callCtx) []Value {
 	if i < 0 || i >= len(sigNumbers) {
 		return i32Val(-int32(syscall.EINVAL))
 	}
+	sigs.mu.Lock()
+	held := sigs.held&(1<<i) != 0
+	fatal := sigs.own && !held && sigs.ignored&(1<<i) == 0 && sigNumbers[i] != syscall.SIGCHLD
+	sigs.mu.Unlock()
+	if fatal {
+		// the system's default ends the program before raise returns
+		dieBySignal(sigNumbers[i])
+	}
 	if sigNumbers[i] == syscall.SIGPIPE {
 		// The Go runtime keeps a SIGPIPE that kill sends: it reaches no
-		// channel. A raise of a caught Pipe is recorded here instead; one
-		// that is not caught does nothing, where the system's default
-		// would end the program.
+		// channel. A raise of a caught Pipe is recorded here instead.
 		sigs.mu.Lock()
-		held := sigs.held&(1<<i) != 0
 		if held {
 			sigs.pending |= 1 << i
 		}

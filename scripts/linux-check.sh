@@ -45,7 +45,12 @@ COPY --from=go /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
 EOF
 
+# A network with IPv6, so that the container's interface has a link-local
+# address and the tests of scoped addresses run (specs/runtime RM2).
+network=kern-linux-check-v6
+docker network inspect "$network" >/dev/null 2>&1 || docker network create --ipv6 "$network" >/dev/null
 docker run --rm \
+  --network "$network" \
   -v "$PWD:/src:ro" \
   -v kern-linux-check-cache:/cache \
   -e GOCACHE=/cache/build -e GOMODCACHE=/cache/mod -e HOME=/tmp/home \

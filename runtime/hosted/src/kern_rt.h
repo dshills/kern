@@ -45,6 +45,7 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <sys/un.h>
+#include <net/if.h>
 #include <sys/file.h>
 #include <sys/random.h>
 #if defined(__linux__)
@@ -135,6 +136,8 @@ int32_t kern_io_sync(int32_t fd);
 int32_t kern_io_set_len(int32_t fd, uint64_t n);
 // Takes (op 0 shared, 1 exclusive) or gives up (2) an advisory lock on an open file; 4 added returns -EWOULDBLOCK instead of waiting: 0 or -errno.
 int32_t kern_io_flock(int32_t fd, int32_t op);
+// Takes or gives up (op as kern_io_flock's) an advisory lock on len bytes from start of an open file, len 0 for all that follow: 0 or -errno.
+int32_t kern_io_lock_range(int32_t fd, int32_t op, uint64_t start, uint64_t len);
 // Writes a path's metadata (kind, size, modified_ns, mode) into out[0..4], following a final link when follow is set: 0 or -errno.
 int32_t kern_io_stat(const char *p, int64_t n, uint8_t follow, uint64_t *out, int64_t cap);
 // As kern_io_stat for an open descriptor.
@@ -276,6 +279,12 @@ int64_t kern_net_connect(const uint8_t *addr, int64_t n, uint64_t ns, uint8_t ti
 int32_t kern_net_unix_listen(const char *p, int64_t n, int32_t backlog);
 // Connects a new Unix-domain stream socket to the path: its descriptor, -errno, or -2^32.
 int64_t kern_net_unix_connect(const char *p, int64_t n, uint64_t ns, uint8_t timed);
+// Makes a Unix-domain datagram socket, bound to the path when n > 0: a descriptor or -errno.
+int32_t kern_net_unix_dgram(const char *p, int64_t n);
+// Sends one datagram to the socket bound to the path, waiting while its queue is full: the count or -errno.
+int64_t kern_net_unix_send_to(int32_t fd, const char *p, int64_t n, const char *path, int64_t pn);
+// Receives one datagram, cut to n bytes, and its sender's path (cut at 104 bytes, NUL-terminated, empty for a sender with no path) into from: the count, -errno, or -2^32.
+int64_t kern_net_unix_recv_from(int32_t fd, char *buf, int64_t n, char *from, int64_t fcap, uint64_t ns, uint8_t timed);
 // Makes two connected Unix-domain stream sockets into fds[0] and fds[1]: 0 or -errno.
 int32_t kern_net_unix_pair(int32_t *fds, int64_t cap);
 // Receives at most n bytes: the count, 0 when the peer closed, -errno, or -2^32.
@@ -286,6 +295,14 @@ int64_t kern_net_send(int32_t fd, const char *p, int64_t n);
 int32_t kern_net_shutdown(int32_t fd, int32_t how);
 // Turns TCP_NODELAY on or off: 0 or -errno.
 int32_t kern_net_set_nodelay(int32_t fd, uint8_t on);
+// Sets a socket option (1 keep-alive, 2 receive buffer, 3 send buffer, 4 broadcast, 5 hop limit, 6 linger seconds or -1, 7 no-delay): 0 or -errno.
+int32_t kern_net_set_opt(int32_t fd, int32_t opt, int64_t value);
+// Reads a socket option's value (numbered as kern_net_set_opt's): the value, or -errno - 1.
+int64_t kern_net_get_opt(int32_t fd, int32_t opt);
+// Finds a network interface by name: its index, or 0 when there is none.
+uint32_t kern_net_if_index(const char *p, int64_t n);
+// Writes the name of the interface with an index into buf: its length, or 0 when there is none or it does not fit.
+int64_t kern_net_if_name(uint32_t index, char *buf, int64_t cap);
 // Writes the socket's own address, or its peer's, into rec: 0 or -errno.
 int32_t kern_net_addr(int32_t fd, uint8_t peer, uint8_t *rec, int64_t cap);
 // Sends one datagram to the address: the count or -errno.
@@ -310,7 +327,7 @@ void kern_signal_close(void);
 int32_t kern_signal_set(int32_t which, int32_t how);
 // Returns the first recorded signal of mask and forgets it, waiting for one (at most ns nanoseconds when timed, then -2^32).
 int64_t kern_signal_wait(uint32_t mask, uint64_t ns, uint8_t timed);
-// Sends the signal to the program's own process: 0 or -errno.
+// Flushes standard output and sends the signal to the program's own process: 0 or -errno.
 int32_t kern_signal_raise(int32_t which);
 
 // ---- rt_rand.c: std/rand ----

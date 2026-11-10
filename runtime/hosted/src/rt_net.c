@@ -14,11 +14,12 @@
 // to a connection the peer closed is an error, never a SIGPIPE:
 // MSG_NOSIGNAL on Linux, SO_NOSIGPIPE on macOS.
 //
-// An address crosses the interface as 19 bytes: the family (4 or 6), 16
-// bytes of address (an IPv4 address in the first four), and the port,
-// high byte first.
+// An address crosses the interface as 23 bytes: the family (4 or 6), 16
+// bytes of address (an IPv4 address in the first four), the port, high
+// byte first, and an IPv6 address's scope (the index of the interface a
+// link-local address belongs to, 0 for none), high byte first.
 
-#define KERN_ADDR_BYTES 19
+#define KERN_ADDR_BYTES 23
 
 // kern_net_to_sa fills a socket address from a record: its length, or 0
 // for a record that is not one.
@@ -38,6 +39,7 @@ static socklen_t kern_net_to_sa(const uint8_t *rec, int64_t n, struct sockaddr_s
         a->sin6_family = AF_INET6;
         a->sin6_port = htons(port);
         memcpy(&a->sin6_addr, rec + 1, 16);
+        a->sin6_scope_id = (uint32_t)rec[19] << 24 | (uint32_t)rec[20] << 16 | (uint32_t)rec[21] << 8 | rec[22];
         return sizeof *a;
     }
     return 0;
@@ -62,6 +64,10 @@ static int kern_net_from_sa(const struct sockaddr_storage *ss, uint8_t *rec) {
         memcpy(rec + 1, &a->sin6_addr, 16);
         rec[17] = (uint8_t)(port >> 8);
         rec[18] = (uint8_t)port;
+        rec[19] = (uint8_t)(a->sin6_scope_id >> 24);
+        rec[20] = (uint8_t)(a->sin6_scope_id >> 16);
+        rec[21] = (uint8_t)(a->sin6_scope_id >> 8);
+        rec[22] = (uint8_t)a->sin6_scope_id;
         return 0;
     }
     return -EAFNOSUPPORT;
@@ -120,6 +126,11 @@ static int kern_net_wait(int fd, short events, int timed, uint64_t start, uint64
     }
 }
 static int kern_net_would_block(int e) { return e == EAGAIN || e == EWOULDBLOCK; }
+#if defined(MSG_NOSIGNAL)
+#define KERN_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define KERN_SEND_FLAGS 0 // SO_NOSIGPIPE is on the socket
+#endif
 
 // kern_net_bound makes a socket of the record's family and binds it.
 static int kern_net_bound(const uint8_t *addr, int64_t n, int type, int reuse) {
@@ -251,6 +262,62 @@ int64_t kern_net_unix_connect(const char *p, int64_t n, uint64_t ns, uint8_t tim
     if (len < 0) return len;
     return kern_net_connect_to(AF_UNIX, (struct sockaddr *)&sa, (socklen_t)len, ns, timed);
 }
+// kern_net_unix_dgram makes a Unix-domain datagram socket, bound to the
+// path when there is one (n > 0): a descriptor or -errno.
+int32_t kern_net_unix_dgram(const char *p, int64_t n) {
+    struct sockaddr_un sa;
+    int len = 0;
+    if (n != 0 && (len = kern_net_unix_sa(p, n, &sa)) < 0) return len;
+    int fd = kern_net_socket(AF_UNIX, SOCK_DGRAM);
+    if (fd < 0) return fd;
+    if (n != 0 && bind(fd, (struct sockaddr *)&sa, (socklen_t)len) < 0) {
+        int e = errno;
+        close(fd);
+        return -e;
+    }
+    return fd;
+}
+int64_t kern_net_unix_send_to(int32_t fd, const char *p, int64_t n, const char *path, int64_t pn) {
+    struct sockaddr_un sa;
+    int len = kern_net_unix_sa(path, pn, &sa);
+    if (len < 0) return len;
+    if (n < 0) return -EINVAL;
+    for (;;) {
+        ssize_t r = sendto(fd, p, (size_t)n, KERN_SEND_FLAGS, (struct sockaddr *)&sa, (socklen_t)len);
+        if (r >= 0) return (int64_t)r;
+        if (errno == EINTR) continue;
+        // a receiver whose queue is full (which this socket's own
+        // readiness does not show): the send is made again each millisecond
+        if (!kern_net_would_block(errno) && errno != ENOBUFS) return -errno;
+        struct timespec nap = {0, 1000000};
+        (void)nanosleep(&nap, NULL);
+    }
+}
+// kern_net_unix_recv_from receives one datagram, cut to n bytes, and
+// writes its sender's path into from, NUL-terminated: an empty path for a
+// sender that is not bound.
+int64_t kern_net_unix_recv_from(int32_t fd, char *buf, int64_t n, char *from, int64_t fcap, uint64_t ns, uint8_t timed) {
+    if (n < 0 || fcap < 105) return -EINVAL;
+    uint64_t start = timed ? kern_now_ns() : 0;
+    for (;;) {
+        struct sockaddr_un sa;
+        socklen_t len = sizeof sa;
+        memset(&sa, 0, sizeof sa);
+        ssize_t r = recvfrom(fd, buf, (size_t)n, 0, (struct sockaddr *)&sa, &len);
+        if (r >= 0) {
+            size_t pl = len > offsetof(struct sockaddr_un, sun_path) ? strnlen(sa.sun_path, len - offsetof(struct sockaddr_un, sun_path)) : 0;
+            if (pl > 104) pl = 104;
+            memcpy(from, sa.sun_path, pl);
+            from[pl] = 0;
+            return (int64_t)r;
+        }
+        if (errno == EINTR) continue;
+        if (!kern_net_would_block(errno)) return -errno;
+        int w = kern_net_wait(fd, POLLIN, timed, start, ns);
+        if (w == 0) return KERN_TIMED_OUT;
+        if (w < 0) return w;
+    }
+}
 int32_t kern_net_unix_pair(int32_t *fds, int64_t cap) {
     if (cap < 2) return -EINVAL;
     int sv[2];
@@ -277,11 +344,6 @@ int64_t kern_net_recv(int32_t fd, char *buf, int64_t n, uint64_t ns, uint8_t tim
         if (w < 0) return w;
     }
 }
-#if defined(MSG_NOSIGNAL)
-#define KERN_SEND_FLAGS MSG_NOSIGNAL
-#else
-#define KERN_SEND_FLAGS 0 // SO_NOSIGPIPE is on the socket
-#endif
 int64_t kern_net_send(int32_t fd, const char *p, int64_t n) {
     if (n <= 0) return 0;
     for (;;) {
@@ -300,6 +362,81 @@ int32_t kern_net_shutdown(int32_t fd, int32_t how) {
 int32_t kern_net_set_nodelay(int32_t fd, uint8_t on) {
     int v = on ? 1 : 0;
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof v) < 0 ? -errno : 0;
+}
+// The socket options std/net names (specs/runtime RM4), by its numbers: 1
+// keep-alive probes, 2 the receive buffer's size, 3 the send buffer's, 4
+// broadcast datagrams, 5 the hop limit of what is sent (the TTL of IPv4),
+// 6 linger on close in seconds (-1: do not), 7 TCP_NODELAY.
+static int kern_net_opt(int32_t fd, int32_t opt, int *level, int *name) {
+    *level = SOL_SOCKET;
+    switch (opt) {
+    case 1: *name = SO_KEEPALIVE; return 0;
+    case 2: *name = SO_RCVBUF; return 0;
+    case 3: *name = SO_SNDBUF; return 0;
+    case 4: *name = SO_BROADCAST; return 0;
+#if defined(SO_LINGER_SEC)
+    case 6: *name = SO_LINGER_SEC; return 0; // Darwin's SO_LINGER counts in ticks
+#else
+    case 6: *name = SO_LINGER; return 0;
+#endif
+    case 7: *level = IPPROTO_TCP; *name = TCP_NODELAY; return 0;
+    case 5: {
+        struct sockaddr_storage ss;
+        socklen_t len = sizeof ss;
+        if (getsockname(fd, (struct sockaddr *)&ss, &len) < 0) return -errno;
+        if (ss.ss_family == AF_INET6) { *level = IPPROTO_IPV6; *name = IPV6_UNICAST_HOPS; }
+        else { *level = IPPROTO_IP; *name = IP_TTL; }
+        return 0;
+    }
+    }
+    return -EINVAL;
+}
+int32_t kern_net_set_opt(int32_t fd, int32_t opt, int64_t value) {
+    int level, name;
+    int e = kern_net_opt(fd, opt, &level, &name);
+    if (e < 0) return e;
+    if (opt == 6) {
+        struct linger l = { value >= 0, value >= 0 ? (int)(value > INT_MAX ? INT_MAX : value) : 0 };
+        return setsockopt(fd, level, name, &l, sizeof l) < 0 ? -errno : 0;
+    }
+    if (value < INT_MIN || value > INT_MAX) return -EINVAL;
+    int v = (int)value;
+    return setsockopt(fd, level, name, &v, sizeof v) < 0 ? -errno : 0;
+}
+// kern_net_get_opt is an option's value, or -errno - 1: linger that is
+// off is the value -1, so a failure is below it.
+int64_t kern_net_get_opt(int32_t fd, int32_t opt) {
+    int level, name;
+    int e = kern_net_opt(fd, opt, &level, &name);
+    if (e < 0) return (int64_t)e - 1;
+    if (opt == 6) {
+        struct linger l;
+        socklen_t len = sizeof l;
+        if (getsockopt(fd, level, name, &l, &len) < 0) return -(int64_t)errno - 1;
+        return l.l_onoff ? (int64_t)l.l_linger : -1;
+    }
+    int v = 0;
+    socklen_t len = sizeof v;
+    if (getsockopt(fd, level, name, &v, &len) < 0) return -(int64_t)errno - 1;
+    return (int64_t)v;
+}
+// kern_net_if_name writes the name of the interface with that index into
+// buf: its length, or 0 when there is none or it does not fit.
+int64_t kern_net_if_name(uint32_t index, char *buf, int64_t cap) {
+    char name[IF_NAMESIZE];
+    if (if_indextoname(index, name) == NULL) return 0;
+    size_t n = strlen(name);
+    if (cap < 0 || n > (size_t)cap) return 0;
+    memcpy(buf, name, n);
+    return (int64_t)n;
+}
+// kern_net_if_index is the index of the interface of that name, or 0.
+uint32_t kern_net_if_index(const char *p, int64_t n) {
+    char name[IF_NAMESIZE];
+    if (n <= 0 || (size_t)n >= sizeof name || memchr(p, 0, (size_t)n) != NULL) return 0;
+    memcpy(name, p, (size_t)n);
+    name[n] = 0;
+    return if_nametoindex(name);
 }
 int32_t kern_net_addr(int32_t fd, uint8_t peer, uint8_t *rec, int64_t cap) {
     if (cap < KERN_ADDR_BYTES) return -EINVAL;

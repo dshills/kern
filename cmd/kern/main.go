@@ -31,7 +31,13 @@ import (
 // Request is the §7 machine-API request (compiler/diag/schema.go).
 type Request = diag.Request
 
+// ownsProcess is set when this process is the kern command itself, and
+// not a test calling run: a program `kern run` interprets then has the
+// process's signals to itself.
+var ownsProcess bool
+
 func main() {
+	ownsProcess = true
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 

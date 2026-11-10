@@ -393,6 +393,30 @@ read back; an image with a stack of 1 MiB that recurses deeper than the
 default allows, and one with start-up code of the test's own; the
 freestanding fixtures booted in the container.
 
+## Phase 13: second extensions (RM1 to RM6)
+
+**Files.** `rt_io.c` (`kern_io_lock_range`), `rt_net.c` (the record of 23
+bytes, `kern_net_set_opt`, `kern_net_get_opt`, `kern_net_if_index`,
+`kern_net_if_name`, three entries for Unix-domain datagrams),
+`rt_signal.c` (the flush before a raise), `std/io.kern`, `std/net.kern`,
+`std/signal.kern`, `compiler/backend/llvm/calls.go`, `compiler/interp`
+(`files.go`, `net.go`, `rawmem.go`, `signal.go`, per-system constants in
+`sys_darwin.go` and `sys_linux.go`), `cmd/kern` (the interpreter is told
+when it owns the process), `scripts/linux-check.sh` (a container network
+with IPv6, for a link-local address to test scopes on).
+
+**Tests.** Two opens of one file contending for ranges, a thread waiting
+for a range, and the opens a lock refuses; every option set and read back
+on TCP, UDP over both families and a Unix-domain pair; scoped addresses
+as text and as records, the interfaces by name and index, and a datagram
+sent over a real link-local address where the machine has one; two bound
+datagram sockets, an unbound sender, a cut datagram, timed receives, a
+slow receiver that loses nothing, and the kinds of failure; two mappings
+of one file and a read of it seeing each other's writes; a mapped file
+cut short and a write through a read-only mapping trapping in both
+engines; and each signal's default ending a native and an interpreted
+program by the same signal after the same output.
+
 ## Gate policy
 
 Every gate is mandatory. The standing exception is the `race_raw_ptr`

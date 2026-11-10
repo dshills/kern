@@ -1,0 +1,182 @@
+//! phase: 6
+//! expect: output net_unix_dgram
+//! tsan: clean
+// Unix-domain datagrams (specs/runtime RM3): two bound sockets exchange
+// datagrams and each learns the other's path; a socket with no path
+// sends, and its receiver sees no sender; a datagram longer than the
+// buffer is cut; a receive with a time gives up; a sender whose receiver
+// is slow waits and loses nothing; and the kind of each failure.
+module cc
+import "std/net"
+import "std/io"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func kind_name(k: io.ErrKind) {
+    match k {
+        NotFound => print_str("NotFound")
+        InvalidInput => print_str("InvalidInput")
+        AddrInUse => print_str("AddrInUse")
+        ConnectionRefused => print_str("ConnectionRefused")
+        _ => print_str("another kind")
+    }
+}
+func fails[T](label: view[]u8, r: own Result[T, io.IoErr]) {
+    print_str(label)
+    print_str(": ")
+    match r {
+        Ok(v) => print_str("no failure")
+        Err(e) => kind_name(io.kind(e))
+    }
+    println()
+}
+func same(a: view[]u8, b: view[]u8) -> bool {
+    if len(a) != len(b) { return false }
+    for i in 0usize..len(a) {
+        if a[i] != b[i] { return false }
+    }
+    return true
+}
+func got(label: view[]u8, m: view[net.UnixMessage], buf: view[]u8, from: view[]u8) {
+    print_str(label)
+    print_str(" [")
+    print_str(buf[0usize : m.len])
+    print_str("] from ")
+    if m.from.len() == 0usize {
+        say("a socket with no path")
+    } else if same(m.from.as_view(), from) {
+        say("the sender's path")
+    } else {
+        say("another path")
+    }
+}
+
+// flood sends count datagrams of four bytes, each carrying its number,
+// to a receiver that is not reading yet.
+func flood(to: own Vec[u8], count: u32) -> u64 {
+    var sent: u64 = 0u64
+    match net.UnixDatagram.unbound() {
+        Ok(s) => {
+            for i in 0u32..count {
+                var d: [4]u8 = zero()
+                store_be(d, 0usize, i)
+                match s.send_to(d, to.as_view()) {
+                    Ok(n) => { sent = sent + 1u64 }
+                    Err(e) => { return sent }
+                }
+            }
+        }
+        Err(e) => { }
+    }
+    return sent
+}
+
+func run(dir: view[]u8) -> Result[(), io.IoErr] {
+    pa := io.join(dir, "a")
+    pb := io.join(dir, "b")
+    a := net.UnixDatagram.bind(pa.as_view())?
+    b := net.UnixDatagram.bind(pb.as_view())?
+    var buf: [64]u8 = zero()
+
+    say("-- two bound sockets")
+    n := a.send_to("to b", pb.as_view())?
+    print_str("a sent "); print_u64(u64(n)); say(" bytes")
+    m := b.recv_from(buf)?
+    got("b received", m, buf, pa.as_view())
+    k := b.send_to("back to a", m.from.as_view())?
+    back := a.recv_from(buf)?
+    got("a received", back, buf, pb.as_view())
+
+    say("-- a socket with no path")
+    u := net.UnixDatagram.unbound()?
+    j := u.send_to("anonymous", pb.as_view())?
+    anon := b.recv_from(buf)?
+    got("b received", anon, buf, pa.as_view())
+
+    say("-- lengths")
+    e := u.send_to("", pb.as_view())?
+    empty := b.recv_from(buf)?
+    print_str("an empty datagram arrives with "); print_u64(u64(empty.len)); say(" bytes")
+    l := u.send_to("a datagram longer than the buffer", pb.as_view())?
+    cut := b.recv_from(buf[0usize : 10usize])?
+    got("into ten bytes", cut, buf, pa.as_view())
+    match b.recv_from_timeout(buf, time.millis(20u64))? {
+        Some(x) => say("the rest of it arrived as another datagram")
+        None => say("the rest of it is lost")
+    }
+
+    say("-- times")
+    start := now_ns()
+    match b.recv_from_timeout(buf, time.millis(30u64))? {
+        Some(x) => say("a datagram from nowhere")
+        None => {
+            if now_ns() - start >= 30000000u64 { say("nothing in 30 ms: waited the whole time") } else { say("returned early") }
+        }
+    }
+    match b.recv_from_timeout(buf, time.millis(0u64))? {
+        Some(x) => say("a datagram from nowhere")
+        None => say("nothing at a look")
+    }
+    w := u.send_to("waiting", pb.as_view())?
+    match b.recv_from_timeout(buf, time.seconds(10u64))? {
+        Some(x) => got("one that is there is received", x, buf, pa.as_view())
+        None => say("a datagram that was sent did not arrive")
+    }
+
+    say("-- a slow receiver loses nothing")
+    with s := thread.scope() {
+        to := Vec[u8].new()
+        to.extend(pb.as_view())
+        match s.spawn(flood, to, 3000u32) {
+            Ok(sender) => {
+                time.sleep(time.millis(100u64))
+                var next: u32 = 0u32
+                var in_order: bool = true
+                while next < 3000u32 {
+                    match b.recv_from_timeout(buf, time.seconds(20u64))? {
+                        Some(x) => {
+                            if x.len != 4usize || load_be[u32](buf, 0usize) != next { in_order = false }
+                            next = next + 1u32
+                        }
+                        None => { break }
+                    }
+                }
+                print_str("sent "); print_u64(sender.get()); print_str(", received "); print_u64(u64(next))
+                if in_order { say(", in order") } else { say(", out of order") }
+            }
+            Err(x) => say("no thread")
+        }
+    }
+
+    say("-- failures")
+    fails("a path that is bound", net.UnixDatagram.bind(pa.as_view()))
+    fails("an empty path", net.UnixDatagram.bind(""))
+    missing := io.join(dir, "missing")
+    fails("sending to a path nothing is at", u.send_to("x", missing.as_view()))
+    drop(a)
+    fails("sending to a path whose socket is closed", u.send_to("x", pa.as_view()))
+    long := Vec[u8].new()
+    long.extend(dir)
+    while long.len() < 200usize { long.push(120u8) }
+    fails("a path too long for a socket", net.UnixDatagram.bind(long.as_view()))
+    io.remove_file(pa.as_view())?
+    io.remove_file(pb.as_view())?
+    return Ok(())
+}
+
+func main() -> i32 {
+    match io.make_temp_dir("kern-dgram-") {
+        Ok(dir) => {
+            match run(dir.as_view()) {
+                Ok(u) => { }
+                Err(e) => { print_str("failed: "); kind_name(io.kind(e)); println() }
+            }
+            match io.remove_dir(dir.as_view()) {
+                Ok(u) => say("cleaned up")
+                Err(e) => say("the directory is not empty")
+            }
+        }
+        Err(e) => say("no temporary directory")
+    }
+    return 0i32
+}

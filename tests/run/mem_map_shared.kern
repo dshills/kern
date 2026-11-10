@@ -1,0 +1,58 @@
+//! phase: 6
+//! expect: output mem_map_shared
+// A mapping is the file's own bytes (specs/runtime RL4, RM5): a write
+// through one mapping is seen at once through another and by a read of
+// the file, with no sync, and a write to the file is seen through the
+// mappings made before it.
+module t
+import "std/io"
+import "std/mem"
+
+func say(s: view[]u8) { print_str(s); println() }
+func text(label: view[]u8, bytes: view[]u8) { print_str(label); print_str(" ["); print_str(bytes); print_str("]"); println() }
+
+func run(dir: view[]u8) -> Result[(), io.IoErr] {
+    path := io.join(dir, "data")
+    io.write_file(path.as_view(), "hello, mapped file")?
+    o := io.options()
+    o.read = true
+    o.write = true
+    f := io.open(path.as_view(), o)?
+    w := mem.map_file(f, true)?
+    ro := io.open_read(path.as_view())?
+    r := mem.map_file(ro, false)?
+
+    with b := w.bytes_mut() { b[0usize] = 72u8 }
+    with b := r.bytes() { text("a second mapping, after a write through the first", b) }
+    var buf: [18]u8 = zero()
+    n := ro.read(buf)?
+    text("a read of the file, with no sync", buf[0usize : n])
+
+    at := f.seek(io.SeekFrom.Start(7u64))?
+    f.write_all("MAPPED")?
+    with b := r.bytes() { text("the mapping, after a write to the file", b) }
+    with b := w.bytes() { text("the writable mapping sees it too", b) }
+
+    // a second open writes, and both mappings follow
+    other := io.open(path.as_view(), o)?
+    end := other.seek(io.SeekFrom.Start(14u64))?
+    other.write_all("FILE")?
+    with b := r.bytes() { text("after another open's write", b) }
+    drop(w)
+    drop(r)
+    io.remove_dir_all(dir)?
+    return Ok(())
+}
+
+func main() -> i32 {
+    match io.make_temp_dir("kern-shared-") {
+        Ok(dir) => {
+            match run(dir.as_view()) {
+                Ok(u) => say("cleaned up")
+                Err(e) => say("failed")
+            }
+        }
+        Err(e) => say("no temporary directory")
+    }
+    return 0i32
+}

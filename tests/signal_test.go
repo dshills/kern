@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -172,6 +173,158 @@ func TestSignalIgnoredThenDefault(t *testing.T) {
 			ws, ok := ee.Sys().(syscall.WaitStatus)
 			if !ok || !ws.Signaled() || ws.Signal() != syscall.SIGTERM {
 				t.Errorf("the program ended with %v, want death by SIGTERM", err)
+			}
+		})
+	}
+}
+
+// A program that raises a signal on itself: which one, and with which
+// disposition, its number of arguments chooses.
+const signalRaiser = `module t
+import "std/signal"
+import "std/io"
+func say(s: view[]u8) { print_str(s); println() }
+func main() -> i32 {
+    say("before")
+    a := io.args()
+    n := a.len()
+    if n == 1usize { signal.raise(signal.Signal.Terminate) }
+    if n == 2usize { signal.raise(signal.Signal.User1) }
+    if n == 3usize { signal.raise(signal.Signal.Quit) }
+    if n == 4usize { signal.raise(signal.Signal.Pipe) }
+    if n == 5usize {
+        signal.ignore(signal.Signal.User2)
+        signal.raise(signal.Signal.User2)
+        say("ignored")
+        signal.reset(signal.Signal.User2)
+        signal.raise(signal.Signal.User2)
+    }
+    if n == 6usize {
+        signal.raise(signal.Signal.Child)
+        say("a child signal does nothing")
+        signal.raise(signal.Signal.Hangup)
+    }
+    say("after")
+    return 0i32
+}
+`
+
+// A signal at its default disposition does to an interpreted program what
+// the system does to a native one (specs/runtime RM6): the process dies
+// by that signal, after what it had written. The Go runtime the
+// interpreter runs on would let User1, User2 and Pipe pass and answer
+// Quit with a dump of its own.
+func TestSignalDefaultsEndTheProgram(t *testing.T) {
+	cases := []struct {
+		args int
+		sig  syscall.Signal
+		out  string
+	}{
+		{0, syscall.SIGTERM, "before\n"},
+		{1, syscall.SIGUSR1, "before\n"},
+		{2, syscall.SIGQUIT, "before\n"},
+		{3, syscall.SIGPIPE, "before\n"},
+		{4, syscall.SIGUSR2, "before\nignored\n"},
+		{5, syscall.SIGHUP, "before\na child signal does nothing\n"},
+	}
+	for _, engine := range []string{"native", "interpreter"} {
+		t.Run(engine, func(t *testing.T) {
+			var argv []string
+			if engine == "interpreter" {
+				file := filepath.Join(t.TempDir(), "t.kern")
+				if err := os.WriteFile(file, []byte(signalRaiser), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				argv = []string{kernBinary(t), "run", file, "--"}
+			} else {
+				argv = []string{buildProgram(t, signalRaiser, native.Options{})}
+			}
+			for _, c := range cases {
+				args := append([]string{}, argv[1:]...)
+				for i := 0; i < c.args; i++ {
+					args = append(args, "x")
+				}
+				cmd := exec.Command(argv[0], args...)
+				var stderr strings.Builder
+				cmd.Stderr = &stderr
+				out, err := cmd.Output()
+				if string(out) != c.out {
+					t.Errorf("%v: the program wrote %q, want %q", c.sig, out, c.out)
+				}
+				if stderr.Len() != 0 {
+					t.Errorf("%v: the program wrote to standard error: %s", c.sig, stderr.String())
+				}
+				var ee *exec.ExitError
+				if !errors.As(err, &ee) {
+					t.Errorf("%v: the program ended with %v, want death by the signal", c.sig, err)
+					continue
+				}
+				if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != c.sig {
+					t.Errorf("%v: the program ended with %v, want death by the signal", c.sig, err)
+				}
+			}
+		})
+	}
+}
+
+// A program that catches User1 once, then gives it up and waits.
+const signalUserWaiter = `module t
+import "std/signal"
+import "std/io"
+func say(s: view[]u8) {
+    print_str(s)
+    println()
+    match io.flush_stdout() {
+        Ok(u) => { }
+        Err(e) => { }
+    }
+}
+func line() {
+    input := io.stdin()
+    var b: [1]u8 = zero()
+    match input.read(b) {
+        Ok(n) => { }
+        Err(e) => { }
+    }
+}
+func main() -> i32 {
+    with sigs := signal.catch(signal.Signal.User1) {
+        say("ready")
+        match sigs.wait() {
+            User1 => say("User1")
+            _ => say("another signal")
+        }
+    }
+    say("default")
+    line()
+    say("still running")
+    return 0i32
+}
+`
+
+// The same from outside the program: a caught User1 is the program's to
+// handle, and once it is no longer caught the next one ends the program,
+// natively and interpreted alike.
+func TestSignalDefaultFromOutside(t *testing.T) {
+	for _, engine := range []string{"native", "interpreter"} {
+		t.Run(engine, func(t *testing.T) {
+			cmd, _, out := started(t, signalUserWaiter, engine == "interpreter")
+			expectLine(t, out, "ready")
+			if err := cmd.Process.Signal(syscall.SIGUSR1); err != nil {
+				t.Fatal(err)
+			}
+			expectLine(t, out, "User1")
+			expectLine(t, out, "default")
+			if err := cmd.Process.Signal(syscall.SIGUSR1); err != nil {
+				t.Fatal(err)
+			}
+			err := cmd.Wait()
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				t.Fatalf("the program ended with %v, want death by the signal", err)
+			}
+			if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGUSR1 {
+				t.Errorf("the program ended with %v, want death by SIGUSR1", err)
 			}
 		})
 	}

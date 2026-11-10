@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"syscall"
 	"time"
@@ -725,15 +726,18 @@ func init() {
 			if it.consoleWrite(u64(a[0]), a[1]) {
 				return nil
 			}
-			it.encode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0), a[1])
+			it.encode(it.rawAtW(u64(a[0]), c.targ(0), c.pos), c.targ(0), a[1])
 			return nil
 		},
 		"ptr_copy": func(it *Interp, a []Value, c callCtx) []Value {
 			n := u64(a[2]) * uint64(layout.Of(c.targ(0)).Size)
-			dst := it.heap.bytes(u64(a[0]), n)
+			dst, ro := it.heap.span(u64(a[0]), n)
 			src := it.heap.bytes(u64(a[1]), n)
 			if (dst == nil || src == nil) && n > 0 {
 				it.trap("explicit", c.pos)
+			}
+			if ro && n > 0 {
+				it.trap("unreachable", c.pos) // a write to memory mapped for reading
 			}
 			copy(dst, src)
 			return nil
@@ -747,7 +751,7 @@ func init() {
 			size := uint64(layout.Of(t).Size)
 			base := u64(a[0])
 			for i := 0; i < s.length(); i++ {
-				it.encode(it.rawAt(base+uint64(i)*size, t, c.pos), t, s.at(i).get())
+				it.encode(it.rawAtW(base+uint64(i)*size, t, c.pos), t, s.at(i).get())
 			}
 			return nil
 		},
@@ -935,7 +939,7 @@ var fastIntrinsics = map[string]fastIntrinsic{
 		return it.decode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0))
 	},
 	"ptr_store": func(it *Interp, a []Value, c callCtx) Value {
-		it.encode(it.rawAt(u64(a[0]), c.targ(0), c.pos), c.targ(0), a[1])
+		it.encode(it.rawAtW(u64(a[0]), c.targ(0), c.pos), c.targ(0), a[1])
 		return nil
 	},
 	"ptr_view": func(it *Interp, a []Value, c callCtx) Value {
@@ -1175,12 +1179,15 @@ func (it *Interp) spawned(name string, args []Value, finish func(*Interp, Value,
 							it.fatalExit(code) // exit on any thread ends the program with that status
 							return
 						}
-						panic(r)
+						if tr = faultTrap(r, it.file); tr == nil {
+							panic(r)
+						}
 					}
 					child.trapRecord(tr)
 					trapped = tr
 				}
 			}()
+			debug.SetPanicOnFault(true) // as RunEntries: a fault in mapped memory is a trap
 			rets := child.callNamed(name, args)
 			if len(rets) > 0 {
 				result = rets[0]

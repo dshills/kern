@@ -259,15 +259,32 @@ The modules hold the policy.
   other.
 - **A call that a signal interrupts is made again.** No `Interrupted`
   error reaches a program from the runtime's own calls.
-- **Sockets**, TCP, UDP and Unix-domain, are non-blocking inside the
-  runtime; a call that waits polls with the time that is left, so a timed
-  call never outlasts its duration.
-- **A file lock** (`File.lock`) is advisory and belongs to the open
-  file: it ends when the file is closed.
+- **Sockets**, TCP, UDP and Unix-domain (streams and datagrams), are
+  non-blocking inside the runtime; a call that waits polls with the time
+  that is left, so a timed call never outlasts its duration. A datagram
+  sent to a Unix-domain socket whose queue is full is sent again each
+  millisecond until it is taken: none is lost.
+- **An address** crosses the interface as 23 bytes: the family, 16 bytes
+  of address, the port and, for an IPv6 address that belongs to one link,
+  its scope (the interface's index).
+- **Socket options** are set and read by number through two entries; the
+  methods of `std/net` name them. Linger is in seconds on every system.
+- **A file lock** is advisory and belongs to the open file: it ends when
+  the file is closed, and closing another open of the same file does not
+  end it. `File.lock` locks the whole file (`flock`); `File.lock_range`
+  locks a range of its bytes (the lock of the open file description,
+  `F_OFD_SETLK`), and needs the file open for reading (a shared lock) or
+  for writing (an exclusive one). The two are different kinds of lock:
+  macOS has each see the other, Linux does not, so a file is guarded with
+  one kind.
 - **A mapped file** (`mem.map_file`) is the file's own pages: a write
-  through a writable mapping is a write to the file.
+  through a writable mapping is a write to the file, seen at once by
+  every other mapping and read of it. A byte past the end of a file cut
+  short under its mapping faults, which is a trap of kind `unreachable`.
 - **A caught signal runs no code of the program.** The runtime's handler
   sets a bit and writes a byte to a pipe; `Signals.wait` returns it.
+  `signal.raise` flushes standard output before it sends the signal, so
+  what the program wrote is seen when the signal ends it.
 - **Random bytes** come from `getentropy`.
 
 ## 9. Environment variables and build options
@@ -353,15 +370,22 @@ Every test of the runtime runs on macOS arm64 and, in a container, on
 Linux arm64; CI adds Linux x86-64. Freestanding images boot under QEMU
 for both architectures on both hosts.
 
-**The interpreter** behaves as the hosted runtime does, with these
-differences, each from its being a program of another runtime:
+**The interpreter** behaves as the hosted runtime does: the fixtures
+give the same output and the same trap records in both. It makes the
+system calls the runtime makes (a mapped file is the system's mapping, a
+lock the system's lock, a socket the system's socket), and under `kern
+run` a signal left at its default ends the program by that signal, as it
+ends a native one. Four things follow from its being a program of
+another runtime, and are properties of it, not of kern programs:
 
 - its output is not buffered, so nothing waits for a flush;
-- it writes no allocation report and has no arena limit in its
-  freestanding emulation;
-- a signal left at its default does what the interpreter's own runtime
-  does with it, which for `User1`, `User2` and `Pipe` is nothing;
-- a backtrace lists the interpreter's activations, which for a debug
+- its memory is its host's: it writes no allocation report, and its
+  freestanding emulation has no arena to exhaust;
+- a `Pipe` signal that another process sends is kept by its host runtime
+  and not seen (one the program raises is, and a write to a closed pipe
+  or socket is an error in both engines);
+- the record of a fault in mapped memory has the span 0-0, and a
+  backtrace lists the interpreter's activations, which for a debug
   `--backtrace` build is the same line.
 
 ## 13. The entries
@@ -414,6 +438,7 @@ entry raises its traps.
 | `int32_t kern_io_sync(int32_t fd)` | Asks the system to make a file's data durable: 0 or -errno. |
 | `int32_t kern_io_set_len(int32_t fd, uint64_t n)` | Sets a file's length to n bytes, zero-filling growth: 0 or -errno. |
 | `int32_t kern_io_flock(int32_t fd, int32_t op)` | Takes (op 0 shared, 1 exclusive) or gives up (2) an advisory lock on an open file; 4 added returns -EWOULDBLOCK instead of waiting: 0 or -errno. |
+| `int32_t kern_io_lock_range(int32_t fd, int32_t op, uint64_t start, uint64_t len)` | Takes or gives up (op as kern_io_flock's) an advisory lock on len bytes from start of an open file, len 0 for all that follow: 0 or -errno. |
 | `int32_t kern_io_stat(const char *p, int64_t n, uint8_t follow, uint64_t *out, int64_t cap)` | Writes a path's metadata (kind, size, modified_ns, mode) into out[0..4], following a final link when follow is set: 0 or -errno. |
 | `int32_t kern_io_fstat(int32_t fd, uint64_t *out, int64_t cap)` | As kern_io_stat for an open descriptor. |
 | `int32_t kern_io_rename(const char *p, int64_t n, const char *q, int64_t m)` | Renames p to q, replacing q: 0 or -errno. |
@@ -497,11 +522,18 @@ entry raises its traps.
 | `int64_t kern_net_connect(const uint8_t *addr, int64_t n, uint64_t ns, uint8_t timed)` | Connects a new TCP socket to the address: its descriptor, -errno, or -2^32 (the socket is then closed). |
 | `int32_t kern_net_unix_listen(const char *p, int64_t n, int32_t backlog)` | Makes a Unix-domain stream socket bound to the path and listening with the backlog: a descriptor or -errno. |
 | `int64_t kern_net_unix_connect(const char *p, int64_t n, uint64_t ns, uint8_t timed)` | Connects a new Unix-domain stream socket to the path: its descriptor, -errno, or -2^32. |
+| `int32_t kern_net_unix_dgram(const char *p, int64_t n)` | Makes a Unix-domain datagram socket, bound to the path when n > 0: a descriptor or -errno. |
+| `int64_t kern_net_unix_send_to(int32_t fd, const char *p, int64_t n, const char *path, int64_t pn)` | Sends one datagram to the socket bound to the path, waiting while its queue is full: the count or -errno. |
+| `int64_t kern_net_unix_recv_from(int32_t fd, char *buf, int64_t n, char *from, int64_t fcap, uint64_t ns, uint8_t timed)` | Receives one datagram, cut to n bytes, and its sender's path (cut at 104 bytes, NUL-terminated, empty for a sender with no path) into from: the count, -errno, or -2^32. |
 | `int32_t kern_net_unix_pair(int32_t *fds, int64_t cap)` | Makes two connected Unix-domain stream sockets into fds[0] and fds[1]: 0 or -errno. |
 | `int64_t kern_net_recv(int32_t fd, char *buf, int64_t n, uint64_t ns, uint8_t timed)` | Receives at most n bytes: the count, 0 when the peer closed, -errno, or -2^32. |
 | `int64_t kern_net_send(int32_t fd, const char *p, int64_t n)` | Sends at most n bytes, waiting while the socket's buffer is full: the count or -errno (never a SIGPIPE). |
 | `int32_t kern_net_shutdown(int32_t fd, int32_t how)` | Shuts down reading (0), writing (1) or both (2): 0 or -errno. |
 | `int32_t kern_net_set_nodelay(int32_t fd, uint8_t on)` | Turns TCP_NODELAY on or off: 0 or -errno. |
+| `int32_t kern_net_set_opt(int32_t fd, int32_t opt, int64_t value)` | Sets a socket option (1 keep-alive, 2 receive buffer, 3 send buffer, 4 broadcast, 5 hop limit, 6 linger seconds or -1, 7 no-delay): 0 or -errno. |
+| `int64_t kern_net_get_opt(int32_t fd, int32_t opt)` | Reads a socket option's value (numbered as kern_net_set_opt's): the value, or -errno - 1. |
+| `uint32_t kern_net_if_index(const char *p, int64_t n)` | Finds a network interface by name: its index, or 0 when there is none. |
+| `int64_t kern_net_if_name(uint32_t index, char *buf, int64_t cap)` | Writes the name of the interface with an index into buf: its length, or 0 when there is none or it does not fit. |
 | `int32_t kern_net_addr(int32_t fd, uint8_t peer, uint8_t *rec, int64_t cap)` | Writes the socket's own address, or its peer's, into rec: 0 or -errno. |
 | `int64_t kern_net_send_to(int32_t fd, const char *p, int64_t n, const uint8_t *addr, int64_t an)` | Sends one datagram to the address: the count or -errno. |
 | `int64_t kern_net_recv_from(int32_t fd, char *buf, int64_t n, uint8_t *from, int64_t fcap, uint64_t ns, uint8_t timed)` | Receives one datagram, cut to n bytes, and its sender's record into from: the count, -errno, or -2^32. |
@@ -517,7 +549,7 @@ entry raises its traps.
 | `void kern_signal_close(void)` | Restores every caught signal's earlier disposition, discards the records and frees the claim. |
 | `int32_t kern_signal_set(int32_t which, int32_t how)` | Makes the signal ignored (how 1) or default (how 0): 0, -EBUSY when the live Signals holds it, or -errno. |
 | `int64_t kern_signal_wait(uint32_t mask, uint64_t ns, uint8_t timed)` | Returns the first recorded signal of mask and forgets it, waiting for one (at most ns nanoseconds when timed, then -2^32). |
-| `int32_t kern_signal_raise(int32_t which)` | Sends the signal to the program's own process: 0 or -errno. |
+| `int32_t kern_signal_raise(int32_t which)` | Flushes standard output and sends the signal to the program's own process: 0 or -errno. |
 
 **rt_rand.c: std/rand**
 

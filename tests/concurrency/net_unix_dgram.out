@@ -1,0 +1,23 @@
+-- two bound sockets
+a sent 4 bytes
+b received [to b] from the sender's path
+a received [back to a] from the sender's path
+-- a socket with no path
+b received [anonymous] from a socket with no path
+-- lengths
+an empty datagram arrives with 0 bytes
+into ten bytes [a datagram] from a socket with no path
+the rest of it is lost
+-- times
+nothing in 30 ms: waited the whole time
+nothing at a look
+one that is there is received [waiting] from a socket with no path
+-- a slow receiver loses nothing
+sent 3000, received 3000, in order
+-- failures
+a path that is bound: AddrInUse
+an empty path: InvalidInput
+sending to a path nothing is at: NotFound
+sending to a path whose socket is closed: ConnectionRefused
+a path too long for a socket: InvalidInput
+cleaned up

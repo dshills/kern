@@ -1,0 +1,32 @@
+-- a TCP stream over IPv4
+keep-alive: off
+keep-alive, set: on
+keep-alive, cleared: off
+no-delay: off
+no-delay, set: on
+receive buffer: at least what was asked
+send buffer: at least what was asked
+hop limit: 42
+a hop limit of 256: InvalidInput
+a hop limit of 0: InvalidInput
+hop limit, after the two refusals: 42
+linger: off
+linger, set: 3 s
+linger, zero: 0 s
+linger, cleared: off
+the accepted end's no-delay: off
+-- a UDP socket over IPv4
+broadcast: off
+broadcast, set: on
+hop limit: 7
+receive buffer: at least what was asked
+send buffer: at least what was asked
+-- a UDP socket over IPv6
+broadcast: off
+broadcast, set: on
+hop limit: 7
+receive buffer: at least what was asked
+send buffer: at least what was asked
+-- a Unix-domain pair
+send buffer: at least what was asked
+receive buffer: at least what was asked

@@ -284,6 +284,7 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 		bt = false
 	}
 	it.SetBacktrace(bt)
+	it.SetOwnsProcess(ownsProcess)
 	return it.Run()
 }
 

@@ -1,6 +1,6 @@
 # Spec: the kern runtime, complete
 
-**Version:** 0.7. **Status:** implemented (`specs/runtime/STATUS.md`). **Date:** 2026-11-09.
+**Version:** 0.8. **Status:** implemented (`specs/runtime/STATUS.md`). **Date:** 2026-11-09.
 
 ## 0. Goal
 
@@ -79,6 +79,11 @@ what it does and small for what a release needs:
 - Changing the performance of code that does not use the new facilities:
   the benchmark workloads' release instruction counts stay within 1% (R-P1).
 - Pushing to origin or publishing a release.
+- (Stated in v0.8; never in a requirement.) What exists on one of the two
+  hosts only, such as a Unix-domain name in Linux's abstract namespace:
+  the library is the same on both. Passing descriptors or credentials
+  over a Unix-domain socket: it needs a way to make a `File` or a socket
+  from a descriptor of unknown kind, which the library does not offer.
 
 ## 3. Requirements
 
@@ -625,6 +630,97 @@ the architecture's start-up code.
 **RL6. The Linux gate boots images.** The `kern-linux-check` container has
 QEMU for both architectures, and the freestanding fixtures and board tests
 boot there.
+
+### M. Second extensions (added in v0.8, after phase 12)
+
+Phase 12's report named four things `std/io` and `std/net` did not reach
+and two ways the interpreter differed from the hosted runtime. They are
+requirements too.
+
+**RM1. Locks on ranges of a file.** `File.lock_range(start: u64, n: u64,
+exclusive: bool) -> Result[(), IoErr]`, `try_lock_range(start, n,
+exclusive) -> Result[bool, IoErr]` and `unlock_range(start, n) ->
+Result[(), IoErr]` take and give up advisory locks on `n` bytes from
+`start`; `n` of 0 is every byte from `start` on, however the file grows,
+and the bytes need not exist. Shared locks overlap each other, an
+exclusive lock overlaps nothing; locking a range the file already holds
+changes its kind; unlocking part of a range leaves the rest held. The
+lock belongs to the open file (the open file description: `F_OFD_SETLK`),
+as RL3's does: two opens of one file in one process contend, closing
+another open of the file does not release it, and it is released when its
+own file is closed. A shared lock needs the file open for reading and an
+exclusive lock for writing: `InvalidInput` otherwise. `start` or `n`
+above 2^63 - 1 is `InvalidInput`. A range lock and RL3's whole-file lock
+are different kinds, and whether one conflicts with the other is the
+system's choice: the reference says so.
+
+**RM2. IPv6 scopes.** `SocketAddr` gains `scope: u32`: the index of the
+network interface an IPv6 link-local address belongs to, 0 for none; an
+IPv4 address carries none. `addr(ip, port)` gives scope 0 and
+`addr_scoped(ip, port, scope)` the scope given. The runtime's address
+record grows to 23 bytes, the scope in the last four, high byte first,
+and every entry that takes or returns an address carries it: a socket
+bound or connected to a scoped address reports the scope in `local_addr`
+and `peer_addr`, a datagram's sender carries it, and `resolve` returns it
+when the resolver does. `parse_addr` reads `[v6%zone]:port`, where the
+zone is an interface's index (a decimal number from 1 to 2^32 - 1 with no
+leading zero) or the name of one of the machine's interfaces, and returns
+`None` for an empty zone, zero, a number out of range or a name the
+machine does not have; `format_addr` writes a scope as `%index`.
+`interface_index(name: view[]u8) -> Option[u32]` and
+`interface_name(index: u32) -> Option[Vec[u8]]` convert between the two.
+
+**RM3. Unix-domain datagrams.** `UnixDatagram` with `bind(path) ->
+Result[UnixDatagram, IoErr]`, `unbound()`, `send_to(data, path) ->
+Result[usize, IoErr]`, `recv_from(buf) -> Result[UnixMessage, IoErr]`,
+`recv_from_timeout(buf, d) -> Result[Option[UnixMessage], IoErr]` and
+`UnixMessage { len: usize; from: Vec[u8] }`, where `from` is the sender's
+path and is empty for a sender that is not bound. RL1's rules for paths
+hold. A datagram longer than the buffer is cut to it. `send_to` waits
+while the receiver's queue is full, so that no datagram is lost: a test
+sends 3,000 datagrams to a socket that starts reading 100 ms later and
+receives all of them in order. Sending to a path nothing is at is
+`NotFound`; to a path whose socket was closed, `ConnectionRefused`.
+
+**RM4. Socket options.** Methods that set an option and read it back:
+on `TcpStream`, `set_keepalive(bool)`/`keepalive()`, `nodelay()` beside
+RH2's `set_nodelay`, `set_recv_buffer(u32)`/`recv_buffer()`,
+`set_send_buffer(u32)`/`send_buffer()`, `set_hop_limit(u32)`/`hop_limit()`
+(IPv4's TTL or IPv6's hop limit, by the socket's family; 1 to 255, any
+other number `InvalidInput`) and
+`set_linger(Option[u32])`/`linger()` in seconds; on `UdpSocket`,
+`set_broadcast(bool)`/`broadcast()`, the two buffers and the hop limit;
+on `UnixStream` and `UnixDatagram`, the two buffers. A new socket has
+keep-alive, no-delay, broadcast and linger off. A buffer's size as read
+is what the system gave, which is at least what was asked. A value the
+system refuses is its error. Linger is counted in seconds on every
+system (`SO_LINGER_SEC` on macOS, whose `SO_LINGER` counts in ticks).
+
+**RM5. The interpreter maps files.** In the interpreter `mem.map_file`
+maps the file as the hosted runtime does (shared): a write through a
+mapping is seen at once through another mapping and by a read of the
+file, and a write to the file is seen through the mappings made before
+it; RL4's fixture and a new one give the same output in every
+configuration. An access to a mapping's bytes after it is unmapped is a
+trap, not a fault of the interpreter. A fault the system raises in mapped
+memory (a byte past the end of a file cut short under its mapping, a
+write in `unsafe` code through a mapping made for reading) is a trap of
+kind `unreachable` in both engines, and the interpreter reports it and
+ends with the trap's status.
+
+**RM6. The interpreter gives signals the system's default.** A program
+run by `kern run` that leaves a signal of `std/signal` at its default is
+ended by that signal as a native program is (the process dies by the
+signal, which a parent sees in the wait status), for a signal the program
+raises and for one another process sends: `Interrupt`, `Terminate`,
+`Hangup`, `Quit`, `User1` and `User2`; `Pipe` when the program raises
+it. A caught or ignored signal does not end it, and a signal given back
+its default does again. `signal.raise` flushes standard output first in
+both engines, so the same output precedes the end. A `Pipe` signal sent
+by another process to an interpreted program is not seen (the
+interpreter's host runtime keeps it); the reference says so. A program
+run inside another process's interpreter (`kern test`, the test suite)
+leaves that process's signals alone.
 
 ### P. Performance
 

@@ -2,10 +2,13 @@ package interp
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"os"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -16,8 +19,9 @@ import (
 // work behind a read, write or accept deadline. A descriptor is a number
 // of the interpreter's own, above every file's.
 //
-// An address crosses as a record of 19 bytes: the family (4 or 6), 16
-// bytes of address (IPv4 in the first four), the port high byte first.
+// An address crosses as a record of 23 bytes: the family (4 or 6), 16
+// bytes of address (IPv4 in the first four), the port high byte first,
+// an IPv6 address's scope (an interface's index) high byte first.
 
 // sock is one open socket: a listener, a stream or a datagram socket.
 // tcp is set beside conn for a TCP stream, which alone has TCP's options.
@@ -26,6 +30,36 @@ type sock struct {
 	conn stream
 	tcp  *net.TCPConn
 	udp  *net.UDPConn
+	ud   *net.UnixConn // a Unix-domain datagram socket
+}
+
+// control runs f on the socket's descriptor, for the options Go's types
+// do not carry.
+func (s *sock) control(f func(fd int) error) error {
+	var c any
+	switch {
+	case s.ln != nil:
+		c = s.ln
+	case s.conn != nil:
+		c = s.conn
+	case s.udp != nil:
+		c = s.udp
+	case s.ud != nil:
+		c = s.ud
+	}
+	sc, ok := c.(syscall.Conn)
+	if !ok {
+		return syscall.EBADF
+	}
+	raw, err := sc.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var ferr error
+	if err := raw.Control(func(fd uintptr) { ferr = f(int(fd)) }); err != nil {
+		return err
+	}
+	return ferr
 }
 
 // listener is a TCP or a Unix-domain listener, and stream a connection
@@ -53,28 +87,35 @@ func streamSock(c net.Conn) *sock {
 }
 
 const (
-	addrBytes = 19
+	addrBytes = 23
 	sockBase  = 1 << 20 // socket descriptors start here, clear of the files'
 )
 
 func init() {
 	for k, v := range map[string]func(*Interp, []Value, callCtx) []Value{
-		"net_tcp_listen":   netTCPListen,
-		"net_udp_bind":     netUDPBind,
-		"net_accept":       netAccept,
-		"net_connect":      netConnect,
-		"net_unix_listen":  netUnixListen,
-		"net_unix_connect": netUnixConnect,
-		"net_unix_pair":    netUnixPair,
-		"net_recv":         netRecv,
-		"net_send":         netSend,
-		"net_shutdown":     netShutdown,
-		"net_set_nodelay":  netSetNodelay,
-		"net_addr":         netAddr,
-		"net_send_to":      netSendTo,
-		"net_recv_from":    netRecvFrom,
-		"net_close":        netClose,
-		"net_resolve":      netResolve,
+		"net_tcp_listen":     netTCPListen,
+		"net_udp_bind":       netUDPBind,
+		"net_accept":         netAccept,
+		"net_connect":        netConnect,
+		"net_unix_listen":    netUnixListen,
+		"net_unix_connect":   netUnixConnect,
+		"net_unix_pair":      netUnixPair,
+		"net_recv":           netRecv,
+		"net_send":           netSend,
+		"net_shutdown":       netShutdown,
+		"net_set_nodelay":    netSetNodelay,
+		"net_set_opt":        netSetOpt,
+		"net_get_opt":        netGetOpt,
+		"net_if_index":       netIfIndex,
+		"net_if_name":        netIfName,
+		"net_unix_dgram":     netUnixDgram,
+		"net_unix_send_to":   netUnixSendTo,
+		"net_unix_recv_from": netUnixRecvFrom,
+		"net_addr":           netAddr,
+		"net_send_to":        netSendTo,
+		"net_recv_from":      netRecvFrom,
+		"net_close":          netClose,
+		"net_resolve":        netResolve,
 	} {
 		intrinsics[k] = v
 	}
@@ -99,26 +140,44 @@ func (it *Interp) sockOf(v Value) *sock {
 	return it.sh.socks[signedOf(v.(Int))]
 }
 
-// recAddr reads a record: the address, the port and the family (4 or 6),
-// or false for bytes that are not one.
-func recAddr(rec []byte) (net.IP, int, byte, bool) {
+// recAddr reads a record: the address, the port, the scope as Go names
+// one (an interface's index in decimal, empty for none) and the family (4
+// or 6), or false for bytes that are not one.
+func recAddr(rec []byte) (net.IP, int, string, byte, bool) {
 	if len(rec) < addrBytes {
-		return nil, 0, 0, false
+		return nil, 0, "", 0, false
 	}
 	port := int(rec[17])<<8 | int(rec[18])
 	switch rec[0] {
 	case 4:
-		return net.IP(append([]byte(nil), rec[1:5]...)), port, 4, true
+		return net.IP(append([]byte(nil), rec[1:5]...)), port, "", 4, true
 	case 6:
-		return net.IP(append([]byte(nil), rec[1:17]...)), port, 6, true
+		zone := ""
+		if scope := binary.BigEndian.Uint32(rec[19:23]); scope != 0 {
+			zone = strconv.FormatUint(uint64(scope), 10)
+		}
+		return net.IP(append([]byte(nil), rec[1:17]...)), port, zone, 6, true
 	}
-	return nil, 0, 0, false
+	return nil, 0, "", 0, false
+}
+
+// scopeOf is the index of the interface a zone names: Go gives a zone as
+// the interface's name when it knows one, else as the index in decimal.
+func scopeOf(zone string) uint32 {
+	if zone == "" {
+		return 0
+	}
+	if ifi, err := net.InterfaceByName(zone); err == nil {
+		return uint32(ifi.Index)
+	}
+	n, _ := strconv.ParseUint(zone, 10, 32)
+	return uint32(n)
 }
 
 // addrRec is the record of an address: an IPv4 one whatever length Go
 // holds it in (an IPv6 socket here is IPv6 only, so it never carries an
 // IPv4 address in IPv6 form).
-func addrRec(ip net.IP, port int) []byte {
+func addrRec(ip net.IP, port int, zone string) []byte {
 	rec := make([]byte, addrBytes)
 	if four := ip.To4(); four != nil {
 		rec[0] = 4
@@ -126,6 +185,7 @@ func addrRec(ip net.IP, port int) []byte {
 	} else {
 		rec[0] = 6
 		copy(rec[1:], ip.To16())
+		binary.BigEndian.PutUint32(rec[19:], scopeOf(zone))
 	}
 	rec[17], rec[18] = byte(port>>8), byte(port)
 	return rec
@@ -174,7 +234,7 @@ func network(base string, family byte) string {
 }
 
 func netTCPListen(it *Interp, a []Value, _ callCtx) []Value {
-	ip, port, family, ok := recAddr(seqBytes(acc(a[0])))
+	ip, port, zone, family, ok := recAddr(seqBytes(acc(a[0])))
 	if !ok {
 		return i32Val(-int32(syscall.EINVAL))
 	}
@@ -185,7 +245,7 @@ func netTCPListen(it *Interp, a []Value, _ callCtx) []Value {
 	// Go listens with the system's largest queue and with address reuse
 	// on; the queue the program asked for is set by listening again
 	lc := net.ListenConfig{KeepAlive: -1}
-	l, err := lc.Listen(context.Background(), network("tcp", family), (&net.TCPAddr{IP: ip, Port: port}).String())
+	l, err := lc.Listen(context.Background(), network("tcp", family), (&net.TCPAddr{IP: ip, Port: port, Zone: zone}).String())
 	if err != nil {
 		return i32Val(-int32(errnoOf(err)))
 	}
@@ -197,15 +257,18 @@ func netTCPListen(it *Interp, a []Value, _ callCtx) []Value {
 }
 
 func netUDPBind(it *Interp, a []Value, _ callCtx) []Value {
-	ip, port, family, ok := recAddr(seqBytes(acc(a[0])))
+	ip, port, zone, family, ok := recAddr(seqBytes(acc(a[0])))
 	if !ok {
 		return i32Val(-int32(syscall.EINVAL))
 	}
-	u, err := net.ListenUDP(network("udp", family), &net.UDPAddr{IP: ip, Port: port})
+	u, err := net.ListenUDP(network("udp", family), &net.UDPAddr{IP: ip, Port: port, Zone: zone})
 	if err != nil {
 		return i32Val(-int32(errnoOf(err)))
 	}
-	return i32Val(int32(it.addSock(&sock{udp: u})))
+	s := &sock{udp: u}
+	// Go permits broadcast on every datagram socket, the system on none
+	_ = s.control(func(fd int) error { return syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_BROADCAST, 0) })
+	return i32Val(int32(it.addSock(s)))
 }
 
 func netAccept(it *Interp, a []Value, _ callCtx) []Value {
@@ -222,7 +285,7 @@ func netAccept(it *Interp, a []Value, _ callCtx) []Value {
 }
 
 func netConnect(it *Interp, a []Value, _ callCtx) []Value {
-	ip, port, family, ok := recAddr(seqBytes(acc(a[0])))
+	ip, port, zone, family, ok := recAddr(seqBytes(acc(a[0])))
 	if !ok {
 		return i64Val(-int64(syscall.EINVAL))
 	}
@@ -232,7 +295,7 @@ func netConnect(it *Interp, a []Value, _ callCtx) []Value {
 		// that did not complete in its one call does
 		d.Deadline = time.Now().Add(time.Duration(min(a[1].(Int).Bits, uint64(1<<62))))
 	}
-	c, err := d.Dial(network("tcp", family), (&net.TCPAddr{IP: ip, Port: port}).String())
+	c, err := d.Dial(network("tcp", family), (&net.TCPAddr{IP: ip, Port: port, Zone: zone}).String())
 	if err != nil {
 		return i64Val(netErr(err))
 	}
@@ -435,9 +498,9 @@ func netAddr(it *Interp, a []Value, _ callCtx) []Value {
 	}
 	switch x := addr.(type) {
 	case *net.TCPAddr:
-		putBytes(a[2], addrRec(x.IP, x.Port))
+		putBytes(a[2], addrRec(x.IP, x.Port, x.Zone))
 	case *net.UDPAddr:
-		putBytes(a[2], addrRec(x.IP, x.Port))
+		putBytes(a[2], addrRec(x.IP, x.Port, x.Zone))
 	default:
 		return i32Val(-int32(syscall.ENOTCONN)) // a listener or an unconnected socket has no peer
 	}
@@ -449,12 +512,12 @@ func netSendTo(it *Interp, a []Value, _ callCtx) []Value {
 	if s == nil || s.udp == nil {
 		return i64Val(-int64(syscall.EBADF))
 	}
-	ip, port, _, ok := recAddr(seqBytes(acc(a[2])))
+	ip, port, zone, _, ok := recAddr(seqBytes(acc(a[2])))
 	if !ok {
 		return i64Val(-int64(syscall.EINVAL))
 	}
 	_ = s.udp.SetWriteDeadline(time.Time{})
-	n, err := s.udp.WriteToUDP(seqBytes(acc(a[1])), &net.UDPAddr{IP: ip, Port: port})
+	n, err := s.udp.WriteToUDP(seqBytes(acc(a[1])), &net.UDPAddr{IP: ip, Port: port, Zone: zone})
 	if err != nil {
 		return i64Val(netErr(err))
 	}
@@ -476,7 +539,7 @@ func netRecvFrom(it *Interp, a []Value, _ callCtx) []Value {
 		return i64Val(netErr(err))
 	}
 	putBytes(a[1], buf[:n])
-	putBytes(a[2], addrRec(from.IP, from.Port))
+	putBytes(a[2], addrRec(from.IP, from.Port, from.Zone))
 	return i64Val(int64(n))
 }
 
@@ -496,6 +559,8 @@ func netClose(it *Interp, a []Value, _ callCtx) []Value {
 		err = s.conn.Close()
 	case s.udp != nil:
 		err = s.udp.Close()
+	case s.ud != nil:
+		err = s.ud.Close()
 	}
 	if err != nil {
 		return i32Val(-int32(errnoOf(err)))
@@ -530,10 +595,218 @@ func netResolve(_ *Interp, a []Value, _ callCtx) []Value {
 	}
 	var recs []byte
 	for _, ia := range addrs {
-		recs = append(recs, addrRec(ia.IP, port)...)
+		recs = append(recs, addrRec(ia.IP, port, ia.Zone)...)
 	}
 	if len(recs) <= byteSeq(acc(a[2])).length() {
 		putBytes(a[2], recs)
 	}
 	return i64Val(int64(len(recs)))
+}
+
+// sockOpt is the system's level and name of an option std/net numbers,
+// as the runtime's kern_net_opt: 1 keep-alive, 2 the receive buffer, 3
+// the send buffer, 4 broadcast, 5 the hop limit (of the socket's
+// family), 6 linger, 7 no-delay.
+func sockOpt(fd int, opt int32) (level, name int, err error) {
+	switch opt {
+	case 1:
+		return syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, nil
+	case 2:
+		return syscall.SOL_SOCKET, syscall.SO_RCVBUF, nil
+	case 3:
+		return syscall.SOL_SOCKET, syscall.SO_SNDBUF, nil
+	case 4:
+		return syscall.SOL_SOCKET, syscall.SO_BROADCAST, nil
+	case 5:
+		sa, serr := syscall.Getsockname(fd)
+		if serr != nil {
+			return 0, 0, serr
+		}
+		if _, six := sa.(*syscall.SockaddrInet6); six {
+			return syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, nil
+		}
+		return syscall.IPPROTO_IP, syscall.IP_TTL, nil
+	case 6:
+		return syscall.SOL_SOCKET, soLinger, nil
+	case 7:
+		return syscall.IPPROTO_TCP, syscall.TCP_NODELAY, nil
+	}
+	return 0, 0, syscall.EINVAL
+}
+
+func netSetOpt(it *Interp, a []Value, _ callCtx) []Value {
+	s := it.sockOf(a[0])
+	if s == nil {
+		return i32Val(-int32(syscall.EBADF))
+	}
+	opt, value := int32(a[1].(Int).Bits), signedOf(a[2].(Int))
+	err := s.control(func(fd int) error {
+		level, name, err := sockOpt(fd, opt)
+		if err != nil {
+			return err
+		}
+		if opt == 6 {
+			l := syscall.Linger{}
+			if value >= 0 {
+				l.Onoff, l.Linger = 1, int32(min(value, math.MaxInt32))
+			}
+			return syscall.SetsockoptLinger(fd, level, name, &l)
+		}
+		if value < math.MinInt32 || value > math.MaxInt32 {
+			return syscall.EINVAL
+		}
+		return syscall.SetsockoptInt(fd, level, name, int(value))
+	})
+	if err != nil {
+		return i32Val(-int32(errnoOf(err)))
+	}
+	return i32Val(0)
+}
+
+// netGetOpt is an option's value, or -errno - 1: linger that is off is
+// the value -1.
+func netGetOpt(it *Interp, a []Value, _ callCtx) []Value {
+	s := it.sockOf(a[0])
+	if s == nil {
+		return i64Val(-int64(syscall.EBADF) - 1)
+	}
+	opt := int32(a[1].(Int).Bits)
+	var value int64
+	err := s.control(func(fd int) error {
+		level, name, err := sockOpt(fd, opt)
+		if err != nil {
+			return err
+		}
+		if opt == 6 {
+			// package syscall reads no linger structure; it reads a
+			// longer one, whose first eight bytes the system fills with
+			// linger's two numbers
+			m, lerr := syscall.GetsockoptIPv6Mreq(fd, level, name)
+			if lerr != nil {
+				return lerr
+			}
+			value = -1
+			if binary.NativeEndian.Uint32(m.Multiaddr[0:4]) != 0 {
+				value = int64(int32(binary.NativeEndian.Uint32(m.Multiaddr[4:8])))
+			}
+			return nil
+		}
+		v, gerr := syscall.GetsockoptInt(fd, level, name)
+		value = int64(v)
+		return gerr
+	})
+	if err != nil {
+		return i64Val(-int64(errnoOf(err)) - 1)
+	}
+	return i64Val(value)
+}
+
+func netIfIndex(_ *Interp, a []Value, _ callCtx) []Value {
+	name := seqBytes(acc(a[0]))
+	var index uint32
+	if len(name) > 0 && len(name) < 16 {
+		if ifi, err := net.InterfaceByName(string(name)); err == nil {
+			index = uint32(ifi.Index)
+		}
+	}
+	return []Value{mkInt(tyU32, uint64(index))}
+}
+
+func netIfName(_ *Interp, a []Value, _ callCtx) []Value {
+	index := a[0].(Int).Bits
+	if index == 0 || index > math.MaxInt32 {
+		return i64Val(0)
+	}
+	ifi, err := net.InterfaceByIndex(int(index))
+	if err != nil || len(ifi.Name) > byteSeq(acc(a[1])).length() {
+		return i64Val(0)
+	}
+	putBytes(a[1], []byte(ifi.Name))
+	return i64Val(int64(len(ifi.Name)))
+}
+
+// netUnixDgram makes a Unix-domain datagram socket, bound to the path
+// when there is one.
+func netUnixDgram(it *Interp, a []Value, _ callCtx) []Value {
+	b := seqBytes(acc(a[0]))
+	if len(b) == 0 {
+		// no address at all: Go's own way to an unbound socket would have
+		// Linux bind it to a name of the system's choosing
+		fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+		if err != nil {
+			return i32Val(-int32(errnoOf(err)))
+		}
+		syscall.CloseOnExec(fd)
+		f := os.NewFile(uintptr(fd), "unixgram")
+		pc, perr := net.FilePacketConn(f) // a duplicate that the poller owns
+		_ = f.Close()
+		if perr != nil {
+			return i32Val(-int32(errnoOf(perr)))
+		}
+		return i32Val(int32(it.addSock(&sock{ud: pc.(*net.UnixConn)})))
+	}
+	path, e := unixPath(b)
+	if e != 0 {
+		return i32Val(-int32(e))
+	}
+	c, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
+	if err != nil {
+		return i32Val(-int32(errnoOf(err)))
+	}
+	return i32Val(int32(it.addSock(&sock{ud: c})))
+}
+
+func netUnixSendTo(it *Interp, a []Value, _ callCtx) []Value {
+	s := it.sockOf(a[0])
+	if s == nil || s.ud == nil {
+		return i64Val(-int64(syscall.EBADF))
+	}
+	path, e := unixPath(seqBytes(acc(a[2])))
+	if e != 0 {
+		return i64Val(-int64(e))
+	}
+	data := seqBytes(acc(a[1]))
+	for {
+		// a receiver whose queue is full: the send is made again each
+		// millisecond, as the runtime makes it
+		_ = s.ud.SetWriteDeadline(time.Now().Add(20 * time.Millisecond))
+		n, err := s.ud.WriteToUnix(data, &net.UnixAddr{Name: path, Net: "unixgram"})
+		if err == nil {
+			return i64Val(int64(n))
+		}
+		if netErr(err) != timedOut && errnoOf(err) != int(syscall.ENOBUFS) && errnoOf(err) != int(syscall.EAGAIN) {
+			return i64Val(netErr(err))
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// netUnixRecvFrom receives one datagram and writes its sender's path,
+// ended by a zero byte, into from.
+func netUnixRecvFrom(it *Interp, a []Value, _ callCtx) []Value {
+	s := it.sockOf(a[0])
+	if s == nil || s.ud == nil {
+		return i64Val(-int64(syscall.EBADF))
+	}
+	if byteSeq(acc(a[2])).length() < 105 {
+		return i64Val(-int64(syscall.EINVAL))
+	}
+	want := byteSeq(acc(a[1])).length()
+	buf := make([]byte, max(want, 1)) // a datagram is taken off the queue even into no bytes
+	_ = s.ud.SetReadDeadline(deadline(a[3], a[4]))
+	n, from, err := s.ud.ReadFromUnix(buf)
+	if err != nil {
+		return i64Val(netErr(err))
+	}
+	n = min(n, want)
+	putBytes(a[1], buf[:n])
+	path := ""
+	if from != nil {
+		path = from.Name
+	}
+	if len(path) > 104 {
+		path = path[:104]
+	}
+	putBytes(a[2], append([]byte(path), 0))
+	return i64Val(int64(n))
 }

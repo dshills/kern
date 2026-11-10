@@ -1,0 +1,28 @@
+-- ranges that overlap and ranges that do not
+a holds bytes 0 to 9
+b, bytes 5 to 14: held by another
+b, bytes 10 to 19: taken
+b, shared, bytes 0 to 4: held by another
+a again, the range it holds: taken
+-- giving up part of a range
+b, shared, bytes 0 to 4: taken
+a, shared beside it: taken
+a, exclusive over b's shared lock: held by another
+b, bytes 5 to 9, which a kept: held by another
+-- to the end of the file, and past it
+a, from byte 15 on: held by another
+b gave up everything
+a, from byte 15 on: taken
+b, bytes 1000 to 1009, beyond the file: held by another
+b, bytes 20 to 29, beyond the file: held by another
+-- a thread waits for a range
+while b holds part of it, the waiter has the range: false
+after b let go the waiter returned 1
+a, the waiter's range after its file was closed: taken
+b, the same range after a's file was closed: taken
+-- a lock needs the file open its way
+exclusive, on a file open for reading: InvalidInput
+shared, on the same file: taken
+shared, on a file open for writing: InvalidInput
+exclusive, on the same file: taken
+cleaned up

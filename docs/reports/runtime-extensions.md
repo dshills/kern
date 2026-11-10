@@ -72,14 +72,16 @@ ADR-017). The others were gaps, and this phase closes them.
 - **`UnixPair` is a union of one variant**, `Ends(a, b)`, not a struct:
   kern cannot move two fields out of a struct, and a `match` moves both
   payloads out.
-- **In the interpreter a mapping is a copy** of the file's bytes, written
-  back at `sync` and when the mapping is destroyed. A program that writes
-  through a mapping and reads the file before either sees the old bytes
-  there, and another program's writes are not seen.
-- **Locks are `flock`'s**: they bind programs that ask, hold per open
-  file, and say nothing about byte ranges.
-- **No datagram or abstract Unix-domain sockets**, and no passing of
-  descriptors or credentials over one.
+- **In the interpreter a mapping was a copy** of the file's bytes when
+  this phase ended. Phase 13 made it the system's mapping (RM5).
+- **Locks are `flock`'s**: they bind programs that ask and hold per open
+  file. Phase 13 added locks on ranges of bytes (RM1).
+- **Unix-domain datagrams** came in phase 13 (RM3). A name in Linux's
+  abstract namespace and the passing of descriptors or credentials over a
+  socket are outside the library by decision (spec §2): the first exists
+  on one of the two hosts only, and the second needs a way to make a
+  `File` or a socket from a descriptor of unknown kind, which the library
+  does not offer.
 
 ## Verification
 

@@ -168,6 +168,30 @@ int32_t kern_io_flock(int32_t fd, int32_t op) {
     do r = flock(fd, how); while (r < 0 && errno == EINTR);
     return r < 0 ? -errno : 0;
 }
+// kern_io_lock_range takes or gives up an advisory lock on a range of an
+// open file's bytes (specs/runtime RM1): op as kern_io_flock's; len 0 is
+// "to the end of the file, wherever that comes to be". The lock is the
+// open file description's (F_OFD_SETLK), as flock's is: it is not lost
+// when another descriptor of the same file is closed, and two opens of
+// one file in one process contend like two processes.
+int32_t kern_io_lock_range(int32_t fd, int32_t op, uint64_t start, uint64_t len) {
+    if ((op & 3) == 3 || op < 0 || op > 5) return -EINVAL;
+    if (start > (uint64_t)INT64_MAX || len > (uint64_t)INT64_MAX) return -EINVAL;
+    struct flock fl;
+    memset(&fl, 0, sizeof fl);
+    fl.l_type = (op & 3) == 0 ? F_RDLCK : (op & 3) == 1 ? F_WRLCK : F_UNLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start = (off_t)start;
+    fl.l_len = (off_t)len;
+    int r;
+    do r = fcntl(fd, (op & 4) || (op & 3) == 2 ? F_OFD_SETLK : F_OFD_SETLKW, &fl); while (r < 0 && errno == EINTR);
+    if (r < 0) {
+        if (errno == EACCES) return -EAGAIN; // a conflict is one error, whichever the system names it
+        if (errno == EBADF) return -EINVAL;  // the file is not open the way the lock needs
+        return -errno;
+    }
+    return 0;
+}
 // kern_stat_out writes std/io's Metadata as four numbers: the kind (1 a
 // regular file, 2 a directory, 3 anything else, 4 a symbolic link), the
 // size in bytes, the modification time in nanoseconds since the Unix

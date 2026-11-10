@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/bits"
 	"os"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -47,12 +48,14 @@ type Interp struct {
 	// record (specs/runtime RE2); frames is then this thread's activations,
 	// outermost first, kept only while it is on
 	backtrace bool
-	frames    []*frame
-	globals   []Value  // this thread's instances of the module's thread_locals
-	heap      *rawHeap // byte-addressed memory for raw pointers
-	sh        *sharedState
-	tid       uint64 // this thread's identifier (0 is the main thread)
-	inTrap    bool   // a trap inside the handler terminates
+	// ownsProcess: see SetOwnsProcess
+	ownsProcess bool
+	frames      []*frame
+	globals     []Value  // this thread's instances of the module's thread_locals
+	heap        *rawHeap // byte-addressed memory for raw pointers
+	sh          *sharedState
+	tid         uint64 // this thread's identifier (0 is the main thread)
+	inTrap      bool   // a trap inside the handler terminates
 	// Freestanding selects the freestanding emulation: console device
 	// writes go to standard output and the halt line ends the run.
 	Freestanding bool
@@ -430,6 +433,12 @@ func (it *Interp) RunEntries(names []string) (status int) {
 	// a program that traps or exits runs no destructor: what it did to
 	// the process's signals ends with it all the same
 	defer releaseSignals()
+	if it.ownsProcess {
+		defaultSignals()
+	}
+	// a fault in memory the system mapped is a panic to recover, not the
+	// end of the process
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
 	var entries []*ir.Func
 	for _, name := range names {
 		entry := it.mod.Func(name)
@@ -448,7 +457,9 @@ func (it *Interp) RunEntries(names []string) (status int) {
 			}
 			tr, ok := r.(*Trap)
 			if !ok {
-				panic(r)
+				if tr = faultTrap(r, it.file); tr == nil {
+					panic(r)
+				}
 			}
 			it.trapRecord(tr)
 			status = 134
@@ -546,6 +557,27 @@ func (it *Interp) trapRecord(tr *Trap) {
 // trap record, as a native program does with KERN_BACKTRACE=1 or built with
 // --backtrace (specs/runtime RE2).
 func (it *Interp) SetBacktrace(on bool) { it.backtrace = on }
+
+// SetOwnsProcess tells the interpreter that the program it runs is all
+// this process is for (`kern run`): a signal whose default in the system
+// ends a program then ends this one as the system would (specs/runtime
+// RM6), where a program run inside another (a test) leaves the process's
+// signals to its host.
+func (it *Interp) SetOwnsProcess(on bool) { it.ownsProcess = on }
+
+// faultTrap is the trap of a memory fault that the Go runtime raised as a
+// panic: an access to a mapped file's bytes past the file's end. It is
+// kind unreachable with no location, which is how the runtime reports a
+// fault that is not a stack overflow. Any other panic is not one.
+func faultTrap(r any, file string) *Trap {
+	if _, ok := r.(interface {
+		error
+		Addr() uintptr
+	}); ok {
+		return &Trap{Kind: "unreachable", File: file}
+	}
+	return nil
+}
 
 // backtraceLine is the backtrace of the trapping thread: its user
 // functions' activations, innermost first, at most 64, each with the

@@ -1,0 +1,23 @@
+-- text
+[fe80::1%7]:80 -> [fe80::1%7]:80 scope 7
+[fe80::1%4294967295]:65535 -> [fe80::1%4294967295]:65535 scope 4294967295
+[fe80::1]:80 -> [fe80::1]:80 scope 0
+[::1%1]:9 -> [::1%1]:9 scope 1
+[fe80::1%]:80 -> refused
+[fe80::1%0]:80 -> refused
+[fe80::1%07]:80 -> refused
+[fe80::1%4294967296]:80 -> refused
+[fe80::1%no-such-interface]:80 -> refused
+[fe80::1%7%8]:80 -> refused
+127.0.0.1%7:80 -> refused
+-- the record
+scope bytes 18 52 86 120
+read back: scope 305419896 port 9
+an IPv4 address takes none: scope 0
+and its record carries none: scope 0
+-- interfaces
+interface 1 has a name whose index is 1
+its name as a scope is scope 1
+no interface of an unknown name
+no name for an unknown index
+no interface of the empty name

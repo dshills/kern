@@ -20,17 +20,26 @@ type rawHeap struct {
 	chunks  []*heapChunk        // never moved once created, so slices stay valid
 	allocs  map[uint64]rawBlock // address -> the live allocation there
 	handles []Value
+	// mapped are the file mappings (std/mem): memory the system mapped,
+	// given addresses of the interpreter's above mapBase, and gone from
+	// here when unmapped, so that a later access is a trap and not a fault
+	mapped  []*heapChunk
+	mapNext uint64
 }
 
 // heapChunk is one stable backing array; allocations never span chunks.
+// ro marks a file mapping that was not made writable: the system would
+// fault a write to it.
 type heapChunk struct {
 	base uint64
 	mem  []byte
 	used uint64
+	ro   bool
 }
 
 const (
 	heapBase     = 0x1_0000_0000
+	mapBase      = 0x4000_0000_0000
 	chunkSize    = 1 << 20
 	maxAllocSize = 1 << 40 // larger requests fail (the interpreter's address space)
 )
@@ -142,15 +151,54 @@ func (h *rawHeap) zero(addr, n uint64) {
 // Chunks are never reallocated, so the slice stays valid after the lock is
 // released; concurrent access to one allocation is the program's data race.
 func (h *rawHeap) bytes(addr, n uint64) []byte {
+	b, _ := h.span(addr, n)
+	return b
+}
+
+// span is bytes, and whether the bytes may only be read.
+func (h *rawHeap) span(addr, n uint64) ([]byte, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, c := range h.chunks {
+	list := h.chunks
+	if addr >= mapBase {
+		list = h.mapped
+	}
+	for _, c := range list {
 		if addr >= c.base && addr-c.base < uint64(len(c.mem)) {
 			off := addr - c.base
 			if n > uint64(len(c.mem))-off {
-				return nil
+				return nil, false
 			}
-			return c.mem[off : off+n]
+			return c.mem[off : off+n], c.ro
+		}
+	}
+	return nil, false
+}
+
+// adopt gives memory the system mapped an address of the interpreter's, a
+// multiple of align, and records it as a live block of its length.
+func (h *rawHeap) adopt(mem []byte, ro bool, align uint64) uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.mapNext == 0 {
+		h.mapNext = mapBase
+	}
+	base := (h.mapNext + align - 1) / align * align
+	h.mapNext = base + uint64(len(mem)) + align // a gap: running off the end of one mapping is not the next
+	h.mapped = append(h.mapped, &heapChunk{base: base, mem: mem, used: uint64(len(mem)), ro: ro})
+	h.allocs[base] = rawBlock{uint64(len(mem)), align}
+	return base
+}
+
+// release forgets the mapping at addr and returns its memory for the
+// caller to unmap, or nil when there is none.
+func (h *rawHeap) release(addr uint64) []byte {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i, c := range h.mapped {
+		if c.base == addr {
+			h.mapped = append(h.mapped[:i], h.mapped[i+1:]...)
+			return c.mem
 		}
 	}
 	return nil
@@ -179,6 +227,21 @@ func (it *Interp) rawAt(addr uint64, t resolve.Type, pos ast.Pos) []byte {
 	b := it.heap.bytes(addr, n)
 	if b == nil && n > 0 {
 		it.trap("explicit", pos)
+	}
+	return b
+}
+
+// rawAtW is rawAt for a write: memory that may only be read (a file
+// mapping that was not made writable) traps with kind unreachable, where
+// the system would fault and the runtime report that kind.
+func (it *Interp) rawAtW(addr uint64, t resolve.Type, pos ast.Pos) []byte {
+	n := uint64(layout.Of(t).Size)
+	b, ro := it.heap.span(addr, n)
+	if b == nil && n > 0 {
+		it.trap("explicit", pos)
+	}
+	if ro && n > 0 {
+		it.trap("unreachable", pos) // the system's fault, which the runtime reports as this kind
 	}
 	return b
 }

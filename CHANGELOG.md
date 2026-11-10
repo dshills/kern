@@ -47,6 +47,16 @@ The runtime work (`specs/runtime`, `docs/runtime.md`,
   `remove_dir_all`, `join`; `File.lock`, `try_lock`, `unlock` (advisory
   locks), `File.raw_fd`.
 - `std/mem`: `map_file` and `Mapping`, a file's bytes in memory.
+- `std/io`: `File.lock_range`, `try_lock_range` and `unlock_range`,
+  advisory locks on ranges of a file's bytes.
+- `std/net`: `SocketAddr` has a `scope` (the interface of an IPv6
+  link-local address), read and written as `[v6%zone]:port`, with
+  `addr_scoped`, `interface_index` and `interface_name`; `UnixDatagram`,
+  datagrams between programs on one machine; socket options as methods
+  (`set_keepalive`, `set_recv_buffer`, `set_send_buffer`,
+  `set_hop_limit`, `set_linger`, `set_broadcast`, each with its reading
+  form, and `nodelay`).
+- `signal.raise` flushes standard output before it sends the signal.
 - `std/sync` (new): `RwLock`, `Once`, `WaitGroup`, a bounded `Channel`.
 - `std/signal` (new): `catch`, `ignore`, `reset`, `raise`, and `Signals`
   to wait for what was caught.
@@ -86,6 +96,10 @@ The runtime work (`specs/runtime`, `docs/runtime.md`,
 
 ### Tooling
 
+- `kern run`: a signal left at its default ends an interpreted program by
+  that signal, as it ends a native one (`User1`, `User2` and `Quit` did
+  not); a mapped file is the system's mapping, shared with the file's
+  other users; a fault in mapped memory is a trap of kind `unreachable`.
 - `docs/runtime.md`, the runtime's reference, with every entry of both
   runtimes generated from their headers; `docs/freestanding-porting.md`.
 - The fixture corpus runs under AddressSanitizer and

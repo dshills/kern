@@ -1,0 +1,87 @@
+//! phase: 6
+//! expect: output net_scopes
+// IPv6 scopes (specs/runtime RM2): an address with a scope as text and
+// as the runtime's record; the scopes parse_addr refuses; and the
+// machine's interfaces by name and by index. Interface 1 exists on every
+// system the hosted runtime supports (the loopback interface).
+module t
+import "std/net"
+
+func say(s: view[]u8) { print_str(s); println() }
+func parsed(text: view[]u8) {
+    print_str(text)
+    print_str(" -> ")
+    match net.parse_addr(text) {
+        Some(a) => {
+            back := net.format_addr(a)
+            print_str(back.as_view())
+            print_str(" scope ")
+            print_u64(u64(a.scope))
+            println()
+        }
+        None => say("refused")
+    }
+}
+
+func main() -> i32 {
+    say("-- text")
+    parsed("[fe80::1%7]:80")
+    parsed("[fe80::1%4294967295]:65535")
+    parsed("[fe80::1]:80")
+    parsed("[::1%1]:9")
+    parsed("[fe80::1%]:80")
+    parsed("[fe80::1%0]:80")
+    parsed("[fe80::1%07]:80")
+    parsed("[fe80::1%4294967296]:80")
+    parsed("[fe80::1%no-such-interface]:80")
+    parsed("[fe80::1%7%8]:80")
+    parsed("127.0.0.1%7:80")
+
+    say("-- the record")
+    var rec: [23]u8 = zero()
+    a := net.addr_scoped(net.loopback_v6(0u16).ip, 9u16, 305419896u32)
+    net.to_wire(a, rec)
+    print_str("scope bytes")
+    for k in 19usize..23usize { print_str(" "); print_u64(u64(rec[k])) }
+    println()
+    b := net.from_wire(rec)
+    print_str("read back: scope "); print_u64(u64(b.scope)); print_str(" port "); print_u64(u64(b.port)); println()
+    four := net.addr_scoped(net.v4(10u8, 0u8, 0u8, 1u8), 9u16, 5u32)
+    print_str("an IPv4 address takes none: scope "); print_u64(u64(four.scope)); println()
+    net.to_wire(four, rec)
+    c := net.from_wire(rec)
+    print_str("and its record carries none: scope "); print_u64(u64(c.scope)); println()
+
+    say("-- interfaces")
+    match net.interface_name(1u32) {
+        Some(name) => {
+            match net.interface_index(name.as_view()) {
+                Some(i) => { print_str("interface 1 has a name whose index is "); print_u64(u64(i)); println() }
+                None => say("interface 1 has a name with no index")
+            }
+            // the name is a scope too
+            text := Vec[u8].new()
+            text.extend("[fe80::1%")
+            text.extend(name.as_view())
+            text.extend("]:80")
+            match net.parse_addr(text.as_view()) {
+                Some(s) => { print_str("its name as a scope is scope "); print_u64(u64(s.scope)); println() }
+                None => say("its name is refused as a scope")
+            }
+        }
+        None => say("there is no interface 1")
+    }
+    match net.interface_index("no-such-interface") {
+        Some(i) => say("an interface nobody has was found")
+        None => say("no interface of an unknown name")
+    }
+    match net.interface_name(4000000000u32) {
+        Some(n) => say("an index nobody has was named")
+        None => say("no name for an unknown index")
+    }
+    match net.interface_index("") {
+        Some(i) => say("the empty name was found")
+        None => say("no interface of the empty name")
+    }
+    return 0i32
+}

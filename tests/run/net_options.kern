@@ -1,0 +1,135 @@
+//! phase: 6
+//! expect: output net_options
+// Socket options (specs/runtime RM4): each is off, or the system's size,
+// on a new socket; what is set is what is read back; and a value the
+// system cannot take is its error.
+module t
+import "std/net"
+import "std/io"
+
+func say(s: view[]u8) { print_str(s); println() }
+func flag(label: view[]u8, r: own Result[bool, io.IoErr]) {
+    print_str(label)
+    match r {
+        Ok(on) => { if on { say(": on") } else { say(": off") } }
+        Err(e) => say(": an error")
+    }
+}
+func count(label: view[]u8, r: own Result[u32, io.IoErr]) {
+    print_str(label)
+    match r {
+        Ok(n) => { print_str(": "); print_u64(u64(n)); println() }
+        Err(e) => say(": an error")
+    }
+}
+// at_least reports whether the system gave a buffer of the size asked
+// for or more: it may round a size up, and Linux doubles it.
+func at_least(label: view[]u8, r: own Result[u32, io.IoErr], want: u32) {
+    print_str(label)
+    match r {
+        Ok(n) => { if n >= want { say(": at least what was asked") } else { say(": smaller than asked") } }
+        Err(e) => say(": an error")
+    }
+}
+func linger(label: view[]u8, r: own Result[Option[u32], io.IoErr]) {
+    print_str(label)
+    match r {
+        Ok(l) => {
+            match l {
+                Some(n) => { print_str(": "); print_u64(u64(n)); say(" s") }
+                None => say(": off")
+            }
+        }
+        Err(e) => say(": an error")
+    }
+}
+func refused(label: view[]u8, r: own Result[(), io.IoErr]) {
+    print_str(label)
+    match r {
+        Ok(u) => say(": taken")
+        Err(e) => {
+            match io.kind(e) {
+                InvalidInput => say(": InvalidInput")
+                _ => say(": another error")
+            }
+        }
+    }
+}
+
+func tcp(local: net.SocketAddr) -> Result[(), io.IoErr] {
+    l := net.TcpListener.bind(local)?
+    c := net.TcpStream.connect(l.local_addr()?)?
+    flag("keep-alive", c.keepalive())
+    c.set_keepalive(true)?
+    flag("keep-alive, set", c.keepalive())
+    c.set_keepalive(false)?
+    flag("keep-alive, cleared", c.keepalive())
+    flag("no-delay", c.nodelay())
+    c.set_nodelay(true)?
+    flag("no-delay, set", c.nodelay())
+    c.set_recv_buffer(65536u32)?
+    at_least("receive buffer", c.recv_buffer(), 65536u32)
+    c.set_send_buffer(32768u32)?
+    at_least("send buffer", c.send_buffer(), 32768u32)
+    c.set_hop_limit(42u32)?
+    count("hop limit", c.hop_limit())
+    refused("a hop limit of 256", c.set_hop_limit(256u32))
+    refused("a hop limit of 0", c.set_hop_limit(0u32))
+    count("hop limit, after the two refusals", c.hop_limit())
+    linger("linger", c.linger())
+    c.set_linger(Some(3u32))?
+    linger("linger, set", c.linger())
+    c.set_linger(Some(0u32))?
+    linger("linger, zero", c.linger())
+    c.set_linger(None)?
+    linger("linger, cleared", c.linger())
+    // an accepted connection has options of its own
+    s := l.accept()?
+    flag("the accepted end's no-delay", s.nodelay())
+    return Ok(())
+}
+
+func udp(local: net.SocketAddr) -> Result[(), io.IoErr] {
+    u := net.UdpSocket.bind(local)?
+    flag("broadcast", u.broadcast())
+    u.set_broadcast(true)?
+    flag("broadcast, set", u.broadcast())
+    u.set_hop_limit(7u32)?
+    count("hop limit", u.hop_limit())
+    u.set_recv_buffer(65536u32)?
+    at_least("receive buffer", u.recv_buffer(), 65536u32)
+    u.set_send_buffer(32768u32)?
+    at_least("send buffer", u.send_buffer(), 32768u32)
+    return Ok(())
+}
+
+func unix() -> Result[(), io.IoErr] {
+    match net.UnixStream.pair()? {
+        Ends(a, b) => {
+            a.set_send_buffer(32768u32)?
+            at_least("send buffer", a.send_buffer(), 32768u32)
+            b.set_recv_buffer(32768u32)?
+            at_least("receive buffer", b.recv_buffer(), 32768u32)
+        }
+    }
+    return Ok(())
+}
+
+func section(name: view[]u8, r: own Result[(), io.IoErr]) {
+    match r {
+        Ok(u) => { }
+        Err(e) => { print_str(name); say(" failed") }
+    }
+}
+
+func main() -> i32 {
+    say("-- a TCP stream over IPv4")
+    section("tcp", tcp(net.loopback_v4(0u16)))
+    say("-- a UDP socket over IPv4")
+    section("udp", udp(net.loopback_v4(0u16)))
+    say("-- a UDP socket over IPv6")
+    section("udp6", udp(net.loopback_v6(0u16)))
+    say("-- a Unix-domain pair")
+    section("unix", unix())
+    return 0i32
+}

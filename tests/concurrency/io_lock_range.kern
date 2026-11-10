@@ -1,0 +1,135 @@
+//! phase: 6
+//! expect: output io_lock_range
+//! tsan: clean
+// Locks on ranges of a file's bytes (specs/runtime RM1): two opens of one
+// file contend only where their ranges overlap; shared locks coexist;
+// part of a range can be given up; a length of 0 reaches to the end of
+// the file however it grows; lock_range waits until the holder lets go;
+// a lock needs the file open the way it reads or writes; and closing the
+// file ends its locks.
+module cc
+import "std/io"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func tried(label: view[]u8, r: own Result[bool, io.IoErr]) {
+    print_str(label)
+    match r {
+        Ok(got) => { if got { say(": taken") } else { say(": held by another") } }
+        Err(e) => {
+            match io.kind(e) {
+                InvalidInput => say(": InvalidInput")
+                _ => say(": another error")
+            }
+        }
+    }
+}
+func both(path: view[]u8) -> Result[io.File, io.IoErr] {
+    o := io.options()
+    o.read = true
+    o.write = true
+    return io.open(path, o)
+}
+
+// waiter opens the file itself, waits for bytes 100 to 199 and records
+// that it has them.
+func waiter(path: own Vec[u8], has: view[Atomic[u32]]) -> u64 {
+    match both(path.as_view()) {
+        Ok(f) => {
+            match f.lock_range(100u64, 100u64, true) {
+                Ok(u) => {
+                    has.store(1u32, Ordering.seq_cst)
+                    return 1u64
+                }
+                Err(e) => { return 0u64 }
+            }
+        }
+        Err(e) => { return 0u64 }
+    }
+}
+
+func run(dir: view[]u8) -> Result[(), io.IoErr] {
+    path := io.join(dir, "ranges")
+    io.write_file(path.as_view(), "0123456789abcdefghij")?
+    a := both(path.as_view())?
+    b := both(path.as_view())?
+    say("-- ranges that overlap and ranges that do not")
+    a.lock_range(0u64, 10u64, true)?
+    say("a holds bytes 0 to 9")
+    tried("b, bytes 5 to 14", b.try_lock_range(5u64, 10u64, true))
+    tried("b, bytes 10 to 19", b.try_lock_range(10u64, 10u64, true))
+    tried("b, shared, bytes 0 to 4", b.try_lock_range(0u64, 5u64, false))
+    tried("a again, the range it holds", a.try_lock_range(0u64, 10u64, true))
+
+    say("-- giving up part of a range")
+    a.unlock_range(0u64, 5u64)?
+    tried("b, shared, bytes 0 to 4", b.try_lock_range(0u64, 5u64, false))
+    tried("a, shared beside it", a.try_lock_range(0u64, 5u64, false))
+    tried("a, exclusive over b's shared lock", a.try_lock_range(0u64, 5u64, true))
+    tried("b, bytes 5 to 9, which a kept", b.try_lock_range(5u64, 5u64, true))
+
+    say("-- to the end of the file, and past it")
+    tried("a, from byte 15 on", a.try_lock_range(15u64, 0u64, true))
+    b.unlock_range(0u64, 0u64)?
+    say("b gave up everything")
+    tried("a, from byte 15 on", a.try_lock_range(15u64, 0u64, true))
+    tried("b, bytes 1000 to 1009, beyond the file", b.try_lock_range(1000u64, 10u64, true))
+    tried("b, bytes 20 to 29, beyond the file", b.try_lock_range(20u64, 10u64, false))
+    a.unlock_range(0u64, 0u64)?
+    b.unlock_range(0u64, 0u64)?
+
+    say("-- a thread waits for a range")
+    b.lock_range(150u64, 10u64, false)?
+    has := Atomic[u32].new(0u32)
+    with s := thread.scope() {
+        copy_of := Vec[u8].new()
+        copy_of.extend(path.as_view())
+        match s.spawn(waiter, copy_of, has) {
+            Ok(j) => {
+                time.sleep(time.millis(100u64))
+                print_str("while b holds part of it, the waiter has the range: ")
+                print_bool(has.load(Ordering.seq_cst) == 1u32)
+                println()
+                b.unlock_range(150u64, 10u64)?
+                print_str("after b let go the waiter returned ")
+                print_u64(j.get())
+                println()
+            }
+            Err(e) => say("no thread")
+        }
+    }
+    // the waiter's file is closed, and its locks with it
+    tried("a, the waiter's range after its file was closed", a.try_lock_range(100u64, 100u64, true))
+    drop(a)
+    tried("b, the same range after a's file was closed", b.try_lock_range(100u64, 100u64, true))
+    drop(b)
+
+    say("-- a lock needs the file open its way")
+    r := io.open_read(path.as_view())?
+    tried("exclusive, on a file open for reading", r.try_lock_range(0u64, 1u64, true))
+    tried("shared, on the same file", r.try_lock_range(0u64, 1u64, false))
+    drop(r)
+    w := io.open_append(path.as_view())?
+    tried("shared, on a file open for writing", w.try_lock_range(0u64, 1u64, false))
+    tried("exclusive, on the same file", w.try_lock_range(0u64, 1u64, true))
+    drop(w)
+    io.remove_file(path.as_view())?
+    return Ok(())
+}
+
+func main() -> i32 {
+    match io.make_temp_dir("kern-range-") {
+        Ok(dir) => {
+            match run(dir.as_view()) {
+                Ok(u) => { }
+                Err(e) => say("failed")
+            }
+            match io.remove_dir(dir.as_view()) {
+                Ok(u) => say("cleaned up")
+                Err(e) => say("the directory is not empty")
+            }
+        }
+        Err(e) => say("no temporary directory")
+    }
+    return 0i32
+}

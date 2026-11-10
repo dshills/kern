@@ -126,8 +126,10 @@ int64_t kern_signal_wait(uint32_t mask, uint64_t ns, uint8_t timed) {
     }
 }
 // kern_signal_raise sends a signal to the program's own process: 0 or
-// -errno.
+// -errno. Standard output is flushed first: what the program wrote is
+// seen even when the signal's disposition ends it.
 int32_t kern_signal_raise(int32_t which) {
     if (which < 0 || which >= KERN_SIGNALS) return -EINVAL;
+    kern_flush();
     return kill(getpid(), kern_signals[which]) != 0 ? -errno : 0;
 }

@@ -1,11 +1,11 @@
 package interp
 
 import (
-	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"syscall"
+	"unsafe"
 )
 
 // std/io's files beyond read and write, metadata, paths and error kinds
@@ -15,21 +15,22 @@ import (
 
 func init() {
 	for k, v := range map[string]func(*Interp, []Value, callCtx) []Value{
-		"io_seek":      ioSeek,
-		"io_sync":      ioSync,
-		"io_set_len":   ioSetLen,
-		"io_flock":     ioFlock,
-		"mem_map_file": memMapFile,
-		"mem_sync":     memSync,
-		"io_stat":      ioStat,
-		"io_fstat":     ioFstat,
-		"io_rename":    func(_ *Interp, a []Value, _ callCtx) []Value { return twoPaths(a, syscall.Rename) },
-		"io_link":      func(_ *Interp, a []Value, _ callCtx) []Value { return twoPaths(a, syscall.Link) },
-		"io_symlink":   func(_ *Interp, a []Value, _ callCtx) []Value { return twoPaths(a, syscall.Symlink) },
-		"io_chmod":     ioChmod,
-		"io_readlink":  ioReadlink,
-		"io_realpath":  ioRealpath,
-		"io_getcwd":    ioGetcwd,
+		"io_seek":       ioSeek,
+		"io_sync":       ioSync,
+		"io_set_len":    ioSetLen,
+		"io_flock":      ioFlock,
+		"io_lock_range": ioLockRange,
+		"mem_map_file":  memMapFile,
+		"mem_sync":      memSync,
+		"io_stat":       ioStat,
+		"io_fstat":      ioFstat,
+		"io_rename":     func(_ *Interp, a []Value, _ callCtx) []Value { return twoPaths(a, syscall.Rename) },
+		"io_link":       func(_ *Interp, a []Value, _ callCtx) []Value { return twoPaths(a, syscall.Link) },
+		"io_symlink":    func(_ *Interp, a []Value, _ callCtx) []Value { return twoPaths(a, syscall.Symlink) },
+		"io_chmod":      ioChmod,
+		"io_readlink":   ioReadlink,
+		"io_realpath":   ioRealpath,
+		"io_getcwd":     ioGetcwd,
 		"io_err_kind": func(_ *Interp, a []Value, _ callCtx) []Value {
 			return i32Val(int32(errKind(syscall.Errno(int32(a[0].(Int).Bits)))))
 		},
@@ -333,92 +334,107 @@ func ioFlock(it *Interp, a []Value, _ callCtx) []Value {
 	}
 }
 
-// fileMap is a file mapping (std/mem, specs/runtime RL4). The
-// interpreter's memory is its own, so a mapping is a block of its heap
-// holding the file's bytes, written back when the program syncs or unmaps
-// it: a write through it reaches the file then, not at once, and another
-// program's writes to the file are not seen.
+// ioLockRange takes or gives up a lock on a range of a file's bytes, as
+// the runtime's kern_io_lock_range: the lock of the open file
+// description, op as ioFlock's, a length of 0 for every byte from start.
+func ioLockRange(it *Interp, a []Value, _ callCtx) []Value {
+	f := it.openFile(signedOf(a[0].(Int)))
+	if f == nil {
+		return i32Val(-int32(syscall.EBADF))
+	}
+	op := int32(a[1].(Int).Bits)
+	start, n := u64(a[2]), u64(a[3])
+	if op < 0 || op > 5 || op&3 == 3 || start > math.MaxInt64 || n > math.MaxInt64 {
+		return i32Val(-int32(syscall.EINVAL))
+	}
+	lk := syscall.Flock_t{Type: [...]int16{syscall.F_RDLCK, syscall.F_WRLCK, syscall.F_UNLCK}[op&3], Start: int64(start), Len: int64(n)}
+	cmd := fOFDSetlkw
+	if op&4 != 0 || op&3 == 2 {
+		cmd = fOFDSetlk
+	}
+	for {
+		err := syscall.FcntlFlock(f.Fd(), cmd, &lk)
+		if err == nil {
+			return i32Val(0)
+		}
+		if err == syscall.EACCES {
+			return i32Val(-int32(syscall.EAGAIN)) // a conflict is one error, whichever the system names it
+		}
+		if err == syscall.EBADF {
+			return i32Val(-int32(syscall.EINVAL)) // the file is not open the way the lock needs
+		}
+		if err != syscall.EINTR {
+			return i32Val(-int32(errnoOf(err)))
+		}
+	}
+}
+
+// fileMap is a file mapping (std/mem, specs/runtime RL4, RM5): memory the
+// system mapped from the file, shared, as the runtime's is, so that a
+// write through it is a write to the file and another program's writes
+// are seen. The interpreter gives it an address of its own.
 type fileMap struct {
-	f        *os.File // the mapping's own handle: it outlives the File
-	n        uint64
-	writable bool
+	mem []byte
 }
 
 func memMapFile(it *Interp, a []Value, _ callCtx) []Value {
 	fd := signedOf(a[0].(Int))
 	n, writable := u64(a[1]), bool(a[2].(Bool))
 	it.sh.mu.Lock()
-	f, opts := it.sh.files[fd], it.sh.fileOpts[fd]
+	f := it.sh.files[fd]
 	it.sh.mu.Unlock()
 	if f == nil {
 		return i64Val(-int64(syscall.EBADF))
 	}
-	if n == 0 {
+	if n == 0 || n > math.MaxInt {
 		return i64Val(-int64(syscall.EINVAL))
 	}
-	// the system maps a file that is open for reading, and writably one
-	// open for writing too
-	if opts&1 == 0 || (writable && opts&(2|4) == 0) {
-		return i64Val(-int64(syscall.EACCES))
+	prot := syscall.PROT_READ
+	if writable {
+		prot |= syscall.PROT_WRITE
 	}
-	dup, err := syscall.Dup(int(f.Fd()))
+	mem, err := syscall.Mmap(int(f.Fd()), 0, int(n), prot, syscall.MAP_SHARED)
 	if err != nil {
 		return i64Val(-int64(errnoOf(err)))
 	}
-	syscall.CloseOnExec(dup)
-	own := os.NewFile(uintptr(dup), f.Name())
-	addr := it.heap.alloc(n, uint64(os.Getpagesize()))
-	if addr == 0 {
-		_ = own.Close()
-		return i64Val(-int64(syscall.ENOMEM))
-	}
-	it.heap.zero(addr, n)
-	if _, err := own.ReadAt(it.heap.bytes(addr, n), 0); err != nil && err != io.EOF {
-		_ = own.Close()
-		it.heap.free(addr)
-		return i64Val(-int64(errnoOf(err)))
-	}
+	addr := it.heap.adopt(mem, !writable, uint64(os.Getpagesize()))
 	it.sh.mu.Lock()
 	if it.sh.maps == nil {
 		it.sh.maps = map[uint64]*fileMap{}
 	}
-	it.sh.maps[addr] = &fileMap{f: own, n: n, writable: writable}
+	it.sh.maps[addr] = &fileMap{mem: mem}
 	it.sh.mu.Unlock()
 	return i64Val(int64(addr))
 }
 
-// flushMap writes a writable mapping's bytes to its file.
-func (it *Interp) flushMap(addr uint64, m *fileMap) error {
-	if !m.writable {
-		return nil
-	}
-	_, err := m.f.WriteAt(it.heap.bytes(addr, m.n), 0)
-	return err
-}
-
+// memSync returns when the system has written a mapping's changed pages
+// to its file.
 func memSync(it *Interp, a []Value, _ callCtx) []Value {
 	addr := u64(a[0])
 	it.sh.mu.Lock()
 	m := it.sh.maps[addr]
 	it.sh.mu.Unlock()
-	if m == nil {
+	if m == nil || len(m.mem) == 0 {
 		return i32Val(0)
 	}
-	if err := it.flushMap(addr, m); err != nil {
-		return i32Val(-int32(errnoOf(err)))
+	if _, _, e := syscall.Syscall(syscall.SYS_MSYNC, uintptr(unsafe.Pointer(&m.mem[0])), uintptr(len(m.mem)), syscall.MS_SYNC); e != 0 {
+		return i32Val(-int32(e))
 	}
 	return i32Val(0)
 }
 
-// unmapFile ends a file mapping at addr, if there is one: its changes go
-// to the file and its handle is closed. The block is freed by mem_unmap.
+// unmapFile ends a file mapping at addr, if there is one: the memory
+// leaves the interpreter's address space first, so that an access after
+// this is a trap, and is then unmapped. The block's record is freed by
+// mem_unmap.
 func (it *Interp) unmapFile(addr uint64) {
 	it.sh.mu.Lock()
 	m := it.sh.maps[addr]
 	delete(it.sh.maps, addr)
 	it.sh.mu.Unlock()
 	if m != nil {
-		_ = it.flushMap(addr, m)
-		_ = m.f.Close()
+		if mem := it.heap.release(addr); mem != nil {
+			_ = syscall.Munmap(mem)
+		}
 	}
 }

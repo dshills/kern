@@ -525,6 +525,8 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		setDst(fe.rt("kern_io_seek", "i64 (i32, i64, i32)", "i32 "+fe.v(a[0])+", i64 "+fe.v(a[1])+", i32 "+fe.v(a[2])))
 	case "io_flock":
 		setDst(fe.rt("kern_io_flock", "i32 (i32, i32)", "i32 "+fe.v(a[0])+", i32 "+fe.v(a[1])))
+	case "io_lock_range":
+		setDst(fe.rt("kern_io_lock_range", "i32 (i32, i32, i64, i64)", "i32 "+fe.v(a[0])+", i32 "+fe.v(a[1])+", i64 "+fe.v(a[2])+", i64 "+fe.v(a[3])))
 	case "io_sync":
 		setDst(fe.rt("kern_io_sync", "i32 (i32)", "i32 "+fe.v(a[0])))
 	case "io_set_len":
@@ -694,6 +696,29 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		z := fe.next("t")
 		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[1]))
 		setDst(fe.rt("kern_net_set_nodelay", "i32 (i32, i8)", "i32 "+fe.v(a[0])+", i8 "+z))
+	case "net_set_opt":
+		setDst(fe.rt("kern_net_set_opt", "i32 (i32, i32, i64)", "i32 "+fe.v(a[0])+", i32 "+fe.v(a[1])+", i64 "+fe.v(a[2])))
+	case "net_get_opt":
+		setDst(fe.rt("kern_net_get_opt", "i64 (i32, i32)", "i32 "+fe.v(a[0])+", i32 "+fe.v(a[1])))
+	case "net_if_index":
+		p, l := fe.seqParts(a[0])
+		setDst(fe.rt("kern_net_if_index", "i32 (ptr, i64)", "ptr "+p+", i64 "+l))
+	case "net_if_name":
+		p, l := fe.seqParts(a[1])
+		setDst(fe.rt("kern_net_if_name", "i64 (i32, ptr, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l))
+	case "net_unix_dgram":
+		p, l := fe.seqParts(a[0])
+		setDst(fe.rt("kern_net_unix_dgram", "i32 (ptr, i64)", "ptr "+p+", i64 "+l))
+	case "net_unix_send_to":
+		p, l := fe.seqParts(a[1])
+		q, m := fe.seqParts(a[2])
+		setDst(fe.rt("kern_net_unix_send_to", "i64 (i32, ptr, i64, ptr, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l+", ptr "+q+", i64 "+m))
+	case "net_unix_recv_from":
+		p, l := fe.seqParts(a[1])
+		q, m := fe.seqParts(a[2])
+		z := fe.next("t")
+		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[4]))
+		setDst(fe.rt("kern_net_unix_recv_from", "i64 (i32, ptr, i64, ptr, i64, i64, i8)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l+", ptr "+q+", i64 "+m+", i64 "+fe.v(a[3])+", i8 "+z))
 	case "net_addr":
 		z := fe.next("t")
 		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[1]))

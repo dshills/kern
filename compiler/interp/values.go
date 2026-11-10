@@ -258,7 +258,7 @@ func (r rawRef) set(v Value) {
 	if v == nil {
 		return // a move or drop out of raw memory: the bytes are dead, nothing to write
 	}
-	r.it.encode(r.it.rawAt(r.addr, r.t, ast.Pos{}), r.t, v)
+	r.it.encode(r.it.rawAtW(r.addr, r.t, ast.Pos{}), r.t, v)
 }
 
 // field returns the place of struct field i (or tuple element i) of a raw aggregate.

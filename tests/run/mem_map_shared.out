@@ -1,0 +1,6 @@
+a second mapping, after a write through the first [Hello, mapped file]
+a read of the file, with no sync [Hello, mapped file]
+the mapping, after a write to the file [Hello, MAPPED file]
+the writable mapping sees it too [Hello, MAPPED file]
+after another open's write [Hello, MAPPED FILE]
+cleaned up

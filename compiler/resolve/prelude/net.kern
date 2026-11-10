@@ -1,5 +1,6 @@
-// std/net: TCP and UDP sockets over IPv4 and IPv6, for hosted programs
-// (a freestanding image has no network behind these).
+// std/net: TCP and UDP sockets over IPv4 and IPv6 and Unix-domain
+// sockets, for hosted programs (a freestanding image has no network
+// behind these).
 // Imported with `import "std/net"` (specs/runtime area H).
 //
 // A socket call blocks the calling thread until it completes, or, for the
@@ -12,9 +13,10 @@ module net
 import "std/io"
 import "std/time"
 
-// Runtime intrinsics (hosted). An address crosses as a record of 19
+// Runtime intrinsics (hosted). An address crosses as a record of 23
 // bytes: the family (4 or 6), 16 bytes of address (IPv4 in the first
-// four), the port high byte first. A call with ns and timed waits at most
+// four), the port high byte first, an IPv6 address's scope high byte
+// first. A call with ns and timed waits at most
 // ns nanoseconds when timed is set and returns io.timed_out() when that
 // time passed; each returns its value or -errno.
 func net_tcp_listen(addr: view[]u8, backlog: i32) -> i32
@@ -24,10 +26,27 @@ func net_connect(addr: view[]u8, ns: u64, timed: bool) -> i64
 func net_unix_listen(path: view[]u8, backlog: i32) -> i32
 func net_unix_connect(path: view[]u8, ns: u64, timed: bool) -> i64
 func net_unix_pair(fds: edit[]i32) -> i32
+// net_unix_dgram makes a datagram socket, bound to path unless it is
+// empty; net_unix_recv_from writes the sender's path into from (at least
+// 105 bytes), ended by a zero byte.
+func net_unix_dgram(path: view[]u8) -> i32
+func net_unix_send_to(fd: i32, data: view[]u8, path: view[]u8) -> i64
+func net_unix_recv_from(fd: i32, buf: edit[]u8, from: edit[]u8, ns: u64, timed: bool) -> i64
 func net_recv(fd: i32, buf: edit[]u8, ns: u64, timed: bool) -> i64
 func net_send(fd: i32, data: view[]u8) -> i64
 func net_shutdown(fd: i32, how: i32) -> i32
 func net_set_nodelay(fd: i32, on: bool) -> i32
+// net_set_opt and net_get_opt set and read a socket option by number: 1
+// keep-alive, 2 the receive buffer's size, 3 the send buffer's, 4
+// broadcast, 5 the hop limit, 6 linger in seconds (-1: off), 7 no-delay.
+// net_get_opt returns the value, or -errno - 1.
+func net_set_opt(fd: i32, opt: i32, value: i64) -> i32
+func net_get_opt(fd: i32, opt: i32) -> i64
+// net_if_index is the index of the network interface with a name, 0 for
+// none; net_if_name writes the name of the interface with an index into
+// buf and returns its length, 0 for none.
+func net_if_index(name: view[]u8) -> u32
+func net_if_name(index: u32, buf: edit[]u8) -> i64
 func net_addr(fd: i32, peer: bool, rec: edit[]u8) -> i32
 func net_send_to(fd: i32, data: view[]u8, addr: view[]u8) -> i64
 func net_recv_from(fd: i32, buf: edit[]u8, from: edit[]u8, ns: u64, timed: bool) -> i64
@@ -42,7 +61,12 @@ union IpAddr { V4(a: [4]u8); V6(a: [16]u8) }
 // SocketAddr is an address and a port. Addresses are small values that
 // copy: every function here takes one by value, so the result of one call
 // can be the argument of another.
-struct SocketAddr { ip: IpAddr; port: u16 }
+//
+// scope is for an IPv6 address that means something only on one link (a
+// link-local address, fe80::/10): the index of the network interface the
+// link is on, which the system needs to reach it. It is 0 for every
+// other address, and an IPv4 address has none.
+struct SocketAddr { ip: IpAddr; port: u16; scope: u32 }
 
 // v4 is the IPv4 address a.b.c.d.
 func v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
@@ -55,7 +79,36 @@ func v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
 }
 
 // addr joins an address and a port.
-func addr(ip: IpAddr, port: u16) -> SocketAddr { return SocketAddr { ip: ip, port: port } }
+func addr(ip: IpAddr, port: u16) -> SocketAddr { return SocketAddr { ip: ip, port: port, scope: 0u32 } }
+
+// addr_scoped is addr with the scope of an IPv6 link-local address: the
+// index of its interface, which interface_index finds by name. An IPv4
+// address has no scope, and the one given is dropped.
+func addr_scoped(ip: IpAddr, port: u16, scope: u32) -> SocketAddr {
+    match ip {
+        V4(b) => { return SocketAddr { ip: ip, port: port, scope: 0u32 } }
+        V6(b) => { return SocketAddr { ip: ip, port: port, scope: scope } }
+    }
+}
+
+// interface_index is the index of the network interface with a name
+// (`en0`, `eth0`, `lo`), or None when the machine has none of that name.
+func interface_index(name: view[]u8) -> Option[u32] {
+    i := net_if_index(name)
+    if i == 0u32 { return None }
+    return Some(i)
+}
+
+// interface_name is the name of the network interface with an index, or
+// None when the machine has none.
+func interface_name(index: u32) -> Option[Vec[u8]] {
+    var buf: [64]u8 = zero()
+    n := net_if_name(index, buf)
+    if n <= 0i64 { return None }
+    name := Vec[u8].new()
+    for k in 0usize..usize(n) { name.push(buf[k]) }
+    return Some(name)
+}
 
 // loopback_v4 and loopback_v6 are 127.0.0.1 and ::1 with a port; any_v4
 // and any_v6 are the addresses that stand for every interface. Port 0
@@ -73,9 +126,9 @@ func any_v6(port: u16) -> SocketAddr {
 }
 
 // to_wire and from_wire convert between a SocketAddr and the runtime's
-// record of 19 bytes.
+// record of 23 bytes.
 func to_wire(a: view[SocketAddr], rec: edit[]u8) {
-    for i in 0usize..19usize { rec[i] = 0u8 }
+    for i in 0usize..23usize { rec[i] = 0u8 }
     match a.ip {
         V4(b) => {
             rec[0usize] = 4u8
@@ -84,6 +137,10 @@ func to_wire(a: view[SocketAddr], rec: edit[]u8) {
         V6(b) => {
             rec[0usize] = 6u8
             for i in 0usize..16usize { rec[1usize + i] = b[i] }
+            rec[19usize] = truncate[u8](a.scope >> 24u32)
+            rec[20usize] = truncate[u8]((a.scope >> 16u32) & 255u32)
+            rec[21usize] = truncate[u8]((a.scope >> 8u32) & 255u32)
+            rec[22usize] = truncate[u8](a.scope & 255u32)
         }
     }
     rec[17usize] = truncate[u8](a.port >> 8u32)
@@ -94,7 +151,8 @@ func from_wire(rec: view[]u8) -> SocketAddr {
     if rec[0usize] == 6u8 {
         var b: [16]u8 = zero()
         for i in 0usize..16usize { b[i] = rec[1usize + i] }
-        return addr(V6(b), port)
+        scope := ((u32(rec[19usize]) * 256u32 + u32(rec[20usize])) * 256u32 + u32(rec[21usize])) * 256u32 + u32(rec[22usize])
+        return addr_scoped(V6(b), port, scope)
     }
     var b: [4]u8 = zero()
     for i in 0usize..4usize { b[i] = rec[1usize + i] }
@@ -231,8 +289,29 @@ func parse_ip(text: view[]u8) -> Option[IpAddr] {
     return None
 }
 
+// parse_scope reads what follows the `%` of a scoped address: an
+// interface's index in decimal (1 to 4294967295, no leading zero), or
+// the name of one of this machine's interfaces. A zone that is all
+// digits is always an index and never looked up as a name. None for
+// anything else.
+func parse_scope(zone: view[]u8) -> Option[u32] {
+    if len(zone) == 0usize { return None }
+    var digits: bool = true
+    for c in zone {
+        if c < 48u8 || c > 57u8 { digits = false }
+    }
+    if !digits { return interface_index(zone) }
+    if len(zone) > 10usize || (len(zone) > 1usize && zone[0usize] == 48u8) { return None }
+    var v: u64 = 0u64
+    for c in zone { v = v * 10u64 + u64(c - 48u8) }
+    if v == 0u64 || v > 4294967295u64 { return None }
+    return Some(truncate[u32](v))
+}
+
 // parse_addr reads `a.b.c.d:port` or `[v6]:port`; the port is 0 to 65535
-// in one to five decimal digits.
+// in one to five decimal digits. An IPv6 address may carry a scope,
+// `[fe80::1%en0]:port` or `[fe80::1%4]:port`: the name of one of this
+// machine's interfaces, or its index.
 func parse_addr(text: view[]u8) -> Option[SocketAddr] {
     n := len(text)
     if n == 0usize { return None }
@@ -263,8 +342,14 @@ func parse_addr(text: view[]u8) -> Option[SocketAddr] {
     }
     if six {
         var sixteen: [16]u8 = zero()
-        if !parse_v6(text[1usize : host_end], sixteen) { return None }
-        return Some(addr(V6(sixteen), port))
+        var ip_end: usize = 1usize
+        while ip_end < host_end && text[ip_end] != 37u8 { ip_end = ip_end + 1usize }
+        if !parse_v6(text[1usize : ip_end], sixteen) { return None }
+        if ip_end == host_end { return Some(addr(V6(sixteen), port)) }
+        match parse_scope(text[ip_end + 1usize : host_end]) {
+            Some(scope) => { return Some(addr_scoped(V6(sixteen), port, scope)) }
+            None => { return None }
+        }
     }
     var four: [4]u8 = zero()
     if !parse_v4(text[0usize : host_end], four) { return None }
@@ -365,7 +450,7 @@ func format_ip(ip: IpAddr) -> Vec[u8] {
 }
 
 // format_addr is `a.b.c.d:port` or `[v6]:port`, which parse_addr reads
-// back.
+// back; an address with a scope is `[v6%index]:port`.
 func format_addr(a: SocketAddr) -> Vec[u8] {
     text := Vec[u8].new()
     match a.ip {
@@ -373,6 +458,10 @@ func format_addr(a: SocketAddr) -> Vec[u8] {
         V6(b) => {
             text.push(91u8)
             push_v6(text, b)
+            if a.scope != 0u32 {
+                text.push(37u8)
+                push_number(text, a.scope)
+            }
             text.push(93u8)
         }
     }
@@ -387,7 +476,7 @@ func format_addr(a: SocketAddr) -> Vec[u8] {
 // is an error of kind NotFound.
 func resolve(host: view[]u8, port: u16) -> Result[Vec[SocketAddr], io.IoErr] {
     buf := Vec[u8].new()
-    buf.resize(304usize, 0u8)
+    buf.resize(368usize, 0u8)
     while true {
         var n: i64 = 0i64
         with e := buf.as_edit() { n = net_resolve(host, port, e) }
@@ -396,20 +485,20 @@ func resolve(host: view[]u8, port: u16) -> Result[Vec[SocketAddr], io.IoErr] {
             list := Vec[SocketAddr].new()
             with b := buf.as_view() {
                 var at: usize = 0usize
-                while at + 19usize <= usize(n) {
+                while at + 23usize <= usize(n) {
                     // a record the list already has is the same address again
                     var seen: bool = false
                     var prev: usize = 0usize
                     while prev < at && !seen {
                         var same: bool = true
-                        for k in 0usize..19usize {
+                        for k in 0usize..23usize {
                             if b[prev + k] != b[at + k] { same = false }
                         }
                         seen = same
-                        prev = prev + 19usize
+                        prev = prev + 23usize
                     }
-                    if !seen { list.push(from_wire(b[at : at + 19usize])) }
-                    at = at + 19usize
+                    if !seen { list.push(from_wire(b[at : at + 23usize])) }
+                    at = at + 23usize
                 }
             }
             return Ok(list)
@@ -421,10 +510,43 @@ func resolve(host: view[]u8, port: u16) -> Result[Vec[SocketAddr], io.IoErr] {
 
 // sock_addr reads a socket's own address, or its peer's.
 func sock_addr(fd: i32, peer: bool) -> Result[SocketAddr, io.IoErr] {
-    var rec: [19]u8 = zero()
+    var rec: [23]u8 = zero()
     r := net_addr(fd, peer, rec)
     if r < 0i32 { return Err(io.err_of(0i32 - r)) }
     return Ok(from_wire(rec))
+}
+
+// ---- socket options (RM4) ----
+
+// The options a socket carries are set and read through methods of the
+// socket types; these are what they share. A size or a limit the system
+// cannot give is its error (kind InvalidInput), and the system may give a
+// buffer larger than asked: the reading methods return what it gave.
+
+func opt_set(fd: i32, opt: i32, value: i64) -> Result[(), io.IoErr] { return io.status(net_set_opt(fd, opt, value)) }
+func opt_get(fd: i32, opt: i32) -> Result[i64, io.IoErr] {
+    r := net_get_opt(fd, opt)
+    if r < 0i64 - 1i64 { return Err(io.neg(r + 1i64)) }
+    return Ok(r)
+}
+func opt_flag(fd: i32, opt: i32) -> Result[bool, io.IoErr] {
+    v := opt_get(fd, opt)?
+    return Ok(v != 0i64)
+}
+func opt_set_flag(fd: i32, opt: i32, on: bool) -> Result[(), io.IoErr] {
+    var v: i64 = 0i64
+    if on { v = 1i64 }
+    return opt_set(fd, opt, v)
+}
+// opt_set_hops sets the hop limit, 1 to 255 on every system.
+func opt_set_hops(fd: i32, hops: u32) -> Result[(), io.IoErr] {
+    if hops == 0u32 || hops > 255u32 { return Err(io.error_of(io.ErrKind.InvalidInput)) }
+    return opt_set(fd, 5i32, i64(hops))
+}
+func opt_count(fd: i32, opt: i32) -> Result[u32, io.IoErr] {
+    v := opt_get(fd, opt)?
+    if v < 0i64 || v > 4294967295i64 { return Err(io.error_of(io.ErrKind.Other)) }
+    return Ok(truncate[u32](u64(v)))
 }
 
 // ---- TCP (RH2) ----
@@ -442,7 +564,7 @@ impl TcpListener {
     // bind_with_backlog is bind with a queue of the given length; what
     // the system does with a connection beyond it is the system's choice.
     func bind_with_backlog(addr: SocketAddr, backlog: u32) -> Result[TcpListener, io.IoErr] {
-        var rec: [19]u8 = zero()
+        var rec: [23]u8 = zero()
         to_wire(addr, rec)
         var queue: u32 = backlog
         if queue > 65535u32 { queue = 65535u32 }
@@ -509,7 +631,7 @@ impl io.Writer for TcpStream {
 impl TcpStream {
     // connect makes a connection to addr.
     func connect(addr: SocketAddr) -> Result[TcpStream, io.IoErr] {
-        var rec: [19]u8 = zero()
+        var rec: [23]u8 = zero()
         to_wire(addr, rec)
         r := net_connect(rec, 0u64, false)
         if r < 0i64 { return Err(io.neg(r)) }
@@ -521,7 +643,7 @@ impl TcpStream {
     // given up. A duration of zero starts the attempt and returns None
     // unless it succeeded at once.
     func connect_timeout(addr: SocketAddr, d: time.Duration) -> Result[Option[TcpStream], io.IoErr] {
-        var rec: [19]u8 = zero()
+        var rec: [23]u8 = zero()
         to_wire(addr, rec)
         r := net_connect(rec, d.ns, true)
         if r == io.timed_out() { return Ok(None) }
@@ -564,8 +686,46 @@ impl TcpStream {
     }
 
     // set_nodelay turns the delay of small writes (Nagle's algorithm) off
-    // or back on.
+    // or back on; nodelay is whether it is off.
     func set_nodelay(edit self, on: bool) -> Result[(), io.IoErr] { return io.status(net_set_nodelay(self.fd, on)) }
+    func nodelay(view self) -> Result[bool, io.IoErr] { return opt_flag(self.fd, 7i32) }
+
+    // set_keepalive has the system probe a connection that has been idle
+    // (after a time that is the system's setting), so that a peer that
+    // vanished is found out: a read then fails instead of waiting forever.
+    func set_keepalive(edit self, on: bool) -> Result[(), io.IoErr] { return opt_set_flag(self.fd, 1i32, on) }
+    func keepalive(view self) -> Result[bool, io.IoErr] { return opt_flag(self.fd, 1i32) }
+
+    // set_recv_buffer and set_send_buffer ask for the system's buffers of
+    // received and unsent bytes to be of a size; recv_buffer and
+    // send_buffer are the sizes it gave.
+    func set_recv_buffer(edit self, bytes: u32) -> Result[(), io.IoErr] { return opt_set(self.fd, 2i32, i64(bytes)) }
+    func recv_buffer(view self) -> Result[u32, io.IoErr] { return opt_count(self.fd, 2i32) }
+    func set_send_buffer(edit self, bytes: u32) -> Result[(), io.IoErr] { return opt_set(self.fd, 3i32, i64(bytes)) }
+    func send_buffer(view self) -> Result[u32, io.IoErr] { return opt_count(self.fd, 3i32) }
+
+    // set_hop_limit sets how many routers what this socket sends may
+    // pass (IPv4's time to live, IPv6's hop limit), 1 to 255: kind
+    // InvalidInput for any other number.
+    func set_hop_limit(edit self, hops: u32) -> Result[(), io.IoErr] { return opt_set_hops(self.fd, hops) }
+    func hop_limit(view self) -> Result[u32, io.IoErr] { return opt_count(self.fd, 5i32) }
+
+    // set_linger decides what closing the stream does with bytes not yet
+    // sent: with Some(seconds) the close waits at most that long for
+    // them to be sent and then drops the connection (Some(0) drops it at
+    // once, and the peer sees a reset); with None, the default, the close
+    // returns at once and the system goes on sending.
+    func set_linger(edit self, seconds: Option[u32]) -> Result[(), io.IoErr] {
+        match seconds {
+            Some(n) => { return opt_set(self.fd, 6i32, i64(n)) }
+            None => { return opt_set(self.fd, 6i32, 0i64 - 1i64) }
+        }
+    }
+    func linger(view self) -> Result[Option[u32], io.IoErr] {
+        v := opt_get(self.fd, 6i32)?
+        if v < 0i64 { return Ok(None) }
+        return Ok(Some(truncate[u32](u64(v))))
+    }
 
     // peer_addr and local_addr are the addresses of the two ends.
     func peer_addr(view self) -> Result[SocketAddr, io.IoErr] { return sock_addr(self.fd, true) }
@@ -693,6 +853,12 @@ impl UnixStream {
         return io.status(net_shutdown(self.fd, n))
     }
 
+    // The buffers, as TcpStream's.
+    func set_recv_buffer(edit self, bytes: u32) -> Result[(), io.IoErr] { return opt_set(self.fd, 2i32, i64(bytes)) }
+    func recv_buffer(view self) -> Result[u32, io.IoErr] { return opt_count(self.fd, 2i32) }
+    func set_send_buffer(edit self, bytes: u32) -> Result[(), io.IoErr] { return opt_set(self.fd, 3i32, i64(bytes)) }
+    func send_buffer(view self) -> Result[u32, io.IoErr] { return opt_count(self.fd, 3i32) }
+
     destructor(edit self) {
         if self.fd >= 0i32 { r := net_close(self.fd) }
     }
@@ -711,7 +877,7 @@ struct UdpSocket nocopy { fd: i32 }
 impl UdpSocket {
     // bind makes a socket on addr.
     func bind(addr: SocketAddr) -> Result[UdpSocket, io.IoErr] {
-        var rec: [19]u8 = zero()
+        var rec: [23]u8 = zero()
         to_wire(addr, rec)
         fd := net_udp_bind(rec)
         if fd < 0i32 { return Err(io.err_of(0i32 - fd)) }
@@ -721,7 +887,7 @@ impl UdpSocket {
     // send_to sends data as one datagram to an address and returns its
     // length.
     func send_to(edit self, data: view[]u8, to: SocketAddr) -> Result[usize, io.IoErr] {
-        var rec: [19]u8 = zero()
+        var rec: [23]u8 = zero()
         to_wire(to, rec)
         r := net_send_to(self.fd, data, rec)
         if r < 0i64 { return Err(io.neg(r)) }
@@ -731,7 +897,7 @@ impl UdpSocket {
     // recv_from waits for one datagram and puts it in buf; a datagram
     // longer than buf is cut to it and the rest is lost.
     func recv_from(edit self, buf: edit[]u8) -> Result[Datagram, io.IoErr] {
-        var rec: [19]u8 = zero()
+        var rec: [23]u8 = zero()
         r := net_recv_from(self.fd, buf, rec, 0u64, false)
         if r < 0i64 { return Err(io.neg(r)) }
         return Ok(Datagram { len: usize(r), from: from_wire(rec) })
@@ -740,7 +906,7 @@ impl UdpSocket {
     // recv_from_timeout is recv_from waiting at most d: None when no
     // datagram arrived in that time. A duration of zero looks once.
     func recv_from_timeout(edit self, buf: edit[]u8, d: time.Duration) -> Result[Option[Datagram], io.IoErr] {
-        var rec: [19]u8 = zero()
+        var rec: [23]u8 = zero()
         r := net_recv_from(self.fd, buf, rec, d.ns, true)
         if r == io.timed_out() { return Ok(None) }
         if r < 0i64 { return Err(io.neg(r)) }
@@ -750,7 +916,104 @@ impl UdpSocket {
     // local_addr is the address the socket is bound to.
     func local_addr(view self) -> Result[SocketAddr, io.IoErr] { return sock_addr(self.fd, false) }
 
+    // set_broadcast permits sending to a broadcast address
+    // (255.255.255.255, or a network's), which is otherwise an error of
+    // kind Permission.
+    func set_broadcast(edit self, on: bool) -> Result[(), io.IoErr] { return opt_set_flag(self.fd, 4i32, on) }
+    func broadcast(view self) -> Result[bool, io.IoErr] { return opt_flag(self.fd, 4i32) }
+
+    // The buffers and the hop limit, as TcpStream's. A datagram that
+    // arrives when the receive buffer is full is lost.
+    func set_recv_buffer(edit self, bytes: u32) -> Result[(), io.IoErr] { return opt_set(self.fd, 2i32, i64(bytes)) }
+    func recv_buffer(view self) -> Result[u32, io.IoErr] { return opt_count(self.fd, 2i32) }
+    func set_send_buffer(edit self, bytes: u32) -> Result[(), io.IoErr] { return opt_set(self.fd, 3i32, i64(bytes)) }
+    func send_buffer(view self) -> Result[u32, io.IoErr] { return opt_count(self.fd, 3i32) }
+    func set_hop_limit(edit self, hops: u32) -> Result[(), io.IoErr] { return opt_set_hops(self.fd, hops) }
+    func hop_limit(view self) -> Result[u32, io.IoErr] { return opt_count(self.fd, 5i32) }
+
     destructor(edit self) {
         if self.fd >= 0i32 { r := net_close(self.fd) }
     }
+}
+
+// ---- Unix-domain datagrams (RM3) ----
+
+// UnixMessage is what UnixDatagram.recv_from received: the number of
+// bytes it put in the buffer and the path of the socket that sent them,
+// empty when that socket is not bound to one. A sender that another
+// program bound to a path longer than this library allows (104 bytes or
+// more) is reported by the first 104 bytes of its path.
+struct UnixMessage { len: usize; from: Vec[u8] }
+
+// UnixDatagram sends and receives datagrams between programs on one
+// machine, each addressed to the path of a bound socket. Unlike UDP's, a
+// datagram here is not lost on the way: send_to waits while the
+// receiver's queue is full. It is closed when it is destroyed; the path
+// of a bound socket is the program's to remove.
+struct UnixDatagram nocopy { fd: i32 }
+
+impl UnixDatagram {
+    // bind makes a socket that receives what is sent to path, creating
+    // the path: kind AddrInUse when it exists.
+    func bind(path: view[]u8) -> Result[UnixDatagram, io.IoErr] {
+        if len(path) == 0usize { return Err(io.error_of(io.ErrKind.InvalidInput)) }
+        fd := net_unix_dgram(path)
+        if fd < 0i32 { return Err(io.err_of(0i32 - fd)) }
+        return Ok(UnixDatagram { fd: fd })
+    }
+
+    // unbound makes a socket with no path: it can send, and a receiver
+    // sees an empty sender's path, so nothing can be sent back to it.
+    func unbound() -> Result[UnixDatagram, io.IoErr] {
+        fd := net_unix_dgram("")
+        if fd < 0i32 { return Err(io.err_of(0i32 - fd)) }
+        return Ok(UnixDatagram { fd: fd })
+    }
+
+    // send_to sends data as one datagram to the socket bound to path and
+    // returns its length: kind NotFound when nothing is at the path,
+    // ConnectionRefused when no socket is bound to it any more.
+    func send_to(edit self, data: view[]u8, path: view[]u8) -> Result[usize, io.IoErr] {
+        r := net_unix_send_to(self.fd, data, path)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(usize(r))
+    }
+
+    // recv_from waits for one datagram and puts it in buf; a datagram
+    // longer than buf is cut to it and the rest is lost.
+    func recv_from(edit self, buf: edit[]u8) -> Result[UnixMessage, io.IoErr] {
+        var from: [108]u8 = zero()
+        r := net_unix_recv_from(self.fd, buf, from, 0u64, false)
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(UnixMessage { len: usize(r), from: sender(from) })
+    }
+
+    // recv_from_timeout is recv_from waiting at most d: None when no
+    // datagram arrived in that time. A duration of zero looks once.
+    func recv_from_timeout(edit self, buf: edit[]u8, d: time.Duration) -> Result[Option[UnixMessage], io.IoErr] {
+        var from: [108]u8 = zero()
+        r := net_unix_recv_from(self.fd, buf, from, d.ns, true)
+        if r == io.timed_out() { return Ok(None) }
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Some(UnixMessage { len: usize(r), from: sender(from) }))
+    }
+
+    func set_recv_buffer(edit self, bytes: u32) -> Result[(), io.IoErr] { return opt_set(self.fd, 2i32, i64(bytes)) }
+    func recv_buffer(view self) -> Result[u32, io.IoErr] { return opt_count(self.fd, 2i32) }
+    func set_send_buffer(edit self, bytes: u32) -> Result[(), io.IoErr] { return opt_set(self.fd, 3i32, i64(bytes)) }
+    func send_buffer(view self) -> Result[u32, io.IoErr] { return opt_count(self.fd, 3i32) }
+
+    destructor(edit self) {
+        if self.fd >= 0i32 { r := net_close(self.fd) }
+    }
+}
+
+// sender is the path the runtime wrote: the bytes before the first zero.
+func sender(from: view[]u8) -> Vec[u8] {
+    path := Vec[u8].new()
+    for c in from {
+        if c == 0u8 { break }
+        path.push(c)
+    }
+    return path
 }
