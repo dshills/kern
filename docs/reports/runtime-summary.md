@@ -1,7 +1,7 @@
 # The runtime work: summary
 
-**Date:** 2026-11-09. **Spec:** `specs/runtime/SPEC.md` v0.6. **Plan:**
-`specs/runtime/PLAN.md`, twelve phases. **Ledger:**
+**Date:** 2026-11-09. **Spec:** `specs/runtime/SPEC.md` v0.8. **Plan:**
+`specs/runtime/PLAN.md`, thirteen phases. **Ledger:**
 `specs/runtime/STATUS.md`, one row per requirement. **Reference:**
 `docs/runtime.md`. **Hosts:** macOS 27.2 on arm64 and Ubuntu 24.04 on
 arm64 in the `kern-linux-check` container.
@@ -27,9 +27,10 @@ tested in both engines and on both hosts, and documented.
 | 9 | Signals and randomness: `std/signal`, `std/rand` | `runtime-signal-rand.md` | `6296fee` |
 | 10 | Freestanding: the board interface, the heap's size, a double-free check | `runtime-board.md` | `a176db2` |
 | 11 | Documentation, the performance check, the final gates | this report | `b4f2b5b` |
-| 12 | Extensions: Unix-domain sockets, directory trees, file locks, mapped files, the freestanding stack and start-up code, QEMU in the Linux gate | `runtime-extensions.md` | 04bdaed |
+| 12 | Extensions: Unix-domain sockets, directory trees, file locks, mapped files, the freestanding stack and start-up code, QEMU in the Linux gate | `runtime-extensions.md` | `04bdaed` |
+| 13 | Second extensions: locks on ranges of a file, IPv6 scopes, Unix-domain datagrams, socket options; an interpreter that maps files and gives signals the system's default | `runtime-second-extensions.md` | `813cc0f` |
 
-Every one of the forty-seven requirements has a row in the ledger with
+Every one of the fifty-three requirements has a row in the ledger with
 the commit that met it and its deviations from the spec's text.
 
 ## What the work found in the compiler
@@ -130,35 +131,35 @@ workload carrying 2.4 million instructions more.
 
 ## Gate 10: the ledger
 
-`specs/runtime/STATUS.md` lists the forty-seven requirements, each with
+`specs/runtime/STATUS.md` lists the fifty-three requirements, each with
 its commit and its deviations, and what was found along the way.
 
-## What is not done, and why
+## Scope
 
-Two things were decided against in the spec (§2, Non-goals), not left
-over:
+Every requirement of the spec is met; the ledger has no open row. What
+the runtime does not do was decided in the spec (§2, Non-goals), not
+left over:
 
 - **No asynchronous I/O.** A call that waits blocks its thread
   (ADR-017, decision 1). Sockets are non-blocking inside the runtime,
   which leaves room for a reactor without changing an entry's contract.
 - **No TLS, and nothing above the transport layer.** Encryption belongs
-  in a library with its own review, not in a runtime's first release.
+  in a library with its own review, not in a runtime.
+- **Nothing that one host has and the other lacks**, and no passing of
+  descriptors between processes.
 
-And a third is the owner's to do: nothing has been pushed or published.
+Two passes followed the first eleven phases, each closing what the
+report before it had named: phase 12 (`runtime-extensions.md`) added
+Unix-domain sockets, directory trees, file locks, mapped files, the
+freestanding stack's size and start-up code, and QEMU in the Linux gate;
+phase 13 (`runtime-second-extensions.md`) added locks on ranges of a
+file, IPv6 scopes, Unix-domain datagrams and socket options, and made
+the interpreter map files and end a program on a signal's default as the
+system does. `docs/runtime.md` section 12 states the four properties
+that remain of the interpreter's being a program of another runtime.
 
-What the first eleven phases had left for a user to miss was added as a
-twelfth (`docs/reports/runtime-extensions.md`): Unix-domain sockets,
-directory trees, file locks, mapped files, the freestanding stack's size
-and start-up code, and QEMU in the Linux gate.
-
-What remains is small and stated where it applies:
-
-- **The interpreter is not the system** for signals at their default
-  disposition, it writes no allocation report, and a mapping there is a
-  copy written back at `sync` and when it is destroyed.
-- **No IPv6 scope identifiers; no socket options beyond `TCP_NODELAY`.**
-- **`OpenOptions.trunc`**, not `truncate`: a reserved word cannot name a
-  field.
+Publishing is the owner's: nothing has been pushed, by standing
+instruction.
 
 ## Verification
 

@@ -50,9 +50,15 @@ reason. Updated at the end of every phase.
 | RL1 Unix-domain sockets | 12 | 04bdaed | `UnixPair` is a one-variant union (`Ends(a, b)`), which a `match` takes apart: kern cannot move two fields out of a struct. `connect_timeout` added |
 | RL2 directories | 12 | 04bdaed | `io.join` added |
 | RL3 file locks | 12 | 04bdaed | `unlock` returns `Result[(), IoErr]` |
-| RL4 mapped files | 12 | 04bdaed | In the interpreter a mapping is a copy, written back at `sync` and when it is destroyed |
+| RL4 mapped files | 12 | 04bdaed | The interpreter's mapping was a copy until phase 13 (RM5); it is the system's mapping now |
 | RL5 freestanding stack and start-up | 12 | 04bdaed |  |
 | RL6 the Linux gate boots images | 12 | 04bdaed | The container requires QEMU (`KERN_REQUIRE_QEMU=1`): a missing emulator fails the gate |
+| RM1 locks on ranges | 13 | 813cc0f |  |
+| RM2 IPv6 scopes | 13 | 813cc0f | `to_wire`/`from_wire` and every record are 23 bytes. An all-digit zone is always an index. The Linux gate's container runs on a network with IPv6 so that the test on a real link runs there |
+| RM3 Unix-domain datagrams | 13 | 813cc0f |  |
+| RM4 socket options | 13 | 813cc0f | A hop limit outside 1 to 255 is refused before the system is asked |
+| RM5 the interpreter maps files | 13 | 813cc0f | The interpreter's record of a fault has the span 0-0, where the runtime's names the function when its walk finds one |
+| RM6 the interpreter's signal defaults | 13 | 813cc0f | The interpreter gives a signal the system's default with a raw `sigaction`, and exits with 128 + the signal's number should that fail |
 
 ## Found along the way
 
@@ -73,3 +79,5 @@ reason. Updated at the end of every phase.
 | Every program imported the whole runtime's system functions (2.4 million instructions at launch on macOS): the link drops unreached runtime code | b4f2b5b |
 | `tests/run/std_io.kern` wrote to the working directory, which the Linux container mounts read-only | b4f2b5b |
 | A configured stack of 65,536 bytes could not start `main` or a thread on Linux arm64, whose minimum is 131,072 (found by the final run of the whole suite in the container) | b4f2b5b |
+| Go's network package permits broadcast on every datagram socket and the system on none: the interpreter's UDP sockets could broadcast without `set_broadcast` | 813cc0f |
+| A signal that `signal.raise` sent with a fatal disposition ended a native program before its buffered output was written; `raise` flushes first | 813cc0f |
