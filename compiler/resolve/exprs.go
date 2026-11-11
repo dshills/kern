@@ -621,6 +621,7 @@ func (c *fnCtx) index(sc *scope, x *ast.IndexExpr, want Type) Type {
 				m[tp.Name] = args[i]
 				c.r.checkConstraints(c.file, x.Args[i].Span(), args[i], tp)
 			}
+			c.r.prog.Info.FuncInsts[x] = m
 			return Subst(f.Type, m)
 		}
 	}

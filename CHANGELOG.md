@@ -8,6 +8,14 @@ section of this file into a GitHub release is `docs/releasing.md`.
 
 ## [Unreleased]
 
+### Language
+
+- Fixed: a generic function used as a value with its type arguments,
+  `thread.spawn(work[u8], ...)` or `f := work[T]` inside a generic
+  function, was accepted by the checker and then failed in the compiler
+  with an internal error. It is now a reference to that instance, as
+  the checker's own message for a bare `work` asks the program to write.
+
 ## [v0.2.1] - 2026-11-11
 
 Two defects of v0.2.0 that safe code reached, both found by writing

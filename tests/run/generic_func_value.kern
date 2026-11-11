@@ -1,0 +1,58 @@
+//! phase: 6
+//! expect: output generic_func_value
+// A generic function as a value takes explicit type arguments, f[T]: with
+// a concrete argument, and inside a generic function with one of its own
+// type parameters, where the instance referred to is the one made for the
+// caller's argument.
+module main
+
+interface Tick {
+    func now(view self) -> u64
+}
+struct Fixed { n: u64 }
+impl Tick for Fixed {
+    func now(view self) -> u64 { return self.n }
+}
+struct Twice { n: u64 }
+impl Tick for Twice {
+    func now(view self) -> u64 { return self.n * 2u64 }
+}
+
+func plus[T: Copy](v: own T, k: u64) -> u64 { return k + u64(size_of[T]()) }
+
+func read[C: Tick + Send + Share](c: own Shared[C], k: u64) -> u64 { return c.get().now() + k }
+
+func on_thread[C: Tick + Send + Share](c: view[Shared[C]]) -> u64 {
+    match thread.spawn(read[C], c.clone(), 1u64) {
+        Ok(t) => { return t.join() }
+        Err(e) => { return 0u64 }
+    }
+}
+
+func apply(f: func(own u32, u64) -> u64, k: u64) -> u64 { return f(0u32, k) }
+
+func main() -> i32 {
+    // called through a parameter
+    print_u64(apply(plus[u32], 10u64))
+    println()
+    // bound to a variable
+    g := plus[u64]
+    print_u64(g(0u64, 10u64))
+    println()
+    // a thread's function, with a concrete argument
+    match thread.spawn(plus[u8], 0u8, 10u64) {
+        Ok(t) => {
+            print_u64(t.join())
+            println()
+        }
+        Err(e) => { }
+    }
+    // and with the caller's type parameter
+    a := Shared[Fixed].new(Fixed { n: 40u64 })
+    b := Shared[Twice].new(Twice { n: 40u64 })
+    print_u64(on_thread(a))
+    println()
+    print_u64(on_thread(b))
+    println()
+    return 0i32
+}

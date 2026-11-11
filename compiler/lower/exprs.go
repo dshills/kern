@@ -133,6 +133,20 @@ func (fl *fnLower) expr(e ast.Expr, want resolve.Type) operand {
 		}
 		return fl.field(x)
 	case *ast.IndexExpr:
+		// a generic function as a value, f[T]: a reference to that instance,
+		// its arguments read in this function's own instance
+		if inst, ok := fl.l.info.FuncInsts[x]; ok {
+			id, _ := x.X.(*ast.Ident)
+			if sym := fl.l.info.Idents[id]; id != nil && sym != nil && sym.Kind == resolve.SymFunc {
+				subst := make(map[string]resolve.Type, len(inst))
+				for name, arg := range inst {
+					subst[name] = fl.ty(arg)
+				}
+				v := fl.newValue(t)
+				fl.emit(&ir.FuncRef{Dst: v, Name: fl.l.request(sym.Func, subst, fl.file), Pos: x.Pos})
+				return operand{val: v}
+			}
+		}
 		return fl.index(x)
 	case *ast.SliceExpr:
 		return fl.slice(x)

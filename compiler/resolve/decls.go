@@ -242,6 +242,10 @@ type Info struct {
 	Fields         map[*ast.FieldExpr]*FieldDecl
 	Variants       map[*ast.Arm]*VariantDecl
 	Closures       map[*ast.ClosureExpr]*ClosureInfo
+	// FuncInsts records, for a generic function used as a value with
+	// explicit type arguments (`f[T]`), the argument bound to each of the
+	// function's type parameters.
+	FuncInsts map[*ast.IndexExpr]map[string]Type
 	// Consumed maps a `move x` or `drop(x)` expression to the identifier
 	// record the resolver made for its variable (an entry of Idents).
 	Consumed map[ast.Expr]*ast.Ident
@@ -292,7 +296,7 @@ type TwoPhaseArg struct {
 
 func newInfo() *Info {
 	return &Info{
-		Types: map[ast.Expr]Type{}, Idents: map[*ast.Ident]*Symbol{}, Calls: map[*ast.CallExpr]*CallInfo{},
+		Types: map[ast.Expr]Type{}, FuncInsts: map[*ast.IndexExpr]map[string]Type{}, Idents: map[*ast.Ident]*Symbol{}, Calls: map[*ast.CallExpr]*CallInfo{},
 		Funcs: map[*ast.FuncDecl]*FuncDecl{}, Decls: map[any]*Symbol{}, Consts: map[ast.Expr]bool{}, ImportedConsts: map[*ast.FieldExpr]*ConstDecl{},
 		Fields: map[*ast.FieldExpr]*FieldDecl{}, Variants: map[*ast.Arm]*VariantDecl{}, Closures: map[*ast.ClosureExpr]*ClosureInfo{}, Consumed: map[ast.Expr]*ast.Ident{},
 		Drops: map[any][]*Symbol{}, OutFieldDrops: map[any]map[*Symbol][]string{}, AssignDrop: map[*ast.Assign]bool{}, OwnedSubject: map[any]bool{},
