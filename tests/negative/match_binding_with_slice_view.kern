@@ -1,0 +1,14 @@
+//! expect: reject ASSIGN_IMMUTABLE rule=T.5
+// A slice of a Copy arm binding is a view when the subject is one, and so
+// is what a with binds to it (specs/match-bindings item 6, M3).
+module m
+union U { R(cells: [4]u64); Empty }
+func f(u: view[U]) {
+    match u {
+        R(cells) => {
+            with s := cells[0usize : 2usize] { s[0usize] = 1u64 }   // ASSIGN_IMMUTABLE
+        }
+        Empty => { }
+    }
+}
+func main() -> i32 { return 0i32 }

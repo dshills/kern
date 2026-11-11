@@ -80,6 +80,27 @@ func TestHover(t *testing.T) {
 	}
 }
 
+// A match arm's Copy binding is reported as what the arm makes it: an edit
+// binding where the arm writes it, a local where it only reads
+// (specs/match-bindings A5).
+func TestHoverMatchBinding(t *testing.T) {
+	const prog = "module app\nfunc main() -> i32 {\n    var o: Option[u64] = Some(5u64)\n    match o {\n        Some(n) => { n = n + 1u64 }\n        None => { }\n    }\n    match o {\n        Some(n) => { print_u64(n) }\n        None => { }\n    }\n    return 0i32\n}\n"
+	dir := writeTree(t, map[string]string{"app.kern": prog})
+	uri := URIOf(filepath.Join(dir, "app.kern"))
+	c := start(t, Options{})
+	c.initialize(nil, true)
+	c.open(uri, prog)
+	for i, want := range []string{"```kern\nbinding edit n: u64\n```", "```kern\nlocal n: u64\n```"} {
+		h, e := c.hoverAt(uri, at(prog, "Some(n)", i, len("Some(")))
+		if e != nil || h == nil || !strings.HasPrefix(h.Contents.Value, want) {
+			t.Errorf("hover on n in match %d: %+v %+v, want it to begin %q", i, h, e, want)
+		}
+	}
+	if s := c.stop(); s != 0 {
+		t.Errorf("status %d", s)
+	}
+}
+
 func TestHoverPanic(t *testing.T) {
 	dir := writeTree(t, map[string]string{"app.kern": ownProgram})
 	uri := URIOf(filepath.Join(dir, "app.kern"))

@@ -10,6 +10,32 @@ section of this file into a GitHub release is `docs/releasing.md`.
 
 ### Language
 
+- Fixed: a write through a `match` arm's binding of a `Copy` payload
+  field was lost. `match o { Some(n) => { n = n + 1u64 } ... }` changed a
+  copy of the field and left `o` as it was, in both engines, although
+  Rule 5.3.1 says an arm's bindings are edits of the matched place when
+  the subject is one, and although the same text in a generic function
+  did write to the subject. Such a binding is now an edit of the field
+  when the arm uses it as one: assigns to it or to a part of it, passes
+  it to an `edit` parameter or an `edit self` method, `take`s or
+  `replace`s it, returns it as an edit, or does one of these through a
+  nested `match` or a `with` on it. A binding the arm only reads is
+  still a copy made on entering the arm, and still leaves the matched
+  place free, which the reference now says. Three kinds of program
+  change, and no other:
+  - with a subject that is an edit, the write now reaches the subject;
+  - with a subject that is a view, the write no longer compiles
+    (`ASSIGN_IMMUTABLE`, or `ACC_PERMISSION_ESCALATION` for an `edit`
+    argument, an `edit self` method, `take` and `replace`): copy the
+    binding into a local to keep the old meaning;
+  - an arm that writes its binding and also reaches the matched place by
+    name no longer compiles (`ACC_CONFLICT`, which points at the write).
+- A `match` keeps its subject frozen only in the arms that hold an
+  access to it. An arm that binds nothing, or only `Copy` values it
+  reads, may use and reassign the subject, as Rule 5.3.1 has it ("for
+  the arm"): `match o { Some(n) => { n = n + 1u64 } None => { o = Some(0u64) } }`
+  compiles. Until now one such binding in any arm froze the subject in
+  every arm. No program that compiled is affected.
 - Fixed: a generic function used as a value with its type arguments,
   `thread.spawn(work[u8], ...)` or `f := work[T]` inside a generic
   function, was accepted by the checker and then failed in the compiler

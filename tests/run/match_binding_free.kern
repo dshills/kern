@@ -1,0 +1,108 @@
+//! phase: 6
+//! expect: output match_binding_free
+// A match keeps its subject frozen only in an arm that holds an access
+// binding (specs/match-bindings M6). An arm that binds nothing, or only
+// Copy values it reads, leaves the subject free, so that it can be
+// reassigned there; until 2026-11-11 one access binding in any arm froze
+// the subject in every arm.
+module t
+import "std/str"
+
+struct Node { value: u64; next: Option[PoolId[Node]] }
+union Slot { Empty; Full(s: str.String) }
+struct Gate { slot: Option[u64]; left: u64 }
+impl Gate {
+    func maybe(edit self) -> edit[Option[u64]] release leave { return self.slot }
+    func leave(edit self) { self.left = self.left + 1u64 }
+}
+
+func show(label: view[]u8, v: u64) {
+    print_str(label)
+    print_str(": ")
+    print_u64(v)
+    println()
+}
+func opt(o: view[Option[u64]]) -> u64 {
+    match o {
+        Some(n) => { return n }
+        None => { return 0u64 }
+    }
+}
+
+// One arm writes its binding, the other reassigns the subject.
+func bump(o: edit[Option[u64]]) {
+    match o {
+        Some(n) => { n = n + 1u64 }
+        None => { o = Some(0u64) }
+    }
+}
+
+// The arm with the String holds an access; the other holds nothing.
+func fill(o: edit[Slot]) {
+    match o {
+        Full(s) => { s.push(65u8) }
+        Empty => { o = Slot.Full(str.String.from("new")) }
+    }
+}
+
+func main() -> i32 {
+    // a list walk: the arm only reads its binding, and moves the subject on
+    nodes := Pool[Node].new()
+    var head: Option[PoolId[Node]] = None
+    for v in 1u64..4u64 {
+        match nodes.alloc(Node { value: v, next: head }) {
+            Ok(id) => { head = Some(id) }
+            Err(e) => { }
+        }
+    }
+    var sum: u64 = 0u64
+    var cur: Option[PoolId[Node]] = head
+    while true {
+        match cur {
+            Some(id) => {
+                with n := nodes.get(id) {
+                    sum = sum + n.value
+                    cur = n.next
+                }
+            }
+            None => { break }
+        }
+    }
+    show("a list walk", sum)
+
+    var a: Option[u64] = None
+    bump(a)
+    show("none, bumped", opt(a))
+    bump(a)
+    show("bumped again", opt(a))
+    var b: Option[u64] = Some(1u64)
+    bump(b)
+    show("some, bumped", opt(b))
+
+    var s: Slot = Slot.Empty
+    fill(s)
+    fill(s)
+    match s {
+        Full(text) => {
+            print_str("a payload-free arm: ")
+            print_str(text.as_view())
+            println()
+        }
+        Empty => { }
+    }
+
+    // a release function runs once, when the match ends, in either case
+    var g: Gate = Gate { slot: Some(1u64), left: 0u64 }
+    match g.maybe() {
+        Some(n) => { n = n + 1u64 }
+        None => { }
+    }
+    show("releases after a written binding", g.left)
+    show("and the value", opt(g.slot))
+    var k: Gate = Gate { slot: Some(1u64), left: 0u64 }
+    match k.maybe() {
+        _ => { }
+    }
+    show("releases after arms that bind nothing", k.left)
+    return 0i32
+}

@@ -1,0 +1,15 @@
+//! expect: reject PLACE_REQUIRED rule=T.5
+// A Copy arm binding that the arm writes is an access binding, which an
+// out argument must not name (specs/match-bindings M4).
+module m
+func init(v: out u64) { v = 1u64 }
+func f(o: edit[Option[u64]]) {
+    match o {
+        Some(n) => {
+            init(out n)   // PLACE_REQUIRED
+            n = 2u64
+        }
+        None => { }
+    }
+}
+func main() -> i32 { return 0i32 }

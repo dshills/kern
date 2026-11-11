@@ -144,6 +144,7 @@ func (c *fnCtx) expr(sc *scope, e ast.Expr, want Type) Type {
 			c.errorf("NAME_UNRESOLVED", x.Pos, "move requires an owned local, found %s", x.Name)
 			return c.record(e, &Bad{})
 		}
+		c.ownedUse(sym, "NAME_UNRESOLVED", x.Pos, "move requires an owned local, found %s", x.Name)
 		id := &ast.Ident{Pos: x.Pos, Name: x.Name}
 		c.r.prog.Info.Idents[id] = sym
 		c.r.prog.Info.Consumed[x] = id
@@ -152,12 +153,14 @@ func (c *fnCtx) expr(sc *scope, e ast.Expr, want Type) Type {
 		t := c.expr(sc, x.X, nil)
 		return c.record(e, valueOf(t))
 	case *ast.Take:
+		c.demandEdit(sc, x.Place)
 		t := c.expr(sc, x.Place, nil)
 		if !c.isPlace(sc, x.Place) {
 			c.errorf("PLACE_REQUIRED", x.Place.Span(), "take requires a place")
 		}
 		return c.record(e, valueOf(t))
 	case *ast.Replace:
+		c.demandEdit(sc, x.Place)
 		t := c.expr(sc, x.Place, nil)
 		if !c.isPlace(sc, x.Place) {
 			c.errorf("PLACE_REQUIRED", x.Place.Span(), "replace requires a place")
@@ -170,6 +173,7 @@ func (c *fnCtx) expr(sc *scope, e ast.Expr, want Type) Type {
 			c.errorf("NAME_UNRESOLVED", x.Pos, "drop requires an owned local, found %s", x.Name)
 			return c.record(e, &Bad{})
 		}
+		c.ownedUse(sym, "NAME_UNRESOLVED", x.Pos, "drop requires an owned local, found %s", x.Name)
 		id := &ast.Ident{Pos: x.Pos, Name: x.Name}
 		c.r.prog.Info.Idents[id] = sym
 		c.r.prog.Info.Consumed[x] = id

@@ -1,6 +1,7 @@
 package resolve
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/dshills/kern/compiler/ast"
@@ -191,6 +192,7 @@ func (c *fnCtx) stmt(sc *scope, s ast.Stmt) {
 		}
 		c.declare(sc, s, s.Name, SymLocal, t, ast.ConvValue, s.Pos)
 	case *ast.Assign:
+		c.demandEdit(sc, s.Target)
 		tt := c.expr(sc, s.Target, nil)
 		if acc, isAcc := tt.(*Access); isAcc {
 			if !acc.Edit {
@@ -261,6 +263,9 @@ func (c *fnCtx) ret(sc *scope, s *ast.Return) {
 			// place's type must be the access's element type
 			t := c.expr(sc, s.Value, nil)
 			if _, isAcc := t.(*Access); !isAcc && c.isPlace(sc, s.Value) && Identical(valueOf(t), accessElem(a)) {
+				if a.Edit {
+					c.demandEdit(sc, s.Value)
+				}
 				if a.Edit && !c.placeIsMutable(sc, s.Value) {
 					c.errorf("ACC_PERMISSION_ESCALATION", s.Value.Span(), "returning an edit of a read-only place")
 				}
@@ -292,7 +297,13 @@ func (c *fnCtx) with(sc *scope, s *ast.With) {
 		if st.Edit {
 			conv = ast.ConvEdit
 		}
-		c.declare(inner, s, s.Names[0], SymAccess, accessElem(st), conv, s.NamePos[0])
+		sym := c.declare(inner, s, s.Names[0], SymAccess, accessElem(st), conv, s.NamePos[0])
+		// a binding of a path of a match arm's Copy binding (a slice of it)
+		// is derived from it: an edit use of the one is an edit use of the
+		// other (specs/match-bindings §1, item 6)
+		if root := c.placeRoot(sc, s.Subject); root != nil && root.armBound() {
+			sym.Derived = root
+		}
 	case *Tuple:
 		if len(s.Names) != len(st.Elems) {
 			c.errorf("TYPE_MISMATCH", s.Pos, "with binds %d names but the subject yields %d accesses", len(s.Names), len(st.Elems))
@@ -349,17 +360,28 @@ func (c *fnCtx) match(sc *scope, s *ast.Match) {
 	var subjT Type
 	owned := false
 	edit := false
+	// root is the binding the subject is a path of, when that is a match
+	// arm's Copy binding or derives from one: this match's own Copy
+	// bindings are then derived from it (specs/match-bindings §1, item 6)
+	var root *Symbol
 	if s.Move {
 		subjT = c.expr(sc, s.Subject, nil)
 		owned = true
 	} else {
 		subjT = c.expr(sc, s.Subject, nil)
+		if sym := c.placeRoot(sc, s.Subject); sym != nil && sym.armBound() {
+			root = sym
+		}
 		if a, ok := subjT.(*Access); ok {
 			subjT = accessElem(a)
 			edit = a.Edit
 		} else if isTemporary(s.Subject) {
 			owned = true
-		} else if sym := c.placeRoot(sc, s.Subject); sym != nil && sym.Kind == SymAccess {
+		} else if sym := c.placeRoot(sc, s.Subject); sym != nil && sym.ArmCopy {
+			// a Copy binding not yet used as an edit: a write through this
+			// match would make it one, which the outer subject must allow
+			edit = sym.ArmEdit
+		} else if sym != nil && sym.Kind == SymAccess {
 			edit = sym.Conv == ast.ConvEdit
 		} else if sym != nil && sym.Kind == SymParam && sym.Conv == ast.ConvEdit {
 			edit = true
@@ -420,6 +442,11 @@ func (c *fnCtx) match(sc *scope, s *ast.Match) {
 			}
 			if owned || IsCopy(fts[i]) {
 				sym := c.declare(inner, nil, b, SymLocal, fts[i], ast.ConvValue, arm.BindPos[i])
+				if !owned {
+					// a Copy binding of a place match: a copy unless the arm
+					// uses it as an edit (specs/match-bindings M1, M2)
+					sym.ArmCopy, sym.ArmEdit, sym.Derived = true, edit, root
+				}
 				c.r.prog.Info.Decls[&arm.BindPos[i]] = sym
 				continue
 			}
@@ -680,7 +707,14 @@ func (c *fnCtx) placeIsMutable(sc *scope, e ast.Expr) bool {
 		return false
 	}
 	switch sym.Kind {
-	case SymLocal, SymGlobal:
+	case SymLocal:
+		// a match arm's Copy binding is written through to the subject, so
+		// it is as writable as the subject is (specs/match-bindings M3). A
+		// caller that requires the place to be writable calls demandEdit
+		// first, which makes the binding the access it then is; a caller
+		// that only asks (a slice's or a loop's permission) does not
+		return !sym.ArmCopy || sym.ArmEdit
+	case SymGlobal:
 		return true
 	case SymParam:
 		if sym.Conv == ast.ConvEdit || sym.Conv == ast.ConvOwn || sym.Conv == ast.ConvOut {
@@ -702,6 +736,61 @@ func (c *fnCtx) interiorWrite(t Type) bool {
 		return false
 	}
 	return c.unsafe > 0
+}
+
+// armBound reports whether the symbol is, or was until the arm wrote it, a
+// match arm's Copy binding, or is derived from one.
+func (s *Symbol) armBound() bool { return s.ArmCopy || s.EditUse != nil || s.Derived != nil }
+
+// demandEdit records that the place e is used as an edit: an assignment's
+// target, an edit argument or receiver, the place of a take or a replace,
+// a place returned as an edit. A match arm's Copy binding at the root of
+// e, and each binding it derives from, is from then on an access binding
+// for its whole arm (specs/match-bindings M2); a root of any other kind
+// is untouched. Callers make their permission check after this call, so
+// the check sees the binding as the view or the edit it now is.
+func (c *fnCtx) demandEdit(sc *scope, e ast.Expr) {
+	at := e.Span()
+	for sym := c.placeRoot(sc, e); sym != nil; sym = sym.Derived {
+		c.promote(sym, at)
+		// the edit use that starts first in the source, in whatever order
+		// the uses are met (M7's related span)
+		if sym.EditUse != nil && at.Start < sym.EditUse.Start {
+			use := at
+			sym.EditUse = &use
+		}
+	}
+}
+
+// promote makes a Copy arm binding the access binding it is once the arm
+// uses it as an edit: an edit of the payload field when the subject is
+// editable, a view when it is not, in which case the caller's permission
+// check refuses the use (M3). The uses of the name as an owned local met
+// so far get the diagnostic an access binding gets (M4).
+func (c *fnCtx) promote(sym *Symbol, at ast.Pos) {
+	if !sym.ArmCopy {
+		return
+	}
+	sym.ArmCopy = false
+	sym.Kind = SymAccess
+	sym.Conv = ast.ConvView
+	if sym.ArmEdit {
+		sym.Conv = ast.ConvEdit
+	}
+	sym.EditUse = &at
+	for _, u := range sym.ownedUses {
+		c.errorf(u.code, u.pos, "%s", u.msg)
+	}
+	sym.ownedUses = nil
+}
+
+// ownedUse notes a use of sym as an owned local (move, drop, an out
+// argument) that is an error if sym, a Copy arm binding so far only read,
+// is later used as an edit; promote reports it then.
+func (c *fnCtx) ownedUse(sym *Symbol, code diag.Code, pos ast.Pos, format string, args ...any) {
+	if sym.ArmCopy {
+		sym.ownedUses = append(sym.ownedUses, ownedUse{code: code, pos: pos, msg: fmt.Sprintf(format, args...)})
+	}
 }
 
 // placeRoot returns the root symbol of a place expression, or nil.

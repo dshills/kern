@@ -140,6 +140,13 @@ func (c *checker) errorf(code diag.Code, file string, pos ast.Pos, format string
 	c.diags = append(c.diags, diag.New(code, file, diag.Span{Start: pos.Start, End: pos.End}, format, args...))
 }
 
+// related attaches a related span to the diagnostic just reported.
+func (c *checker) related(r diag.Related) {
+	if n := len(c.diags); n > 0 {
+		c.diags[n-1].Related = append(c.diags[n-1].Related, r)
+	}
+}
+
 // fix attaches a machine-applicable edit to the diagnostic just reported.
 func (c *checker) fix(ops ...diag.StructuredEditOp) {
 	if n := len(c.diags); n > 0 {

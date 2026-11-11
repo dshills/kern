@@ -1,0 +1,14 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+// An arm that writes its Copy binding holds an edit of the matched place,
+// so it cannot also reach the place by its own name (specs/match-bindings M7).
+module m
+func f(o: edit[Option[u64]]) {
+    match o {
+        Some(n) => {
+            n = n + 1u64
+            o = None   // ACC_CONFLICT
+        }
+        None => { }
+    }
+}
+func main() -> i32 { return 0i32 }

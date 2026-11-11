@@ -366,12 +366,16 @@ func (c *fnCtx) checkArgs(sc *scope, x *ast.CallExpr, info *CallInfo, fps []Func
 				c.errorf("PLACE_REQUIRED", a.Pos, "out argument must name an uninitialized local or out parameter")
 				continue
 			}
+			c.ownedUse(sym, "PLACE_REQUIRED", a.Pos, "out argument must name an uninitialized local or out parameter")
 			c.r.prog.Info.Idents[id] = sym
 			c.r.prog.Info.Types[id] = sym.Type
 			c.unifyArg(a.X, p.Type, sym.Type, params, m)
 		case ast.ConvView, ast.ConvEdit:
 			if a.Out {
 				c.errorf("TYPE_MISMATCH", a.Pos, "out is only valid for out parameters")
+			}
+			if p.Conv == ast.ConvEdit {
+				c.demandEdit(sc, a.X)
 			}
 			at := c.expr(sc, a.X, pt)
 			if acc, ok := at.(*Access); ok {
@@ -507,6 +511,10 @@ func (c *fnCtx) spawn(sc *scope, x *ast.CallExpr, info *CallInfo, kind string, w
 func (c *fnCtx) checkReceiver(sc *scope, fn *ast.FieldExpr, conv ast.Conv, recvT Type) {
 	switch conv {
 	case ast.ConvEdit:
+		// the receiver's type was resolved before the method was known to
+		// take edit self; a binding's type is the same before and after it
+		// becomes an access binding, so nothing recorded is stale
+		c.demandEdit(sc, fn.X)
 		if acc, ok := recvT.(*Access); ok {
 			if !acc.Edit {
 				c.errorf("ACC_PERMISSION_ESCALATION", fn.X.Span(), "edit receiver given a view")

@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"github.com/dshills/kern/compiler/ast"
+	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/resolve"
 )
 
@@ -120,6 +121,9 @@ type access struct {
 	pos     ast.Pos
 	release bool // carries a pending release function
 	label   string
+	// note, on the freeze of a match arm, is the related span the conflict
+	// it causes is reported with (specs/match-bindings M7)
+	note *diag.Related
 	// twin, on an enclosing access a scoped spawn added (it lives until the
 	// scope's join), is the same argument's access in the spawning
 	// statement: the two are one access, so they never conflict

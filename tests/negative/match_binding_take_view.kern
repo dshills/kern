@@ -1,0 +1,11 @@
+//! expect: reject ACC_PERMISSION_ESCALATION rule=5.3.4
+// take through a Copy arm binding is an edit of the matched place, which a
+// view subject does not allow (specs/match-bindings M3).
+module m
+func f(o: view[Option[u64]]) -> u64 {
+    match o {
+        Some(n) => { return take(n) }   // ACC_PERMISSION_ESCALATION
+        None => { return 0u64 }
+    }
+}
+func main() -> i32 { return 0i32 }

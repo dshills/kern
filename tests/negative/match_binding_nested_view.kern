@@ -1,0 +1,16 @@
+//! expect: reject ASSIGN_IMMUTABLE rule=T.5
+// A write through a nested match is a write through the outer binding
+// (specs/match-bindings item 6), which a view subject does not allow.
+module m
+func f(o: view[Option[Option[u64]]]) {
+    match o {
+        Some(inner) => {
+            match inner {
+                Some(x) => { x = 1u64 }   // ASSIGN_IMMUTABLE
+                None => { }
+            }
+        }
+        None => { }
+    }
+}
+func main() -> i32 { return 0i32 }

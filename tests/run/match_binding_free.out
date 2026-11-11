@@ -1,0 +1,8 @@
+a list walk: 6
+none, bumped: 0
+bumped again: 1
+some, bumped: 2
+a payload-free arm: newA
+releases after a written binding: 1
+and the value: 2
+releases after arms that bind nothing: 1

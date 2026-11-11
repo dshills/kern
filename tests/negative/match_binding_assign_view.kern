@@ -1,0 +1,11 @@
+//! expect: reject ASSIGN_IMMUTABLE rule=T.5
+// A Copy arm binding that the arm writes is an edit of the matched place,
+// which a view subject does not allow (specs/match-bindings M3).
+module m
+func f(o: view[Option[u64]]) {
+    match o {
+        Some(n) => { n = n + 1u64 }   // ASSIGN_IMMUTABLE
+        None => { }
+    }
+}
+func main() -> i32 { return 0i32 }

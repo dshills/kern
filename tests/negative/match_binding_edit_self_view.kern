@@ -1,0 +1,15 @@
+//! expect: reject ACC_PERMISSION_ESCALATION rule=5.3.4
+// An edit self method on a Copy arm binding makes it an edit of the matched
+// place, which a view subject does not allow (specs/match-bindings M3).
+module m
+struct P { x: u64 }
+impl P {
+    func grow(edit self) { self.x = self.x + 1u64 }
+}
+func f(o: view[Option[P]]) {
+    match o {
+        Some(p) => { p.grow() }   // ACC_PERMISSION_ESCALATION
+        None => { }
+    }
+}
+func main() -> i32 { return 0i32 }

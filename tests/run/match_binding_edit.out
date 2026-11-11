@@ -1,0 +1,26 @@
+assignment: 6
+a field of a struct payload: 12
+an element of an array payload: 37
+an edit parameter: 16
+an edit self method: 112
+replace gave: 16
+replace: 40
+take gave: 40
+take: 0
+a closure: 2
+a closure reads: 2
+and reads again: 7
+read, written, read: 7
+the outer binding after the nested write: 5
+a nested match: 5
+two bindings, one written: 1202
+through an edit parameter: 8
+a field of a local: 9
+a Pool.at projection: 21
+a returned edit: 53
+a with over a slice: 55
+a nested match in a with: 802
+read through a slice: 55
+and then reassigned: 0
+generic: 33
+its twin: 33

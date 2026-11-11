@@ -1,0 +1,15 @@
+//! expect: reject NAME_UNRESOLVED rule=T.1
+// A Copy arm binding that the arm writes is an access binding for the whole
+// arm, so a move of it is refused even before the write (specs/match-bindings M4).
+module m
+func f(o: edit[Option[u64]]) -> u64 {
+    match o {
+        Some(n) => {
+            was := move n   // NAME_UNRESOLVED
+            n = 1u64
+            return was
+        }
+        None => { return 0u64 }
+    }
+}
+func main() -> i32 { return 0i32 }

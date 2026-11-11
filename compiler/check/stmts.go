@@ -1,6 +1,8 @@
 package check
 
 import (
+	"fmt"
+
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/diag"
 	"github.com/dshills/kern/compiler/resolve"
@@ -190,6 +192,14 @@ func (f *fn) finish(st *flow, s ast.Node) {
 				f.cursorConflicts[own.pos] = true
 			}
 			f.errorf("ACC_CONFLICT", own.pos, "%s access to %s conflicts with a live %s access", own.kind, describePlace(own.pl), describeOther(other))
+			// a freeze that a write through a Copy arm binding caused says
+			// where that write is
+			for _, a := range [2]*access{own, other} {
+				if a.note != nil {
+					f.c.related(*a.note)
+					break
+				}
+			}
 		}
 	}
 	f.accs = f.accs[:0]
@@ -405,19 +415,6 @@ func (f *fn) match(st *flow, s *ast.Match) *flow {
 	}
 	f.finish(st, s)
 	sc := f.pushScope(s)
-	// The subject stays frozen only while an arm holds an access binding;
-	// arms that bind only Copy values copy them when entered.
-	needsFreeze := false
-	for _, arm := range s.Arms {
-		for i := range arm.BindPos {
-			if sym := f.c.info.Decls[&arm.BindPos[i]]; sym != nil && sym.Kind == resolve.SymAccess {
-				needsFreeze = true
-			}
-		}
-	}
-	if r != nil && r.pl.root != nil && !s.Move && needsFreeze {
-		f.encl = append(f.encl, &access{pl: r.pl, kind: accFreeze, start: 0, end: forever, pos: s.Subject.Span()})
-	}
 	if r != nil && r.owned {
 		f.c.info.OwnedSubject[s] = true
 	}
@@ -433,6 +430,15 @@ func (f *fn) match(st *flow, s *ast.Match) *flow {
 			}
 		}
 		armScope := f.pushScope(arm)
+		// The subject is frozen in an arm that holds an access binding, and
+		// only there: an arm that binds nothing, or only Copy values it
+		// reads (copied when the arm is entered), leaves it free
+		// (specs/match-bindings M6). The freeze ends with the arm's scope.
+		if r != nil && r.pl.root != nil && !s.Move {
+			if frozen, note := armFreeze(f.c.info, arm); frozen {
+				f.encl = append(f.encl, &access{pl: r.pl, kind: accFreeze, start: 0, end: forever, pos: s.Subject.Span(), note: note})
+			}
+		}
 		for i := range arm.BindPos {
 			if sym := f.c.info.Decls[&arm.BindPos[i]]; sym != nil {
 				if sym.Kind == resolve.SymLocal {
@@ -456,6 +462,35 @@ func (f *fn) match(st *flow, s *ast.Match) *flow {
 	_ = sc
 	f.popScope()
 	return f.join(results, s.Pos)
+}
+
+// armFreeze reports whether a match arm holds an access binding, which
+// keeps the subject frozen for the arm. When every such binding is a Copy
+// binding that the arm made an edit by writing it, the freeze exists only
+// because of those writes, and note points at the first of them in the
+// source (specs/match-bindings M7).
+func armFreeze(info *resolve.Info, arm *ast.Arm) (frozen bool, note *diag.Related) {
+	var first *resolve.Symbol
+	onlyWritten := true
+	for i := range arm.BindPos {
+		sym := info.Decls[&arm.BindPos[i]]
+		if sym == nil || sym.Kind != resolve.SymAccess {
+			continue
+		}
+		frozen = true
+		if sym.EditUse == nil {
+			onlyWritten = false
+		} else if first == nil || sym.EditUse.Start < first.EditUse.Start {
+			first = sym
+		}
+	}
+	if frozen && onlyWritten && first != nil {
+		note = &diag.Related{
+			Label: fmt.Sprintf("the arm writes %s here, which makes %s an edit of the matched place", first.Name, first.Name),
+			Start: first.EditUse.Start, End: first.EditUse.End,
+		}
+	}
+	return frozen, note
 }
 
 // outArgOf returns the out-argument symbol of a fallible out call used as a

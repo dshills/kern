@@ -1,0 +1,12 @@
+//! expect: reject ACC_PERMISSION_ESCALATION rule=5.3.4
+// Passing a Copy arm binding to an edit parameter makes it an edit of the
+// matched place, which a view subject does not allow (specs/match-bindings M3).
+module m
+func add(v: edit[u64]) { v = v + 1u64 }
+func f(o: view[Option[u64]]) {
+    match o {
+        Some(n) => add(n)   // ACC_PERMISSION_ESCALATION
+        None => { }
+    }
+}
+func main() -> i32 { return 0i32 }

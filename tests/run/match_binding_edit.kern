@@ -1,0 +1,233 @@
+//! phase: 6
+//! expect: output match_binding_edit
+// A match arm's binding of a Copy payload field is an edit of the field
+// when the arm uses it as one, so that a write through it reaches the
+// matched place (specs/match-bindings M2); until 2026-11-11 it changed a
+// copy. Each case prints the subject after its match.
+module t
+
+struct P { x: u64; y: u64 }
+impl P {
+    func grow(edit self) { self.x = self.x + 100u64 }
+}
+union U { A(p: P); R(cells: [4]u64); Two(a: u64, b: u64); Opts(slots: [2]Option[u64]); Empty }
+union One { Only(p: P) }
+struct Holder { slot: Option[u64]; k: u64 }
+
+func show(label: view[]u8, v: u64) {
+    print_str(label)
+    print_str(": ")
+    print_u64(v)
+    println()
+}
+// These read, and so bind copies.
+func opt(o: view[Option[u64]]) -> u64 {
+    match o {
+        Some(n) => { return n }
+        None => { return 0u64 }
+    }
+}
+func total(u: view[U]) -> u64 {
+    match u {
+        A(p) => { return p.x + p.y }
+        R(cells) => { return cells[0usize] + cells[1usize] + cells[2usize] + cells[3usize] }
+        Two(a, b) => { return a * 100u64 + b }
+        Opts(slots) => { return opt(slots[0usize]) * 100u64 + opt(slots[1usize]) }
+        Empty => { return 0u64 }
+    }
+}
+func add(v: edit[u64], k: u64) { v = v + k }
+func apply(f: closure()) { f() }
+
+// The subject is reached through an edit parameter.
+func bump_in(o: edit[Option[u64]]) {
+    match o {
+        Some(n) => { n = n + 1u64 }
+        None => { }
+    }
+}
+// An edit of a Copy binding's field is returned (item 5).
+func x_of(u: edit[One]) -> edit[u64] {
+    match u {
+        Only(p) => { return p.x }
+    }
+}
+// A type parameter is not Copy, so its binding was always an edit: the
+// generic function and its twin now agree (M8).
+func set_generic[T](o: edit[Option[T]], v: own T) {
+    match o {
+        Some(n) => { n = v }
+        None => { drop(v) }
+    }
+}
+func set_u64(o: edit[Option[u64]], v: u64) {
+    match o {
+        Some(n) => { n = v }
+        None => { }
+    }
+}
+
+func main() -> i32 {
+    var o: Option[u64] = Some(5u64)
+    match o {
+        Some(n) => { n = n + 1u64 }
+        None => { }
+    }
+    show("assignment", opt(o))
+
+    var u: U = U.A(P { x: 1u64, y: 2u64 })
+    match u {
+        A(p) => { p.x = 10u64 }
+        _ => { }
+    }
+    show("a field of a struct payload", total(u))
+
+    var r: U = U.R([1u64, 2u64, 3u64, 4u64])
+    match r {
+        R(cells) => { cells[2usize] = 30u64 }
+        _ => { }
+    }
+    show("an element of an array payload", total(r))
+
+    match o {
+        Some(n) => add(n, 10u64)
+        None => { }
+    }
+    show("an edit parameter", opt(o))
+
+    match u {
+        A(p) => { p.grow() }
+        _ => { }
+    }
+    show("an edit self method", total(u))
+
+    match o {
+        Some(n) => {
+            was := replace(n, 40u64)
+            show("replace gave", was)
+        }
+        None => { }
+    }
+    show("replace", opt(o))
+    match o {
+        Some(n) => {
+            was := take(n)
+            show("take gave", was)
+        }
+        None => { }
+    }
+    show("take", opt(o))
+
+    o = Some(1u64)
+    match o {
+        Some(n) => { apply(|| { n = n + 1u64 }) }
+        None => { }
+    }
+    show("a closure", opt(o))
+
+    // an edit for the whole arm, not from the write on
+    match o {
+        Some(n) => {
+            apply(|| { show("a closure reads", n) })
+            n = 7u64
+            apply(|| { show("and reads again", n) })
+        }
+        None => { }
+    }
+    show("read, written, read", opt(o))
+
+    var w: Option[Option[u64]] = Some(Some(1u64))
+    match w {
+        Some(inner) => {
+            match inner {
+                Some(x) => { x = 5u64 }
+                None => { }
+            }
+            show("the outer binding after the nested write", opt(inner))
+        }
+        None => { }
+    }
+    match w {
+        Some(inner) => { show("a nested match", opt(inner)) }
+        None => { }
+    }
+
+    var t: U = U.Two(1u64, 2u64)
+    match t {
+        Two(a, b) => { a = b + 10u64 }
+        _ => { }
+    }
+    show("two bindings, one written", total(t))
+
+    bump_in(o)
+    show("through an edit parameter", opt(o))
+
+    var h: Holder = Holder { slot: Some(1u64), k: 0u64 }
+    match h.slot {
+        Some(n) => { n = 9u64 }
+        None => { }
+    }
+    show("a field of a local", opt(h.slot))
+
+    pool := Pool[Option[u64]].new()
+    match pool.alloc(Some(20u64)) {
+        Ok(id) => {
+            match pool.at(id) {
+                Some(n) => { n = n + 1u64 }
+                None => { }
+            }
+            with slot := pool.get(id) { show("a Pool.at projection", opt(slot)) }
+        }
+        Err(e) => { }
+    }
+
+    var one: One = One.Only(P { x: 1u64, y: 2u64 })
+    add(x_of(one), 50u64)
+    match one {
+        Only(p) => { show("a returned edit", p.x + p.y) }
+    }
+
+    match r {
+        R(cells) => {
+            with s := cells[0usize : 2usize] { s[1usize] = 20u64 }
+        }
+        _ => { }
+    }
+    show("a with over a slice", total(r))
+
+    var g: U = U.Opts([Some(1u64), Some(2u64)])
+    match g {
+        Opts(slots) => {
+            with s := slots[0usize : 2usize] {
+                match s[0usize] {
+                    Some(x) => { x = 8u64 }
+                    None => { }
+                }
+            }
+        }
+        _ => { }
+    }
+    show("a nested match in a with", total(g))
+
+    // a slice that is only read leaves the binding a copy and the subject free
+    match r {
+        R(cells) => {
+            var sum: u64 = 0u64
+            with s := cells[0usize : 4usize] {
+                for v in s { sum = sum + v }
+            }
+            r = U.Empty
+            show("read through a slice", sum)
+        }
+        _ => { }
+    }
+    show("and then reassigned", total(r))
+
+    var a: Option[u64] = Some(1u64)
+    var b: Option[u64] = Some(1u64)
+    set_generic(a, 33u64)
+    set_u64(b, 33u64)
+    show("generic", opt(a))
+    show("its twin", opt(b))
+    return 0i32
+}
