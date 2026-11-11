@@ -84,7 +84,7 @@ it (`docs/ownership.md` rule 5.6.4).
 
 ## Installing
 
-The current release is **v0.2.2** (`CHANGELOG.md`). The `kern` binary is
+The current release is **v0.2.3** (`CHANGELOG.md`). The `kern` binary is
 self-contained: the standard library and both runtimes are built into it.
 Native builds need `clang` (the hosted runtime is compiled and linked with
 it; the compiled runtime is kept under the user cache directory,
@@ -105,7 +105,7 @@ shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
 ```bash
-tar -xzf kern-v0.2.2-darwin-arm64.tar.gz && sudo install kern-v0.2.2-darwin-arm64/kern /usr/local/bin/
+tar -xzf kern-v0.2.3-darwin-arm64.tar.gz && sudo install kern-v0.2.3-darwin-arm64/kern /usr/local/bin/
 ```
 
 **With Go** (1.25 or newer):
@@ -270,17 +270,14 @@ latency is within the interval of the better of C and Rust on every workload.
 
 ## Status
 
-v0.2.2 packages the state described here: v0.1.0, the first release, the
+v0.2.3 packages the state described here: v0.1.0, the first release, the
 runtime work of v0.2.0 (`specs/runtime`,
 `docs/reports/runtime-summary.md`), and what writing programs on that
 runtime found and asked for (`docs/reports/reference-conformance.md`,
-`docs/reports/std-streams.md`, `docs/reports/match-bindings.md`). Each release's changelog entry
+`docs/reports/std-streams.md`, `docs/reports/match-bindings.md`,
+`docs/reports/for-bindings.md`). Each release's changelog entry
 (`CHANGELOG.md`) summarizes it by area, and v0.1.0's lists the known
-limitations. `main` is ahead of the release by one language fix, listed
-under "Unreleased" in the changelog: a write through a `for` loop's
-variable of a `Copy` element now reaches the element, by the rule v0.2.2
-gave a `match` arm's binding (`docs/reports/for-bindings.md`). A binary
-built from source has it; the v0.2.2 archives do not. The implementation went through five planned phases (`specs/initial/PLAN.md`,
+limitations. The implementation went through five planned phases (`specs/initial/PLAN.md`,
 reports in `docs/reports/`): workload design, the core language and
 interpreter, the native backend and ownership checker, concurrency and
 freestanding targets, tooling and the machine API, and hardening (frozen

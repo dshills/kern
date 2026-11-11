@@ -8,6 +8,24 @@ section of this file into a GitHub release is `docs/releasing.md`.
 
 ## [Unreleased]
 
+## [v0.2.3] - 2026-11-11
+
+One defect of v0.2.2: the lost write that release fixed for a `match`
+arm's binding was still there for a `for` loop's variable.
+
+- A write through a `for` loop's variable of a `Copy` element was lost:
+  the body changed a copy and the sequence stayed as it was.
+
+It is under "Language", with the three ways it can alter a program
+written for v0.2.2. Only a program that writes through such a variable
+is affected: over the 2,127 kern files of this repository's tests,
+examples, benchmarks and library, three were. Rule 5.3.1 of the
+reference and the cursor-protocol paragraph of `spec/types.md` are
+reworded to say what such a variable is (`docs/reports/for-bindings.md`).
+`spec/rules.lock` is unchanged, and the machine API answers the schema
+versions it answered in v0.2.2 (0.2 to 0.5). CI's toolchain install
+steps now stop after fifteen minutes.
+
 ### Language
 
 - Fixed: a write through a `for` loop's variable of a `Copy` element was
@@ -493,7 +511,8 @@ intend to. Diagnostic codes stay frozen to their rule numbers in
 machine-API versions a release answers, and any change to either is listed
 here.
 
-[Unreleased]: https://github.com/dshills/kern/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/dshills/kern/compare/v0.2.3...HEAD
+[v0.2.3]: https://github.com/dshills/kern/releases/tag/v0.2.3
 [v0.2.2]: https://github.com/dshills/kern/releases/tag/v0.2.2
 [v0.2.1]: https://github.com/dshills/kern/releases/tag/v0.2.1
 [v0.2.0]: https://github.com/dshills/kern/releases/tag/v0.2.0
