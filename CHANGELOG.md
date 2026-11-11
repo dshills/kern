@@ -8,6 +8,29 @@ section of this file into a GitHub release is `docs/releasing.md`.
 
 ## [Unreleased]
 
+## [v0.2.2] - 2026-11-11
+
+Two defects of v0.2.1 that five more programs written on it found, with
+the programs themselves.
+
+- A write through a `match` arm's binding of a `Copy` payload field was
+  lost: the arm changed a copy and the matched value stayed as it was.
+- A generic function used as a value with its type arguments failed in
+  the compiler with an internal error.
+
+Both are under "Language". The first can alter a program written for
+v0.2.1 in three ways, listed in its entry: the write now reaches the
+matched value; with a subject that is only a view it no longer compiles;
+and an arm that writes its binding and also names the matched value no
+longer compiles. Only a program that writes through such a binding is
+affected: over the 2,113 kern files of this repository's tests,
+examples, benchmarks and library, one fixture was. Rule 5.3.1 of the
+reference is reworded to say what a binding of a `Copy` field is.
+`spec/rules.lock` is unchanged, and the machine API answers the schema
+versions it answered in v0.2.1 (0.2 to 0.5); an `ACC_CONFLICT` that a
+write through an arm binding causes now fills the `related` list the
+schema already has.
+
 ### Language
 
 - Fixed: a write through a `match` arm's binding of a `Copy` payload
@@ -446,7 +469,8 @@ intend to. Diagnostic codes stay frozen to their rule numbers in
 machine-API versions a release answers, and any change to either is listed
 here.
 
-[Unreleased]: https://github.com/dshills/kern/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/dshills/kern/compare/v0.2.2...HEAD
+[v0.2.2]: https://github.com/dshills/kern/releases/tag/v0.2.2
 [v0.2.1]: https://github.com/dshills/kern/releases/tag/v0.2.1
 [v0.2.0]: https://github.com/dshills/kern/releases/tag/v0.2.0
 [v0.1.0]: https://github.com/dshills/kern/releases/tag/v0.1.0
