@@ -29,6 +29,10 @@ jobs:
 
       - name: Install toolchain (Ubuntu)
         if: runner.os == 'Linux'
+        # the longest of these on a good day is under four minutes; when the
+        # package mirrors cannot be reached the step otherwise retries for
+        # an hour or two before it fails
+        timeout-minutes: 15
         run: |
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
           echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-20 main" | sudo tee /etc/apt/sources.list.d/llvm.list
@@ -40,6 +44,7 @@ jobs:
 
       - name: Install toolchain (macOS)
         if: runner.os == 'macOS'
+        timeout-minutes: 15
         run: |
           brew install llvm lld qemu
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
@@ -74,6 +79,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Install toolchain
+        timeout-minutes: 15
         run: |
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
           echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-20 main" | sudo tee /etc/apt/sources.list.d/llvm.list
