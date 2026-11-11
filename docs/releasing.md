@@ -43,11 +43,22 @@ A binary reports its version with `kern version` (JSON) or
 3. Commit, and push `main`.
 4. Wait for the `ci` workflow to pass on that commit. The release workflow
    refuses a commit without a successful `ci` run on a push, so pushing the
-   tag together with `main` fails.
-5. Tag and push the tag:
+   tag together with `main` fails. A run that failed for a reason outside
+   the commit (a runner that could not reach its package mirror, say: the
+   install step fails and no test runs) is made good by running its
+   failed jobs again, which keeps the run and its commit:
 
    ```bash
-   git tag -a vX.Y.Z -m "kern vX.Y.Z"
+   gh run rerun RUN_ID --failed
+   ```
+
+   A failed test is not such a reason: fix it in a new commit, which is
+   then the release commit.
+5. Tag the release commit and push the tag. Name the commit when `main`
+   has moved past it while CI ran, since the tag otherwise lands on `HEAD`:
+
+   ```bash
+   git tag -a vX.Y.Z -m "kern vX.Y.Z" COMMIT
    ```
 
    ```bash
