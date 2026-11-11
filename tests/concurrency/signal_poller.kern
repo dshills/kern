@@ -1,0 +1,141 @@
+//! phase: 6
+//! expect: output signal_poller
+//! tsan: clean
+// A Signals watched by a Poller (specs/std-streams R9), with a socket
+// watched beside it: nothing is reported before a signal; a signal
+// raised before the wait is reported under the Signals' token (one that
+// arrives while the wait blocks is signal_poller_wakes.kern's); once
+// try_next has
+// returned None a look reports nothing; the socket is reported under its
+// own token; watching a Signals for writing is InvalidInput and leaves
+// the watch as it was; and after unwatch a signal is not reported but is
+// still there to take.
+module cc
+import "std/io"
+import "std/net"
+import "std/signal"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func yes(what: view[]u8, ok: bool) {
+    print_str(what)
+    if ok { say(": yes") } else { say(": NO") }
+}
+func name(s: signal.Signal) {
+    match s {
+        User1 => print_str("User1")
+        User2 => print_str("User2")
+        _ => print_str("another signal")
+    }
+}
+// only reports whether the events are one report of the token, readable
+// and not writable.
+func only(events: view[Vec[net.Ready]], token: u64) -> bool {
+    if events.len() != 1usize { return false }
+    e := events.get(0usize)
+    return e.token == token && e.readable && !e.writable
+}
+// take_all takes every signal that has arrived.
+func take_all(sigs: edit[signal.Signals]) {
+    while true {
+        match sigs.try_next() {
+            Some(s) => {
+                print_str("  took ")
+                name(s)
+                println()
+            }
+            None => {
+                say("  then None")
+                break
+            }
+        }
+    }
+}
+func is_invalid(r: own Result[(), io.IoErr]) -> bool {
+    match r {
+        Ok(u) => { return false }
+        Err(e) => {
+            match io.kind(e) {
+                InvalidInput => { return true }
+                _ => { return false }
+            }
+        }
+    }
+}
+
+func watched(a: edit[net.UnixStream], b: edit[net.UnixStream]) -> Result[(), io.IoErr] {
+    p := net.Poller.new()?
+    events := Vec[net.Ready].new()
+    sigs := signal.catch(signal.Signal.User1)
+    sigs.add(signal.Signal.User2)
+    p.watch(a, 1u64, true, false)?
+    p.watch(sigs, 9u64, true, false)?
+
+    say("-- before any signal")
+    n0 := p.wait_timeout(events, time.millis(30u64))?
+    yes("nothing is reported in 30 ms", n0 == 0usize)
+
+    say("-- a signal raised before the wait")
+    signal.raise(signal.Signal.User1)
+    n1 := p.wait(events)?
+    yes("the wait reports the Signals under its token, readable", only(events, 9u64))
+    take_all(sigs)
+    n2 := p.wait_timeout(events, time.millis(0u64))?
+    yes("after None, a look reports nothing", n2 == 0usize)
+
+    say("-- a socket beside it")
+    b.write_all("!")?
+    n4 := p.wait(events)?
+    yes("a byte on the pair is reported under the pair's token only", only(events, 1u64))
+    var one: [1]u8 = zero()
+    r := a.read(one)?
+
+    say("-- asked for writing")
+    yes("watching a Signals for writing is InvalidInput", is_invalid(p.watch(sigs, 10u64, true, true)))
+    signal.raise(signal.Signal.User1)
+    n5 := p.wait(events)?
+    yes("the earlier watch still reports under its token", only(events, 9u64))
+    take_all(sigs)
+
+    say("-- unwatched")
+    p.unwatch(sigs)?
+    signal.raise(signal.Signal.User1)
+    // the signal is waited for first, so that it has arrived when the
+    // Poller is asked; a wait with no time limit left would take it
+    var arrived: bool = false
+    limit := time.after(time.seconds(20u64))
+    while !arrived && !limit.expired() {
+        n6 := p.wait_timeout(events, time.millis(20u64))?
+        if n6 != 0usize { break }
+        match sigs.wait_timeout(time.millis(0u64)) {
+            Some(s) => {
+                arrived = true
+                yes("a signal is not reported", n6 == 0usize)
+                print_str("and is still there to take: ")
+                name(s)
+                println()
+            }
+            None => { }
+        }
+    }
+    if !arrived { say("the signal was reported, or never arrived") }
+    return Ok(())
+}
+
+func main() -> i32 {
+    match net.UnixStream.pair() {
+        Ok(ends) => {
+            match move ends {
+                Ends(a, b) => {
+                    match watched(a, b) {
+                        Ok(u) => { }
+                        Err(e) => say("failed")
+                    }
+                }
+            }
+        }
+        Err(e) => say("no pair")
+    }
+    say("done")
+    return 0i32
+}

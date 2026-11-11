@@ -1,0 +1,55 @@
+-- a new buffer
+  pending 0
+  no whole line, and nothing appended: true
+  nothing held
+-- two lines and a piece of a third
+  pending 9
+  line [ab]
+  pending 6
+  line [cd]
+  pending 2
+  no whole line, and nothing appended: true
+  pending 2
+  rest [ef]
+  pending 0
+-- a terminator split between two feeds
+  no whole line, and nothing appended: true
+  line [x]
+  pending 1
+  rest [y]
+-- a carriage return that ends nothing, and empty lines
+  line [a\rb]
+  line []
+  line []
+  no whole line, and nothing appended: true
+-- a line is appended to what the vector holds
+  line [head:tail]
+-- take_rest hands over whole lines too, as held
+  rest [a\nb\r\nc]
+  pending 0
+-- after a long line, an unfinished one is finished
+  the long line's length: 5000
+  pending 7
+  line [partial and more]
+  pending 4
+  rest [last]
+-- read_line over a reader that gives 1, 2 and 5 bytes in turn
+  line [one]
+  line [two]
+  line []
+  line [three]
+  the end, with nothing appended: true
+-- a line that was read ahead costs no read
+  line [a]
+  reads so far: 1
+  line [b]
+  reads so far: 1
+  line [c]
+  reads so far: 1
+-- a reader that fails on its third read
+  the error is returned, nothing appended: true
+  pending 3
+  rest [abc]
+-- the work is linear in the bytes
+  the lines came out whole: true
+  a byte at a time, and many short lines: within the limit

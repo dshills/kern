@@ -1,0 +1,18 @@
+-- before any signal
+nothing is reported in 30 ms: yes
+-- a signal raised before the wait
+the wait reports the Signals under its token, readable: yes
+  took User1
+  then None
+after None, a look reports nothing: yes
+-- a socket beside it
+a byte on the pair is reported under the pair's token only: yes
+-- asked for writing
+watching a Signals for writing is InvalidInput: yes
+the earlier watch still reports under its token: yes
+  took User1
+  then None
+-- unwatched
+a signal is not reported: yes
+and is still there to take: User1
+done

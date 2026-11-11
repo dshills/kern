@@ -1,0 +1,85 @@
+//! phase: 6
+//! expect: output vec_remove_prefix
+// Vec.remove_prefix (specs/std-streams R1): the first n elements are
+// destroyed, from the last of them to the first, each once; the rest
+// move to the front in order, none destroyed or copied; the length drops
+// by n and the capacity stays. Zero removes nothing, the whole length
+// removes everything.
+module t
+struct Noisy nocopy { id: u64 }
+impl Noisy {
+    destructor(edit self) {
+        print_str("  drop ")
+        print_u64(self.id)
+        println()
+    }
+}
+func say(s: view[]u8) { print_str(s); println() }
+func show(label: view[]u8, v: view[Vec[u64]]) {
+    print_str(label)
+    for x in v.as_view() {
+        print_str(" ")
+        print_u64(x)
+    }
+    print_str(" (length ")
+    print_u64(u64(v.len()))
+    print_str(")")
+    println()
+}
+
+func numbers() {
+    say("numbers")
+    v := Vec[u64].new()
+    for i in 0u64..10u64 { v.push(i) }
+    cap := v.capacity()
+    v.remove_prefix(0usize)
+    show("  none removed:", v)
+    v.remove_prefix(3usize)
+    show("  three removed:", v)
+    v.remove_prefix(1usize)
+    show("  one more:", v)
+    v.push(100u64)
+    show("  and one pushed:", v)
+    print_str("  the capacity is what it was: ")
+    print_bool(v.capacity() == cap)
+    println()
+    v.remove_prefix(v.len())
+    show("  all removed:", v)
+    v.remove_prefix(0usize)
+    v.push(7u64)
+    show("  usable after:", v)
+}
+
+func owners() {
+    say("values with destructors")
+    v := Vec[Noisy].new()
+    for i in 1u64..7u64 { v.push(Noisy { id: i }) }
+    say("  the first three go, last of them first")
+    v.remove_prefix(3usize)
+    print_str("  what is left:")
+    for x in v.as_view() {
+        print_str(" ")
+        print_u64(x.id)
+    }
+    println()
+    say("  none of the first")
+    v.remove_prefix(0usize)
+    say("  the vector is destroyed, last element first")
+}
+
+func zero_sized() {
+    say("elements of no size")
+    v := Vec[()].new()
+    for i in 0u64..5u64 { v.push(()) }
+    v.remove_prefix(2usize)
+    print_str("  length ")
+    print_u64(u64(v.len()))
+    println()
+}
+
+func main() -> i32 {
+    numbers()
+    owners()
+    zero_sized()
+    return 0i32
+}

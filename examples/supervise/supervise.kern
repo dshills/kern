@@ -26,7 +26,8 @@
 // How it is built:
 //   - Each service has a thread, which starts the program (std/process),
 //     reads its output through a pipe with a time limit, so that it looks
-//     at the stop flag between reads, and decides about the restart.
+//     at the stop flag between reads, splits it into lines with an
+//     io.LineBuf, and decides about the restart.
 //   - The threads are scoped: they hold views of the configuration, the
 //     stop flag and the output, all of which the supervising function
 //     owns, and the function cannot return before they have ended.
@@ -281,26 +282,13 @@ func command_of(svc: view[Service]) -> process.Command {
     }
 }
 
-// absorb adds what was read to what is kept of an unfinished line, and
-// writes every line that is whole.
-func absorb(kept: edit[Vec[u8]], chunk: view[]u8, sink: view[Mutex[Sink]], service: usize) {
-    kept.extend(chunk)
-    rest := Vec[u8].new()
-    with b := kept.as_view() {
-        var start: usize = 0usize
-        var i: usize = 0usize
-        while i < len(b) {
-            if b[i] == 10u8 {
-                var end: usize = i
-                if end > start && b[end - 1usize] == 13u8 { end = end - 1usize }
-                note(sink, service, 124u8, b[start : end])
-                start = i + 1usize
-            }
-            i = i + 1usize
-        }
-        rest.extend(b[start : len(b)])
+// pass_on writes every whole line the child has written so far.
+func pass_on(lines: edit[io.LineBuf], sink: view[Mutex[Sink]], service: usize) {
+    line := Vec[u8].new()
+    while lines.next_line(line) {
+        note(sink, service, 124u8, line.as_view())
+        line.clear()
     }
-    kept = rest
 }
 
 // ended writes how a run ended, and is true when it failed.
@@ -329,7 +317,7 @@ func attend(child: own process.Child, service: usize, grace_ms: u64, stop: view[
     var asked: bool = false
     var killed: bool = false
     var deadline: u64 = 0u64
-    kept := Vec[u8].new()
+    lines := io.LineBuf.new()
     var buf: [1024]u8 = zero()
     match child.take_stdout() {
         Ok(pipe) => {
@@ -339,7 +327,12 @@ func attend(child: own process.Child, service: usize, grace_ms: u64, stop: view[
                         Ok(got) => {
                             match got {
                                 Some(n) => {
-                                    if n == 0usize { reading = false } else { absorb(kept, buf[0usize : n], sink, service) }
+                                    if n == 0usize {
+                                        reading = false
+                                    } else {
+                                        lines.feed(buf[0usize : n])
+                                        pass_on(lines, sink, service)
+                                    }
                                 }
                                 None => {
                                     // quiet: a child that has ended while something
@@ -363,7 +356,9 @@ func attend(child: own process.Child, service: usize, grace_ms: u64, stop: view[
                         Ok(st) => {
                             match st {
                                 Some(status) => {
-                                    if kept.len() > 0usize { note(sink, service, 124u8, kept.as_view()) }
+                                    // what the child wrote last, with no newline after it
+                                    last := Vec[u8].new()
+                                    if lines.take_rest(last) { note(sink, service, 124u8, last.as_view()) }
                                     return ended(status, sink, service)
                                 }
                                 None => { }

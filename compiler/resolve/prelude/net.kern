@@ -10,6 +10,7 @@
 // closed is an error of kind BrokenPipe or ConnectionReset and never ends
 // the program. Every type here may move to another thread.
 module net
+import "std/signal"
 import "std/io"
 import "std/time"
 
@@ -34,6 +35,10 @@ func net_unix_send_to(fd: i32, data: view[]u8, path: view[]u8) -> i64
 func net_unix_recv_from(fd: i32, buf: edit[]u8, from: edit[]u8, ns: u64, timed: bool) -> i64
 func net_recv(fd: i32, buf: edit[]u8, ns: u64, timed: bool) -> i64
 func net_send(fd: i32, data: view[]u8) -> i64
+// net_send_timeout is net_send that waits at most ns nanoseconds for the
+// socket to take any of the bytes: the count, -errno, or the timed-out
+// value when it took none.
+func net_send_timeout(fd: i32, data: view[]u8, ns: u64) -> i64
 func net_shutdown(fd: i32, how: i32) -> i32
 func net_set_nodelay(fd: i32, on: bool) -> i32
 // net_set_opt and net_get_opt set and read a socket option by number: 1
@@ -660,6 +665,14 @@ impl Source for UdpSocket { func descriptor(view self) -> i32 { return self.fd }
 impl Source for UnixListener { func descriptor(view self) -> i32 { return self.fd } }
 impl Source for UnixStream { func descriptor(view self) -> i32 { return self.fd } }
 impl Source for UnixDatagram { func descriptor(view self) -> i32 { return self.fd } }
+// A signal.Signals is a Source too, so that one wait serves sockets and
+// signals: watched for reading, it is reported when a signal it has
+// caught has arrived. The program then calls try_next until it is None;
+// a report may come once more after the last signal was taken. Watching
+// it for writing is InvalidInput. Its descriptor is the process's and
+// outlives the Signals: unwatch it before destroying the Signals, or the
+// watch reports the next Signals' arrivals under its old token.
+impl Source for signal.Signals { func descriptor(view self) -> i32 { return signal.signal_fd() } }
 
 // ---- TCP (RH2) ----
 
@@ -782,6 +795,19 @@ impl TcpStream {
             off = off + usize(r)
         }
         return Ok(())
+    }
+
+    // write_timeout sends what the socket will take of data, waiting at
+    // most d for it to take any: Some(n) for the first n bytes (the rest
+    // is not sent), None when it took none in that time. A duration of
+    // zero offers the bytes once and never waits, which is how a thread
+    // that serves many connections writes: what is left is kept, and the
+    // socket watched for writing in a Poller.
+    func write_timeout(edit self, data: view[]u8, d: time.Duration) -> Result[Option[usize], io.IoErr] {
+        r := net_send_timeout(self.fd, data, d.ns)
+        if r == io.timed_out() { return Ok(None) }
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Some(usize(r)))
     }
 
     // shutdown ends one direction, or both, without closing the socket:
@@ -1058,6 +1084,19 @@ impl UnixStream {
             off = off + usize(r)
         }
         return Ok(())
+    }
+
+    // write_timeout sends what the socket will take of data, waiting at
+    // most d for it to take any: Some(n) for the first n bytes (the rest
+    // is not sent), None when it took none in that time. A duration of
+    // zero offers the bytes once and never waits, which is how a thread
+    // that serves many connections writes: what is left is kept, and the
+    // socket watched for writing in a Poller.
+    func write_timeout(edit self, data: view[]u8, d: time.Duration) -> Result[Option[usize], io.IoErr] {
+        r := net_send_timeout(self.fd, data, d.ns)
+        if r == io.timed_out() { return Ok(None) }
+        if r < 0i64 { return Err(io.neg(r)) }
+        return Ok(Some(usize(r)))
     }
 
     func shutdown(edit self, how: Shutdown) -> Result[(), io.IoErr] {

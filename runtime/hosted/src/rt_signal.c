@@ -96,19 +96,41 @@ int32_t kern_signal_set(int32_t which, int32_t how) {
     sigemptyset(&sa.sa_mask);
     return sigaction(kern_signals[which], &sa, NULL) != 0 ? -errno : 0;
 }
+// kern_signal_fd is the pipe's read end, for a Poller to watch
+// (specs/std-streams R9): -1 until a signal has been caught.
+int32_t kern_signal_fd(void) { return kern_sig_pipe[0]; }
+// kern_signal_take returns the first signal of mask, in Signal's order,
+// that has been recorded, and forgets that record: -1 when there is none.
+static int kern_signal_take(uint32_t mask) {
+    uint32_t pending = atomic_load(&kern_sig_pending) & mask;
+    for (int i = 0; pending != 0 && i < KERN_SIGNALS; i++) {
+        uint32_t bit = 1u << i;
+        // taken only if still set: another thread cannot hold this
+        // Signals, but the handler sets bits at any moment
+        if ((pending & bit) && (atomic_fetch_and(&kern_sig_pending, ~bit) & bit)) return i;
+    }
+    return -1;
+}
 // kern_signal_wait returns the first signal of mask, in Signal's order,
 // that has been recorded, and forgets that record. It waits until there
 // is one, or for ns nanoseconds when timed: then -2^32.
+//
+// When nothing wanted is recorded, which is to say nothing is (one
+// Signals exists at a time, and its mask is every signal held), it
+// empties the pipe before it gives up or waits, so that the pipe is
+// readable only for a record made from then on: a Poller that watches
+// the pipe reports nothing more until another signal arrives. A record
+// made before the pipe was emptied had its byte among those read, so the
+// records are looked at once more.
 int64_t kern_signal_wait(uint32_t mask, uint64_t ns, uint8_t timed) {
     uint64_t start = timed ? kern_now_ns() : 0;
     for (;;) {
-        uint32_t pending = atomic_load(&kern_sig_pending) & mask;
-        for (int i = 0; pending != 0 && i < KERN_SIGNALS; i++) {
-            uint32_t bit = 1u << i;
-            // taken only if still set: another thread cannot hold this
-            // Signals, but the handler sets bits at any moment
-            if ((pending & bit) && (atomic_fetch_and(&kern_sig_pending, ~bit) & bit)) return i;
-        }
+        int got = kern_signal_take(mask);
+        if (got >= 0) return got;
+        char drain[64];
+        while (read(kern_sig_pipe[0], drain, sizeof drain) > 0) {}
+        got = kern_signal_take(mask);
+        if (got >= 0) return got;
         int ms = -1;
         if (timed) {
             uint64_t spent = kern_now_ns() - start;
@@ -118,10 +140,7 @@ int64_t kern_signal_wait(uint32_t mask, uint64_t ns, uint8_t timed) {
             ms = whole > (uint64_t)INT_MAX ? INT_MAX : (int)whole;
         }
         struct pollfd p = {kern_sig_pipe[0], POLLIN, 0};
-        if (poll(&p, 1, ms) > 0) {
-            char drain[64];
-            while (read(kern_sig_pipe[0], drain, sizeof drain) > 0) {}
-        }
+        (void)poll(&p, 1, ms);
         // a signal, an interruption or the end of the wait: look again
     }
 }

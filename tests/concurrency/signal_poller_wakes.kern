@@ -1,0 +1,60 @@
+//! phase: 6
+//! expect: output signal_poller_wakes
+// A signal that arrives while Poller.wait blocks wakes it (specs/std-streams
+// R9 a): another thread raises it 30 ms after the wait began, and the
+// wait, which has no time limit, returns with the Signals' token.
+//
+// This fixture is not run under ThreadSanitizer, which signal_poller.kern
+// is. The sanitizer runs a program's signal handler only when the thread
+// that received the signal next enters a call the sanitizer intercepts,
+// and on macOS a wait in the readiness queue is not one: the handler
+// would never run, and the wait never end.
+module cc
+import "std/io"
+import "std/net"
+import "std/signal"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func raise_later(ms: u64) -> u64 {
+    time.sleep(time.millis(ms))
+    signal.raise(signal.Signal.User2)
+    return 0u64
+}
+
+func woken() -> Result[(), io.IoErr] {
+    p := net.Poller.new()?
+    events := Vec[net.Ready].new()
+    sigs := signal.catch(signal.Signal.User2)
+    p.watch(sigs, 9u64, true, false)?
+    quiet := p.wait_timeout(events, time.millis(0u64))?
+    t := thread.spawn(raise_later, 30u64)
+    n := p.wait(events)?
+    var reported: bool = false
+    if quiet == 0usize && events.len() == 1usize {
+        e := events.get(0usize)
+        reported = e.token == 9u64 && e.readable
+    }
+    if reported { say("the wait was woken, with the Signals' token") } else { say("the wait returned something else") }
+    match sigs.try_next() {
+        Some(s) => say("and the signal is there to take")
+        None => say("and no signal is there")
+    }
+    match sigs.try_next() {
+        Some(s) => say("twice")
+        None => say("once")
+    }
+    match move t {
+        Ok(h) => { done := h.join() }
+        Err(e) => say("no thread")
+    }
+    return Ok(())
+}
+
+func main() -> i32 {
+    match woken() {
+        Ok(u) => { }
+        Err(e) => say("failed")
+    }
+    return 0i32
+}

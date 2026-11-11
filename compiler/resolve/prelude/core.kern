@@ -744,6 +744,27 @@ impl Vec[T] {
             }
         }
     }
+    // remove_prefix destroys the first n elements, from the last of them
+    // to the first, and moves the rest to the front, in order; the
+    // capacity stays, and nothing is allocated. It traps bounds, with
+    // the vector unchanged, when n is more than the length.
+    contract { requires "data addresses cap elements of which the first size are live" }
+    func remove_prefix(edit self, n: usize) {
+        if n > self.size { trap_kind(bounds) }
+        var i: usize = n
+        while i > 0usize {
+            i = i - 1usize
+            unsafe {
+                v := ptr_take(ptr_offset(self.data, truncate[isize](i)))
+                drop(v)
+            }
+        }
+        rest := self.size - n
+        if n > 0usize && rest > 0usize {
+            unsafe { ptr_copy(self.data, ptr_offset(self.data, truncate[isize](n)), rest) }
+        }
+        self.size = rest
+    }
     // clone deep-copies every element (the clone behind copy(v)).
     func clone(view self) -> Vec[T] {
         res := Vec[T].with_capacity(self.size)

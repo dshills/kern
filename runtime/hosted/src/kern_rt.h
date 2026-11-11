@@ -315,6 +315,8 @@ int32_t kern_net_unix_pair(int32_t *fds, int64_t cap);
 int64_t kern_net_recv(int32_t fd, char *buf, int64_t n, uint64_t ns, uint8_t timed);
 // Sends at most n bytes, waiting while the socket's buffer is full: the count or -errno (never a SIGPIPE).
 int64_t kern_net_send(int32_t fd, const char *p, int64_t n);
+// Sends at most n bytes, waiting at most ns nanoseconds for the socket to take any: the count (0 for no bytes), -errno, or -2^32 when it took none in that time.
+int64_t kern_net_send_timeout(int32_t fd, const char *p, int64_t n, uint64_t ns);
 // Shuts down reading (0), writing (1) or both (2): 0 or -errno.
 int32_t kern_net_shutdown(int32_t fd, int32_t how);
 // Turns TCP_NODELAY on or off: 0 or -errno.
@@ -351,6 +353,8 @@ void kern_signal_close(void);
 int32_t kern_signal_set(int32_t which, int32_t how);
 // Returns the first recorded signal of mask and forgets it, waiting for one (at most ns nanoseconds when timed, then -2^32).
 int64_t kern_signal_wait(uint32_t mask, uint64_t ns, uint8_t timed);
+// Returns the descriptor that is readable while a caught signal has arrived and not been returned, for a readiness queue to watch: -1 before the first catch.
+int32_t kern_signal_fd(void);
 // Flushes standard output and sends the signal to the program's own process: 0 or -errno.
 int32_t kern_signal_raise(int32_t which);
 

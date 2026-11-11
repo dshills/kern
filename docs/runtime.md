@@ -273,6 +273,18 @@ The modules hold the policy.
   It is not a scheduler: the runtime runs nothing of the program's, and
   an event loop is a loop in the program. To wake a thread that waits,
   watch one end of `UnixStream.pair()` and write to the other.
+- **Such a loop needs three more things**, and has them. A stream's
+  `write_timeout` with no duration offers bytes to the socket and never
+  waits; what the socket does not take is kept, and the socket watched
+  for writing. An `io.LineBuf` holds what has been read of a line that
+  is not whole yet: the program feeds it what arrives and takes whole
+  lines out, and it does not own the stream, so the program writes to
+  the stream as it likes. And a `signal.Signals` can be watched like a
+  socket: it is reported when a signal it has caught has arrived, and
+  the program then calls `try_next` until it is `None`. A report may
+  come once more after the last signal was taken. The descriptor
+  behind it is the process's and outlives the `Signals`, so a watch is
+  ended with `unwatch`, not by destroying the `Signals`.
 - **A Unix-domain stream carries open files and sockets** between
   processes (`send_with`, `send_file`, `recv_with`). What arrives is a
   `Descriptor`, close-on-exec, which the program turns into the type it
@@ -566,6 +578,7 @@ entry raises its traps.
 | `int32_t kern_net_unix_pair(int32_t *fds, int64_t cap)` | Makes two connected Unix-domain stream sockets into fds[0] and fds[1]: 0 or -errno. |
 | `int64_t kern_net_recv(int32_t fd, char *buf, int64_t n, uint64_t ns, uint8_t timed)` | Receives at most n bytes: the count, 0 when the peer closed, -errno, or -2^32. |
 | `int64_t kern_net_send(int32_t fd, const char *p, int64_t n)` | Sends at most n bytes, waiting while the socket's buffer is full: the count or -errno (never a SIGPIPE). |
+| `int64_t kern_net_send_timeout(int32_t fd, const char *p, int64_t n, uint64_t ns)` | Sends at most n bytes, waiting at most ns nanoseconds for the socket to take any: the count (0 for no bytes), -errno, or -2^32 when it took none in that time. |
 | `int32_t kern_net_shutdown(int32_t fd, int32_t how)` | Shuts down reading (0), writing (1) or both (2): 0 or -errno. |
 | `int32_t kern_net_set_nodelay(int32_t fd, uint8_t on)` | Turns TCP_NODELAY on or off: 0 or -errno. |
 | `int32_t kern_net_set_opt(int32_t fd, int32_t opt, int64_t value)` | Sets a socket option (1 keep-alive, 2 receive buffer, 3 send buffer, 4 broadcast, 5 hop limit, 6 linger seconds or -1, 7 no-delay): 0 or -errno. |
@@ -587,6 +600,7 @@ entry raises its traps.
 | `void kern_signal_close(void)` | Restores every caught signal's earlier disposition, discards the records and frees the claim. |
 | `int32_t kern_signal_set(int32_t which, int32_t how)` | Makes the signal ignored (how 1) or default (how 0): 0, -EBUSY when the live Signals holds it, or -errno. |
 | `int64_t kern_signal_wait(uint32_t mask, uint64_t ns, uint8_t timed)` | Returns the first recorded signal of mask and forgets it, waiting for one (at most ns nanoseconds when timed, then -2^32). |
+| `int32_t kern_signal_fd(void)` | Returns the descriptor that is readable while a caught signal has arrived and not been returned, for a readiness queue to watch: -1 before the first catch. |
 | `int32_t kern_signal_raise(int32_t which)` | Flushes standard output and sends the signal to the program's own process: 0 or -errno. |
 
 **rt_rand.c: std/rand**

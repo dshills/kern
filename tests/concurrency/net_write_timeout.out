@@ -1,0 +1,19 @@
+-- TCP
+empty data is Some(0): yes
+ten bytes are taken whole: yes
+with a zero duration, a peer that does not read ends in None: yes
+a full socket gives None after the 50 ms it was given: yes
+the peer read exactly the bytes the calls said were taken, in order: yes
+then a write is taken again: yes
+and read as written: yes
+a write to a closed peer is BrokenPipe or ConnectionReset: yes
+-- a Unix pair
+empty data is Some(0): yes
+ten bytes are taken whole: yes
+with a zero duration, a peer that does not read ends in None: yes
+a full socket gives None after the 50 ms it was given: yes
+the peer read exactly the bytes the calls said were taken, in order: yes
+then a write is taken again: yes
+and read as written: yes
+a write to a closed peer is BrokenPipe or ConnectionReset: yes
+done

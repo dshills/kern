@@ -90,9 +90,11 @@ func New(mod *ir.Module, file string, out, errOut io.Writer) *Interp {
 // sharedState is the process-wide interpreter state shared by every thread
 // (spawned threads are goroutines with their own Interp copy).
 type sharedState struct {
-	args          []string            // the program's arguments (std/io args)
-	files         map[int64]*os.File  // open files by descriptor (std/io)
-	socks         map[int64]*sock     // open sockets by descriptor (std/net)
+	args          []string           // the program's arguments (std/io args)
+	files         map[int64]*os.File // open files by descriptor (std/io)
+	socks         map[int64]*sock    // open sockets by descriptor (std/net)
+	sigSock       int64              // the descriptor that stands for the signal pipe's read end
+	sigSockOnce   sync.Once
 	fileOpts      map[int64]uint32    // the OpenOptions bits each open file was opened with
 	maps          map[uint64]*fileMap // file mappings by address (std/mem)
 	nextSock      int64

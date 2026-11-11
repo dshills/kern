@@ -1,0 +1,177 @@
+//! phase: 6
+//! expect: output net_write_timeout
+//! tsan: clean
+// write_timeout on a TcpStream and a UnixStream (specs/std-streams R8):
+// empty data is Some(0); a small write is taken whole; a peer that does
+// not read is written to until None, with a zero duration, which never
+// waits, and with one that does; the bytes the peer then reads are
+// exactly those the calls said were taken, in order; a write is taken
+// again afterwards; and a write to a closed peer is an error, not a
+// signal. How much a socket takes is the host's affair: nothing here
+// prints a count.
+module cc
+import "std/io"
+import "std/net"
+import "std/time"
+
+func say(s: view[]u8) { print_str(s); println() }
+func yes(what: view[]u8, ok: bool) {
+    print_str(what)
+    if ok { say(": yes") } else { say(": NO") }
+}
+
+// Byte k of what is written is k % 251, so a piece that starts at any
+// offset of the stream is a slice of this.
+func pattern() -> Vec[u8] {
+    v := Vec[u8].new()
+    for i in 0usize..4347usize { v.push(truncate[u8](i % 251usize)) }
+    return v
+}
+
+// exchange writes through write and reads the peer's end through read.
+func exchange(write: closure(view[]u8, time.Duration) -> Result[Option[usize], io.IoErr], read: closure(edit[]u8) -> Result[usize, io.IoErr]) -> Result[(), io.IoErr] {
+    pat := pattern()
+    with p := pat.as_view() {
+        match write(p[0usize : 0usize], time.millis(0u64))? {
+            Some(n) => yes("empty data is Some(0)", n == 0usize)
+            None => yes("empty data is Some(0)", false)
+        }
+        var sent: usize = 0usize
+        match write(p[0usize : 10usize], time.seconds(5u64))? {
+            Some(n) => {
+                sent = n
+                yes("ten bytes are taken whole", n == 10usize)
+            }
+            None => yes("ten bytes are taken whole", false)
+        }
+        // a zero duration: Some while the socket has room, then None
+        var none_at_once: bool = false
+        var rounds: u64 = 0u64
+        while !none_at_once && rounds < 1000000u64 {
+            at := sent % 251usize
+            match write(p[at : at + 4096usize], time.millis(0u64))? {
+                Some(n) => { sent = sent + n }
+                None => { none_at_once = true }
+            }
+            rounds = rounds + 1u64
+        }
+        yes("with a zero duration, a peer that does not read ends in None", none_at_once)
+        // the system may still be moving bytes to the peer's buffer:
+        // write until 20 ms pass with nothing taken
+        var full: bool = false
+        while !full {
+            at := sent % 251usize
+            match write(p[at : at + 4096usize], time.millis(20u64))? {
+                Some(n) => { sent = sent + n }
+                None => { full = true }
+            }
+        }
+        start := now_ns()
+        at := sent % 251usize
+        last := write(p[at : at + 4096usize], time.millis(50u64))?
+        waited := now_ns() - start
+        match last {
+            Some(n) => {
+                sent = sent + n
+                yes("a full socket gives None after the 50 ms it was given", false)
+            }
+            None => yes("a full socket gives None after the 50 ms it was given", waited >= 50000000u64)
+        }
+        // the peer reads what was sent
+        var got: usize = 0usize
+        var in_order: bool = true
+        var buf: [4096]u8 = zero()
+        while got < sent {
+            n := read(buf)?
+            if n == 0usize { break }
+            for i in 0usize..n {
+                if buf[i] != p[(got + i) % 251usize] { in_order = false }
+            }
+            got = got + n
+        }
+        yes("the peer read exactly the bytes the calls said were taken, in order", got == sent && in_order)
+        from := sent % 251usize
+        match write(p[from : from + 100usize], time.seconds(5u64))? {
+            Some(n) => {
+                yes("then a write is taken again", n > 0usize)
+                var more: usize = 0usize
+                while more < n {
+                    k := read(buf[0usize : n - more])?
+                    if k == 0usize { break }
+                    for i in 0usize..k {
+                        if buf[i] != p[(sent + more + i) % 251usize] { in_order = false }
+                    }
+                    more = more + k
+                }
+                yes("and read as written", more == n && in_order)
+            }
+            None => yes("then a write is taken again", false)
+        }
+    }
+    return Ok(())
+}
+
+// closed writes to a peer that is gone until the system says so. The
+// first writes of a TCP connection may be taken before it has learned.
+func closed(write: closure(view[]u8, time.Duration) -> Result[Option[usize], io.IoErr]) {
+    pat := pattern()
+    var told: bool = false
+    var tries: u64 = 0u64
+    with p := pat.as_view() {
+        while !told && tries < 500u64 {
+            match write(p[0usize : 100usize], time.millis(10u64)) {
+                Ok(r) => { time.sleep(time.millis(2u64)) }
+                Err(e) => {
+                    match io.kind(e) {
+                        BrokenPipe => { told = true }
+                        ConnectionReset => { told = true }
+                        _ => { tries = 500u64 }
+                    }
+                }
+            }
+            tries = tries + 1u64
+        }
+    }
+    yes("a write to a closed peer is BrokenPipe or ConnectionReset", told)
+}
+
+func tcp() -> Result[(), io.IoErr] {
+    say("-- TCP")
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    a := net.TcpStream.connect(l.local_addr()?)?
+    b := l.accept()?
+    // small buffers keep the test short; the system may give more
+    a.set_send_buffer(4096u32)?
+    b.set_recv_buffer(4096u32)?
+    exchange(|data, d| a.write_timeout(data, d), |buf| b.read(buf))?
+    drop(b)
+    closed(|data, d| a.write_timeout(data, d))
+    return Ok(())
+}
+
+func unix() -> Result[(), io.IoErr] {
+    say("-- a Unix pair")
+    match net.UnixStream.pair()? {
+        Ends(a, b) => {
+            a.set_send_buffer(4096u32)?
+            b.set_recv_buffer(4096u32)?
+            exchange(|data, d| a.write_timeout(data, d), |buf| b.read(buf))?
+            drop(b)
+            closed(|data, d| a.write_timeout(data, d))
+        }
+    }
+    return Ok(())
+}
+
+func main() -> i32 {
+    match tcp() {
+        Ok(u) => { }
+        Err(e) => say("TCP failed")
+    }
+    match unix() {
+        Ok(u) => { }
+        Err(e) => say("the pair failed")
+    }
+    say("done")
+    return 0i32
+}

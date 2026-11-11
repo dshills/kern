@@ -1,0 +1,271 @@
+//! phase: 6
+//! expect: output io_linebuf
+// io.LineBuf (specs/std-streams R2 to R6): bytes are fed and whole lines
+// taken, with "\n" or "\r\n" as the terminator, also when it is split
+// between two feeds; a "\r" elsewhere is content; take_rest hands over
+// what is held exactly as held; read_line reads a Reader only when no
+// whole line is held, returns a last line that nothing terminates, and
+// on an error loses nothing. The work is linear in the bytes, which the
+// last section measures against a single feed of the same run.
+module t
+import "std/io"
+func say(s: view[]u8) { print_str(s); println() }
+// show writes bytes with their carriage returns and newlines spelled out.
+func show(label: view[]u8, bytes: view[]u8) {
+    print_str(label)
+    print_str(" [")
+    for b in bytes {
+        if b == 13u8 {
+            print_str("\\r")
+        } else if b == 10u8 {
+            print_str("\\n")
+        } else {
+            var one: [1]u8 = [b]
+            print_str(one)
+        }
+    }
+    print_str("]")
+    println()
+}
+func pending(lb: view[io.LineBuf]) {
+    print_str("  pending ")
+    print_u64(u64(lb.pending()))
+    println()
+}
+// next takes one line and shows it, or says that there is none.
+func next(lb: edit[io.LineBuf]) {
+    line := Vec[u8].new()
+    if lb.next_line(line) {
+        show("  line", line.as_view())
+    } else {
+        print_str("  no whole line, and nothing appended: ")
+        print_bool(line.len() == 0usize)
+        println()
+    }
+}
+func rest(lb: edit[io.LineBuf]) {
+    line := Vec[u8].new()
+    if lb.take_rest(line) {
+        show("  rest", line.as_view())
+    } else {
+        say("  nothing held")
+    }
+}
+
+func fed() {
+    say("-- a new buffer")
+    lb := io.LineBuf.new()
+    pending(lb)
+    next(lb)
+    rest(lb)
+    say("-- two lines and a piece of a third")
+    lb.feed("ab\ncd\r\nef")
+    pending(lb)
+    next(lb)
+    pending(lb)
+    next(lb)
+    pending(lb)
+    next(lb)
+    pending(lb)
+    rest(lb)
+    pending(lb)
+    say("-- a terminator split between two feeds")
+    lb.feed("x\r")
+    next(lb)
+    lb.feed("\ny")
+    next(lb)
+    pending(lb)
+    rest(lb)
+    say("-- a carriage return that ends nothing, and empty lines")
+    lb.feed("a\rb\n\n\r\n")
+    next(lb)
+    next(lb)
+    next(lb)
+    next(lb)
+    say("-- a line is appended to what the vector holds")
+    lb.feed("")
+    lb.feed("tail\n")
+    line := Vec[u8].new()
+    line.extend("head:")
+    got := lb.next_line(line)
+    show("  line", line.as_view())
+    say("-- take_rest hands over whole lines too, as held")
+    lb.feed("a\nb\r\nc")
+    rest(lb)
+    pending(lb)
+}
+
+// A long line is consumed, which leaves a consumed front of more than
+// half the buffer; the next feed drops that front, and the unfinished
+// line that follows it must survive.
+func compacted() {
+    say("-- after a long line, an unfinished one is finished")
+    lb := io.LineBuf.new()
+    long := Vec[u8].new()
+    for i in 0usize..5000usize { long.push(46u8) }
+    long.extend("\npartial")
+    lb.feed(long.as_view())
+    line := Vec[u8].new()
+    got := lb.next_line(line)
+    print_str("  the long line's length: ")
+    print_u64(u64(line.len()))
+    println()
+    pending(lb)
+    lb.feed(" and more\nlast")
+    next(lb)
+    pending(lb)
+    rest(lb)
+}
+
+// Pieces is a Reader that hands out its bytes a few at a time.
+struct Pieces { data: Vec[u8]; at: usize; sizes: [3]usize; turn: usize; reads: u64 }
+impl io.Reader for Pieces {
+    func read(edit self, buf: edit[]u8) -> Result[usize, io.IoErr] {
+        self.reads = self.reads + 1u64
+        var n: usize = self.sizes[self.turn % 3usize]
+        self.turn = self.turn + 1usize
+        if n > self.data.len() - self.at { n = self.data.len() - self.at }
+        if n > len(buf) { n = len(buf) }
+        for i in 0usize..n { buf[i] = self.data.get(self.at + i) }
+        self.at = self.at + n
+        return Ok(n)
+    }
+}
+// Failing gives two bytes, one byte, and then an error.
+struct Failing { reads: u64 }
+impl io.Reader for Failing {
+    func read(edit self, buf: edit[]u8) -> Result[usize, io.IoErr] {
+        self.reads = self.reads + 1u64
+        if self.reads == 1u64 {
+            buf[0usize] = 97u8
+            buf[1usize] = 98u8
+            return Ok(2usize)
+        }
+        if self.reads == 2u64 {
+            buf[0usize] = 99u8
+            return Ok(1usize)
+        }
+        return Err(io.error_of(io.ErrKind.Other))
+    }
+}
+
+func read_lines() -> Result[(), io.IoErr] {
+    say("-- read_line over a reader that gives 1, 2 and 5 bytes in turn")
+    data := Vec[u8].new()
+    data.extend("one\ntwo\r\n\nthree")
+    r := Pieces { data: data, at: 0usize, sizes: [1usize, 2usize, 5usize], turn: 0usize, reads: 0u64 }
+    lb := io.LineBuf.new()
+    var more: bool = true
+    while more {
+        line := Vec[u8].new()
+        more = lb.read_line(r, line)?
+        if more {
+            show("  line", line.as_view())
+        } else {
+            print_str("  the end, with nothing appended: ")
+            print_bool(line.len() == 0usize)
+            println()
+        }
+    }
+    say("-- a line that was read ahead costs no read")
+    data2 := Vec[u8].new()
+    data2.extend("a\nb\nc\n")
+    r2 := Pieces { data: data2, at: 0usize, sizes: [6usize, 6usize, 6usize], turn: 0usize, reads: 0u64 }
+    lb2 := io.LineBuf.new()
+    for k in 0u64..3u64 {
+        line := Vec[u8].new()
+        got := lb2.read_line(r2, line)?
+        show("  line", line.as_view())
+        print_str("  reads so far: ")
+        print_u64(r2.reads)
+        println()
+    }
+    return Ok(())
+}
+
+func read_fails() {
+    say("-- a reader that fails on its third read")
+    f := Failing { reads: 0u64 }
+    lb := io.LineBuf.new()
+    line := Vec[u8].new()
+    match lb.read_line(f, line) {
+        Ok(more) => say("  no error")
+        Err(e) => {
+            print_str("  the error is returned, nothing appended: ")
+            print_bool(line.len() == 0usize)
+            println()
+        }
+    }
+    pending(lb)
+    rest(lb)
+}
+
+// cost compares three loads in this run: (a) one line of 65,536 bytes in
+// one feed; (b) the same line a byte at a time, asking for a line after
+// every byte; (c) 100,000 lines of ten bytes in one feed, taken one by
+// one. A buffer that searched its bytes again at every call, or moved
+// them at every line, would take thousands of times (a).
+func cost() {
+    say("-- the work is linear in the bytes")
+    big := Vec[u8].new()
+    for i in 0usize..65536usize { big.push(120u8) }
+    big.push(10u8)
+    line := Vec[u8].new()
+    a := io.LineBuf.new()
+    t0 := now_ns()
+    a.feed(big.as_view())
+    whole := a.next_line(line)
+    ta := now_ns() - t0
+    first := line.len()
+    line.clear()
+    b := io.LineBuf.new()
+    var lines_b: u64 = 0u64
+    t1 := now_ns()
+    with v := big.as_view() {
+        for i in 0usize..len(v) {
+            b.feed(v[i : i + 1usize])
+            if b.next_line(line) { lines_b = lines_b + 1u64 }
+        }
+    }
+    tb := now_ns() - t1
+    second := line.len()
+    many := Vec[u8].new()
+    for i in 0usize..100000usize { many.extend("123456789\n") }
+    c := io.LineBuf.new()
+    var lines_c: u64 = 0u64
+    t2 := now_ns()
+    c.feed(many.as_view())
+    line.clear()
+    while c.next_line(line) {
+        lines_c = lines_c + 1u64
+        line.clear()
+    }
+    tc := now_ns() - t2
+    print_str("  the lines came out whole: ")
+    print_bool(whole && first == 65536usize && second == 65536usize && lines_b == 1u64 && lines_c == 100000u64)
+    println()
+    limit := ta * 400u64 + 1000000000u64
+    if tb < limit && tc < limit {
+        say("  a byte at a time, and many short lines: within the limit")
+    } else {
+        print_str("  over the limit, in nanoseconds: ")
+        print_u64(ta)
+        print_str(" ")
+        print_u64(tb)
+        print_str(" ")
+        print_u64(tc)
+        println()
+    }
+}
+
+func main() -> i32 {
+    fed()
+    compacted()
+    match read_lines() {
+        Ok(u) => { }
+        Err(e) => say("a read failed")
+    }
+    read_fails()
+    cost()
+    return 0i32
+}

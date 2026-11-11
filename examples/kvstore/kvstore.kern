@@ -15,12 +15,15 @@
 //     QUIT               BYE                and the connection is closed
 //
 // How it is built:
-//   - One thread waits on a net.Poller for the listener and every
-//     connection, and reads only what is ready, so no connection waits
-//     for another to speak. (Replies are written without waiting for
-//     readiness: a client that sent a great deal and read none of the
-//     replies would hold the loop. A server for strangers would watch
-//     for writability too.)
+//   - One thread waits on a net.Poller for the listener, every
+//     connection and the signals, and reads only what is ready, so no
+//     connection waits for another to speak. What arrives goes into the
+//     connection's io.LineBuf, which hands back whole lines.
+//   - Nor does one wait for another to listen: replies are offered to a
+//     socket with a write that never waits (write_timeout of no
+//     duration). What the socket does not take stays owed, and the
+//     socket is watched until it can take more. A client that is owed
+//     more than a megabyte is not read until it has taken it.
 //   - Every change is a record appended to the log file. The records of
 //     one round of the loop are written and synced together, and only
 //     then are that round's replies sent: an OK means the change is on
@@ -31,11 +34,13 @@
 //     over the log, so the log is whole at every moment. (A store that
 //     must survive a power failure during the rename would sync the
 //     directory too.)
-//   - Interrupt and Terminate end the loop at the next round.
+//   - Interrupt and Terminate are caught, and the Signals is watched by
+//     the same Poller: the loop sleeps until there is something to do,
+//     and a signal is one of the things.
 //
 // With no arguments the program starts a server on a port of the
-// system's choosing, talks to it from two connections, stops it and reads
-// the log again, which is how it runs as a test.
+// system's choosing, talks to it from two connections, stops it with a
+// signal and reads the log again, which is how it runs as a test.
 module kvstore
 import "std/io"
 import "std/map"
@@ -232,11 +237,12 @@ func execute(store: edit[Store], line: view[]u8, to: edit[Vec[u8]]) -> bool {
 
 // ---- the server ----
 
-// Conn is a connection: what it sent that is not a whole line yet, and
-// the replies it is owed.
-struct Conn { stream: net.TcpStream; inbuf: Vec[u8]; owed: Vec[u8]; open: bool }
+// Conn is a connection: the bytes it sent that are not a whole line yet,
+// the replies it is owed, and what it is watched for.
+struct Conn { stream: net.TcpStream; lines: io.LineBuf; owed: Vec[u8]; open: bool; reading: bool; writing: bool }
 
 const max_line: usize = 65536usize
+const max_owed: usize = 1048576usize
 
 // feed reads what a connection has ready and runs every whole line of it.
 func feed(c: edit[Conn], store: edit[Store], served: edit[u64]) {
@@ -247,52 +253,60 @@ func feed(c: edit[Conn], store: edit[Store], served: edit[u64]) {
                 c.open = false
                 return
             }
-            c.inbuf.extend(buf[0usize : n])
+            c.lines.feed(buf[0usize : n])
         }
         Err(e) => {
             c.open = false
             return
         }
     }
-    var open: bool = true
-    rest := Vec[u8].new()
-    with b := c.inbuf.as_view() {
-        var start: usize = 0usize
-        var i: usize = 0usize
-        while i < len(b) && open {
-            if b[i] == 10u8 {
-                var end: usize = i
-                if end > start && b[end - 1usize] == 13u8 { end = end - 1usize }
-                open = execute(store, b[start : end], c.owed)
-                served = served + 1u64
-                start = i + 1usize
-            }
-            i = i + 1usize
-        }
-        rest.extend(b[start : len(b)])
+    line := Vec[u8].new()
+    while c.open && c.lines.next_line(line) {
+        c.open = execute(store, line.as_view(), c.owed)
+        served = served + 1u64
+        line.clear()
     }
-    c.inbuf = rest
-    if c.inbuf.len() > max_line {
+    if c.open && c.lines.pending() > max_line {
         c.owed.extend("ERR line too long\n")
-        open = false
+        c.open = false
     }
-    if !open { c.open = false }
 }
 
-// settle sends a connection the replies it is owed, and closes it when
-// it is finished. Closing the socket ends its watch.
-func settle(slot: edit[Option[Conn]]) {
+// settle offers a connection the replies it is owed, without waiting for
+// it to take them, and sets what the connection is watched for: writing
+// while something is owed, reading unless it is finished or owed too
+// much. A connection that is finished is closed once nothing is owed,
+// and closing the socket ends its watch.
+func settle(slot: edit[Option[Conn]], p: edit[net.Poller], token: u64) {
     var close: bool = false
     match slot {
         Some(c) => {
             if c.owed.len() > 0usize {
-                match c.stream.write_all(c.owed.as_view()) {
-                    Ok(u) => { }
-                    Err(e) => { c.open = false }
+                match c.stream.write_timeout(c.owed.as_view(), time.millis(0u64)) {
+                    Ok(took) => {
+                        match took {
+                            Some(n) => c.owed.remove_prefix(n)
+                            None => { }
+                        }
+                    }
+                    Err(e) => {
+                        c.open = false
+                        c.owed.clear()
+                    }
                 }
-                c.owed.clear()
             }
-            close = !c.open
+            writing := c.owed.len() > 0usize
+            reading := c.open && c.owed.len() <= max_owed
+            close = !reading && !writing
+            if !close && (reading != c.reading || writing != c.writing) {
+                match p.watch(c.stream, token, reading, writing) {
+                    Ok(u) => {
+                        c.reading = reading
+                        c.writing = writing
+                    }
+                    Err(e) => { close = true }
+                }
+            }
         }
         None => { }
     }
@@ -306,8 +320,11 @@ func is_free(slot: view[Option[Conn]]) -> bool {
     }
 }
 
-// accept_all takes every connection that waits, and watches each under
-// the number of its slot plus one: 0 is the listener's.
+// The listener is watched under token 0 and the signals under token 1; a
+// connection under the number of its slot plus first_conn.
+const first_conn: u64 = 2u64
+
+// accept_all takes every connection that waits.
 func accept_all(l: edit[net.TcpListener], p: edit[net.Poller], conns: edit[Vec[Option[Conn]]]) -> Result[(), io.IoErr] {
     while true {
         match l.accept_timeout(time.millis(0u64))? {
@@ -318,8 +335,8 @@ func accept_all(l: edit[net.TcpListener], p: edit[net.Poller], conns: edit[Vec[O
                     if is_free(conns.get(i)) { at = i }
                     i = i + 1usize
                 }
-                p.watch(s, u64(at) + 1u64, true, false)?
-                c := Conn { stream: s, inbuf: Vec[u8].new(), owed: Vec[u8].new(), open: true }
+                p.watch(s, u64(at) + first_conn, true, false)?
+                c := Conn { stream: s, lines: io.LineBuf.new(), owed: Vec[u8].new(), open: true, reading: true, writing: false }
                 if at == conns.len() {
                     conns.push(Some(c))
                 } else {
@@ -332,22 +349,32 @@ func accept_all(l: edit[net.TcpListener], p: edit[net.Poller], conns: edit[Vec[O
     return Ok(())
 }
 
-// serve runs the loop until stop says so, and returns the number of
-// lines it ran.
-func serve(l: own net.TcpListener, store: edit[Store], stop: closure() -> bool) -> Result[u64, io.IoErr] {
+// serve runs the loop until one of the signals arrives, and returns the
+// number of lines it ran.
+func serve(l: own net.TcpListener, store: edit[Store], sigs: edit[signal.Signals]) -> Result[u64, io.IoErr] {
     p := net.Poller.new()?
     p.watch(l, 0u64, true, false)?
+    p.watch(sigs, 1u64, true, false)?
     events := Vec[net.Ready].new()
     conns := Vec[Option[Conn]].new()
     var served: u64 = 0u64
-    while !stop() {
-        n := p.wait_timeout(events, time.millis(50u64))?
+    var stopping: bool = false
+    while !stopping {
+        n := p.wait(events)?
         for k in 0usize..n {
             e := events.get(k)
             if e.token == 0u64 {
                 accept_all(l, p, conns)?
-            } else {
-                with slot := conns.at(usize(e.token - 1u64)) {
+            } else if e.token == 1u64 {
+                // a report says a signal may have arrived: ask until none has
+                while true {
+                    match sigs.try_next() {
+                        Some(which) => { stopping = true }
+                        None => { break }
+                    }
+                }
+            } else if e.readable || e.closed || e.failed {
+                with slot := conns.at(usize(e.token - first_conn)) {
                     match slot {
                         Some(c) => feed(c, store, served)
                         None => { }
@@ -358,7 +385,7 @@ func serve(l: own net.TcpListener, store: edit[Store], stop: closure() -> bool) 
         // the round's records reach the disk before any of its replies
         // reaches a client
         commit(store)?
-        for i in 0usize..conns.len() { settle(conns.at(i)) }
+        for i in 0usize..conns.len() { settle(conns.at(i), p, u64(i) + first_conn) }
     }
     return Ok(served)
 }
@@ -366,13 +393,6 @@ func serve(l: own net.TcpListener, store: edit[Store], stop: closure() -> bool) 
 // ---- the program ----
 
 func say(s: view[]u8) { print_str(s); println() }
-
-func caught(s: Option[signal.Signal]) -> bool {
-    match s {
-        Some(which) => { return true }
-        None => { return false }
-    }
-}
 
 func run(address: view[]u8, path: view[]u8) -> Result[u64, io.IoErr] {
     match net.parse_addr(address) {
@@ -385,7 +405,7 @@ func run(address: view[]u8, path: view[]u8) -> Result[u64, io.IoErr] {
             say(net.format_addr(l.local_addr()?).as_view())
             sigs := signal.catch(signal.Signal.Interrupt)
             sigs.add(signal.Signal.Terminate)
-            return serve(l, store, || caught(sigs.try_next()))
+            return serve(l, store, sigs)
         }
         None => { return Err(io.error_of(io.ErrKind.InvalidInput)) }
     }
@@ -464,6 +484,19 @@ func converse(at: net.SocketAddr) -> Result[(), io.IoErr] {
     ask(b, "b", "FLY away")?
     ask(b, "b", "SET lonely")?
     ask(b, "b", "GET")?
+    say("-- five thousand commands sent before a reply is read")
+    many := Vec[u8].new()
+    for i in 0usize..5000usize { many.extend("COUNT\n") }
+    a.stream.write_all(many.as_view())?
+    var same: u64 = 0u64
+    line := Vec[u8].new()
+    for i in 0usize..5000usize {
+        reply(a, line)?
+        if str.equal(line.as_view(), "COUNT 3") { same = same + 1u64 }
+    }
+    print_str("a< COUNT 3, ")
+    print_u64(same)
+    say(" times")
     say("-- leaving")
     ask(b, "b", "QUIT")?
     var buf: [8]u8 = zero()
@@ -472,17 +505,24 @@ func converse(at: net.SocketAddr) -> Result[(), io.IoErr] {
     return Ok(())
 }
 
-// demo_server is the server's thread: it opens the store and serves
-// until the flag is raised.
-func demo_server(l: own net.TcpListener, path: own Vec[u8], flag: own Shared[Atomic[u32]]) -> u64 {
+// demo_server is the server's thread: it opens the store, catches the
+// signals and says that it has (1), or that it could not start (2), and
+// serves until a signal arrives.
+func demo_server(l: own net.TcpListener, path: own Vec[u8], ready: own Shared[Atomic[u32]]) -> u64 {
     match open_store(path.as_view()) {
         Ok(store) => {
-            match serve(l, store, || flag.get().load(Ordering.seq_cst) != 0u32) {
+            sigs := signal.catch(signal.Signal.Interrupt)
+            sigs.add(signal.Signal.Terminate)
+            ready.get().store(1u32, Ordering.seq_cst)
+            match serve(l, store, sigs) {
                 Ok(n) => { return n }
                 Err(e) => { return 0u64 }
             }
         }
-        Err(e) => { return 0u64 }
+        Err(e) => {
+            ready.get().store(2u32, Ordering.seq_cst)
+            return 0u64
+        }
     }
 }
 
@@ -518,11 +558,18 @@ func demo_in(dir: view[]u8) -> Result[(), io.IoErr] {
     path := io.join(dir, "store.log")
     l := net.TcpListener.bind(net.loopback_v4(0u16))?
     at := l.local_addr()?
-    flag := Shared[Atomic[u32]].new(Atomic[u32].new(0u32))
-    match thread.spawn(demo_server, l, path.clone(), flag.clone()) {
+    ready := Shared[Atomic[u32]].new(Atomic[u32].new(0u32))
+    match thread.spawn(demo_server, l, path.clone(), ready.clone()) {
         Ok(t) => {
-            talked := converse(at)
-            flag.get().store(1u32, Ordering.seq_cst)
+            while ready.get().load(Ordering.seq_cst) == 0u32 { yield_now() }
+            var talked: Result[(), io.IoErr] = Ok(())
+            if ready.get().load(Ordering.seq_cst) == 1u32 {
+                talked = converse(at)
+                // the server has caught Terminate, so this ends its loop,
+                // not the program
+                say("-- the server is sent Terminate")
+                signal.raise(signal.Signal.Terminate)
+            }
             served := t.join()
             talked?
             print_str("the server ran ")

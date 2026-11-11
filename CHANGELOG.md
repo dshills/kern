@@ -20,6 +20,21 @@ section of this file into a GitHub release is `docs/releasing.md`.
 - The reference no longer speaks of payload fields a pattern leaves
   unbound: a pattern names every field of its variant.
 
+### Standard library
+
+- `io.LineBuf` splits bytes into lines without owning where they come
+  from: the program feeds it what it has read (from a socket it also
+  writes to, or in pieces as a `Poller` reports them) and takes whole
+  lines out with `next_line`; `read_line` does both over any `Reader`.
+- `TcpStream.write_timeout` and `UnixStream.write_timeout` send what the
+  socket will take within a duration; with no duration they never wait,
+  which is how one thread writes to many connections.
+- A `signal.Signals` can be watched by a `net.Poller`, so one wait
+  serves sockets and signals. `std/net` imports `std/signal` for it.
+- `Vec.remove_prefix(n)` drops the first `n` elements and keeps the
+  rest in place and in order.
+- `str.ends_with`.
+
 ### Runtimes and targets
 
 - Fixed: in a native program, the handle of a scoped thread (`Join`)
@@ -36,6 +51,9 @@ section of this file into a GitHub release is `docs/releasing.md`.
   spawns, where it was the reverse order of the handles.
 - The runtime's interface version is 3 (`kern_rt_abi_3`): the contracts
   of `kern_join_get`, `kern_join_drop` and `kern_scope_drop` changed.
+  Two entries were added, `kern_net_send_timeout` and `kern_signal_fd`,
+  and `kern_net_poller_set` refuses write interest in the signal
+  descriptor.
 
 ### Tooling
 
@@ -60,7 +78,9 @@ section of this file into a GitHub release is `docs/releasing.md`.
   - `kvstore`: a key-value server that one thread runs for every
     connection on a `net.Poller`, with an append-only log synced once a
     round before the round's replies are sent, replayed at start, and
-    rewritten by `COMPACT`.
+    rewritten by `COMPACT`. It writes without waiting for a client to
+    read, and sleeps until a connection or a signal has something for
+    it.
   - `ksearch`: a search for a pattern (a small regular-expression
     dialect) over directory trees: one thread walks, the others search
     mapped files, and the results are sorted by path.

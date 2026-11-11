@@ -1113,3 +1113,92 @@ impl[W: Writer] Writer for BufWriter[W] {
         }
     }
 }
+
+// ---- line buffers (specs/std-streams) ----
+
+// LineBuf splits bytes into lines without owning where they come from:
+// the program feeds it what it has read, from a socket it also writes
+// to, or in pieces as a Poller reports them, and takes whole lines out.
+// A line ends with "\n" or "\r\n"; a "\r" elsewhere is part of the line.
+// It keeps what it is fed until it is taken, without a limit: a program
+// that must bound an unfinished line looks at pending().
+//
+// buf[start:] are the bytes held, and no "\n" lies before scanned, so a
+// long line that arrives in many pieces is searched once, not once a
+// piece. The consumed front is dropped when it is at least half of buf.
+struct LineBuf nocopy { buf: Vec[u8]; start: usize; scanned: usize }
+
+impl LineBuf {
+    func new() -> LineBuf { return LineBuf { buf: Vec[u8].new(), start: 0usize, scanned: 0usize } }
+
+    // feed appends bytes to what is held.
+    func feed(edit self, bytes: view[]u8) {
+        if self.start >= 4096usize && self.start >= self.buf.len() - self.start {
+            self.buf.remove_prefix(self.start)
+            self.scanned = self.scanned - self.start
+            self.start = 0usize
+        }
+        self.buf.extend(bytes)
+    }
+
+    // pending is the number of bytes held.
+    func pending(view self) -> usize { return self.buf.len() - self.start }
+
+    // next_line appends the first whole line to line, without its
+    // terminator, and returns true; when no whole line is held it returns
+    // false and changes nothing.
+    func next_line(edit self, line: edit[Vec[u8]]) -> bool {
+        n := self.buf.len()
+        var i: usize = self.scanned
+        var found: bool = false
+        with b := self.buf.as_view() {
+            while i < n && b[i] != 10u8 { i = i + 1usize }
+            if i < n {
+                var end: usize = i
+                if end > self.start && b[end - 1usize] == 13u8 { end = end - 1usize }
+                line.extend(b[self.start : end])
+                found = true
+            }
+        }
+        if !found {
+            self.scanned = n
+            return false
+        }
+        self.start = i + 1usize
+        self.scanned = self.start
+        if self.start == n { self.reset() }
+        return true
+    }
+
+    // take_rest appends everything held to line, exactly as held, and
+    // returns true; false when nothing is held. It is how a last line
+    // that no terminator ends is taken.
+    func take_rest(edit self, line: edit[Vec[u8]]) -> bool {
+        if self.buf.len() == self.start { return false }
+        with b := self.buf.as_view() { line.extend(b[self.start : len(b)]) }
+        self.reset()
+        return true
+    }
+
+    func reset(edit self) {
+        self.buf.clear()
+        self.start = 0usize
+        self.scanned = 0usize
+    }
+
+    // read_line appends the next line of r to line, reading r only when
+    // no whole line is held, and returns true; at the end of r what is
+    // left is a line, and false means the end with nothing left. What
+    // was read past the line stays held for the next call. An error of
+    // r is returned with line unchanged and nothing lost.
+    func read_line[R: Reader](edit self, r: edit[R], line: edit[Vec[u8]]) -> Result[bool, IoErr] {
+        var chunk: [4096]u8 = zero()
+        while true {
+            if self.next_line(line) { return Ok(true) }
+            n := r.read(chunk)?
+            if n == 0usize { return Ok(self.take_rest(line)) }
+            self.feed(chunk[0usize : n])
+        }
+        return Ok(false)
+    }
+}

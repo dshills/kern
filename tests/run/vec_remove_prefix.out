@@ -1,0 +1,21 @@
+numbers
+  none removed: 0 1 2 3 4 5 6 7 8 9 (length 10)
+  three removed: 3 4 5 6 7 8 9 (length 7)
+  one more: 4 5 6 7 8 9 (length 6)
+  and one pushed: 4 5 6 7 8 9 100 (length 7)
+  the capacity is what it was: true
+  all removed: (length 0)
+  usable after: 7 (length 1)
+values with destructors
+  the first three go, last of them first
+  drop 3
+  drop 2
+  drop 1
+  what is left: 4 5 6
+  none of the first
+  the vector is destroyed, last element first
+  drop 6
+  drop 5
+  drop 4
+elements of no size
+  length 3

@@ -1,0 +1,13 @@
+//! phase: 6
+//! expect: trap bounds
+// Vec.remove_prefix traps bounds when asked for more elements than the
+// vector has (specs/std-streams R1).
+module t
+func main() -> i32 {
+    v := Vec[u64].new()
+    v.push(1u64)
+    v.push(2u64)
+    n := v.len() + 1usize
+    v.remove_prefix(n)
+    return 0i32
+}

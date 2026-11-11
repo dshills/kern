@@ -47,6 +47,49 @@ var sigs struct {
 	wake    chan struct{}
 	own     bool           // the program owns the process's signals
 	dflt    chan os.Signal // the signals asked for so as to give them the system's default
+	// pipe is the runtime's signal pipe (rt_signal.c): a byte is written
+	// for every arrival recorded, so that its read end is readable while
+	// one waits and a Poller can watch it (specs/std-streams R9). It is
+	// made at the first catch and kept for the life of the process.
+	pipe    [2]int
+	hasPipe bool
+}
+
+// sigNote writes the byte that says "look at the bits"; a full pipe
+// already says it. The caller holds sigs.mu.
+func sigNote() {
+	if sigs.hasPipe {
+		_, _ = syscall.Write(sigs.pipe[1], []byte{0})
+	}
+}
+
+// sigDrain empties the pipe. The caller holds sigs.mu.
+func sigDrain() {
+	if !sigs.hasPipe {
+		return
+	}
+	var buf [64]byte
+	for {
+		n, err := syscall.Read(sigs.pipe[0], buf[:])
+		if n <= 0 || err != nil {
+			return
+		}
+	}
+}
+
+// signalFD is the runtime's kern_signal_fd: a descriptor of the program's
+// that stands for the pipe's read end, the same one every time.
+func signalFD(it *Interp, _ []Value, _ callCtx) []Value {
+	sigs.mu.Lock()
+	ok, fd := sigs.hasPipe, sigs.pipe[0]
+	sigs.mu.Unlock()
+	if !ok {
+		return i32Val(-1)
+	}
+	it.sh.sigSockOnce.Do(func() {
+		it.sh.sigSock = it.addSock(&sock{raw: fd, hasRaw: true, signal: true})
+	})
+	return i32Val(int32(it.sh.sigSock))
 }
 
 // sigFatal are the signals whose default the interpreter must supply:
@@ -122,6 +165,7 @@ func init() {
 		"signal_set":   signalSet,
 		"signal_wait":  signalWait,
 		"signal_raise": signalRaise,
+		"signal_fd":    signalFD,
 		"rand_fill":    randFill,
 	} {
 		intrinsics[k] = v
@@ -142,6 +186,7 @@ func releaseSignals() {
 		signal.Stop(sigs.dflt)
 	}
 	sigs.held, sigs.pending, sigs.ignored, sigs.live, sigs.own = 0, 0, 0, false, false
+	sigDrain()
 }
 
 func signalOpen(_ *Interp, _ []Value, _ callCtx) []Value {
@@ -149,6 +194,17 @@ func signalOpen(_ *Interp, _ []Value, _ callCtx) []Value {
 	defer sigs.mu.Unlock()
 	if sigs.live {
 		return i32Val(-int32(syscall.EBUSY))
+	}
+	if !sigs.hasPipe {
+		var p [2]int
+		if err := syscall.Pipe(p[:]); err != nil {
+			return i32Val(-int32(errnoOf(err)))
+		}
+		for _, fd := range p {
+			syscall.CloseOnExec(fd)
+			_ = syscall.SetNonblock(fd, true)
+		}
+		sigs.pipe, sigs.hasPipe = p, true
 	}
 	sigs.live = true
 	if sigs.ch == nil {
@@ -160,6 +216,7 @@ func signalOpen(_ *Interp, _ []Value, _ callCtx) []Value {
 				for i, n := range sigNumbers {
 					if s == n && sigs.held&(1<<i) != 0 {
 						sigs.pending |= 1 << i
+						sigNote()
 					}
 				}
 				sigs.mu.Unlock()
@@ -197,6 +254,7 @@ func signalClose(_ *Interp, _ []Value, _ callCtx) []Value {
 		signal.Stop(sigs.ch)
 	}
 	sigs.held, sigs.pending, sigs.live = 0, 0, false
+	sigDrain()
 	return nil
 }
 
@@ -243,6 +301,13 @@ func signalWait(_ *Interp, a []Value, _ callCtx) []Value {
 				return i64Val(int64(i))
 			}
 		}
+		// Nothing wanted is recorded, which is to say nothing is: one
+		// Signals exists at a time and its mask is every signal held. The
+		// pipe is emptied, so that it is readable only for an arrival
+		// recorded from here on. The lock that guards the record also
+		// guards the byte written for it, so no arrival lies between
+		// this look and the emptying.
+		sigDrain()
 		wake := sigs.wake
 		sigs.mu.Unlock()
 		if !timed {
@@ -281,6 +346,7 @@ func signalRaise(_ *Interp, a []Value, _ callCtx) []Value {
 		sigs.mu.Lock()
 		if held {
 			sigs.pending |= 1 << i
+			sigNote()
 		}
 		wake := sigs.wake
 		sigs.mu.Unlock()

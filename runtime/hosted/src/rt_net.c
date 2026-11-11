@@ -542,6 +542,8 @@ int32_t kern_net_poller_new(void) {
 }
 int32_t kern_net_poller_set(int32_t p, int32_t fd, uint64_t token, int32_t interest) {
     if (interest < 0 || interest > 3) return -EINVAL;
+    // the signal pipe's read end is never written to (specs/std-streams R9)
+    if ((interest & 2) && fd >= 0 && fd == kern_signal_fd()) return -EINVAL;
 #if defined(__linux__)
     if (interest == 0) return epoll_ctl(p, EPOLL_CTL_DEL, fd, NULL) < 0 ? -errno : 0;
     struct epoll_event ev;
@@ -673,6 +675,23 @@ int64_t kern_net_send(int32_t fd, const char *p, int64_t n) {
         if (errno == EINTR) continue;
         if (!kern_net_would_block(errno)) return -errno;
         int w = kern_net_wait(fd, POLLOUT, 0, 0, 0);
+        if (w < 0) return w;
+    }
+}
+// kern_net_send_timeout is kern_net_send that gives up: it offers the
+// bytes, and when the socket takes none waits for it to be writable, for
+// what is left of ns nanoseconds, and offers them again. A wait that
+// ends on the deadline is followed by no offer (specs/std-streams R8).
+int64_t kern_net_send_timeout(int32_t fd, const char *p, int64_t n, uint64_t ns) {
+    if (n <= 0) return 0;
+    uint64_t start = kern_now_ns();
+    for (;;) {
+        ssize_t r = send(fd, p, (size_t)n, KERN_SEND_FLAGS);
+        if (r >= 0) return (int64_t)r;
+        if (errno == EINTR) continue;
+        if (!kern_net_would_block(errno)) return -errno;
+        int w = kern_net_wait(fd, POLLOUT, 1, start, ns);
+        if (w == 0) return KERN_TIMED_OUT;
         if (w < 0) return w;
     }
 }

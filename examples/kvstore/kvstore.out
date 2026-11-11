@@ -29,11 +29,14 @@ b> SET lonely
 b< ERR usage: SET key value
 b> GET
 b< ERR usage: GET key
+-- five thousand commands sent before a reply is read
+a< COUNT 3, 5000 times
 -- leaving
 b> QUIT
 b< BYE
 b: the server closed the connection
-the server ran 16 lines
+-- the server is sent Terminate
+the server ran 5016 lines
 -- the log, read by a new store
 3 entries from 5 records
 lang = kern

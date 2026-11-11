@@ -26,6 +26,10 @@ func signal_close()
 func signal_set(which: u32, how: i32) -> i32
 func signal_wait(mask: u32, ns: u64, timed: bool) -> i64
 func signal_raise(which: u32) -> i32
+// signal_fd is the descriptor that is readable while a caught signal has
+// arrived and not been returned: what std/net's Poller watches for a
+// Signals. It is -1 until the program has caught a signal.
+func signal_fd() -> i32
 
 // Signal names the signals a program can catch, ignore or raise: an
 // interrupt from the keyboard (SIGINT), a request to end (SIGTERM), the

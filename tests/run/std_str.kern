@@ -29,5 +29,17 @@ func main() -> i32 {
     }
     print_u64(str.hash("abc") % 1000u64)
     println()
+    // ends_with (specs/std-streams R7): a suffix, the whole, the empty
+    // suffix, one longer than the text, and one that differs
+    print_bool(str.ends_with("hello.kern", ".kern"))
+    print_bool(str.ends_with("hello", "hello"))
+    print_bool(str.ends_with("hello", ""))
+    print_bool(str.ends_with("", ""))
+    println()
+    print_bool(str.ends_with("lo", "hello"))
+    print_bool(str.ends_with("hello.kern", ".kerm"))
+    print_bool(str.ends_with("hello.kern", "hello"))
+    print_bool(str.ends_with("", "x"))
+    println()
     return 0i32
 }

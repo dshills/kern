@@ -37,6 +37,9 @@ type sock struct {
 	// above (std/net's Descriptor); it is the system's own number
 	raw    int
 	hasRaw bool
+	// signal marks the process's signal pipe (std/signal): it is watched
+	// for reading only and is never the program's to close
+	signal bool
 }
 
 // poller is a readiness queue: the system's (kqueue or epoll), and the
@@ -135,6 +138,7 @@ func init() {
 		"net_unix_pair":      netUnixPair,
 		"net_recv":           netRecv,
 		"net_send":           netSend,
+		"net_send_timeout":   netSendTimeout,
 		"net_shutdown":       netShutdown,
 		"net_set_nodelay":    netSetNodelay,
 		"net_set_opt":        netSetOpt,
@@ -494,6 +498,61 @@ func netSend(it *Interp, a []Value, _ callCtx) []Value {
 	return i64Val(0)
 }
 
+// netSendTimeout is the runtime's kern_net_send_timeout (specs/std-streams
+// R8): the bytes are offered to the socket itself, not through Go's Write,
+// which would go on until it had sent them all. A duration of zero makes
+// one offer and never waits. Any other sets a write deadline and lets Go
+// wait for the socket to be writable between offers: Go fails the call
+// once the deadline has passed without making another offer.
+func netSendTimeout(it *Interp, a []Value, _ callCtx) []Value {
+	data := seqBytes(acc(a[1]))
+	if len(data) == 0 {
+		return i64Val(0)
+	}
+	s := it.sockOf(a[0])
+	if s == nil || s.conn == nil {
+		return i64Val(-int64(syscall.EBADF))
+	}
+	sc, ok := s.conn.(syscall.Conn)
+	if !ok {
+		return i64Val(-int64(syscall.EBADF))
+	}
+	rc, err := sc.SyscallConn()
+	if err != nil {
+		return i64Val(netErr(err))
+	}
+	ns := a[2].(Int).Bits
+	wait := ns != 0
+	if wait {
+		_ = s.conn.SetWriteDeadline(time.Now().Add(time.Duration(min(ns, uint64(1<<62)))))
+	} else {
+		_ = s.conn.SetWriteDeadline(time.Time{})
+	}
+	defer func() { _ = s.conn.SetWriteDeadline(time.Time{}) }()
+	var n int
+	var werr error
+	err = rc.Write(func(fd uintptr) bool {
+		for {
+			n, werr = syscall.Write(int(fd), data)
+			if werr != syscall.EINTR {
+				break
+			}
+		}
+		// done, unless the socket took nothing and there is time to wait
+		full := werr == syscall.EAGAIN || werr == syscall.EWOULDBLOCK
+		return !wait || !full
+	})
+	switch {
+	case err != nil:
+		return i64Val(netErr(err)) // the deadline passed while it waited
+	case werr == syscall.EAGAIN || werr == syscall.EWOULDBLOCK:
+		return i64Val(timedOut) // one offer, nothing taken
+	case werr != nil:
+		return i64Val(-int64(errnoOf(werr)))
+	}
+	return i64Val(int64(n))
+}
+
 func netShutdown(it *Interp, a []Value, _ callCtx) []Value {
 	s := it.sockOf(a[0])
 	if s == nil || s.conn == nil {
@@ -600,6 +659,11 @@ func netClose(it *Interp, a []Value, _ callCtx) []Value {
 	fd := signedOf(a[0].(Int))
 	it.sh.mu.Lock()
 	s := it.sh.socks[fd]
+	if s != nil && s.signal {
+		// the signal pipe is not the program's to close: it stays
+		it.sh.mu.Unlock()
+		return i32Val(-int32(syscall.EBADF))
+	}
 	delete(it.sh.socks, fd)
 	it.sh.mu.Unlock()
 	var err error
@@ -887,7 +951,7 @@ func netPollerSet(it *Interp, a []Value, _ callCtx) []Value {
 	if p == nil || p.poll == nil || s == nil {
 		return i32Val(-int32(syscall.EBADF))
 	}
-	if interest < 0 || interest > 3 {
+	if interest < 0 || interest > 3 || (s.signal && interest&2 != 0) {
 		return i32Val(-int32(syscall.EINVAL))
 	}
 	fd, err := s.osFD()

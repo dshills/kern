@@ -652,6 +652,8 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		z := fe.next("t")
 		fe.emit("%s = zext i1 %s to i8", z, fe.v(a[2]))
 		setDst(fe.rt("kern_signal_wait", "i64 (i32, i64, i8)", "i32 "+fe.v(a[0])+", i64 "+fe.v(a[1])+", i8 "+z))
+	case "signal_fd":
+		setDst(fe.rt("kern_signal_fd", "i32 ()", ""))
 	case "rand_fill":
 		p, l := fe.seqParts(a[0])
 		setDst(fe.rt("kern_rand_fill", "i32 (ptr, i64)", "ptr "+p+", i64 "+l))
@@ -690,6 +692,9 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 	case "net_send":
 		p, l := fe.seqParts(a[1])
 		setDst(fe.rt("kern_net_send", "i64 (i32, ptr, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l))
+	case "net_send_timeout":
+		p, l := fe.seqParts(a[1])
+		setDst(fe.rt("kern_net_send_timeout", "i64 (i32, ptr, i64, i64)", "i32 "+fe.v(a[0])+", ptr "+p+", i64 "+l+", i64 "+fe.v(a[2])))
 	case "net_shutdown":
 		setDst(fe.rt("kern_net_shutdown", "i32 (i32, i32)", "i32 "+fe.v(a[0])+", i32 "+fe.v(a[1])))
 	case "net_set_nodelay":

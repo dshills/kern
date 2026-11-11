@@ -289,6 +289,18 @@ func starts_with(s: view[]u8, prefix: view[]u8) -> bool {
     return true
 }
 
+// ends_with reports whether s ends with suffix.
+func ends_with(s: view[]u8, suffix: view[]u8) -> bool {
+    if len(suffix) > len(s) { return false }
+    from := len(s) - len(suffix)
+    i := 0usize
+    while i < len(suffix) {
+        if s[from + i] != suffix[i] { return false }
+        i = i + 1usize
+    }
+    return true
+}
+
 // find returns the index of the first occurrence of needle in s.
 func find(s: view[]u8, needle: view[]u8) -> Option[usize] {
     if len(needle) > len(s) { return None }
