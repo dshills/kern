@@ -16,6 +16,26 @@ section of this file into a GitHub release is `docs/releasing.md`.
   with an internal error. It is now a reference to that instance, as
   the checker's own message for a bare `work` asks the program to write.
 
+### Examples
+
+- Five more applications in `examples/`, each a working tool that with
+  no arguments runs a demonstration of itself, on parts of the language
+  and library the first five did not use: `klisp` (a Lisp interpreter:
+  a module of its own with tests, a union of cells in a `Pool`, a
+  mark-and-sweep collector, an interactive prompt), `ksort` (an external
+  merge sort under a memory limit: an `Allocator` of the program's own
+  that counts, `VecIn`, generic functions that take their order as a
+  closure, buffered files), `kzip` (gzip in both directions, compatible
+  with the system's: bit streams, Huffman codes, tables built once,
+  `budget { allocations 0 }` on the inner loops), `kcache` (a cache with
+  a time to live and a bound on its size: `sync.RwLock` shards, an
+  interface for the clock that the store is generic over, a sweeping
+  thread on a `Condvar` with `Once` and `WaitGroup`, a thread-local
+  count, UDP and signals in one `Poller`) and `kray` (a ray tracer:
+  `f64` vectors on the SIMD intrinsics, shapes behind an interface with
+  no dispatch at run time, rows shared out by an atomic counter across
+  the threads of a scope, a PPM file).
+
 ## [v0.2.1] - 2026-11-11
 
 Two defects of v0.2.0 that safe code reached, both found by writing

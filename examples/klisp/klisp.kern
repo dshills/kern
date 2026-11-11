@@ -1,0 +1,181 @@
+//! phase: 6
+//! expect: output klisp
+// klisp: an interpreter for a small Lisp, with a heap that is collected.
+//
+//     klisp FILE...      runs each file
+//     klisp -i           reads forms from standard input and writes their values
+//
+// The language: whole numbers, booleans, strings, symbols and lists;
+// quote, if, define, set!, lambda, begin, let and cond; the procedures
+// + - * quotient remainder = < > <= >= cons car cdr list null? pair? eq?
+// not display newline set-car! set-cdr!, and, written in the language
+// itself, length reverse append map filter fold range. (gc) collects
+// and says how many cells it freed; (cells) is how many are live.
+//
+// How it is built, in the module lisp beside this file:
+//   - Every value is a cell in one Pool, and a cell names other cells by
+//     handle. A handle is a number that can be stored anywhere, so a
+//     closure that holds its environment, which holds the closure, is
+//     written without a reference in sight, and a stale handle is a trap
+//     and not a wild pointer.
+//   - Nothing frees a cell when a handle to it goes away. A mark and
+//     sweep collector frees what the program can no longer reach, rings
+//     included. It runs only at the top of the evaluator's loop, where
+//     every value still needed is in a list of roots (lisp/interp.kern
+//     says why that is enough).
+//   - A call in tail position replaces the evaluator's expression and
+//     goes round its loop, so a loop written as a procedure that calls
+//     itself runs in constant space; recursion that is not in tail
+//     position is counted and stopped before it can exhaust the stack.
+//   - Arithmetic is checked: a sum that does not fit is a fault the
+//     program is told of, not a trap that ends the interpreter.
+//
+// This directory is a project: kern.mod names this file, the module
+// lisp is the directory lisp, and `kern test` here runs
+// lisp/lisp_test.kern in the interpreter and natively. With no arguments
+// the program runs a session of its own, which is how it runs as a
+// fixture.
+module main
+import "lisp"
+import "std/io"
+import "std/str"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+// run evaluates a text and writes what it printed, then the fault if it
+// ended in one. It reports whether it ended well.
+func run(it: edit[lisp.Interp], src: view[]u8, echo: bool) -> bool {
+    var ok: bool = true
+    problem := str.String.new()
+    match it.Run(src, echo) {
+        Ok(u) => { }
+        Err(f) => {
+            ok = false
+            problem.push_str(f.Message())
+        }
+    }
+    written := str.String.new()
+    it.TakeOutput(written)
+    print_str(written.as_view())
+    if !ok {
+        print_str("error: ")
+        say(problem.as_view())
+    }
+    return ok
+}
+
+// show writes a text as it would be typed, then what it gives.
+func show(it: edit[lisp.Interp], src: view[]u8) {
+    print_str("> ")
+    say(src)
+    ok := run(it, src, true)
+}
+
+func demo() -> i32 {
+    it := lisp.New()
+    say("-- numbers and lists")
+    show(it, "(+ 1 2 3)")
+    show(it, "(map (lambda (x) (* x x)) (range 1 8))")
+    show(it, "(filter (lambda (x) (= 0 (remainder x 3))) (range 0 20))")
+    show(it, "(fold + 0 (range 1 101))")
+    show(it, "(reverse '(a (b . c) \"text\" #t))")
+    show(it, "(display \"hello, \") (display 'world) (newline)")
+    say("-- a closure keeps what it closed over")
+    show(it, "(define (make-counter) (let ((n 0)) (lambda () (set! n (+ n 1)) n)))")
+    show(it, "(define tick (make-counter))")
+    show(it, "(tick) (tick) (tick)")
+    say("-- recursion, and a call in tail position")
+    show(it, "(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))")
+    show(it, "(fib 12)")
+    show(it, "(define (count n acc) (if (= n 0) acc (count (- n 1) (+ acc 1))))")
+    show(it, "(count 500 0)")
+    show(it, "(define (deep n) (if (= n 0) 0 (+ 1 (deep (- n 1)))))")
+    show(it, "(deep 100)")
+    show(it, "(deep 1000)")
+    say("-- garbage")
+    show(it, "(define (churn n) (if (= n 0) 'done (begin (range 0 20) (churn (- n 1)))))")
+    show(it, "(churn 25)")
+    show(it, "(gc)")
+    show(it, "(define keep (range 0 10))")
+    show(it, "(gc)")
+    show(it, "keep")
+    say("-- a ring is garbage too, once nothing reaches it")
+    show(it, "(define ring (list 1 2 3))")
+    show(it, "(set-cdr! (cdr (cdr ring)) ring)")
+    show(it, "(car (cdr (cdr (cdr (cdr ring)))))")
+    show(it, "(set! ring '())")
+    show(it, "(gc)")
+    say("-- faults")
+    show(it, "(car '())")
+    show(it, "(nobody 1 2)")
+    show(it, "(+ 9223372036854775807 1)")
+    show(it, "(quotient 7 0)")
+    show(it, "(1 2 3)")
+    show(it, "(display \"written before the fault\") (newline) (cdr 5)")
+    show(it, "(define (f x")
+    show(it, "(f 1))")
+    say("-- the heap")
+    print_str("cells made: ")
+    print_u64(it.Allocated())
+    print_str(", collections: ")
+    print_u64(it.Collections())
+    print_str(", cells freed: ")
+    print_u64(it.Freed())
+    print_str(", cells live: ")
+    print_u64(u64(it.Cells()))
+    println()
+    return 0i32
+}
+
+// prompt reads forms from standard input until it ends. A form may
+// take several lines: nothing is evaluated until what was typed closes
+// every list it opened.
+func prompt() -> i32 {
+    it := lisp.New()
+    input := io.stdin()
+    lines := io.LineBuf.new()
+    typed := Vec[u8].new()
+    asks := io.is_terminal(io.Stream.Stdin)
+    while true {
+        if asks {
+            if typed.len() == 0usize { print_str("> ") } else { print_str("  ") }
+            flushed := io.flush_stdout()
+        }
+        line := Vec[u8].new()
+        match lines.read_line(input, line) {
+            Ok(more) => {
+                if !more { break }
+            }
+            Err(e) => { break }
+        }
+        typed.extend(line.as_view())
+        typed.push(10u8)
+        if lisp.Balanced(typed.as_view()) {
+            ok := run(it, typed.as_view(), true)
+            typed.clear()
+        }
+    }
+    if typed.len() > 0usize { ok := run(it, typed.as_view(), true) }
+    return 0i32
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize { return demo() }
+    if str.equal(args.get(1usize).as_view(), "-i") { return prompt() }
+    it := lisp.New()
+    for i in 1usize..args.len() {
+        match io.read_file(args.get(i).as_view()) {
+            Ok(text) => {
+                if !run(it, text.as_view(), false) { return 1i32 }
+            }
+            Err(e) => {
+                eprint_str("klisp: cannot read ")
+                eprint_str(args.get(i).as_view())
+                eprint_str("\n")
+                return 2i32
+            }
+        }
+    }
+    return 0i32
+}

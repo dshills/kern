@@ -1,0 +1,551 @@
+//! phase: 6
+//! expect: output kray
+// kray: a ray tracer that renders its scene on every processor and
+// writes a PPM image.
+//
+//     kray [-w WIDTH] [-h HEIGHT] [-s SAMPLES] [-t THREADS] OUT.ppm
+//
+// The scene is three balls on a chequered floor under two lights, with
+// shadows, highlights and mirror reflections. SAMPLES is the side of the
+// grid of rays through each pixel (2 by default: four rays), THREADS the
+// number of threads (by default the number of processors).
+//
+// How it is built:
+//   - A vector is four f64 lanes, the fourth always zero, and its
+//     arithmetic is the SIMD intrinsics: simd_add, simd_sub and simd_mul
+//     lane by lane, simd_reduce_add for a dot product, simd_shuffle for
+//     the two rotations of a cross product. The lanes are summed in
+//     order, so a picture is the same bytes whatever computes it.
+//   - There is no square root in the language: root is Newton's method.
+//   - What a ray can meet is an interface, Shape, and the nearest thing
+//     along a ray is found by a function generic over it, which the
+//     compiler makes once for the balls and once for the floor: there is
+//     no dispatch at run time.
+//   - The rows are shared out by an atomic counter: each thread of a
+//     scope takes the next row until none is left, so a thread that gets
+//     the hard rows does fewer of them. A thread returns the rows it
+//     rendered, which its handle gives up after the scope has ended; the
+//     scene is lent to every thread as a view.
+//   - Everything a ray touches is a small value copied in registers:
+//     nothing is allocated between the first ray and the last.
+//
+// With no arguments the program renders a small picture on one thread
+// and on four, shows that they are the same bytes, and prints it in
+// characters, which is how it runs as a test.
+module kray
+import "std/io"
+import "std/str"
+
+// ---- vectors ----
+
+struct V { c: [4]f64 }
+
+func vec(x: f64, y: f64, z: f64) -> V { return V { c: [x, y, z, 0.0f64] } }
+func add(a: V, b: V) -> V { return V { c: simd_add(a.c, b.c) } }
+func sub(a: V, b: V) -> V { return V { c: simd_sub(a.c, b.c) } }
+func mul(a: V, b: V) -> V { return V { c: simd_mul(a.c, b.c) } }
+func scale(a: V, k: f64) -> V { return V { c: simd_mul(a.c, [k, k, k, k]) } }
+func dot(a: V, b: V) -> f64 { return simd_reduce_add(simd_mul(a.c, b.c)) }
+
+// cross is (a.yzx * b.zxy) - (a.zxy * b.yzx).
+func cross(a: V, b: V) -> V {
+    yzx := [1u32, 2u32, 0u32, 3u32]
+    zxy := [2u32, 0u32, 1u32, 3u32]
+    left := simd_mul(simd_shuffle(a.c, a.c, yzx), simd_shuffle(b.c, b.c, zxy))
+    right := simd_mul(simd_shuffle(a.c, a.c, zxy), simd_shuffle(b.c, b.c, yzx))
+    return V { c: simd_sub(left, right) }
+}
+
+// root is the square root, by Newton's method from above: each step is
+// smaller than the last until the answer is reached.
+func root(v: f64) -> f64 {
+    if v <= 0.0f64 { return 0.0f64 }
+    var r: f64 = v
+    if r < 1.0f64 { r = 1.0f64 }
+    for i in 0u32..64u32 {
+        next := 0.5f64 * (r + v / r)
+        if next >= r { break }
+        r = next
+    }
+    return r
+}
+
+func unit(a: V) -> V { return scale(a, 1.0f64 / root(dot(a, a))) }
+
+// power is x to the n, by squaring.
+func power(x: f64, n: u32) -> f64 {
+    var result: f64 = 1.0f64
+    var base: f64 = x
+    var left: u32 = n
+    while left > 0u32 {
+        if left & 1u32 == 1u32 { result = result * base }
+        base = base * base
+        left = left >> 1u32
+    }
+    return result
+}
+
+// ---- what a ray can meet ----
+
+struct Ray { from: V; dir: V }
+
+// Look is how a surface answers light: its colour, how much of what it
+// shows is a reflection, and how tight its highlight is (0 for none).
+struct Look { colour: V; mirror: f64; shine: u32 }
+
+// Touch is where a ray met something: how far along the ray, the point,
+// the surface's direction there, and its look.
+struct Touch { far: f64; at: V; normal: V; look: Look }
+
+interface Shape {
+    // reach is how far along the ray the shape is met, or a negative
+    // number when it is not.
+    func reach(view self, r: Ray) -> f64
+    // touch describes the meeting at that distance.
+    func touch(view self, r: Ray, far: f64) -> Touch
+}
+
+struct Ball { centre: V; radius: f64; look: Look }
+
+impl Shape for Ball {
+    func reach(view self, r: Ray) -> f64 {
+        to := sub(r.from, self.centre)
+        b := dot(to, r.dir)
+        c := dot(to, to) - self.radius * self.radius
+        inside := b * b - c
+        if inside < 0.0f64 { return -1.0f64 }
+        s := root(inside)
+        if -b - s > nearly { return -b - s }
+        if -b + s > nearly { return -b + s }
+        return -1.0f64
+    }
+    func touch(view self, r: Ray, far: f64) -> Touch {
+        at := add(r.from, scale(r.dir, far))
+        return Touch { far: far, at: at, normal: scale(sub(at, self.centre), 1.0f64 / self.radius), look: self.look }
+    }
+}
+
+// Floor is the plane y = height, in squares of two colours.
+struct Floor { height: f64; light: Look; dark: Look }
+
+impl Shape for Floor {
+    func reach(view self, r: Ray) -> f64 {
+        if r.dir.c[1] > -nearly { return -1.0f64 }
+        far := (self.height - r.from.c[1]) / r.dir.c[1]
+        // the floor ends where it would be a haze anyway, which also keeps
+        // the squares within what touch can number
+        if far > horizon { return -1.0f64 }
+        return far
+    }
+    func touch(view self, r: Ray, far: f64) -> Touch {
+        at := add(r.from, scale(r.dir, far))
+        // which square: the whole parts of x and z, moved to be positive
+        // (a conversion of a negative number to u64 would trap)
+        x := u64(at.c[0] + 1000.0f64)
+        z := u64(at.c[2] + 1000.0f64)
+        var look: Look = self.light
+        if (x + z) % 2u64 == 1u64 { look = self.dark }
+        return Touch { far: far, at: at, normal: vec(0.0f64, 1.0f64, 0.0f64), look: look }
+    }
+}
+
+// ramp is the characters a pixel is printed as, darkest first.
+const ramp: [10]u8 = [32u8, 46u8, 58u8, 45u8, 61u8, 43u8, 42u8, 35u8, 37u8, 64u8]
+
+// field is how much of the scene a picture takes in: its height, one
+// unit of length ahead of the eye.
+const field: f64 = 0.62f64
+
+// horizon is how far along a ray the floor reaches.
+const horizon: f64 = 400.0f64
+
+// nearly keeps a ray from meeting the surface it has just left.
+const nearly: f64 = 0.0001f64
+
+// nearer looks among shapes of one kind for a meeting nearer than best,
+// and returns the nearest of them and best.
+func nearer[S: Shape](shapes: view[]S, r: Ray, best: Option[Touch]) -> Option[Touch] {
+    var limit: f64 = -1.0f64
+    match best {
+        Some(t) => { limit = t.far }
+        None => { }
+    }
+    var found: Option[Touch] = best
+    for s in shapes {
+        far := s.reach(r)
+        if far > 0.0f64 && (limit < 0.0f64 || far < limit) {
+            limit = far
+            found = Some(s.touch(r, far))
+        }
+    }
+    return found
+}
+
+// blocked reports whether a shape of one kind lies along a ray nearer
+// than limit.
+func blocked[S: Shape](shapes: view[]S, r: Ray, limit: f64) -> bool {
+    for s in shapes {
+        far := s.reach(r)
+        if far > 0.0f64 && far < limit { return true }
+    }
+    return false
+}
+
+// ---- the scene ----
+
+struct Lamp { at: V; colour: V }
+
+struct Scene { balls: Vec[Ball]; floors: Vec[Floor]; lamps: Vec[Lamp]; sky_high: V; sky_low: V; eye: V; ahead: V; right: V; up: V }
+
+func new_scene() -> Scene {
+    balls := Vec[Ball].new()
+    balls.push(Ball { centre: vec(0.0f64, 1.0f64, 0.0f64), radius: 1.0f64, look: Look { colour: vec(0.9f64, 0.9f64, 0.95f64), mirror: 0.35f64, shine: 200u32 } })
+    balls.push(Ball { centre: vec(-2.2f64, 0.7f64, 0.6f64), radius: 0.7f64, look: Look { colour: vec(0.85f64, 0.2f64, 0.15f64), mirror: 0.1f64, shine: 30u32 } })
+    balls.push(Ball { centre: vec(1.9f64, 0.5f64, -0.9f64), radius: 0.5f64, look: Look { colour: vec(0.15f64, 0.35f64, 0.9f64), mirror: 0.3f64, shine: 80u32 } })
+    floors := Vec[Floor].new()
+    floors.push(Floor { height: 0.0f64, light: Look { colour: vec(0.85f64, 0.85f64, 0.8f64), mirror: 0.15f64, shine: 0u32 }, dark: Look { colour: vec(0.2f64, 0.25f64, 0.2f64), mirror: 0.15f64, shine: 0u32 } })
+    lamps := Vec[Lamp].new()
+    lamps.push(Lamp { at: vec(-4.0f64, 6.0f64, -5.0f64), colour: vec(1.0f64, 0.95f64, 0.85f64) })
+    lamps.push(Lamp { at: vec(5.0f64, 3.0f64, -2.0f64), colour: vec(0.25f64, 0.3f64, 0.4f64) })
+    eye := vec(0.0f64, 2.2f64, -6.5f64)
+    ahead := unit(sub(vec(0.0f64, 0.8f64, 0.0f64), eye))
+    right := unit(cross(vec(0.0f64, 1.0f64, 0.0f64), ahead))
+    up := cross(ahead, right)
+    return Scene { balls: balls, floors: floors, lamps: lamps, sky_high: vec(0.02f64, 0.05f64, 0.2f64), sky_low: vec(0.55f64, 0.65f64, 0.9f64), eye: eye, ahead: ahead, right: right, up: up }
+}
+
+impl Scene {
+    func meet(view self, r: Ray) -> Option[Touch] {
+        return nearer(self.floors.as_view(), r, nearer(self.balls.as_view(), r, None))
+    }
+
+    func shadowed(view self, r: Ray, limit: f64) -> bool {
+        return blocked(self.balls.as_view(), r, limit) || blocked(self.floors.as_view(), r, limit)
+    }
+
+    func sky(view self, r: Ray) -> V {
+        var h: f64 = r.dir.c[1] * 2.5f64
+        if h < 0.0f64 { h = 0.0f64 }
+        if h > 1.0f64 { h = 1.0f64 }
+        return add(scale(self.sky_low, 1.0f64 - h), scale(self.sky_high, h))
+    }
+
+    // see is the light that arrives along a ray, following it through as
+    // many reflections as bounces allows.
+    func see(view self, r: Ray, bounces: u32) -> V {
+        match self.meet(r) {
+            Some(t) => {
+                var colour: V = scale(t.look.colour, 0.08f64)
+                off := add(t.at, scale(t.normal, nearly))
+                for i in 0usize..self.lamps.len() {
+                    lamp := self.lamps.get(i)
+                    to := sub(lamp.at, t.at)
+                    far := root(dot(to, to))
+                    toward := scale(to, 1.0f64 / far)
+                    facing := dot(t.normal, toward)
+                    if facing > 0.0f64 && !self.shadowed(Ray { from: off, dir: toward }, far) {
+                        colour = add(colour, scale(mul(t.look.colour, lamp.colour), facing))
+                        if t.look.shine > 0u32 {
+                            glint := dot(t.normal, unit(sub(toward, r.dir)))
+                            if glint > 0.0f64 { colour = add(colour, scale(lamp.colour, power(glint, t.look.shine))) }
+                        }
+                    }
+                }
+                if t.look.mirror > 0.0f64 && bounces > 0u32 {
+                    bounce := sub(r.dir, scale(t.normal, 2.0f64 * dot(r.dir, t.normal)))
+                    seen := self.see(Ray { from: off, dir: bounce }, bounces - 1u32)
+                    colour = add(scale(colour, 1.0f64 - t.look.mirror), scale(seen, t.look.mirror))
+                }
+                return colour
+            }
+            None => { return self.sky(r) }
+        }
+    }
+}
+
+// ---- rendering ----
+
+// Shot is a picture's size, the side of the grid of rays through each
+// pixel, and how wide a pixel is for its height (a half for a character).
+struct Shot { width: u32; height: u32; samples: u32; pixel: f64 }
+
+// Row is one rendered row: three bytes a pixel.
+struct Row { y: u32; bytes: Vec[u8] }
+
+// shade is a colour's lane as a byte: clamped, and its root taken, which
+// is near enough to what a screen expects.
+func shade(v: f64) -> u8 {
+    var c: f64 = v
+    if c < 0.0f64 { c = 0.0f64 }
+    if c > 1.0f64 { c = 1.0f64 }
+    return u8(root(c) * 255.99f64)
+}
+
+func render_row(scene: view[Scene], shot: Shot, y: u32) -> Row {
+    bytes := Vec[u8].with_capacity(usize(shot.width) * 3usize)
+    wide := f64(shot.width) * shot.pixel / f64(shot.height)
+    n := f64(shot.samples)
+    for x in 0u32..shot.width {
+        var sum: V = vec(0.0f64, 0.0f64, 0.0f64)
+        for sy in 0u32..shot.samples {
+            for sx in 0u32..shot.samples {
+                u := (f64(x) + (f64(sx) + 0.5f64) / n) / f64(shot.width) - 0.5f64
+                v := 0.5f64 - (f64(y) + (f64(sy) + 0.5f64) / n) / f64(shot.height)
+                dir := unit(add(scene.ahead, add(scale(scene.right, u * wide * field), scale(scene.up, v * field))))
+                sum = add(sum, scene.see(Ray { from: scene.eye, dir: dir }, 3u32))
+            }
+        }
+        mean := scale(sum, 1.0f64 / (n * n))
+        bytes.push(shade(mean.c[0]))
+        bytes.push(shade(mean.c[1]))
+        bytes.push(shade(mean.c[2]))
+    }
+    return Row { y: y, bytes: bytes }
+}
+
+// worker renders rows, taking the next one from the counter, until none
+// is left, and returns what it rendered.
+func worker(scene: view[Scene], shot: Shot, next: view[Atomic[u32]]) -> Vec[Row] {
+    rows := Vec[Row].new()
+    while true {
+        y := next.fetch_add(1u32, Ordering.seq_cst)
+        if y >= shot.height { break }
+        rows.push(render_row(scene, shot, y))
+    }
+    return rows
+}
+
+// Picture is a rendered shot and how many rows each thread rendered.
+struct Picture { bytes: Vec[u8]; rows_by_thread: Vec[u32] }
+
+// render renders a shot on the given number of threads.
+func render(scene: view[Scene], shot: Shot, threads: usize) -> Picture {
+    across := usize(shot.width) * 3usize
+    bytes := Vec[u8].new()
+    bytes.resize(across * usize(shot.height), 0u8)
+    counts := Vec[u32].new()
+    next := Atomic[u32].new(0u32)
+    handles := Vec[Join[Vec[Row]]].new()
+    with s := thread.scope() {
+        for i in 0usize..threads {
+            match s.spawn(worker, scene, shot, next) {
+                Ok(j) => handles.push(j)
+                Err(e) => { }
+            }
+        }
+    }
+    // a thread that could not be started leaves its rows to the others;
+    // with none at all, this thread renders them
+    if handles.len() == 0usize {
+        rows := worker(scene, shot, next)
+        place(bytes, rows.as_view(), across)
+        counts.push(u32(rows.len()))
+    }
+    for i in 0usize..handles.len() { counts.push(0u32) }
+    while true {
+        match handles.pop() {
+            Some(j) => {
+                rows := j.get()
+                place(bytes, rows.as_view(), across)
+                with c := counts.at(handles.len()) { c = u32(rows.len()) }
+            }
+            None => { break }
+        }
+    }
+    return Picture { bytes: bytes, rows_by_thread: counts }
+}
+
+// place copies rows to where they belong in a picture.
+func place(bytes: edit[Vec[u8]], rows: view[]Row, across: usize) {
+    with dst := bytes.as_edit() {
+        for row in rows {
+            base := usize(row.y) * across
+            with src := row.bytes.as_view() {
+                for i in 0usize..len(src) { dst[base + i] = src[i] }
+            }
+        }
+    }
+}
+
+// write_ppm writes a picture as a binary PPM.
+func write_ppm[W: io.Writer](w: own W, shot: Shot, bytes: view[]u8) -> Result[(), io.IoErr] {
+    file := io.BufWriter[W].new(w)
+    head := str.String.from("P6\n")
+    head.push_u64(u64(shot.width))
+    head.push(32u8)
+    head.push_u64(u64(shot.height))
+    head.push_str("\n255\n")
+    io.write_to(file, head.as_view())?
+    io.write_to(file, bytes)?
+    file.flush()?
+    return Ok(())
+}
+
+// ---- the demonstration ----
+
+func say(s: view[]u8) { print_str(s); println() }
+
+func checksum(bytes: view[]u8) -> u64 {
+    var h: u64 = 14695981039346656037u64
+    for b in bytes { h = wrapping_mul(h ^ u64(b), 1099511628211u64) }
+    return h
+}
+
+// brightness is how bright the pixel at a place in a picture's bytes
+// looks: green counts most to the eye, blue least.
+func brightness(bytes: view[]u8, at: usize) -> u32 {
+    return (u32(bytes[at]) * 3u32 + u32(bytes[at + 1usize]) * 6u32 + u32(bytes[at + 2usize])) / 10u32
+}
+
+func demo() -> Result[(), io.IoErr] {
+    scene := new_scene()
+    say("-- vectors on SIMD lanes")
+    c := cross(vec(1.0f64, 0.0f64, 0.0f64), vec(0.0f64, 1.0f64, 0.0f64))
+    text := str.String.from("  x cross y = (")
+    text.push_f64(c.c[0])
+    text.push_str(", ")
+    text.push_f64(c.c[1])
+    text.push_str(", ")
+    text.push_f64(c.c[2])
+    text.push_str("); the root of 2 is ")
+    text.push_f64(root(2.0f64))
+    text.push_str("; the length of (3, 4, 12) is ")
+    text.push_f64(root(dot(vec(3.0f64, 4.0f64, 12.0f64), vec(3.0f64, 4.0f64, 12.0f64))))
+    say(text.as_view())
+
+    say("-- 64 by 32 characters, one ray each")
+    shot := Shot { width: 64u32, height: 32u32, samples: 1u32, pixel: 0.5f64 }
+    one := render(scene, shot, 1usize)
+    four := render(scene, shot, 4usize)
+    line := str.String.new()
+    for y in 0usize..usize(shot.height) {
+        line.clear()
+        line.push_str("  ")
+        for x in 0usize..usize(shot.width) {
+            at := (y * usize(shot.width) + x) * 3usize
+            line.push(ramp[usize(brightness(one.bytes.as_view(), at) * 10u32 / 256u32)])
+        }
+        say(line.as_view())
+    }
+    print_str("  bytes: ")
+    print_u64(u64(one.bytes.len()))
+    print_str(", checksum ")
+    print_u64(checksum(one.bytes.as_view()))
+    println()
+    var total: u32 = 0u32
+    for n in four.rows_by_thread.as_view() { total = total + n }
+    print_str("  four threads rendered ")
+    print_u64(u64(total))
+    print_str(" rows between them, and the same bytes: ")
+    print_bool(checksum(four.bytes.as_view()) == checksum(one.bytes.as_view()) && four.bytes.len() == one.bytes.len())
+    println()
+
+    say("-- 24 by 16 pixels, four rays each, as a PPM file")
+    small := Shot { width: 24u32, height: 16u32, samples: 2u32, pixel: 1.0f64 }
+    fine := render(scene, small, 3usize)
+    dir := io.make_temp_dir("kray-demo")?
+    path := str.String.from(dir.as_view())
+    path.push_str("/small.ppm")
+    written := save(path.as_view(), small, fine.bytes.as_view())
+    back := io.read_file(path.as_view())
+    removed := io.remove_dir_all(dir.as_view())
+    written?
+    data := back?
+    print_str("  the file begins ")
+    with d := data.as_view() {
+        for i in 0usize..2usize { print_str(d[i : i + 1usize]) }
+        print_str(", holds ")
+        print_u64(u64(len(d)))
+        print_str(" bytes, and its pixels have checksum ")
+        print_u64(checksum(d[len(d) - fine.bytes.len() : len(d)]))
+    }
+    println()
+    return Ok(())
+}
+
+func save(path: view[]u8, shot: Shot, bytes: view[]u8) -> Result[(), io.IoErr] {
+    return write_ppm(io.create(path)?, shot, bytes)
+}
+
+// ---- the program ----
+
+func usage() -> i32 {
+    eprint_str("usage: kray [-w WIDTH] [-h HEIGHT] [-s SAMPLES] [-t THREADS] OUT.ppm\n")
+    return 2i32
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize {
+        match demo() {
+            Ok(u) => { return 0i32 }
+            Err(e) => {
+                eprint_str("kray: the demonstration could not write its file\n")
+                return 1i32
+            }
+        }
+    }
+    var shot: Shot = Shot { width: 640u32, height: 400u32, samples: 2u32, pixel: 1.0f64 }
+    var threads: usize = thread.available_parallelism()
+    path := str.String.new()
+    var i: usize = 1usize
+    while i < args.len() {
+        // the number after a flag, read before the flag itself is lent
+        var number: Option[u64] = None
+        if i + 1usize < args.len() { number = str.parse_u64(args.get(i + 1usize).as_view()) }
+        var flag: u8 = 0u8
+        with a := args.get(i).as_view() {
+            if len(a) == 2usize && a[0] == 45u8 {
+                flag = a[1]
+            } else if path.len() == 0usize && len(a) > 0usize && a[0] != 45u8 {
+                path.push_str(a)
+            } else {
+                return usage()
+            }
+        }
+        if flag != 0u8 {
+            match number {
+                Some(n) => {
+                    if n == 0u64 || n > 16384u64 { return usage() }
+                    if flag == 119u8 {
+                        shot.width = u32(n)
+                    } else if flag == 104u8 {
+                        shot.height = u32(n)
+                    } else if flag == 115u8 && n <= 16u64 {
+                        shot.samples = u32(n)
+                    } else if flag == 116u8 && n <= 256u64 {
+                        threads = usize(n)
+                    } else {
+                        return usage()
+                    }
+                }
+                None => { return usage() }
+            }
+            i = i + 1usize
+        }
+        i = i + 1usize
+    }
+    if path.len() == 0usize { return usage() }
+    scene := new_scene()
+    picture := render(scene, shot, threads)
+    match save(path.as_view(), shot, picture.bytes.as_view()) {
+        Ok(u) => { }
+        Err(e) => {
+            eprint_str("kray: cannot write ")
+            eprint_str(path.as_view())
+            eprint_str("\n")
+            return 1i32
+        }
+    }
+    text := str.String.from("kray: ")
+    text.push_u64(u64(shot.width))
+    text.push_str(" by ")
+    text.push_u64(u64(shot.height))
+    text.push_str(", rows by thread:")
+    for n in picture.rows_by_thread.as_view() {
+        text.push(32u8)
+        text.push_u64(u64(n))
+    }
+    say(text.as_view())
+    return 0i32
+}

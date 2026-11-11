@@ -1,0 +1,45 @@
+-- a store of four entries, and a clock moved by hand
+  a = first
+  b = second
+  z is not there
+  60 ms pass
+  b is not there
+  c = third
+  swept: 1
+  four more entries, with room for two: a and c were read, so each gets another turn
+  what is left, oldest first: a c f g 
+  one more: a was not read again, and goes
+  a is not there
+  deleting f: true, and again: false
+  g = seventh, changed
+  entries 3 sets 9 hits 4 misses 3 evicted 3 expired 1
+-- four threads on eight shards
+  operations the threads counted for themselves: 2400; this thread's count is untouched by theirs: true
+  entries 1250 sets 1250 hits 1200 misses 0 evicted 0 expired 0
+-- the sweeping thread
+  41 entries, none expired; after 20 ms of the store's clock: 1 entry
+  the thread was told to stop, and has
+  long = stays
+  expired, by the count: 40
+-- over UDP
+  > SET greeting 0 hello, datagram
+  < OK
+  > GET greeting
+  < VALUE hello, datagram
+  > GET nothing
+  < NONE
+  > SET brief 1 gone in a millisecond
+  < OK
+  > GET brief
+  < NONE
+  > DEL greeting
+  < OK
+  > DEL greeting
+  < NONE
+  > SET no-value 5
+  < ERR usage: SET key ms value
+  > FETCH greeting
+  < ERR unknown request
+  > STATS
+  < STATS entries 1 sets 2 hits 1 misses 2 evicted 0 expired 0
+  the server answered 10 datagrams and stopped at Terminate

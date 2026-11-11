@@ -1,0 +1,784 @@
+//! phase: 6
+//! expect: output kcache
+// kcache: a cache with a bound on its size and a time to live for each
+// entry, served over UDP.
+//
+//     kcache ADDRESS [ENTRIES]     for example: kcache 127.0.0.1:7071 100000
+//
+// A datagram is a request, and its answer is a datagram:
+//
+//     SET key ms value...   OK              ms of 0 keeps it until it is evicted;
+//                                           a year at most
+//     GET key               VALUE value...  or NONE
+//     DEL key               OK              or NONE
+//     STATS                 STATS and the counts
+//
+// How it is built:
+//   - The entries are in eight shards, each behind a sync.RwLock, picked
+//     by the key's hash: readers of one shard run together, a writer
+//     waits only for its own shard.
+//   - A shard's entries live in a Pool and are linked, oldest to newest,
+//     by the handles of their neighbours. A read marks an entry with an
+//     atomic, which a view may change; a writer that needs room takes
+//     the oldest entry that was not marked since it last looked, and
+//     gives a marked one another turn (the clock algorithm). So a read
+//     needs only the read lock, and the list is changed only by writers.
+//   - A thread wakes every so often to remove what has expired. It
+//     sleeps on a Condvar with a time limit, so that stopping it does
+//     not wait for the limit; a Once starts it once however often it is
+//     asked for, and a WaitGroup lets the stop wait for it to be gone.
+//   - The time is read through an interface, Clock, that the store is
+//     generic over: the system's clock when it serves, and one that a
+//     test moves by hand, which is how expiry is tested without waiting.
+//   - Each thread counts its own operations in a thread-local variable.
+//   - The server waits in one Poller for its socket and for Interrupt
+//     and Terminate.
+//
+// With no arguments the program puts a store through its paces, on one
+// thread and on four, and then over UDP, which is how it runs as a test.
+module kcache
+import "std/io"
+import "std/map"
+import "std/net"
+import "std/signal"
+import "std/str"
+import "std/sync"
+import "std/time"
+
+// ---- time ----
+
+interface Clock {
+    func now(view self) -> u64
+}
+
+struct SystemClock { phantom: u8 }
+impl Clock for SystemClock {
+    func now(view self) -> u64 { return now_ns() }
+}
+
+// ManualClock is a clock that goes only when it is told to.
+struct ManualClock { at: Atomic[u64] }
+impl Clock for ManualClock {
+    func now(view self) -> u64 { return self.at.load(Ordering.seq_cst) }
+}
+impl ManualClock {
+    func advance_ms(view self, ms: u64) { was := self.at.fetch_add(ms * 1000000u64, Ordering.seq_cst) }
+}
+
+// ops counts the operations of the thread that reads it.
+thread_local ops: u64 = 0u64
+
+// ---- a shard ----
+
+// Entry is a key and its value, when it expires (0 for never), whether
+// it was read since a writer last looked, and its neighbours in the
+// shard's list.
+struct Entry { key: str.String; value: Vec[u8]; expires: u64; touched: Atomic[u32]; older: Option[PoolId[Entry]]; newer: Option[PoolId[Entry]] }
+
+// Shard is some of the entries: the pool they live in, the handle of
+// each by its key, and the two ends of the list.
+struct Shard { entries: Pool[Entry]; index: map.Map[str.String, PoolId[Entry]]; oldest: Option[PoolId[Entry]]; newest: Option[PoolId[Entry]]; count: usize; room: usize }
+
+func new_shard(room: usize) -> Shard {
+    return Shard { entries: Pool[Entry].new(), index: map.Map[str.String, PoolId[Entry]].new(), oldest: None, newest: None, count: 0usize, room: room }
+}
+
+impl Shard {
+    func find(view self, key: view[]u8) -> Option[PoolId[Entry]] {
+        match map.find_text(self.index, key) {
+            Some(slot) => {
+                id := self.index.value_at(slot)
+                return Some(id)
+            }
+            None => { return None }
+        }
+    }
+
+    func expired(view self, id: PoolId[Entry], now: u64) -> bool {
+        with e := self.entries.get(id) { return e.expires != 0u64 && now >= e.expires }
+    }
+
+    // unlink takes an entry out of the list, and append puts one at the
+    // new end.
+    func unlink(edit self, id: PoolId[Entry]) {
+        var older: Option[PoolId[Entry]] = None
+        var newer: Option[PoolId[Entry]] = None
+        with e := self.entries.get(id) {
+            older = e.older
+            newer = e.newer
+        }
+        match older {
+            Some(o) => {
+                with e := self.entries.at(o) { e.newer = newer }
+            }
+            None => { self.oldest = newer }
+        }
+        match newer {
+            Some(n) => {
+                with e := self.entries.at(n) { e.older = older }
+            }
+            None => { self.newest = older }
+        }
+    }
+    func append(edit self, id: PoolId[Entry]) {
+        was := self.newest
+        with e := self.entries.at(id) {
+            e.older = was
+            e.newer = None
+        }
+        match was {
+            Some(n) => {
+                with e := self.entries.at(n) { e.newer = Some(id) }
+            }
+            None => { self.oldest = Some(id) }
+        }
+        self.newest = Some(id)
+    }
+
+    // remove takes an entry out of the shard and destroys it.
+    func remove(edit self, id: PoolId[Entry]) {
+        self.unlink(id)
+        key := str.String.new()
+        with e := self.entries.get(id) { key.push_str(e.key.as_view()) }
+        gone := self.index.remove(key)
+        self.entries.free(id)
+        self.count = self.count - 1usize
+    }
+
+    // make_room removes one entry: the oldest, unless it was read since
+    // a writer last looked, in which case it becomes the newest and the
+    // next oldest is looked at. It returns 1 when what it removed had
+    // expired, 2 when it had not, 0 when the shard is empty.
+    func make_room(edit self, now: u64) -> u8 {
+        while true {
+            match self.oldest {
+                Some(id) => {
+                    if self.expired(id, now) {
+                        self.remove(id)
+                        return 1u8
+                    }
+                    var was: u32 = 0u32
+                    with e := self.entries.get(id) { was = e.touched.swap(0u32, Ordering.seq_cst) }
+                    if was == 0u32 {
+                        self.remove(id)
+                        return 2u8
+                    }
+                    self.unlink(id)
+                    self.append(id)
+                }
+                None => { return 0u8 }
+            }
+        }
+        return 0u8
+    }
+
+    // put stores a value under a key and returns what make_room did for
+    // it, 0 when it did not need to, and 3 when the value could not be
+    // stored for want of memory.
+    func put(edit self, key: view[]u8, value: view[]u8, expires: u64, now: u64) -> u8 {
+        match self.find(key) {
+            Some(id) => {
+                with e := self.entries.at(id) {
+                    e.value.clear()
+                    e.value.extend(value)
+                    e.expires = expires
+                    e.touched.store(1u32, Ordering.seq_cst)
+                }
+                return 0u8
+            }
+            None => { }
+        }
+        var made: u8 = 0u8
+        if self.count >= self.room { made = self.make_room(now) }
+        kept := Vec[u8].new()
+        kept.extend(value)
+        match self.entries.alloc(Entry { key: str.String.from(key), value: kept, expires: expires, touched: Atomic[u32].new(0u32), older: None, newer: None }) {
+            Ok(id) => {
+                self.append(id)
+                was := self.index.insert(str.String.from(key), id)
+                self.count = self.count + 1usize
+            }
+            Err(e) => { return 3u8 }
+        }
+        return made
+    }
+
+    // fetch appends a key's value to into and marks the entry as read.
+    // It needs only a view of the shard. An entry that has expired is
+    // not there, though it is not removed here.
+    func fetch(view self, key: view[]u8, now: u64, into: edit[Vec[u8]]) -> bool {
+        match self.find(key) {
+            Some(id) => {
+                with e := self.entries.get(id) {
+                    if e.expires != 0u64 && now >= e.expires { return false }
+                    into.extend(e.value.as_view())
+                    e.touched.store(1u32, Ordering.seq_cst)
+                    return true
+                }
+            }
+            None => { return false }
+        }
+    }
+
+    func del(edit self, key: view[]u8) -> bool {
+        match self.find(key) {
+            Some(id) => {
+                self.remove(id)
+                return true
+            }
+            None => { return false }
+        }
+    }
+
+    // sweep removes every entry that has expired.
+    func sweep(edit self, now: u64) -> usize {
+        var removed: usize = 0usize
+        var at: Option[PoolId[Entry]] = self.oldest
+        while true {
+            match at {
+                Some(id) => {
+                    with e := self.entries.get(id) { at = e.newer }
+                    if self.expired(id, now) {
+                        self.remove(id)
+                        removed = removed + 1usize
+                    }
+                }
+                None => { break }
+            }
+        }
+        return removed
+    }
+
+    // keys appends the keys, oldest first, each followed by a space.
+    func keys(view self, into: edit[str.String]) {
+        var at: Option[PoolId[Entry]] = self.oldest
+        while true {
+            match at {
+                Some(id) => {
+                    with e := self.entries.get(id) {
+                        into.push_str(e.key.as_view())
+                        into.push(32u8)
+                        at = e.newer
+                    }
+                }
+                None => { break }
+            }
+        }
+    }
+}
+
+// ---- the store ----
+
+// longest_ms is the longest time to live, a year of milliseconds.
+const longest_ms: u64 = 31536000000u64
+
+struct Counts { sets: Atomic[u64]; hits: Atomic[u64]; misses: Atomic[u64]; evicted: Atomic[u64]; expired: Atomic[u64] }
+
+// Store is the shards, the clock, the counts, and what the sweeping
+// thread needs: a flag that says stop, guarded by a Mutex that the
+// thread sleeps on with a Condvar.
+struct Store[C: Clock] { shards: Vec[sync.RwLock[Shard]]; clock: C; counts: Counts; stopping: Mutex[bool]; wake: Condvar; started: sync.Once; running: sync.WaitGroup }
+
+// new_store makes a store of the given number of shards with room for
+// entries in all, shared out evenly and at least one to a shard.
+func new_store[C: Clock](clock: own C, shards: usize, entries: usize) -> Store[C] {
+    list := Vec[sync.RwLock[Shard]].new()
+    var each: usize = entries / shards
+    if each == 0usize { each = 1usize }
+    for i in 0usize..shards { list.push(sync.RwLock[Shard].new(new_shard(each))) }
+    counts := Counts { sets: Atomic[u64].new(0u64), hits: Atomic[u64].new(0u64), misses: Atomic[u64].new(0u64), evicted: Atomic[u64].new(0u64), expired: Atomic[u64].new(0u64) }
+    return Store[C] { shards: list, clock: clock, counts: counts, stopping: Mutex[bool].new(false), wake: Condvar.new(), started: sync.Once.new(), running: sync.WaitGroup.new() }
+}
+
+func bump(a: view[Atomic[u64]], n: u64) { was := a.fetch_add(n, Ordering.seq_cst) }
+
+impl[C: Clock] Store[C] {
+    func shard_of(view self, key: view[]u8) -> usize { return usize(str.hash(key) % u64(self.shards.len())) }
+
+    // set stores a value for ms milliseconds, or until it is evicted
+    // when ms is 0.
+    func set(view self, key: view[]u8, value: view[]u8, ms: u64) { stored := self.try_set(key, value, ms) }
+
+    // try_set is set that reports whether the value was stored: it is
+    // not when there is no memory for it. A time to live is held to a
+    // year: the number comes from whoever sends a datagram, and a sum
+    // that overflowed would trap.
+    func try_set(view self, key: view[]u8, value: view[]u8, ms: u64) -> bool {
+        ops = ops + 1u64
+        now := self.clock.now()
+        var life: u64 = ms
+        if life > longest_ms { life = longest_ms }
+        var expires: u64 = 0u64
+        if life > 0u64 { expires = now + life * 1000000u64 }
+        var made: u8 = 0u8
+        with shard := self.shards.get(self.shard_of(key)).write() { made = shard.put(key, value, expires, now) }
+        if made == 3u8 { return false }
+        bump(self.counts.sets, 1u64)
+        if made == 1u8 { bump(self.counts.expired, 1u64) }
+        if made == 2u8 { bump(self.counts.evicted, 1u64) }
+        return true
+    }
+
+    // get appends a key's value to into.
+    func get(view self, key: view[]u8, into: edit[Vec[u8]]) -> bool {
+        ops = ops + 1u64
+        now := self.clock.now()
+        var found: bool = false
+        with shard := self.shards.get(self.shard_of(key)).read() { found = shard.fetch(key, now, into) }
+        if found { bump(self.counts.hits, 1u64) } else { bump(self.counts.misses, 1u64) }
+        return found
+    }
+
+    func del(view self, key: view[]u8) -> bool {
+        ops = ops + 1u64
+        var found: bool = false
+        with shard := self.shards.get(self.shard_of(key)).write() { found = shard.del(key) }
+        return found
+    }
+
+    // sweep removes what has expired from every shard.
+    func sweep(view self) -> usize {
+        now := self.clock.now()
+        var removed: usize = 0usize
+        for i in 0usize..self.shards.len() {
+            with shard := self.shards.get(i).write() { removed = removed + shard.sweep(now) }
+        }
+        bump(self.counts.expired, u64(removed))
+        return removed
+    }
+
+    func len(view self) -> usize {
+        var n: usize = 0usize
+        for i in 0usize..self.shards.len() {
+            with shard := self.shards.get(i).read() { n = n + shard.count }
+        }
+        return n
+    }
+
+    // stop_sweeping tells the sweeping thread to end and waits until it
+    // has; it returns at once when there is none.
+    func stop_sweeping(view self) {
+        with stop := self.stopping.lock() { stop = true }
+        self.wake.notify_all()
+        self.running.wait()
+    }
+
+    func stats(view self, into: edit[str.String]) {
+        into.push_str("entries ")
+        into.push_u64(u64(self.len()))
+        into.push_str(" sets ")
+        into.push_u64(self.counts.sets.load(Ordering.seq_cst))
+        into.push_str(" hits ")
+        into.push_u64(self.counts.hits.load(Ordering.seq_cst))
+        into.push_str(" misses ")
+        into.push_u64(self.counts.misses.load(Ordering.seq_cst))
+        into.push_str(" evicted ")
+        into.push_u64(self.counts.evicted.load(Ordering.seq_cst))
+        into.push_str(" expired ")
+        into.push_u64(self.counts.expired.load(Ordering.seq_cst))
+    }
+}
+
+// sweeper is the sweeping thread: it sleeps for the interval, or until
+// it is told to stop, and sweeps between sleeps.
+func sweeper[C: Clock + Send + Share](store: own Shared[Store[C]], every_ns: u64) -> u64 {
+    var sweeps: u64 = 0u64
+    with s := store.get() {
+        var going: bool = true
+        while going {
+            with stop := s.stopping.lock() {
+                if !stop { woken := s.wake.wait_ns(stop, every_ns) }
+                going = !stop
+            }
+            if going {
+                removed := s.sweep()
+                sweeps = sweeps + 1u64
+            }
+        }
+        s.running.done()
+    }
+    return sweeps
+}
+
+// start_sweeping starts the sweeping thread, the first time it is
+// called for a store.
+func start_sweeping[C: Clock + Send + Share](store: view[Shared[Store[C]]], every: time.Duration) {
+    store.get().started.call(|| {
+        store.get().running.add(1u32)
+        match thread.spawn(sweeper[C], store.clone(), every.ns) {
+            Ok(t) => { }
+            Err(e) => { store.get().running.done() }
+        }
+    })
+}
+
+// ---- the protocol ----
+
+func word_at(line: view[]u8, from: usize) -> str.Bounds {
+    var lo: usize = from
+    while lo < len(line) && line[lo] == 32u8 { lo = lo + 1usize }
+    var hi: usize = lo
+    while hi < len(line) && line[hi] != 32u8 { hi = hi + 1usize }
+    return str.Bounds { lo: lo, hi: hi }
+}
+
+// answer writes the reply to one request.
+func answer[C: Clock](store: view[Store[C]], req: view[]u8, reply: edit[Vec[u8]]) {
+    var end: usize = len(req)
+    while end > 0usize && (req[end - 1usize] == 10u8 || req[end - 1usize] == 13u8) { end = end - 1usize }
+    with line := req[0usize : end] {
+        w := word_at(line, 0usize)
+        k := word_at(line, w.hi)
+        if str.equal(line[w.lo : w.hi], "GET") && k.hi > k.lo {
+            reply.extend("VALUE ")
+            if !store.get(line[k.lo : k.hi], reply) {
+                reply.clear()
+                reply.extend("NONE")
+            }
+        } else if str.equal(line[w.lo : w.hi], "SET") && k.hi > k.lo {
+            t := word_at(line, k.hi)
+            match str.parse_u64(line[t.lo : t.hi]) {
+                Some(ms) => {
+                    if t.hi + 1usize < len(line) {
+                        if store.try_set(line[k.lo : k.hi], line[t.hi + 1usize : len(line)], ms) { reply.extend("OK") } else { reply.extend("ERR no memory") }
+                    } else {
+                        reply.extend("ERR usage: SET key ms value")
+                    }
+                }
+                None => reply.extend("ERR usage: SET key ms value")
+            }
+        } else if str.equal(line[w.lo : w.hi], "DEL") && k.hi > k.lo {
+            if store.del(line[k.lo : k.hi]) { reply.extend("OK") } else { reply.extend("NONE") }
+        } else if str.equal(line[w.lo : w.hi], "STATS") {
+            text := str.String.from("STATS ")
+            store.stats(text)
+            reply.extend(text.as_view())
+        } else {
+            reply.extend("ERR unknown request")
+        }
+    }
+}
+
+// serve answers datagrams until a signal arrives, and returns how many
+// it answered.
+func serve[C: Clock](sock: own net.UdpSocket, store: view[Store[C]], sigs: edit[signal.Signals]) -> Result[u64, io.IoErr] {
+    p := net.Poller.new()?
+    p.watch(sock, 0u64, true, false)?
+    p.watch(sigs, 1u64, true, false)?
+    events := Vec[net.Ready].new()
+    var buf: [2048]u8 = zero()
+    reply := Vec[u8].new()
+    var answered: u64 = 0u64
+    var going: bool = true
+    while going {
+        n := p.wait(events)?
+        for i in 0usize..n {
+            e := events.get(i)
+            if e.token == 1u64 {
+                while true {
+                    match sigs.try_next() {
+                        Some(which) => { going = false }
+                        None => { break }
+                    }
+                }
+            } else {
+                // every datagram that waits
+                while true {
+                    match sock.recv_from_timeout(buf, time.millis(0u64))? {
+                        Some(d) => {
+                            reply.clear()
+                            answer(store, buf[0usize : d.len], reply)
+                            sent := sock.send_to(reply.as_view(), d.from)?
+                            answered = answered + 1u64
+                        }
+                        None => { break }
+                    }
+                }
+            }
+        }
+    }
+    return Ok(answered)
+}
+
+// ---- the demonstration ----
+
+func say(s: view[]u8) { print_str(s); println() }
+
+func show_get[C: Clock](store: view[Store[C]], key: view[]u8) {
+    value := Vec[u8].new()
+    print_str("  ")
+    print_str(key)
+    if store.get(key, value) {
+        print_str(" = ")
+        say(value.as_view())
+    } else {
+        say(" is not there")
+    }
+}
+
+func show_stats[C: Clock](store: view[Store[C]]) {
+    text := str.String.new()
+    store.stats(text)
+    print_str("  ")
+    say(text.as_view())
+}
+
+// one_thread: entries, times to live and eviction, with a clock that is
+// moved by hand and a single shard, so that the order is plain.
+func one_thread() {
+    say("-- a store of four entries, and a clock moved by hand")
+    store := new_store(ManualClock { at: Atomic[u64].new(1000000000u64) }, 1usize, 4usize)
+    store.set("a", "first", 0u64)
+    store.set("b", "second", 50u64)
+    store.set("c", "third", 200u64)
+    show_get(store, "a")
+    show_get(store, "b")
+    show_get(store, "z")
+    say("  60 ms pass")
+    store.clock.advance_ms(60u64)
+    show_get(store, "b")
+    show_get(store, "c")
+    print_str("  swept: ")
+    print_u64(u64(store.sweep()))
+    println()
+    say("  four more entries, with room for two: a and c were read, so each gets another turn")
+    store.set("d", "fourth", 0u64)
+    store.set("e", "fifth", 0u64)
+    store.set("f", "sixth", 0u64)
+    store.set("g", "seventh", 0u64)
+    keys := str.String.new()
+    with shard := store.shards.get(0usize).read() { shard.keys(keys) }
+    print_str("  what is left, oldest first: ")
+    say(keys.as_view())
+    say("  one more: a was not read again, and goes")
+    store.set("h", "eighth", 0u64)
+    show_get(store, "a")
+    print_str("  deleting f: ")
+    print_bool(store.del("f"))
+    print_str(", and again: ")
+    print_bool(store.del("f"))
+    println()
+    store.set("g", "seventh, changed", 0u64)
+    show_get(store, "g")
+    show_stats(store)
+}
+
+// writer_and_reader is one thread of four: it sets its own keys, reads
+// keys that were there before it started, and returns its own count of
+// operations.
+func writer_and_reader(store: view[Store[SystemClock]], who: u64) -> u64 {
+    key := str.String.new()
+    value := Vec[u8].new()
+    for i in 0u64..300u64 {
+        key.clear()
+        key.push_str("thread-")
+        key.push_u64(who)
+        key.push_str("-")
+        key.push_u64(i)
+        store.set(key.as_view(), "mine", 0u64)
+        key.clear()
+        key.push_str("shared-")
+        key.push_u64((i * 7u64 + who) % 50u64)
+        value.clear()
+        found := store.get(key.as_view(), value)
+    }
+    return ops
+}
+
+func four_threads() {
+    say("-- four threads on eight shards")
+    store := new_store(SystemClock { phantom: 0u8 }, 8usize, 100000usize)
+    key := str.String.new()
+    for i in 0u64..50u64 {
+        key.clear()
+        key.push_str("shared-")
+        key.push_u64(i)
+        store.set(key.as_view(), "ours", 0u64)
+    }
+    before := ops
+    var counted: u64 = 0u64
+    handles := Vec[Join[u64]].new()
+    with s := thread.scope() {
+        for who in 0u64..4u64 {
+            match s.spawn(writer_and_reader, store, who) {
+                Ok(j) => handles.push(j)
+                Err(e) => say("  no thread")
+            }
+        }
+    }
+    // the scope has ended: each thread's count is its handle's to give
+    while true {
+        match handles.pop() {
+            Some(j) => { counted = counted + j.get() }
+            None => { break }
+        }
+    }
+    print_str("  operations the threads counted for themselves: ")
+    print_u64(counted)
+    print_str("; this thread's count is untouched by theirs: ")
+    print_bool(ops == before)
+    println()
+    show_stats(store)
+}
+
+func background() -> Result[(), SpawnErr] {
+    say("-- the sweeping thread")
+    store := Shared[Store[ManualClock]].new(new_store(ManualClock { at: Atomic[u64].new(1000000000u64) }, 4usize, 1000usize))
+    key := str.String.new()
+    for i in 0u64..40u64 {
+        key.clear()
+        key.push_str("short-")
+        key.push_u64(i)
+        store.get().set(key.as_view(), "gone soon", 10u64)
+    }
+    store.get().set("long", "stays", 0u64)
+    start_sweeping(store, time.millis(2u64))
+    start_sweeping(store, time.millis(2u64))
+    print_str("  41 entries, none expired; after 20 ms of the store's clock: ")
+    store.get().clock.advance_ms(20u64)
+    // the thread sweeps every 2 ms of real time: wait for it, not for long
+    limit := time.after(time.seconds(20u64))
+    while store.get().len() > 1usize && !limit.expired() { time.sleep(time.millis(1u64)) }
+    print_u64(u64(store.get().len()))
+    say(" entry")
+    store.get().stop_sweeping()
+    say("  the thread was told to stop, and has")
+    show_get(store.get(), "long")
+    print_str("  expired, by the count: ")
+    print_u64(store.get().counts.expired.load(Ordering.seq_cst))
+    println()
+    return Ok(())
+}
+
+// server is the thread that serves the demonstration's store.
+func server(sock: own net.UdpSocket, ready: own Shared[Atomic[u32]]) -> u64 {
+    store := new_store(SystemClock { phantom: 0u8 }, 8usize, 1000usize)
+    sigs := signal.catch(signal.Signal.Terminate)
+    ready.get().store(1u32, Ordering.seq_cst)
+    match serve(sock, store, sigs) {
+        Ok(n) => { return n }
+        Err(e) => { return 0u64 }
+    }
+}
+
+func ask(client: edit[net.UdpSocket], to: net.SocketAddr, req: view[]u8) -> Result[(), io.IoErr] {
+    print_str("  > ")
+    say(req)
+    sent := client.send_to(req, to)?
+    var buf: [2048]u8 = zero()
+    match client.recv_from_timeout(buf, time.seconds(20u64))? {
+        Some(d) => {
+            print_str("  < ")
+            say(buf[0usize : d.len])
+        }
+        None => say("  no answer")
+    }
+    return Ok(())
+}
+
+func over_udp() -> Result[(), io.IoErr] {
+    say("-- over UDP")
+    sock := net.UdpSocket.bind(net.loopback_v4(0u16))?
+    to := sock.local_addr()?
+    ready := Shared[Atomic[u32]].new(Atomic[u32].new(0u32))
+    match thread.spawn(server, sock, ready.clone()) {
+        Ok(t) => {
+            while ready.get().load(Ordering.seq_cst) == 0u32 { yield_now() }
+            client := net.UdpSocket.bind(net.loopback_v4(0u16))?
+            talked := conversation(client, to)
+            signal.raise(signal.Signal.Terminate)
+            answered := t.join()
+            talked?
+            print_str("  the server answered ")
+            print_u64(answered)
+            say(" datagrams and stopped at Terminate")
+        }
+        Err(e) => say("  no thread")
+    }
+    return Ok(())
+}
+
+func conversation(client: edit[net.UdpSocket], to: net.SocketAddr) -> Result[(), io.IoErr] {
+    ask(client, to, "SET greeting 0 hello, datagram")?
+    ask(client, to, "GET greeting")?
+    ask(client, to, "GET nothing")?
+    ask(client, to, "SET brief 1 gone in a millisecond")?
+    time.sleep(time.millis(20u64))
+    ask(client, to, "GET brief")?
+    ask(client, to, "DEL greeting")?
+    ask(client, to, "DEL greeting")?
+    ask(client, to, "SET no-value 5")?
+    ask(client, to, "FETCH greeting")?
+    ask(client, to, "STATS")?
+    return Ok(())
+}
+
+func demo() -> i32 {
+    one_thread()
+    four_threads()
+    match background() {
+        Ok(u) => { }
+        Err(e) => say("  no thread")
+    }
+    match over_udp() {
+        Ok(u) => { }
+        Err(e) => say("  a socket failed")
+    }
+    return 0i32
+}
+
+// ---- the program ----
+
+// run serves until a signal stops it. Err is a failure to start, and
+// Ok(false) a socket that failed while it served.
+func run(address: view[]u8, entries: usize) -> Result[bool, io.IoErr] {
+    match net.parse_addr(address) {
+        Some(a) => {
+            sock := net.UdpSocket.bind(a)?
+            store := Shared[Store[SystemClock]].new(new_store(SystemClock { phantom: 0u8 }, 8usize, entries))
+            start_sweeping(store, time.seconds(1u64))
+            print_str("kcache: serving on ")
+            say(net.format_addr(sock.local_addr()?).as_view())
+            flushed := io.flush_stdout()
+            sigs := signal.catch(signal.Signal.Interrupt)
+            sigs.add(signal.Signal.Terminate)
+            answered := serve(sock, store.get(), sigs)
+            store.get().stop_sweeping()
+            text := str.String.new()
+            store.get().stats(text)
+            print_str("kcache: stopped; ")
+            say(text.as_view())
+            match answered {
+                Ok(n) => { return Ok(true) }
+                Err(e) => { return Ok(false) }
+            }
+        }
+        None => { return Err(io.error_of(io.ErrKind.InvalidInput)) }
+    }
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize { return demo() }
+    var entries: usize = 100000usize
+    if args.len() > 2usize {
+        match str.parse_u64(args.get(2usize).as_view()) {
+            Some(n) => { entries = usize(n) }
+            None => {
+                eprint_str("usage: kcache ADDRESS [ENTRIES]\n")
+                return 2i32
+            }
+        }
+    }
+    match run(args.get(1usize).as_view(), entries) {
+        Ok(clean) => {
+            if clean { return 0i32 }
+            eprint_str("kcache: stopped because its socket failed\n")
+            return 1i32
+        }
+        Err(e) => {
+            eprint_str("kcache: cannot serve (a bad address, or one in use)\n")
+            return 1i32
+        }
+    }
+}

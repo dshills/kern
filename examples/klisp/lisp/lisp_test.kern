@@ -1,0 +1,165 @@
+// Tests of the interpreter: `kern test` in the project's directory runs
+// them in the interpreter and natively, at debug and at release.
+module lisp
+import "std/str"
+
+// printed is what a program writes: the values of its forms and what it
+// displays, then its fault if it ends in one.
+func printed(src: view[]u8) -> str.String {
+    it := New()
+    ended := it.Run(src, true)
+    text := str.String.new()
+    it.TakeOutput(text)
+    match ended {
+        Ok(u) => { }
+        Err(f) => {
+            text.push_str("error: ")
+            text.push_str(f.msg.as_view())
+        }
+    }
+    return text
+}
+
+func gives(src: view[]u8, want: view[]u8) -> bool {
+    got := printed(src)
+    return got.equals(want)
+}
+
+func test_arithmetic() {
+    expect(gives("(+ 1 2 3) (* 2 3 7) (- 10 4 3) (- 5) (+) (*)", "6\n42\n3\n-5\n0\n1\n"))
+    expect(gives("(quotient 17 5) (remainder 17 5) (quotient -17 5) (remainder -17 5)", "3\n2\n-3\n-2\n"))
+    expect(gives("(< 1 2) (> 1 2) (= 3 3) (<= 2 2) (>= 1 2)", "#t\n#f\n#t\n#t\n#f\n"))
+}
+
+func test_the_largest_numbers() {
+    expect(gives("9223372036854775807 -9223372036854775808", "9223372036854775807\n-9223372036854775808\n"))
+    expect(gives("(+ 9223372036854775807 1)", "error: a number is too large"))
+    expect(gives("(- -9223372036854775808 1)", "error: a number is too large"))
+    expect(gives("(* 4611686018427387904 2)", "error: a number is too large"))
+    expect(gives("(- -9223372036854775808)", "error: a number is too large"))
+    expect(gives("(quotient -9223372036854775808 -1)", "error: division by zero, or a quotient that is too large"))
+    expect(gives("9223372036854775808", "error: a number is too large"))
+}
+
+func test_lists() {
+    expect(gives("(cons 1 2) (list 1 2 3) (car '(a b)) (cdr '(a b)) '()", "(1 . 2)\n(1 2 3)\na\n(b)\n"))
+    expect(gives("(length '(a b c)) (reverse '(1 2 3)) (append '(1 2) '(3))", "3\n(3 2 1)\n(1 2 3)\n"))
+    expect(gives("(map (lambda (x) (+ x 1)) '(1 2 3)) (fold + 0 (range 0 11))", "(2 3 4)\n55\n"))
+    expect(gives("(null? '()) (null? '(1)) (pair? '(1)) (pair? 1) (eq? 'a 'a) (eq? 'a 'b) (eq? 2 2)", "#t\n#f\n#t\n#f\n#t\n#f\n#t\n"))
+    expect(gives("'(1 . (2 . (3 . ())))", "(1 2 3)\n"))
+}
+
+func test_a_closure_keeps_its_environment() {
+    expect(gives("(define (adder n) (lambda (x) (+ x n))) (define add5 (adder 5)) (add5 1) (add5 10)", "6\n15\n"))
+    expect(gives("(define (counter) (let ((n 0)) (lambda () (set! n (+ n 1)) n))) (define a (counter)) (define b (counter)) (a) (a) (b)", "1\n2\n1\n"))
+}
+
+func test_rest_parameters() {
+    expect(gives("(define (f a . more) more) (f 1) (f 1 2 3)", "(2 3)\n"))
+    expect(gives("((lambda all all) 1 2)", "(1 2)\n"))
+    expect(gives("((lambda (a b) a) 1)", "error: a procedure was called with too few arguments"))
+    expect(gives("((lambda (a) a) 1 2)", "error: a procedure was called with too many arguments"))
+}
+
+func test_cond_and_begin() {
+    expect(gives("(define (sign n) (cond ((< n 0) 'negative) ((= n 0) 'zero) (else 'positive))) (sign -3) (sign 0) (sign 8)", "negative\nzero\npositive\n"))
+    expect(gives("(cond (#f 1)) (cond (5)) (begin 1 2 3) (begin)", "5\n3\n"))
+}
+
+// A procedure that calls itself last goes round the evaluator's loop:
+// 2,000 calls, five times the depth at which recursion is stopped.
+func test_a_tail_call_takes_no_space() {
+    expect(gives("(define (count n acc) (if (= n 0) acc (count (- n 1) (+ acc 1)))) (count 2000 0)", "2000\n"))
+}
+
+func test_recursion_that_is_too_deep_is_a_fault() {
+    expect(gives("(define (deep n) (if (= n 0) 0 (+ 1 (deep (- n 1))))) (deep 50) (deep 2000)", "50\nerror: the recursion is too deep"))
+}
+
+func test_the_collector_keeps_what_is_reachable() {
+    it := New()
+    discard := str.String.new()
+    match it.Run("(define keep (range 0 100)) (define (churn n) (if (= n 0) 0 (begin (range 0 20) (churn (- n 1))))) (churn 40)", false) {
+        Ok(u) => { }
+        Err(f) => { expect(false) }
+    }
+    made := it.Allocated()
+    freed := it.Collect()
+    // far more cells were made than are live: the rest were freed, here
+    // or by the collections the program caused as it ran
+    expect(it.Collections() > 1u64)
+    expect(made > 4000u64)
+    expect(it.Cells() < 800usize)
+    expect(u64(it.Cells()) + it.Freed() == it.Allocated())
+    // and what a name still reaches is whole
+    match it.Run("(fold + 0 keep) (length keep)", true) {
+        Ok(u) => { }
+        Err(f) => { expect(false) }
+    }
+    it.TakeOutput(discard)
+    expect(discard.equals("4950\n100\n"))
+}
+
+func test_a_ring_is_collected() {
+    it := New()
+    match it.Run("(define ring (list 1 2 3)) (set-cdr! (cdr (cdr ring)) ring)", false) {
+        Ok(u) => { }
+        Err(f) => { expect(false) }
+    }
+    first := it.Collect()
+    with_ring := it.Cells()
+    match it.Run("(set! ring 0)", false) {
+        Ok(u) => { }
+        Err(f) => { expect(false) }
+    }
+    freed := it.Collect()
+    // the three pairs of the ring went, though each was reachable from
+    // the others; its three numbers went with them
+    expect(freed >= 6usize)
+    expect(it.Cells() < with_ring)
+}
+
+func test_strings_are_destroyed_with_their_cells() {
+    it := New()
+    match it.Run("(define s \"a string\") (display s)", false) {
+        Ok(u) => { }
+        Err(f) => { expect(false) }
+    }
+    text := str.String.new()
+    it.TakeOutput(text)
+    expect(text.equals("a string"))
+    kept := it.Collect()
+    before := it.Cells()
+    match it.Run("(set! s 0)", false) {
+        Ok(u) => { }
+        Err(f) => { expect(false) }
+    }
+    freed := it.Collect()
+    expect(freed >= 1usize)
+}
+
+func test_what_the_reader_refuses() {
+    expect(gives("(1 2", "error: a list is not closed"))
+    expect(gives(")", "error: a ) with no list to close"))
+    expect(gives("\"open", "error: a string is not closed"))
+    expect(gives("'", "error: nothing after a quote"))
+    expect(gives("(a . b c)", "error: one datum follows the dot"))
+    expect(gives("(a .)", "error: nothing after the dot"))
+    expect(gives("(a . b", "error: a list is not closed"))
+    expect(gives("(display '(1 . 2))", "(1 . 2)"))
+    expect(gives("(display '(1 .5))", "(1 .5)"))
+    expect(gives("12x", "error: a number is too large, or has something that is not a digit in it"))
+    expect(Balanced("(a (b) \"(\" ; (\n)"))
+    expect(!Balanced("(a (b)"))
+    expect(!Balanced("\"open"))
+}
+
+func test_faults_of_the_evaluator() {
+    expect(gives("nobody", "error: unbound variable: nobody"))
+    expect(gives("(set! nobody 1)", "error: unbound variable: nobody"))
+    expect(gives("(car 5)", "error: car or cdr: not a list where one is needed"))
+    expect(gives("(5 5)", "error: what is called is not a procedure"))
+    expect(gives("(+ 'a 1)", "error: a number is needed"))
+    expect(gives("(car)", "error: a built-in procedure was called with the wrong number of arguments: car"))
+    expect(gives("(display 1) (car 5)", "1error: car or cdr: not a list where one is needed"))
+}

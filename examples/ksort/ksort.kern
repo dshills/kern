@@ -1,0 +1,669 @@
+//! phase: 6
+//! expect: output ksort
+// ksort: sorts the lines of files that may be larger than the memory it
+// is allowed.
+//
+//     ksort [-n] [-r] [-u] [-m BYTES] [-o OUT] [FILE...]
+//
+// The lines of the files, or of standard input without one, are written
+// in order to OUT, or to standard output: by their bytes; with -n by
+// the whole number each begins with (then by their bytes); -r reverses
+// the order; -u writes one of each run of equal lines. -m is how many
+// bytes the lines being sorted may take in memory, 64 MiB unless given.
+//
+// How it is built:
+//   - The lines in memory live in two vectors, one of bytes and one of
+//     (offset, length) records, both VecIn over one allocator of this
+//     program's own, Budget, which counts what it gives out and refuses
+//     past the limit. The vectors are fallible: a line that does not fit
+//     is a returned error, not a trap. Two containers share the budget
+//     through a handle: the counts are atomics in a Shared value, the
+//     only kind of state that a handle to shared data may change.
+//   - When the vectors are full their lines are sorted and written to a
+//     file, a run, in a temporary directory, and the vectors are used
+//     again: the memory is asked for once.
+//   - The runs are merged sixteen at a time, through a heap of the
+//     runs' next lines, into longer runs until sixteen or fewer are
+//     left, which are merged into the output. Runs are read and written
+//     through io.BufReader and io.BufWriter.
+//   - The sort and the heap are generic functions that take the order
+//     as a closure, so one of each serves every flag.
+//
+// With no arguments the program sorts data of its own under a budget of
+// 4,096 bytes, which is how it runs as a test.
+module ksort
+import "std/io"
+import "std/rand"
+import "std/str"
+
+// ---- the allocator ----
+
+// Meter is what a budget has given out, and the most it ever had out.
+// Its counts are atomics because every user of the budget holds only a
+// view of it.
+struct Meter { limit: u64; used: Atomic[u64]; peak: Atomic[u64] }
+
+// Budget is a handle to a Meter that allocates from the system while
+// the meter allows it.
+struct Budget nocopy { meter: Shared[Meter]; sys: SystemAllocator }
+
+func budget_of(meter: view[Shared[Meter]]) -> Budget { return Budget { meter: meter.clone(), sys: SystemAllocator.new() } }
+
+impl Allocator for Budget {
+    contract { requires "size and align meet the allocator obligations of spec §6" }
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] {
+        with m := self.meter.get() {
+            before := m.used.fetch_add(u64(size), Ordering.seq_cst)
+            if before + u64(size) > m.limit {
+                back := m.used.fetch_sub(u64(size), Ordering.seq_cst)
+                return Err(OutOfMemory)
+            }
+            if before + u64(size) > m.peak.load(Ordering.seq_cst) { m.peak.store(before + u64(size), Ordering.seq_cst) }
+        }
+        unsafe {
+            match self.sys.alloc(size, align) {
+                Ok(p) => { return Ok(p) }
+                Err(e) => {
+                    with m := self.meter.get() { back := m.used.fetch_sub(u64(size), Ordering.seq_cst) }
+                    return Err(e)
+                }
+            }
+        }
+    }
+    contract { requires "ptr, size and align are those of one earlier alloc of this budget, not yet freed" }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) {
+        with m := self.meter.get() { back := m.used.fetch_sub(u64(size), Ordering.seq_cst) }
+        unsafe { self.sys.free(ptr, size, align) }
+    }
+}
+
+// ---- the lines in memory ----
+
+struct Span { at: usize; n: usize }
+
+// Chunk is the lines in memory: their bytes end to end, and where each
+// begins and how long it is.
+struct Chunk { bytes: VecIn[u8, Budget]; spans: VecIn[Span, Budget] }
+
+// new_chunk asks for the chunk's memory once: three quarters of the
+// budget for bytes, the rest for records.
+func new_chunk(meter: view[Shared[Meter]]) -> Result[Chunk, AllocErr] {
+    limit := usize(meter.get().limit)
+    bytes := VecIn[u8, Budget].new_in(budget_of(meter))
+    spans := VecIn[Span, Budget].new_in(budget_of(meter))
+    bytes.try_reserve(limit / 4usize * 3usize)?
+    spans.try_reserve(limit / 4usize / size_of[Span]())?
+    return Ok(Chunk { bytes: bytes, spans: spans })
+}
+
+impl Chunk {
+    // add keeps a line, and is false when the chunk has no room for it.
+    func add(edit self, line: view[]u8) -> bool {
+        if self.spans.len() == self.spans.capacity() { return false }
+        if self.bytes.capacity() - self.bytes.len() < len(line) { return false }
+        at := self.bytes.len()
+        match self.bytes.try_extend(line) {
+            Ok(u) => { }
+            Err(e) => { return false }
+        }
+        match self.spans.try_push(Span { at: at, n: len(line) }) {
+            Ok(u) => { return true }
+            Err(e) => { return false }
+        }
+    }
+    func lines(view self) -> usize { return self.spans.len() }
+    func clear(edit self) {
+        self.bytes.clear()
+        self.spans.clear()
+    }
+}
+
+// ---- the order ----
+
+struct Options { numeric: bool; reverse: bool; unique: bool }
+
+// leading is the whole number a line begins with, after spaces: 0 when
+// it begins with none, and the nearest end of i64 when it is too large.
+func leading(s: view[]u8) -> i64 {
+    var i: usize = 0usize
+    while i < len(s) && (s[i] == 32u8 || s[i] == 9u8) { i = i + 1usize }
+    var negative: bool = false
+    if i < len(s) && s[i] == 45u8 {
+        negative = true
+        i = i + 1usize
+    }
+    var v: i64 = 0i64
+    while i < len(s) && s[i] >= 48u8 && s[i] <= 57u8 {
+        d := i64(s[i] - 48u8)
+        if negative {
+            v = saturating_sub(saturating_mul(v, 10i64), d)
+        } else {
+            v = saturating_add(saturating_mul(v, 10i64), d)
+        }
+        i = i + 1usize
+    }
+    return v
+}
+
+func bytes_before(a: view[]u8, b: view[]u8) -> bool {
+    var i: usize = 0usize
+    while i < len(a) && i < len(b) {
+        if a[i] != b[i] { return a[i] < b[i] }
+        i = i + 1usize
+    }
+    return len(a) < len(b)
+}
+
+// before is the order of two lines under the options.
+func before(a: view[]u8, b: view[]u8, o: Options) -> bool {
+    if o.reverse { return forward(b, a, o.numeric) }
+    return forward(a, b, o.numeric)
+}
+func forward(a: view[]u8, b: view[]u8, numeric: bool) -> bool {
+    if numeric {
+        x := leading(a)
+        y := leading(b)
+        if x != y { return x < y }
+    }
+    return bytes_before(a, b)
+}
+
+// ---- a sort and a heap for any type, in any order ----
+
+// sift moves the element at from down a heap of the first n elements,
+// in which no element is before its parent's... the largest is first.
+func sift[T](xs: edit[]T, from: usize, n: usize, less: closure(view[T], view[T]) -> bool) {
+    var root: usize = from
+    while 2usize * root + 1usize < n {
+        var child: usize = 2usize * root + 1usize
+        if child + 1usize < n && less(xs[child], xs[child + 1usize]) { child = child + 1usize }
+        if !less(xs[root], xs[child]) { return }
+        swap_at(xs, root, child)
+        root = child
+    }
+}
+
+// sort puts xs in the order less gives: a heap sort, which needs only
+// swaps, so it sorts elements of any type where they are.
+func sort[T](xs: edit[]T, less: closure(view[T], view[T]) -> bool) {
+    n := len(xs)
+    var i: usize = n / 2usize
+    while i > 0usize {
+        i = i - 1usize
+        sift(xs, i, n, less)
+    }
+    var end: usize = n
+    while end > 1usize {
+        end = end - 1usize
+        swap_at(xs, 0usize, end)
+        sift(xs, 0usize, end, less)
+    }
+}
+
+// heap_push adds v to a heap whose first element is the one that less
+// puts before every other, and heap_pop takes that element out.
+func heap_push[T](h: edit[Vec[T]], v: own T, less: closure(view[T], view[T]) -> bool) {
+    h.push(v)
+    var i: usize = h.len() - 1usize
+    with xs := h.as_edit() {
+        while i > 0usize {
+            parent := (i - 1usize) / 2usize
+            if !less(xs[i], xs[parent]) { break }
+            swap_at(xs, i, parent)
+            i = parent
+        }
+    }
+}
+func heap_pop[T](h: edit[Vec[T]], less: closure(view[T], view[T]) -> bool) -> Option[T] {
+    n := h.len()
+    if n == 0usize { return None }
+    with xs := h.as_edit() {
+        swap_at(xs, 0usize, n - 1usize)
+        var root: usize = 0usize
+        while 2usize * root + 1usize < n - 1usize {
+            var child: usize = 2usize * root + 1usize
+            if child + 1usize < n - 1usize && less(xs[child + 1usize], xs[child]) { child = child + 1usize }
+            if !less(xs[child], xs[root]) { break }
+            swap_at(xs, root, child)
+            root = child
+        }
+    }
+    return h.pop()
+}
+
+// ---- runs ----
+
+// Sorter is a sort in progress: the chunk, the runs written so far, and
+// counts for the report.
+struct Sorter { chunk: Chunk; runs: Vec[Vec[u8]]; work: Vec[u8]; o: Options; made: u64; lines: u64; first_runs: u64; merges: u64 }
+
+const fan_in: usize = 16usize
+
+func no_memory() -> io.IoErr { return io.error_of(io.ErrKind.OutOfMemory) }
+
+impl Sorter {
+    // order sorts the lines in memory.
+    func order(edit self) {
+        o := self.o
+        with b := self.chunk.bytes.as_view() {
+            sort(self.chunk.spans.as_edit(), |x, y| before(b[x.at : x.at + x.n], b[y.at : y.at + y.n], o))
+        }
+    }
+
+    // emit writes the lines in memory, in the order they are in, to w,
+    // one of each run of equal lines when only is set.
+    func emit[W: io.Writer](view self, w: edit[W], only: bool) -> Result[(), io.IoErr] {
+        with b := self.chunk.bytes.as_view() {
+            var last: Option[Span] = None
+            for s in self.chunk.spans.as_view() {
+                var same: bool = false
+                if only {
+                    match last {
+                        Some(p) => { same = str.equal(b[p.at : p.at + p.n], b[s.at : s.at + s.n]) }
+                        None => { }
+                    }
+                }
+                if !same {
+                    io.write_to(w, b[s.at : s.at + s.n])?
+                    io.write_to(w, "\n")?
+                }
+                last = Some(s)
+            }
+        }
+        return Ok(())
+    }
+
+    func next_run(edit self) -> Vec[u8] {
+        name := str.String.from("run-")
+        name.push_u64(self.made)
+        self.made = self.made + 1u64
+        return io.join(self.work.as_view(), name.as_view())
+    }
+
+    // spill sorts the lines in memory and writes them to a new run.
+    func spill(edit self) -> Result[(), io.IoErr] {
+        self.order()
+        path := self.next_run()
+        f := io.create(path.as_view())?
+        w := io.BufWriter[io.File].new(f)
+        self.emit(w, false)?
+        w.flush()?
+        self.runs.push(path)
+        self.first_runs = self.first_runs + 1u64
+        self.chunk.clear()
+        return Ok(())
+    }
+
+    // take keeps one line, making room by writing a run when it must.
+    func take_line(edit self, line: view[]u8) -> Result[(), io.IoErr] {
+        self.lines = self.lines + 1u64
+        if self.chunk.add(line) { return Ok(()) }
+        if self.chunk.lines() > 0usize { self.spill()? }
+        if self.chunk.add(line) { return Ok(()) }
+        // it does not fit an empty chunk: no budget of this size sorts it
+        return Err(no_memory())
+    }
+
+    // feed takes every line of a reader.
+    func feed[R: io.Reader](edit self, r: own R) -> Result[(), io.IoErr] {
+        lines := io.BufReader[R].new(r)
+        line := Vec[u8].new()
+        while lines.read_line(line)? {
+            self.take_line(line.as_view())?
+            line.clear()
+        }
+        return Ok(())
+    }
+
+    // finish writes everything in order to w: the lines in memory when
+    // there are no runs, else the runs merged, sixteen at a time.
+    func finish[W: io.Writer](edit self, w: edit[W]) -> Result[(), io.IoErr] {
+        if self.runs.len() == 0usize {
+            self.order()
+            return self.emit(w, self.o.unique)
+        }
+        if self.chunk.lines() > 0usize { self.spill()? }
+        while self.runs.len() > fan_in {
+            path := self.next_run()
+            f := io.create(path.as_view())?
+            longer := io.BufWriter[io.File].new(f)
+            with rs := self.runs.as_view() { merge(rs[0usize : fan_in], longer, self.o, false)? }
+            longer.flush()?
+            for i in 0usize..fan_in { io.remove_file(self.runs.get(i).as_view())? }
+            self.runs.remove_prefix(fan_in)
+            self.runs.push(path)
+            self.merges = self.merges + 1u64
+        }
+        with rs := self.runs.as_view() { merge(rs, w, self.o, self.o.unique)? }
+        return Ok(())
+    }
+}
+
+// Source is a run being merged: its reader and the line it is at.
+struct Source { reader: io.BufReader[io.File]; line: Vec[u8]; more: bool }
+
+func step(s: edit[Source]) -> Result[(), io.IoErr] {
+    s.line.clear()
+    s.more = s.reader.read_line(s.line)?
+    return Ok(())
+}
+
+// merge writes the lines of sorted runs to w in order. The heap holds
+// the numbers of the runs, ordered by the line each is at.
+func merge[W: io.Writer](paths: view[]Vec[u8], w: edit[W], o: Options, only: bool) -> Result[(), io.IoErr] {
+    sources := Vec[Source].new()
+    for p in paths {
+        f := io.open_read(p.as_view())?
+        sources.push(Source { reader: io.BufReader[io.File].new(f), line: Vec[u8].new(), more: false })
+    }
+    heap := Vec[usize].new()
+    for i in 0usize..sources.len() {
+        step(sources.at(i))?
+        if sources.get(i).more { heap_push(heap, i, |a, b| before(sources.get(a).line.as_view(), sources.get(b).line.as_view(), o)) }
+    }
+    last := Vec[u8].new()
+    var wrote: bool = false
+    while true {
+        match heap_pop(heap, |a, b| before(sources.get(a).line.as_view(), sources.get(b).line.as_view(), o)) {
+            Some(i) => {
+                with line := sources.get(i).line.as_view() {
+                    if !only || !wrote || !str.equal(line, last.as_view()) {
+                        io.write_to(w, line)?
+                        io.write_to(w, "\n")?
+                        if only {
+                            last.clear()
+                            last.extend(line)
+                        }
+                        wrote = true
+                    }
+                }
+                step(sources.at(i))?
+                if sources.get(i).more { heap_push(heap, i, |a, b| before(sources.get(a).line.as_view(), sources.get(b).line.as_view(), o)) }
+            }
+            None => { break }
+        }
+    }
+    return Ok(())
+}
+
+// Report is what a sort did.
+struct Report { lines: u64; runs: u64; merges: u64; peak: u64 }
+
+// sort_files sorts the files, or standard input when there are none,
+// into w, with at most limit bytes of lines in memory.
+func sort_files[W: io.Writer](inputs: view[]Vec[u8], w: edit[W], o: Options, limit: u64) -> Result[Report, io.IoErr] {
+    meter := Shared[Meter].new(Meter { limit: limit, used: Atomic[u64].new(0u64), peak: Atomic[u64].new(0u64) })
+    match new_chunk(meter) {
+        Ok(chunk) => {
+            if chunk.spans.capacity() == 0usize { return Err(no_memory()) }
+            work := io.make_temp_dir("ksort")?
+            var s: Sorter = Sorter { chunk: chunk, runs: Vec[Vec[u8]].new(), work: work, o: o, made: 0u64, lines: 0u64, first_runs: 0u64, merges: 0u64 }
+            done := run_sort(s, inputs, w)
+            removed := io.remove_dir_all(s.work.as_view())
+            done?
+            return Ok(Report { lines: s.lines, runs: s.first_runs, merges: s.merges, peak: meter.get().peak.load(Ordering.seq_cst) })
+        }
+        Err(e) => { return Err(no_memory()) }
+    }
+}
+
+func run_sort[W: io.Writer](s: edit[Sorter], inputs: view[]Vec[u8], w: edit[W]) -> Result[(), io.IoErr] {
+    if len(inputs) == 0usize {
+        s.feed(io.stdin())?
+    }
+    for p in inputs {
+        f := io.open_read(p.as_view())?
+        s.feed(f)?
+    }
+    return s.finish(w)
+}
+
+// ---- the demonstration ----
+
+func say(s: view[]u8) { print_str(s); println() }
+
+// Collect is a Writer that keeps what it is given.
+struct Collect { bytes: Vec[u8] }
+impl io.Writer for Collect {
+    func write(edit self, data: view[]u8) -> Result[usize, io.IoErr] {
+        self.bytes.extend(data)
+        return Ok(len(data))
+    }
+    func flush(edit self) -> Result[(), io.IoErr] { return Ok(()) }
+}
+
+// checked reads sorted output: how many lines, whether each is in order
+// after the one before, and a sum of their hashes, which does not depend
+// on their order.
+struct Checked { lines: u64; in_order: bool; sum: u64 }
+func check(text: view[]u8, o: Options) -> Checked {
+    var c: Checked = Checked { lines: 0u64, in_order: true, sum: 0u64 }
+    var start: usize = 0usize
+    var prev: Span = Span { at: 0usize, n: 0usize }
+    for i in 0usize..len(text) {
+        if text[i] == 10u8 {
+            if c.lines > 0u64 && before(text[start : i], text[prev.at : prev.at + prev.n], o) { c.in_order = false }
+            c.sum = wrapping_add(c.sum, str.hash(text[start : i]))
+            c.lines = c.lines + 1u64
+            prev = Span { at: start, n: i - start }
+            start = i + 1usize
+        }
+    }
+    return c
+}
+
+func show_report(r: Report, limit: u64) {
+    print_str("  ")
+    print_u64(r.lines)
+    print_str(" lines, ")
+    print_u64(r.runs)
+    print_str(" runs, ")
+    print_u64(r.merges)
+    print_str(" merges before the last; the most memory held was within the budget: ")
+    print_bool(r.peak <= limit && r.peak > 0u64)
+    println()
+}
+
+// small sorts a few lines under options and writes the result.
+func small(label: view[]u8, text: view[]u8, o: Options, dir: view[]u8) -> Result[(), io.IoErr] {
+    say(label)
+    path := io.join(dir, "small")
+    io.write_file(path.as_view(), text)?
+    inputs := Vec[Vec[u8]].new()
+    inputs.push(path)
+    var got: Collect = Collect { bytes: Vec[u8].new() }
+    r := sort_files(inputs.as_view(), got, o, 4096u64)?
+    with b := got.bytes.as_view() {
+        var start: usize = 0usize
+        for i in 0usize..len(b) {
+            if b[i] == 10u8 {
+                print_str("  ")
+                say(b[start : i])
+                start = i + 1usize
+            }
+        }
+    }
+    return Ok(())
+}
+
+func demo_in(dir: view[]u8) -> Result[(), io.IoErr] {
+    plain := Options { numeric: false, reverse: false, unique: false }
+    say("-- 2,000 lines under a budget of 4,096 bytes")
+    rng := rand.Rng.seeded(20261111u64)
+    data := str.String.new()
+    for i in 0u64..2000u64 {
+        data.push_str("key-")
+        data.push_padded(rng.below(100000u64), 5usize, 48u8)
+        data.push_str(" value ")
+        data.push_u64(rng.below(1000u64))
+        data.push(10u8)
+    }
+    whole := io.join(dir, "data")
+    io.write_file(whole.as_view(), data.as_view())?
+    inputs := Vec[Vec[u8]].new()
+    inputs.push(whole)
+    var sorted: Collect = Collect { bytes: Vec[u8].new() }
+    r := sort_files(inputs.as_view(), sorted, plain, 4096u64)?
+    show_report(r, 4096u64)
+    was := check(data.as_view(), plain)
+    now := check(sorted.bytes.as_view(), plain)
+    print_str("  the input was in order: ")
+    print_bool(was.in_order)
+    print_str("; the output is: ")
+    print_bool(now.in_order)
+    print_str("; it has the same lines: ")
+    print_bool(now.lines == was.lines && now.sum == was.sum)
+    println()
+    say("-- the same lines with room for all of them")
+    var again: Collect = Collect { bytes: Vec[u8].new() }
+    r2 := sort_files(inputs.as_view(), again, plain, 1048576u64)?
+    show_report(r2, 1048576u64)
+    print_str("  byte for byte the same output: ")
+    print_bool(str.equal(again.bytes.as_view(), sorted.bytes.as_view()))
+    println()
+    say("-- unique lines of the same, in reverse")
+    var fewer: Collect = Collect { bytes: Vec[u8].new() }
+    back := Options { numeric: false, reverse: true, unique: true }
+    r3 := sort_files(inputs.as_view(), fewer, back, 4096u64)?
+    last := check(fewer.bytes.as_view(), back)
+    print_str("  in order: ")
+    print_bool(last.in_order)
+    print_str("; no more lines than before: ")
+    print_bool(last.lines <= was.lines && last.lines > 1900u64)
+    println()
+    small("-- by their bytes", "pear\napple\nfig\napple\nBanana\n10\n9\n", plain, dir)?
+    small("-- by the number each begins with", "10 ten\n9 nine\n-3 minus three\nno number\n100\n9 again\n007 seven\n", Options { numeric: true, reverse: false, unique: false }, dir)?
+    small("-- in reverse, one of each", "pear\napple\nfig\napple\npear\n", back, dir)?
+    small("-- a last line with no newline, and an empty line", "b\n\na", plain, dir)?
+    say("-- a line that no budget of this size can hold")
+    long := Vec[u8].new()
+    for i in 0usize..5000usize { long.push(120u8) }
+    long.push(10u8)
+    path := io.join(dir, "long")
+    io.write_file(path.as_view(), long.as_view())?
+    one := Vec[Vec[u8]].new()
+    one.push(path)
+    var none: Collect = Collect { bytes: Vec[u8].new() }
+    match sort_files(one.as_view(), none, plain, 4096u64) {
+        Ok(rep) => say("  sorted")
+        Err(e) => {
+            match io.kind(e) {
+                OutOfMemory => say("  refused: a line does not fit the memory given")
+                _ => say("  another failure")
+            }
+        }
+    }
+    return Ok(())
+}
+
+func demo() -> Result[(), io.IoErr] {
+    dir := io.make_temp_dir("ksort-demo")?
+    done := demo_in(dir.as_view())
+    removed := io.remove_dir_all(dir.as_view())
+    done?
+    return removed
+}
+
+// ---- the program ----
+
+func usage() -> i32 {
+    eprint_str("usage: ksort [-n] [-r] [-u] [-m BYTES] [-o OUT] [FILE...]\n")
+    return 2i32
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize {
+        match demo() {
+            Ok(u) => { return 0i32 }
+            Err(e) => {
+                say("the demonstration failed")
+                return 1i32
+            }
+        }
+    }
+    var o: Options = Options { numeric: false, reverse: false, unique: false }
+    var limit: u64 = 67108864u64
+    var out_at: usize = 0usize
+    var at: usize = 1usize
+    while at < args.len() {
+        if str.equal(args.get(at).as_view(), "-n") {
+            o.numeric = true
+        } else if str.equal(args.get(at).as_view(), "-r") {
+            o.reverse = true
+        } else if str.equal(args.get(at).as_view(), "-u") {
+            o.unique = true
+        } else if (str.equal(args.get(at).as_view(), "-m") || str.equal(args.get(at).as_view(), "-o")) && at + 1usize >= args.len() {
+            return usage()
+        } else if str.equal(args.get(at).as_view(), "-m") {
+            at = at + 1usize
+            match str.parse_u64(args.get(at).as_view()) {
+                Some(n) => { limit = n }
+                None => { return usage() }
+            }
+        } else if str.equal(args.get(at).as_view(), "-o") {
+            at = at + 1usize
+            out_at = at
+        } else {
+            break
+        }
+        at = at + 1usize
+    }
+    var failed: Option[io.IoErr] = None
+    // the output is written beside where it belongs and given its name
+    // when it is whole: a sort that fails leaves what was there, and the
+    // output may be one of the inputs
+    beside := str.String.new()
+    if out_at > 0usize {
+        beside.push_str(args.get(out_at).as_view())
+        beside.push_str(".ksort-tmp")
+    }
+    with all := args.as_view() {
+        if out_at > 0usize {
+            match io.create(beside.as_view()) {
+                Ok(f) => {
+                    w := io.BufWriter[io.File].new(f)
+                    match sort_files(all[at : len(all)], w, o, limit) {
+                        Ok(r) => {
+                            match w.flush() {
+                                Ok(u) => {
+                                    match io.rename(beside.as_view(), all[out_at].as_view()) {
+                                        Ok(named) => { }
+                                        Err(e) => { failed = Some(e) }
+                                    }
+                                }
+                                Err(e) => { failed = Some(e) }
+                            }
+                        }
+                        Err(e) => { failed = Some(e) }
+                    }
+                }
+                Err(e) => { failed = Some(e) }
+            }
+        } else {
+            w := io.BufWriter[io.Stdout].new(io.stdout())
+            match sort_files(all[at : len(all)], w, o, limit) {
+                Ok(r) => {
+                    match w.flush() {
+                        Ok(u) => { }
+                        Err(e) => { failed = Some(e) }
+                    }
+                }
+                Err(e) => { failed = Some(e) }
+            }
+        }
+    }
+    // after a sort that worked the file has its name, and nothing is removed
+    if out_at > 0usize { gone := io.remove_file(beside.as_view()) }
+    match failed {
+        Some(e) => {
+            match io.kind(e) {
+                OutOfMemory => eprint_str("ksort: a line does not fit the memory given with -m\n")
+                NotFound => eprint_str("ksort: a file is not there\n")
+                _ => eprint_str("ksort: a file could not be read or written\n")
+            }
+            return 1i32
+        }
+        None => { return 0i32 }
+    }
+}

@@ -1,0 +1,226 @@
+// The heap of the interpreter: every value is a cell in one Pool, and a
+// cell names other cells by handle, so lists, closures and the
+// environments they close over, cycles included, are ordinary safe code.
+// Nothing is freed when a handle goes away: collect marks what the roots
+// reach and frees the rest.
+module lisp
+import "std/str"
+
+// Ref names a cell.
+struct Ref { id: PoolId[Obj] }
+
+union Cell {
+    Nil
+    True
+    False
+    Int(n: i64)
+    Sym(id: u32)
+    Str(text: str.String)
+    Pair(car: Ref, cdr: Ref)
+    Closure(params: Ref, body: Ref, env: Ref)
+    Builtin(id: u32)
+}
+
+// Obj is a cell and its mark, which is set only while collect runs.
+struct Obj { cell: Cell; marked: bool }
+
+// The kinds of cell, as kind reports them.
+const KNil: u8 = 0u8
+const KTrue: u8 = 1u8
+const KFalse: u8 = 2u8
+const KInt: u8 = 3u8
+const KSym: u8 = 4u8
+const KStr: u8 = 5u8
+const KPair: u8 = 6u8
+const KClosure: u8 = 7u8
+const KBuiltin: u8 = 8u8
+
+struct Two { a: Ref; b: Ref }
+struct Three { a: Ref; b: Ref; c: Ref }
+
+// Heap is the pool, the handle of every cell in it (a Pool does not list
+// its own), and counts for the curious.
+struct Heap { cells: Pool[Obj]; all: Vec[Ref]; collections: u64; freed: u64; allocated: u64 }
+
+func new_heap() -> Heap {
+    return Heap { cells: Pool[Obj].new(), all: Vec[Ref].new(), collections: 0u64, freed: 0u64, allocated: 0u64 }
+}
+
+impl Heap {
+    func alloc(edit self, c: own Cell) -> Ref {
+        match self.cells.alloc(Obj { cell: c, marked: false }) {
+            Ok(id) => {
+                r := Ref { id: id }
+                self.all.push(r)
+                self.allocated = self.allocated + 1u64
+                return r
+            }
+            Err(e) => { trap_kind(oom) }
+        }
+        trap()
+    }
+
+    func live(view self) -> usize { return self.all.len() }
+
+    func kind(view self, r: Ref) -> u8 {
+        with o := self.cells.get(r.id) {
+            match o.cell {
+                Nil => { return KNil }
+                True => { return KTrue }
+                False => { return KFalse }
+                Int(n) => { return KInt }
+                Sym(id) => { return KSym }
+                Str(text) => { return KStr }
+                Pair(car, cdr) => { return KPair }
+                Closure(params, body, env) => { return KClosure }
+                Builtin(id) => { return KBuiltin }
+            }
+        }
+    }
+
+    // The parts of a cell, for a cell of the kind asked for; a cell of
+    // another kind gives None.
+    func int_of(view self, r: Ref) -> Option[i64] {
+        with o := self.cells.get(r.id) {
+            match o.cell {
+                Int(n) => { return Some(n) }
+                _ => { return None }
+            }
+        }
+    }
+    func sym_of(view self, r: Ref) -> Option[u32] {
+        with o := self.cells.get(r.id) {
+            match o.cell {
+                Sym(id) => { return Some(id) }
+                _ => { return None }
+            }
+        }
+    }
+    func builtin_of(view self, r: Ref) -> Option[u32] {
+        with o := self.cells.get(r.id) {
+            match o.cell {
+                Builtin(id) => { return Some(id) }
+                _ => { return None }
+            }
+        }
+    }
+    func pair_of(view self, r: Ref) -> Option[Two] {
+        with o := self.cells.get(r.id) {
+            match o.cell {
+                Pair(car, cdr) => { return Some(Two { a: car, b: cdr }) }
+                _ => { return None }
+            }
+        }
+    }
+    func closure_of(view self, r: Ref) -> Option[Three] {
+        with o := self.cells.get(r.id) {
+            match o.cell {
+                Closure(params, body, env) => { return Some(Three { a: params, b: body, c: env }) }
+                _ => { return None }
+            }
+        }
+    }
+    // push_text appends a string cell's bytes to dst; false for another kind.
+    func push_text(view self, r: Ref, dst: edit[str.String]) -> bool {
+        with o := self.cells.get(r.id) {
+            match o.cell {
+                Str(text) => {
+                    dst.push_str(text.as_view())
+                    return true
+                }
+                _ => { return false }
+            }
+        }
+    }
+
+    // set_car and set_cdr change a pair; another kind is left alone. The
+    // cell is replaced whole: a field that a match binds is a copy when
+    // its type is Copy, so an assignment to the binding would be lost.
+    func set_car(edit self, r: Ref, v: Ref) {
+        match self.pair_of(r) {
+            Some(p) => {
+                with o := self.cells.at(r.id) { o.cell = Cell.Pair(v, p.b) }
+            }
+            None => { }
+        }
+    }
+    func set_cdr(edit self, r: Ref, v: Ref) {
+        match self.pair_of(r) {
+            Some(p) => {
+                with o := self.cells.at(r.id) { o.cell = Cell.Pair(p.a, v) }
+            }
+            None => { }
+        }
+    }
+
+    // mark sets a cell's mark and reports whether it was clear.
+    func mark(edit self, r: Ref) -> bool {
+        with o := self.cells.at(r.id) {
+            if o.marked { return false }
+            o.marked = true
+            return true
+        }
+    }
+
+    // collect frees every cell that the roots do not reach, and returns
+    // how many that was. The marking keeps its own list of cells to
+    // visit, so a list of any length is walked without recursion.
+    func collect(edit self, roots: view[]Ref) -> usize {
+        work := Vec[Ref].new()
+        for r in roots { work.push(r) }
+        while true {
+            match work.pop() {
+                Some(r) => {
+                    if self.mark(r) {
+                        match self.pair_of(r) {
+                            Some(p) => {
+                                work.push(p.a)
+                                work.push(p.b)
+                            }
+                            None => { }
+                        }
+                        match self.closure_of(r) {
+                            Some(c) => {
+                                work.push(c.a)
+                                work.push(c.b)
+                                work.push(c.c)
+                            }
+                            None => { }
+                        }
+                    }
+                }
+                None => { break }
+            }
+        }
+        // the sweep: a marked cell is kept and its mark cleared, another
+        // is freed, which destroys it (a string's bytes with it), and the
+        // last handle of the list takes its place
+        var freed: usize = 0usize
+        var i: usize = 0usize
+        while i < self.all.len() {
+            r := self.all.get(i)
+            var keep: bool = false
+            with o := self.cells.at(r.id) {
+                keep = o.marked
+                o.marked = false
+            }
+            if keep {
+                i = i + 1usize
+            } else {
+                self.cells.free(r.id)
+                freed = freed + 1usize
+                match self.all.pop() {
+                    Some(last) => {
+                        if i < self.all.len() {
+                            with slot := self.all.at(i) { slot = last }
+                        }
+                    }
+                    None => { }
+                }
+            }
+        }
+        self.collections = self.collections + 1u64
+        self.freed = self.freed + u64(freed)
+        return freed
+    }
+}

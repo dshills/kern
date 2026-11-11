@@ -1,0 +1,18 @@
+-- compressed and restored
+nothing: 0 bytes as 23 (0 coded, 1 stored), restored the same: true
+one byte: 1 bytes as 24 (0 coded, 1 stored), restored the same: true
+six lines of text: 285 bytes as 202 (1 coded, 0 stored), restored the same: true
+the same twelve times: 3420 bytes as 231 (1 coded, 0 stored), restored the same: true
+one byte five thousand times: 5000 bytes as 71 (1 coded, 0 stored), restored the same: true
+bytes from a generator: 1500 bytes as 1523 (0 coded, 1 stored), restored the same: true
+a table of four hundred rows: 16065 bytes as 3569 (1 coded, 0 stored), restored the same: true
+-- a file that gzip made
+restored: hello, hello, hello, hello, kern
+-- files that are not what they should be
+an empty file: not a gzip file
+a file of text: not a gzip file
+the first half of a file: the file ends too soon
+a file without its last byte: the file ends too soon
+a file with one byte changed in the middle: the data is damaged
+a file with one bit of its checksum changed: the checksum or the length does not match
+two files one after the other: 6840 bytes, twice the text: true

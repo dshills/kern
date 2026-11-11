@@ -1,0 +1,935 @@
+//! phase: 6
+//! expect: output kzip
+// kzip: compresses to, and restores from, the gzip format (RFC 1952,
+// with DEFLATE, RFC 1951, inside), so what it writes gunzip reads and
+// what gzip writes it reads.
+//
+//     kzip FILE...        writes FILE.gz for each
+//     kzip -d FILE.gz...  writes FILE for each
+//     kzip -t FILE.gz...  checks each file and writes nothing
+//     kzip -c             compresses standard input to standard output
+//     kzip -d             restores standard input to standard output
+//
+// How it is built:
+//   - Compression finds repeats with a table of where each three bytes
+//     were last seen and a chain of the places before that (LZ77, a
+//     window of 32,768 bytes), then codes each block of literals and
+//     repeats with Huffman codes made for that block. A block that would
+//     not shrink is stored as it is.
+//   - Restoring reads the three kinds of block: stored, coded with the
+//     format's fixed codes, and coded with codes the block carries.
+//   - Bits are packed and unpacked through a 64-bit accumulator. Shifts
+//     and sums that may lose bits are written as such (wrapping_shl,
+//     truncate): an ordinary shift that pushed a bit out would trap.
+//   - The tables are arrays of fixed size inside structs, made once.
+//     The inner loops (the checksum, the search for a repeat, reading
+//     bits) declare with a budget that they allocate nothing, which
+//     `kern check` holds them to.
+//   - A damaged file is an error value at every step, never a trap:
+//     every length and distance read from the file is checked against
+//     what has been restored before it is used as an index.
+//
+// With no arguments the program compresses and restores data of its
+// own, restores a file that gzip made, and is given damaged files,
+// which is how it runs as a test.
+module kzip
+import "std/io"
+import "std/rand"
+import "std/str"
+
+// Flaw is what is wrong with a file that cannot be restored.
+union Flaw { NotGzip; Truncated; Corrupt; Checksum }
+
+// ---- tables ----
+
+// Code is a Huffman code as RFC 1951 orders one: how many codes there
+// are of each length, and the symbols in the order of their codes.
+struct Code { count: [16]u16; symbol: [288]u16 }
+
+struct Tables {
+    crc: [256]u32
+    len_base: [29]u16
+    len_extra: [29]u8
+    dist_base: [30]u16
+    dist_extra: [30]u8
+    order: [19]u8
+    fixed_lit: Code
+    fixed_dist: Code
+}
+
+func new_tables() -> Tables {
+    var t: Tables = Tables {
+        crc: zero(),
+        len_base: [3u16, 4u16, 5u16, 6u16, 7u16, 8u16, 9u16, 10u16, 11u16, 13u16, 15u16, 17u16, 19u16, 23u16, 27u16, 31u16, 35u16, 43u16, 51u16, 59u16, 67u16, 83u16, 99u16, 115u16, 131u16, 163u16, 195u16, 227u16, 258u16],
+        len_extra: [0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 1u8, 1u8, 1u8, 2u8, 2u8, 2u8, 2u8, 3u8, 3u8, 3u8, 3u8, 4u8, 4u8, 4u8, 4u8, 5u8, 5u8, 5u8, 5u8, 0u8],
+        dist_base: [1u16, 2u16, 3u16, 4u16, 5u16, 7u16, 9u16, 13u16, 17u16, 25u16, 33u16, 49u16, 65u16, 97u16, 129u16, 193u16, 257u16, 385u16, 513u16, 769u16, 1025u16, 1537u16, 2049u16, 3073u16, 4097u16, 6145u16, 8193u16, 12289u16, 16385u16, 24577u16],
+        dist_extra: [0u8, 0u8, 0u8, 0u8, 1u8, 1u8, 2u8, 2u8, 3u8, 3u8, 4u8, 4u8, 5u8, 5u8, 6u8, 6u8, 7u8, 7u8, 8u8, 8u8, 9u8, 9u8, 10u8, 10u8, 11u8, 11u8, 12u8, 12u8, 13u8, 13u8],
+        order: [16u8, 17u8, 18u8, 0u8, 8u8, 7u8, 9u8, 6u8, 10u8, 5u8, 11u8, 4u8, 12u8, 3u8, 13u8, 2u8, 14u8, 1u8, 15u8],
+        fixed_lit: Code { count: zero(), symbol: zero() },
+        fixed_dist: Code { count: zero(), symbol: zero() }
+    }
+    for n in 0usize..256usize {
+        var v: u32 = u32(n)
+        for k in 0u32..8u32 {
+            if (v & 1u32) == 1u32 { v = 3988292384u32 ^ (v >> 1u32) } else { v = v >> 1u32 }
+        }
+        t.crc[n] = v
+    }
+    // the fixed codes: lengths 8, 9, 7, 8 for the literals and lengths,
+    // and 5 for every distance
+    var lens: [288]u8 = zero()
+    for i in 0usize..144usize { lens[i] = 8u8 }
+    for i in 144usize..256usize { lens[i] = 9u8 }
+    for i in 256usize..280usize { lens[i] = 7u8 }
+    for i in 280usize..288usize { lens[i] = 8u8 }
+    a := build(t.fixed_lit, lens)
+    var five: [30]u8 = zero()
+    for i in 0usize..30usize { five[i] = 5u8 }
+    b := build(t.fixed_dist, five)
+    return t
+}
+
+// crc_of is the CRC-32 of data.
+budget { allocations 0 }
+func crc_of(t: view[Tables], data: view[]u8) -> u32 {
+    var v: u32 = 4294967295u32
+    for b in data { v = t.crc[usize((v ^ u32(b)) & 255u32)] ^ (v >> 8u32) }
+    return v ^ 4294967295u32
+}
+
+// build makes the code that has the given length for each symbol (0 for
+// a symbol that is not used). It returns 0 for a complete code, a
+// positive number for one with codes to spare, and a negative one for
+// lengths that no code can have.
+func build(c: edit[Code], lens: view[]u8) -> i32 {
+    for i in 0usize..16usize { c.count[i] = 0u16 }
+    for l in lens { c.count[usize(l)] = c.count[usize(l)] + 1u16 }
+    if usize(c.count[0usize]) == len(lens) { return 0i32 }
+    var left: i32 = 1i32
+    for l in 1usize..16usize {
+        left = left * 2i32 - i32(c.count[l])
+        if left < 0i32 { return left }
+    }
+    var offs: [16]u16 = zero()
+    for l in 1usize..15usize { offs[l + 1usize] = offs[l] + c.count[l] }
+    for s in 0usize..len(lens) {
+        l := usize(lens[s])
+        if l != 0usize {
+            c.symbol[usize(offs[l])] = u16(s)
+            offs[l] = offs[l] + 1u16
+        }
+    }
+    return left
+}
+
+// ---- reading bits ----
+
+// Bits reads a file's bits, the low bit of each byte first.
+struct Bits { at: usize; acc: u64; n: u32 }
+
+impl Bits {
+    // take is the next count bits (16 at most) as a number, the first
+    // bit read its lowest.
+    budget { allocations 0 }
+    func take_bits(edit self, data: view[]u8, count: u32) -> Result[u32, Flaw] {
+        while self.n < count {
+            if self.at >= len(data) { return Err(Truncated) }
+            self.acc = self.acc | (u64(data[self.at]) << self.n)
+            self.at = self.at + 1usize
+            self.n = self.n + 8u32
+        }
+        v := truncate[u32](self.acc & ((1u64 << count) - 1u64))
+        self.acc = self.acc >> count
+        self.n = self.n - count
+        return Ok(v)
+    }
+
+    // decode reads one symbol of a code, a bit at a time.
+    budget { allocations 0 }
+    func decode(edit self, data: view[]u8, c: view[Code]) -> Result[u32, Flaw] {
+        var code: i32 = 0i32
+        var first: i32 = 0i32
+        var index: i32 = 0i32
+        for l in 1usize..16usize {
+            bit := self.take_bits(data, 1u32)?
+            code = code | i32(bit)
+            count := i32(c.count[l])
+            if code - count < first { return Ok(u32(c.symbol[usize(index + (code - first))])) }
+            index = index + count
+            first = (first + count) * 2i32
+            code = code * 2i32
+        }
+        return Err(Corrupt)
+    }
+
+    // skip_to_byte drops the bits left of the byte being read.
+    func skip_to_byte(edit self) {
+        drop_bits := self.n % 8u32
+        self.acc = self.acc >> drop_bits
+        self.n = self.n - drop_bits
+    }
+}
+
+// ---- restoring ----
+
+// coded restores one block of literals and repeats with the two codes.
+func coded(r: edit[Bits], data: view[]u8, t: view[Tables], lit: view[Code], dist: view[Code], restored: edit[Vec[u8]]) -> Result[(), Flaw] {
+    while true {
+        sym := r.decode(data, lit)?
+        if sym < 256u32 {
+            restored.push(truncate[u8](sym))
+        } else if sym == 256u32 {
+            return Ok(())
+        } else {
+            li := usize(sym - 257u32)
+            if li >= 29usize { return Err(Corrupt) }
+            n := usize(t.len_base[li]) + usize(r.take_bits(data, u32(t.len_extra[li]))?)
+            di := usize(r.decode(data, dist)?)
+            if di >= 30usize { return Err(Corrupt) }
+            d := usize(t.dist_base[di]) + usize(r.take_bits(data, u32(t.dist_extra[di]))?)
+            // a repeat reaches back into what is restored, and may run
+            // into the bytes it is itself adding
+            if d > restored.len() { return Err(Corrupt) }
+            from := restored.len() - d
+            for k in 0usize..n {
+                b := restored.get(from + k)
+                restored.push(b)
+            }
+        }
+    }
+    return Ok(())
+}
+
+// carried reads the two codes a block carries in front of its data.
+func carried(r: edit[Bits], data: view[]u8, t: view[Tables], lit: edit[Code], dist: edit[Code]) -> Result[(), Flaw] {
+    nlit := usize(r.take_bits(data, 5u32)?) + 257usize
+    ndist := usize(r.take_bits(data, 5u32)?) + 1usize
+    ncode := usize(r.take_bits(data, 4u32)?) + 4usize
+    if nlit > 286usize || ndist > 30usize { return Err(Corrupt) }
+    var lens: [320]u8 = zero()
+    for i in 0usize..ncode { lens[usize(t.order[i])] = truncate[u8](r.take_bits(data, 3u32)?) }
+    var meta: Code = Code { count: zero(), symbol: zero() }
+    if build(meta, lens[0usize : 19usize]) != 0i32 { return Err(Corrupt) }
+    for i in 0usize..19usize { lens[i] = 0u8 }
+    var i: usize = 0usize
+    while i < nlit + ndist {
+        sym := r.decode(data, meta)?
+        if sym < 16u32 {
+            lens[i] = truncate[u8](sym)
+            i = i + 1usize
+        } else {
+            var value: u8 = 0u8
+            var times: usize = 0usize
+            if sym == 16u32 {
+                if i == 0usize { return Err(Corrupt) }
+                value = lens[i - 1usize]
+                times = 3usize + usize(r.take_bits(data, 2u32)?)
+            } else if sym == 17u32 {
+                times = 3usize + usize(r.take_bits(data, 3u32)?)
+            } else {
+                times = 11usize + usize(r.take_bits(data, 7u32)?)
+            }
+            if i + times > nlit + ndist { return Err(Corrupt) }
+            for k in 0usize..times { lens[i + k] = value }
+            i = i + times
+        }
+    }
+    if lens[256usize] == 0u8 { return Err(Corrupt) }
+    // a code may have codes to spare only when it is a single code
+    left := build(lit, lens[0usize : nlit])
+    if left < 0i32 || (left > 0i32 && nlit - usize(lit.count[0usize]) != 1usize) { return Err(Corrupt) }
+    left2 := build(dist, lens[nlit : nlit + ndist])
+    if left2 < 0i32 || (left2 > 0i32 && ndist - usize(dist.count[0usize]) != 1usize) { return Err(Corrupt) }
+    return Ok(())
+}
+
+// inflate restores a DEFLATE stream that begins at r, appending to
+// restored, and leaves r after the stream's last byte.
+func inflate(r: edit[Bits], data: view[]u8, t: view[Tables], restored: edit[Vec[u8]]) -> Result[(), Flaw] {
+    var last: bool = false
+    while !last {
+        last = r.take_bits(data, 1u32)? == 1u32
+        kind := r.take_bits(data, 2u32)?
+        if kind == 0u32 {
+            r.skip_to_byte()
+            n := usize(r.take_bits(data, 16u32)?)
+            check := usize(r.take_bits(data, 16u32)?)
+            if n != (check ^ 65535usize) { return Err(Corrupt) }
+            for k in 0usize..n { restored.push(truncate[u8](r.take_bits(data, 8u32)?)) }
+        } else if kind == 1u32 {
+            coded(r, data, t, t.fixed_lit, t.fixed_dist, restored)?
+        } else if kind == 2u32 {
+            var lit: Code = Code { count: zero(), symbol: zero() }
+            var dist: Code = Code { count: zero(), symbol: zero() }
+            carried(r, data, t, lit, dist)?
+            coded(r, data, t, lit, dist, restored)?
+        } else {
+            return Err(Corrupt)
+        }
+    }
+    r.skip_to_byte()
+    return Ok(())
+}
+
+func le32(data: view[]u8, at: usize) -> u32 { return load_le[u32](data, at) }
+
+// gunzip restores a gzip file: one member after another, each with its
+// header, its stream, and the checksum and the length of what it held.
+func gunzip(data: view[]u8, t: view[Tables], restored: edit[Vec[u8]]) -> Result[(), Flaw] {
+    var at: usize = 0usize
+    if len(data) == 0usize { return Err(NotGzip) }
+    while at < len(data) {
+        if at + 10usize > len(data) {
+            if at == 0usize { return Err(NotGzip) }
+            return Err(Truncated)
+        }
+        if data[at] != 31u8 || data[at + 1usize] != 139u8 || data[at + 2usize] != 8u8 { return Err(NotGzip) }
+        flags := data[at + 3usize]
+        // the three flag bits the format keeps for later must be clear
+        if (flags & 224u8) != 0u8 { return Err(NotGzip) }
+        member := at
+        at = at + 10usize
+        if (flags & 4u8) != 0u8 {
+            if at + 2usize > len(data) { return Err(Truncated) }
+            at = at + 2usize + usize(load_le[u16](data, at))
+        }
+        // a name and a comment, each ended by a zero byte
+        for which in 0u32..2u32 {
+            if (flags & wrapping_shl(8u8, which)) != 0u8 {
+                while at < len(data) && data[at] != 0u8 { at = at + 1usize }
+                at = at + 1usize
+            }
+        }
+        // the header's own checksum: the low half of its CRC
+        if (flags & 2u8) != 0u8 {
+            if at + 2usize > len(data) { return Err(Truncated) }
+            if (crc_of(t, data[member : at]) & 65535u32) != u32(load_le[u16](data, at)) { return Err(Checksum) }
+            at = at + 2usize
+        }
+        if at > len(data) { return Err(Truncated) }
+        start := restored.len()
+        var r: Bits = Bits { at: at, acc: 0u64, n: 0u32 }
+        inflate(r, data, t, restored)?
+        // whole bytes read ahead belong to what follows the stream
+        at = r.at - usize(r.n / 8u32)
+        if at + 8usize > len(data) { return Err(Truncated) }
+        with made := restored.as_view() {
+            if crc_of(t, made[start : len(made)]) != le32(data, at) { return Err(Checksum) }
+            if truncate[u32](len(made) - start) != le32(data, at + 4usize) { return Err(Checksum) }
+        }
+        at = at + 8usize
+    }
+    return Ok(())
+}
+
+// ---- writing bits ----
+
+struct Packer { bytes: Vec[u8]; acc: u64; n: u32 }
+
+impl Packer {
+    // put writes the low count bits of value, lowest first.
+    func put(edit self, value: u32, count: u32) {
+        self.acc = self.acc | (u64(value) << self.n)
+        self.n = self.n + count
+        while self.n >= 8u32 {
+            self.bytes.push(truncate[u8](self.acc))
+            self.acc = self.acc >> 8u32
+            self.n = self.n - 8u32
+        }
+    }
+    // put_code writes a Huffman code, whose first bit is its highest.
+    func put_code(edit self, code: u16, bits: u8) {
+        var rev: u32 = 0u32
+        var c: u32 = u32(code)
+        for k in 0u8..bits {
+            rev = (rev * 2u32) | (c & 1u32)
+            c = c >> 1u32
+        }
+        self.put(rev, u32(bits))
+    }
+    func finish_byte(edit self) {
+        if self.n > 0u32 {
+            self.bytes.push(truncate[u8](self.acc))
+            self.acc = 0u64
+            self.n = 0u32
+        }
+    }
+    func put_le32(edit self, v: u32) {
+        var four: [4]u8 = zero()
+        store_le[u32](four, 0usize, v)
+        self.bytes.extend(four)
+    }
+}
+
+// ---- making codes ----
+
+// lengths_for gives each symbol the length of its code in a Huffman
+// code for the given counts, none longer than limit: the classic
+// construction, and when that gives a code that is too long the counts
+// are flattened and it is made again.
+func lengths_for(counts: view[]u32, limit: u8, lens: edit[]u8) {
+    n := len(counts)
+    weights := Vec[u64].new()
+    for c in counts { weights.push(u64(c)) }
+    while true {
+        for i in 0usize..n { lens[i] = 0u8 }
+        // the symbols in use, by weight and then by number
+        used := Vec[usize].new()
+        for s in 0usize..n {
+            if weights.get(s) > 0u64 { used.push(s) }
+        }
+        if used.len() == 0usize { return }
+        if used.len() == 1usize {
+            lens[used.get(0usize)] = 1u8
+            return
+        }
+        with u := used.as_edit() {
+            var i: usize = 1usize
+            while i < len(u) {
+                var j: usize = i
+                while j > 0usize && (weights.get(u[j]) < weights.get(u[j - 1usize])) {
+                    swap_at(u, j, j - 1usize)
+                    j = j - 1usize
+                }
+                i = i + 1usize
+            }
+        }
+        // nodes: the leaves in order, then each pair's parent; the two
+        // lightest are always at the front of the leaves or of the
+        // parents, which come out in order of weight
+        leaves := used.len()
+        node_w := Vec[u64].new()
+        parent := Vec[usize].new()
+        for k in 0usize..leaves {
+            node_w.push(weights.get(used.get(k)))
+            parent.push(0usize)
+        }
+        var leaf: usize = 0usize
+        var inner: usize = leaves
+        while node_w.len() < 2usize * leaves - 1usize {
+            var pick: [2]usize = zero()
+            for k in 0usize..2usize {
+                if leaf < leaves && (inner >= node_w.len() || node_w.get(leaf) <= node_w.get(inner)) {
+                    pick[k] = leaf
+                    leaf = leaf + 1usize
+                } else {
+                    pick[k] = inner
+                    inner = inner + 1usize
+                }
+            }
+            at := node_w.len()
+            node_w.push(node_w.get(pick[0usize]) + node_w.get(pick[1usize]))
+            parent.push(0usize)
+            with p := parent.as_edit() {
+                p[pick[0usize]] = at
+                p[pick[1usize]] = at
+            }
+        }
+        root := node_w.len() - 1usize
+        var longest: u8 = 0u8
+        for k in 0usize..leaves {
+            var depth: u8 = 0u8
+            var at: usize = k
+            while at != root {
+                at = parent.get(at)
+                depth = depth + 1u8
+            }
+            lens[used.get(k)] = depth
+            if depth > longest { longest = depth }
+        }
+        if longest <= limit { return }
+        with w := weights.as_edit() {
+            for s in 0usize..n {
+                if w[s] > 0u64 { w[s] = (w[s] + 1u64) / 2u64 }
+            }
+        }
+    }
+}
+
+// codes_for numbers the codes of a code with the given lengths, as RFC
+// 1951 numbers them.
+func codes_for(lens: view[]u8, codes: edit[]u16) {
+    var count: [16]u16 = zero()
+    for l in lens { count[usize(l)] = count[usize(l)] + 1u16 }
+    count[0usize] = 0u16
+    var next: [16]u16 = zero()
+    var code: u16 = 0u16
+    for l in 1usize..16usize {
+        code = (code + count[l - 1usize]) * 2u16
+        next[l] = code
+    }
+    for s in 0usize..len(lens) {
+        l := usize(lens[s])
+        if l != 0usize {
+            codes[s] = next[l]
+            next[l] = next[l] + 1u16
+        }
+    }
+}
+
+// ---- compressing ----
+
+// A token is a byte, or a repeat: bit 31, the length less 3 in bits 15
+// to 22, the distance less 1 in bits 0 to 14.
+const repeat_bit: u32 = 2147483648u32
+
+func hash3(data: view[]u8, i: usize) -> usize {
+    // the products are meant to lose their high bits: an ordinary `*`
+    // would trap on them
+    v := wrapping_mul(u32(data[i]), 2654435761u32) ^ wrapping_mul(u32(data[i + 1usize]), 40503u32) ^ wrapping_mul(u32(data[i + 2usize]), 2246822519u32)
+    return usize((v >> 12u32) & 32767u32)
+}
+
+// same_run is how many bytes at a and at b are the same, up to most.
+budget { allocations 0 }
+func same_run(data: view[]u8, a: usize, b: usize, most: usize) -> usize {
+    var n: usize = 0usize
+    while n < most && data[a + n] == data[b + n] { n = n + 1usize }
+    return n
+}
+
+// Finder remembers where each three bytes were last seen (the place
+// plus one, 0 for never) and, for each place, the place before it with
+// the same three bytes.
+struct Finder { head: Vec[u32]; prev: Vec[u32] }
+
+impl Finder {
+    func note(edit self, data: view[]u8, i: usize) {
+        if i + 3usize > len(data) { return }
+        h := hash3(data, i)
+        before := self.head.get(h)
+        with p := self.prev.at(i % 32768usize) { p = before }
+        with slot := self.head.at(h) { slot = u32(i) + 1u32 }
+    }
+
+    // longest is the longest repeat of what begins at i, as a token, or
+    // 0 when there is none of three bytes or more.
+    budget { allocations 0 }
+    func longest(view self, data: view[]u8, i: usize) -> u32 {
+        if i + 3usize > len(data) { return 0u32 }
+        var most: usize = len(data) - i
+        if most > 258usize { most = 258usize }
+        var best: usize = 0usize
+        var best_dist: usize = 0usize
+        var cand: u32 = self.head.get(hash3(data, i))
+        var tries: u32 = 0u32
+        while cand != 0u32 && tries < 24u32 {
+            p := usize(cand - 1u32)
+            if i - p > 32768usize { break }
+            n := same_run(data, p, i, most)
+            if n > best {
+                best = n
+                best_dist = i - p
+                if n == most { break }
+            }
+            cand = self.prev.get(p % 32768usize)
+            tries = tries + 1u32
+        }
+        if best < 3usize { return 0u32 }
+        return repeat_bit | (u32(best - 3usize) * 32768u32) | u32(best_dist - 1usize)
+    }
+}
+
+// Block is one block's tokens and the bytes of the input they stand for.
+struct Block { tok_from: usize; tok_to: usize; in_from: usize; in_to: usize }
+
+// Shape counts what a compression wrote.
+struct Shape { stored: u64; coded: u64 }
+
+func len_symbol(t: view[Tables], n: usize) -> usize {
+    var s: usize = 28usize
+    while usize(t.len_base[s]) > n { s = s - 1usize }
+    return s
+}
+func dist_symbol(t: view[Tables], d: usize) -> usize {
+    var s: usize = 29usize
+    while usize(t.dist_base[s]) > d { s = s - 1usize }
+    return s
+}
+
+// write_block writes one block: with codes made for it, or stored when
+// that is no larger.
+func write_block(w: edit[Packer], data: view[]u8, toks: view[]u32, b: Block, last: bool, t: view[Tables], shape: edit[Shape]) {
+    var lit_n: [286]u32 = zero()
+    var dist_n: [30]u32 = zero()
+    var extra: u64 = 0u64
+    lit_n[256usize] = 1u32
+    for k in b.tok_from..b.tok_to {
+        tok := toks[k]
+        if (tok & repeat_bit) == 0u32 {
+            lit_n[usize(tok)] = lit_n[usize(tok)] + 1u32
+        } else {
+            ls := len_symbol(t, usize((tok >> 15u32) & 255u32) + 3usize)
+            ds := dist_symbol(t, usize(tok & 32767u32) + 1usize)
+            lit_n[257usize + ls] = lit_n[257usize + ls] + 1u32
+            dist_n[ds] = dist_n[ds] + 1u32
+            extra = extra + u64(t.len_extra[ls]) + u64(t.dist_extra[ds])
+        }
+    }
+    var lit_len: [286]u8 = zero()
+    var dist_len: [30]u8 = zero()
+    lengths_for(lit_n, 15u8, lit_len)
+    lengths_for(dist_n, 15u8, dist_len)
+    var nlit: usize = 286usize
+    while nlit > 257usize && lit_len[nlit - 1usize] == 0u8 { nlit = nlit - 1usize }
+    var ndist: usize = 30usize
+    while ndist > 1usize && dist_len[ndist - 1usize] == 0u8 { ndist = ndist - 1usize }
+    // the lengths of both codes, one after the other, are themselves
+    // coded, with a code of 19 symbols of which this uses the first 16
+    var meta_n: [19]u32 = zero()
+    for i in 0usize..nlit { meta_n[usize(lit_len[i])] = meta_n[usize(lit_len[i])] + 1u32 }
+    for i in 0usize..ndist { meta_n[usize(dist_len[i])] = meta_n[usize(dist_len[i])] + 1u32 }
+    var meta_len: [19]u8 = zero()
+    lengths_for(meta_n, 7u8, meta_len)
+    var ncode: usize = 19usize
+    while ncode > 4usize && meta_len[usize(t.order[ncode - 1usize])] == 0u8 { ncode = ncode - 1usize }
+    var bits: u64 = 17u64 + 3u64 * u64(ncode) + extra
+    for i in 0usize..19usize { bits = bits + u64(meta_n[i]) * u64(meta_len[i]) }
+    for i in 0usize..286usize { bits = bits + u64(lit_n[i]) * u64(lit_len[i]) }
+    for i in 0usize..30usize { bits = bits + u64(dist_n[i]) * u64(dist_len[i]) }
+    raw := b.in_to - b.in_from
+    var final: u32 = 0u32
+    if last { final = 1u32 }
+    if (bits + 7u64) / 8u64 >= u64(raw) + 5u64 {
+        // stored: the length, the length with every bit turned, the bytes
+        w.put(final, 1u32)
+        w.put(0u32, 2u32)
+        w.finish_byte()
+        w.put(u32(raw), 16u32)
+        w.put(u32(raw) ^ 65535u32, 16u32)
+        w.bytes.extend(data[b.in_from : b.in_to])
+        shape.stored = shape.stored + 1u64
+        return
+    }
+    var lit_code: [286]u16 = zero()
+    var dist_code: [30]u16 = zero()
+    var meta_code: [19]u16 = zero()
+    codes_for(lit_len, lit_code)
+    codes_for(dist_len, dist_code)
+    codes_for(meta_len, meta_code)
+    w.put(final, 1u32)
+    w.put(2u32, 2u32)
+    w.put(u32(nlit - 257usize), 5u32)
+    w.put(u32(ndist - 1usize), 5u32)
+    w.put(u32(ncode - 4usize), 4u32)
+    for i in 0usize..ncode { w.put(u32(meta_len[usize(t.order[i])]), 3u32) }
+    for i in 0usize..nlit { w.put_code(meta_code[usize(lit_len[i])], meta_len[usize(lit_len[i])]) }
+    for i in 0usize..ndist { w.put_code(meta_code[usize(dist_len[i])], meta_len[usize(dist_len[i])]) }
+    for k in b.tok_from..b.tok_to {
+        tok := toks[k]
+        if (tok & repeat_bit) == 0u32 {
+            w.put_code(lit_code[usize(tok)], lit_len[usize(tok)])
+        } else {
+            n := usize((tok >> 15u32) & 255u32) + 3usize
+            d := usize(tok & 32767u32) + 1usize
+            ls := len_symbol(t, n)
+            ds := dist_symbol(t, d)
+            w.put_code(lit_code[257usize + ls], lit_len[257usize + ls])
+            w.put(u32(n - usize(t.len_base[ls])), u32(t.len_extra[ls]))
+            w.put_code(dist_code[ds], dist_len[ds])
+            w.put(u32(d - usize(t.dist_base[ds])), u32(t.dist_extra[ds]))
+        }
+    }
+    w.put_code(lit_code[256usize], lit_len[256usize])
+    shape.coded = shape.coded + 1u64
+}
+
+// deflate writes data as a DEFLATE stream.
+func deflate(data: view[]u8, t: view[Tables], w: edit[Packer], shape: edit[Shape]) {
+    var f: Finder = Finder { head: Vec[u32].new(), prev: Vec[u32].new() }
+    f.head.resize(32768usize, 0u32)
+    f.prev.resize(32768usize, 0u32)
+    toks := Vec[u32].new()
+    blocks := Vec[Block].new()
+    var from_tok: usize = 0usize
+    var from_in: usize = 0usize
+    var i: usize = 0usize
+    while i < len(data) {
+        found := f.longest(data, i)
+        f.note(data, i)
+        if found == 0u32 {
+            toks.push(u32(data[i]))
+            i = i + 1usize
+        } else {
+            toks.push(found)
+            n := usize((found >> 15u32) & 255u32) + 3usize
+            for k in 1usize..n { f.note(data, i + k) }
+            i = i + n
+        }
+        if i - from_in >= 32768usize {
+            blocks.push(Block { tok_from: from_tok, tok_to: toks.len(), in_from: from_in, in_to: i })
+            from_tok = toks.len()
+            from_in = i
+        }
+    }
+    if from_in < len(data) || blocks.len() == 0usize {
+        blocks.push(Block { tok_from: from_tok, tok_to: toks.len(), in_from: from_in, in_to: len(data) })
+    }
+    for k in 0usize..blocks.len() {
+        b := blocks.get(k)
+        write_block(w, data, toks.as_view(), b, k + 1usize == blocks.len(), t, shape)
+    }
+    w.finish_byte()
+}
+
+// gzip writes data as a gzip file: no name, no time.
+func gzip(data: view[]u8, t: view[Tables], shape: edit[Shape]) -> Vec[u8] {
+    var w: Packer = Packer { bytes: Vec[u8].new(), acc: 0u64, n: 0u32 }
+    w.bytes.extend("\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff")
+    deflate(data, t, w, shape)
+    w.put_le32(crc_of(t, data))
+    w.put_le32(truncate[u32](len(data)))
+    return replace(w.bytes, Vec[u8].new())
+}
+
+// ---- the demonstration ----
+
+func say(s: view[]u8) { print_str(s); println() }
+
+func flaw_name(f: Flaw) {
+    match f {
+        NotGzip => print_str("not a gzip file")
+        Truncated => print_str("the file ends too soon")
+        Corrupt => print_str("the data is damaged")
+        Checksum => print_str("the checksum or the length does not match")
+    }
+}
+
+// round compresses data, restores it, and says what became of it.
+func round(label: view[]u8, data: view[]u8, t: view[Tables]) {
+    var shape: Shape = Shape { stored: 0u64, coded: 0u64 }
+    packed := gzip(data, t, shape)
+    restored := Vec[u8].new()
+    print_str(label)
+    print_str(": ")
+    print_u64(u64(len(data)))
+    print_str(" bytes as ")
+    print_u64(u64(packed.len()))
+    print_str(" (")
+    print_u64(shape.coded)
+    print_str(" coded, ")
+    print_u64(shape.stored)
+    print_str(" stored), restored the same: ")
+    match gunzip(packed.as_view(), t, restored) {
+        Ok(u) => print_bool(str.equal(restored.as_view(), data))
+        Err(f) => flaw_name(f)
+    }
+    println()
+}
+
+func refused(label: view[]u8, data: view[]u8, t: view[Tables]) {
+    restored := Vec[u8].new()
+    print_str(label)
+    print_str(": ")
+    match gunzip(data, t, restored) {
+        Ok(u) => print_str("restored")
+        Err(f) => flaw_name(f)
+    }
+    println()
+}
+
+// What `printf 'hello, hello, hello, hello, kern\n' | gzip -9n` writes:
+// one block, coded with the format's fixed codes.
+const theirs: view[]u8 = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\x03\xcb\x48\xcd\xc9\xc9\xd7\x51\xc8\xc0\x46\x65\xa7\x16\xe5\x71\x01\x00\x43\x05\xb2\xef\x21\x00\x00\x00"
+
+const verse: view[]u8 = "A value has one owner, and the owner is a name.\nA name goes out of scope, and the value is destroyed.\nA value may be moved, and the name it left is dead.\nA value may be viewed by any number at once,\nor edited by one, and never both.\nAn access does not escape the call it was made for.\n"
+
+func demo() -> i32 {
+    t := new_tables()
+    say("-- compressed and restored")
+    round("nothing", "", t)
+    round("one byte", "a", t)
+    round("six lines of text", verse, t)
+    text := Vec[u8].new()
+    for i in 0usize..12usize { text.extend(verse) }
+    round("the same twelve times", text.as_view(), t)
+    same := Vec[u8].new()
+    for i in 0usize..5000usize { same.push(97u8) }
+    round("one byte five thousand times", same.as_view(), t)
+    rng := rand.Rng.seeded(7u64)
+    noise := Vec[u8].new()
+    noise.resize(1500usize, 0u8)
+    rng.fill(noise.as_edit())
+    round("bytes from a generator", noise.as_view(), t)
+    table := str.String.new()
+    for i in 0u64..400u64 {
+        table.push_str("row ")
+        table.push_padded(i, 4usize, 48u8)
+        table.push_str(", squared ")
+        table.push_u64(i * i)
+        table.push_str(", in sixteens ")
+        table.push_hex(i)
+        table.push(10u8)
+    }
+    round("a table of four hundred rows", table.as_view(), t)
+
+    say("-- a file that gzip made")
+    restored := Vec[u8].new()
+    match gunzip(theirs, t, restored) {
+        Ok(u) => {
+            print_str("restored: ")
+            print_str(restored.as_view())
+        }
+        Err(f) => {
+            flaw_name(f)
+            println()
+        }
+    }
+
+    say("-- files that are not what they should be")
+    var shape: Shape = Shape { stored: 0u64, coded: 0u64 }
+    good := gzip(text.as_view(), t, shape)
+    refused("an empty file", "", t)
+    refused("a file of text", verse, t)
+    with g := good.as_view() {
+        refused("the first half of a file", g[0usize : len(g) / 2usize], t)
+        refused("a file without its last byte", g[0usize : len(g) - 1usize], t)
+    }
+    damaged := good.clone()
+    with d := damaged.at(damaged.len() / 2usize) { d = d ^ 255u8 }
+    refused("a file with one byte changed in the middle", damaged.as_view(), t)
+    other := good.clone()
+    with d := other.at(other.len() - 6usize) { d = d ^ 1u8 }
+    refused("a file with one bit of its checksum changed", other.as_view(), t)
+    twice := good.clone()
+    twice.extend(good.as_view())
+    restored2 := Vec[u8].new()
+    print_str("two files one after the other: ")
+    match gunzip(twice.as_view(), t, restored2) {
+        Ok(u) => {
+            print_u64(u64(restored2.len()))
+            print_str(" bytes, twice the text: ")
+            print_bool(restored2.len() == 2usize * text.len())
+        }
+        Err(f) => flaw_name(f)
+    }
+    println()
+    return 0i32
+}
+
+// ---- the program ----
+
+func fail(what: view[]u8, path: view[]u8) -> i32 {
+    eprint_str("kzip: ")
+    eprint_str(what)
+    eprint_str(path)
+    eprint_str("\n")
+    return 1i32
+}
+
+func usage() -> i32 {
+    eprint_str("usage: kzip FILE...   kzip -d FILE.gz...   kzip -t FILE.gz...   kzip -c   kzip -d   kzip -t\n")
+    return 2i32
+}
+
+// is_flag reports whether an argument is written as a flag.
+func is_flag(a: view[]u8) -> bool { return len(a) > 0usize && a[0] == 45u8 }
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize { return demo() }
+    // a flag comes first and is one of three; -c takes no files
+    for i in 1usize..args.len() {
+        with a := args.get(i).as_view() {
+            if is_flag(a) && (i > 1usize || !(str.equal(a, "-c") || str.equal(a, "-d") || str.equal(a, "-t"))) { return usage() }
+        }
+    }
+    if str.equal(args.get(1usize).as_view(), "-c") && args.len() > 2usize { return usage() }
+    if args.len() == 2usize && str.equal(args.get(1usize).as_view(), "-c") {
+        match io.read_stdin() {
+            Ok(input) => {
+                t := new_tables()
+                var shape: Shape = Shape { stored: 0u64, coded: 0u64 }
+                packed := gzip(input.as_view(), t, shape)
+                match io.write_stdout(packed.as_view()) {
+                    Ok(u) => { return 0i32 }
+                    Err(e) => { return 1i32 }
+                }
+            }
+            Err(e) => { return fail("cannot read standard input", "") }
+        }
+    }
+    t := new_tables()
+    restore := str.equal(args.get(1usize).as_view(), "-d")
+    test := str.equal(args.get(1usize).as_view(), "-t")
+    if (restore || test) && args.len() == 2usize {
+        match io.read_stdin() {
+            Ok(input) => {
+                restored := Vec[u8].new()
+                match gunzip(input.as_view(), t, restored) {
+                    Ok(u) => {
+                        if test { return 0i32 }
+                        match io.write_stdout(restored.as_view()) {
+                            Ok(w) => { return 0i32 }
+                            Err(e) => { return 1i32 }
+                        }
+                    }
+                    Err(f) => {
+                        eprint_str("kzip: ")
+                        flaw_note(f)
+                        return 1i32
+                    }
+                }
+            }
+            Err(e) => { return fail("cannot read standard input", "") }
+        }
+    }
+    // a file that fails is reported, and the rest are still done
+    var status: i32 = 0i32
+    var at: usize = 1usize
+    if restore || test { at = 2usize }
+    while at < args.len() {
+        with path := args.get(at).as_view() {
+            match io.read_file(path) {
+                Ok(input) => {
+                    if restore || test {
+                        restored := Vec[u8].new()
+                        match gunzip(input.as_view(), t, restored) {
+                            Ok(u) => {
+                                if restore {
+                                    if !str.ends_with(path, ".gz") {
+                                        status = fail("the name does not end in .gz: ", path)
+                                    } else {
+                                        match io.write_file(path[0usize : len(path) - 3usize], restored.as_view()) {
+                                            Ok(w) => { }
+                                            Err(e) => { status = fail("cannot write the file restored from ", path) }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(f) => {
+                                eprint_str("kzip: ")
+                                eprint_str(path)
+                                eprint_str(": ")
+                                flaw_note(f)
+                                status = 1i32
+                            }
+                        }
+                    } else {
+                        var shape: Shape = Shape { stored: 0u64, coded: 0u64 }
+                        packed := gzip(input.as_view(), t, shape)
+                        name := Vec[u8].new()
+                        name.extend(path)
+                        name.extend(".gz")
+                        match io.write_file(name.as_view(), packed.as_view()) {
+                            Ok(w) => { }
+                            Err(e) => { status = fail("cannot write ", name.as_view()) }
+                        }
+                    }
+                }
+                Err(e) => { status = fail("cannot read ", path) }
+            }
+        }
+        at = at + 1usize
+    }
+    return status
+}
+
+func flaw_note(f: Flaw) {
+    match f {
+        NotGzip => eprint_str("not a gzip file\n")
+        Truncated => eprint_str("the file ends too soon\n")
+        Corrupt => eprint_str("the data is damaged\n")
+        Checksum => eprint_str("the checksum or the length does not match\n")
+    }
+}

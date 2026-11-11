@@ -1,0 +1,905 @@
+// The interpreter: symbols, the reader, the evaluator and the printer.
+//
+// What the collector must not free. A collection happens only at the top
+// of the evaluator's loop (and in the gc procedure), never inside an
+// allocation, so a value is at risk only while an evaluation runs. Every
+// value that an evaluation in progress still needs is therefore in
+// `roots`: the expression and the environment of each activation, the
+// procedure and the arguments of a call being assembled, the values of a
+// let being bound. Everything else in flight (the cells of the program's
+// text, a result on its way to a root) is reachable from those, or is
+// not needed after the next evaluation begins.
+module lisp
+import "std/map"
+import "std/str"
+
+// Fault is why a program could not be read or run. incomplete marks
+// text that ended inside a list or a string: more text may finish it.
+struct Fault { msg: str.String; incomplete: bool }
+
+func fault(msg: view[]u8) -> Fault { return Fault { msg: str.String.from(msg), incomplete: false } }
+
+// unfinished is the fault of a text that ends before its datum does.
+func unfinished(msg: view[]u8) -> Fault { return Fault { msg: str.String.from(msg), incomplete: true } }
+
+impl Fault {
+    func Message(view self) -> view[]u8 { return self.msg.as_view() }
+    func Incomplete(view self) -> bool { return self.incomplete }
+}
+
+// The special forms are the first symbols interned, in this order.
+const SQuote: u32 = 0u32
+const SIf: u32 = 1u32
+const SDefine: u32 = 2u32
+const SSet: u32 = 3u32
+const SLambda: u32 = 4u32
+const SBegin: u32 = 5u32
+const SLet: u32 = 6u32
+const SCond: u32 = 7u32
+const SElse: u32 = 8u32
+const NotSpecial: u32 = 9u32
+
+const max_depth: usize = 400usize
+const max_nesting: usize = 200usize
+const first_threshold: usize = 1024usize
+
+struct Interp {
+    heap: Heap
+    names: Vec[str.String]
+    numbers: map.Map[str.String, u32]
+    symbols: Vec[Ref]
+    builtins: Vec[u32]
+    globals: Vec[Ref]
+    roots: Vec[Ref]
+    nil: Ref
+    yes: Ref
+    no: Ref
+    absent: Ref
+    global: Ref
+    written: str.String
+    threshold: usize
+}
+
+// The procedures written in the language itself.
+const prelude: view[]u8 = "(define (length xs) (define (go xs n) (if (null? xs) n (go (cdr xs) (+ n 1)))) (go xs 0))\n(define (reverse xs) (define (go xs acc) (if (null? xs) acc (go (cdr xs) (cons (car xs) acc)))) (go xs '()))\n(define (append a b) (if (null? a) b (cons (car a) (append (cdr a) b))))\n(define (map f xs) (if (null? xs) '() (cons (f (car xs)) (map f (cdr xs)))))\n(define (filter keep xs) (cond ((null? xs) '()) ((keep (car xs)) (cons (car xs) (filter keep (cdr xs)))) (else (filter keep (cdr xs)))))\n(define (fold f acc xs) (if (null? xs) acc (fold f (f acc (car xs)) (cdr xs))))\n(define (range a b) (define (go b acc) (if (< b a) acc (go (- b 1) (cons b acc)))) (go (- b 1) '()))\n"
+
+// New makes an interpreter with the special forms, the built-in
+// procedures and the prelude in its global environment.
+func New() -> Interp {
+    heap := new_heap()
+    nil := heap.alloc(Cell.Nil)
+    yes := heap.alloc(Cell.True)
+    no := heap.alloc(Cell.False)
+    absent := heap.alloc(Cell.Nil)
+    global := heap.alloc(Cell.Pair(nil, nil))
+    var it: Interp = Interp { heap: heap, names: Vec[str.String].new(), numbers: map.Map[str.String, u32].new(), symbols: Vec[Ref].new(), builtins: Vec[u32].new(), globals: Vec[Ref].new(), roots: Vec[Ref].new(), nil: nil, yes: yes, no: no, absent: absent, global: global, written: str.String.new(), threshold: first_threshold }
+    a := it.intern("quote")
+    b := it.intern("if")
+    c := it.intern("define")
+    d := it.intern("set!")
+    e := it.intern("lambda")
+    f := it.intern("begin")
+    g := it.intern("let")
+    h := it.intern("cond")
+    i := it.intern("else")
+    it.builtin_named("+")
+    it.builtin_named("-")
+    it.builtin_named("*")
+    it.builtin_named("quotient")
+    it.builtin_named("remainder")
+    it.builtin_named("=")
+    it.builtin_named("<")
+    it.builtin_named(">")
+    it.builtin_named("<=")
+    it.builtin_named(">=")
+    it.builtin_named("cons")
+    it.builtin_named("car")
+    it.builtin_named("cdr")
+    it.builtin_named("list")
+    it.builtin_named("null?")
+    it.builtin_named("pair?")
+    it.builtin_named("eq?")
+    it.builtin_named("not")
+    it.builtin_named("display")
+    it.builtin_named("newline")
+    it.builtin_named("gc")
+    it.builtin_named("cells")
+    it.builtin_named("set-car!")
+    it.builtin_named("set-cdr!")
+    match it.Run(prelude, false) {
+        Ok(u) => { }
+        Err(fault) => { trap() }
+    }
+    return it
+}
+
+impl Interp {
+    // ---- symbols ----
+
+    // intern is the number of the symbol with this name, which it makes
+    // the first time.
+    func intern(edit self, name: view[]u8) -> u32 {
+        match map.find_text(self.numbers, name) {
+            Some(slot) => {
+                n := self.numbers.value_at(slot)
+                return n
+            }
+            None => { }
+        }
+        id := truncate[u32](self.names.len())
+        self.names.push(str.String.from(name))
+        old := self.numbers.insert(str.String.from(name), id)
+        cell := self.heap.alloc(Cell.Sym(id))
+        self.symbols.push(cell)
+        self.globals.push(self.absent)
+        return id
+    }
+
+    func symbol(view self, id: u32) -> Ref {
+        r := self.symbols.get(usize(id))
+        return r
+    }
+
+    // builtin_named binds the next built-in procedure to its name.
+    func builtin_named(edit self, name: view[]u8) {
+        id := self.intern(name)
+        n := truncate[u32](self.builtins.len())
+        self.builtins.push(id)
+        proc := self.heap.alloc(Cell.Builtin(n))
+        with slot := self.globals.at(usize(id)) { slot = proc }
+    }
+
+    // ---- cells ----
+
+    func cons(edit self, a: Ref, b: Ref) -> Ref { return self.heap.alloc(Cell.Pair(a, b)) }
+
+    func car_of(view self, r: Ref) -> Ref {
+        match self.heap.pair_of(r) {
+            Some(p) => { return p.a }
+            None => { return self.nil }
+        }
+    }
+    func cdr_of(view self, r: Ref) -> Ref {
+        match self.heap.pair_of(r) {
+            Some(p) => { return p.b }
+            None => { return self.nil }
+        }
+    }
+    func is_pair(view self, r: Ref) -> bool { return self.heap.kind(r) == KPair }
+    func truthy(view self, r: Ref) -> bool { return self.heap.kind(r) != KFalse }
+    func boolean(view self, b: bool) -> Ref {
+        if b { return self.yes }
+        return self.no
+    }
+
+    // pair is a pair's two parts, or a fault that names what was expected.
+    func pair(view self, r: Ref, what: view[]u8) -> Result[Two, Fault] {
+        match self.heap.pair_of(r) {
+            Some(p) => { return Ok(p) }
+            None => {
+                f := fault(what)
+                f.msg.push_str(": not a list where one is needed")
+                return Err(f)
+            }
+        }
+    }
+
+    // nth is the element of a list at an index.
+    func nth(view self, list: Ref, index: usize, what: view[]u8) -> Result[Ref, Fault] {
+        var p: Ref = list
+        var i: usize = 0usize
+        while i < index {
+            cell := self.pair(p, what)?
+            p = cell.b
+            i = i + 1usize
+        }
+        cell := self.pair(p, what)?
+        return Ok(cell.a)
+    }
+
+    // ---- the roots ----
+
+    func root(view self, i: usize) -> Ref {
+        r := self.roots.get(i)
+        return r
+    }
+    func set_root(edit self, i: usize, r: Ref) {
+        with slot := self.roots.at(i) { slot = r }
+    }
+    func unroot(edit self, n: usize) {
+        while self.roots.len() > n { gone := self.roots.pop() }
+    }
+
+    // collect frees what nothing in flight, no symbol and no binding
+    // reaches, and sets the size at which the next collection happens.
+    func collect(edit self) -> usize {
+        all := Vec[Ref].new()
+        all.extend(self.roots.as_view())
+        all.extend(self.symbols.as_view())
+        all.extend(self.globals.as_view())
+        all.push(self.absent)
+        all.push(self.global)
+        all.push(self.nil)
+        all.push(self.yes)
+        all.push(self.no)
+        freed := self.heap.collect(all.as_view())
+        self.threshold = self.heap.live() * 2usize
+        if self.threshold < first_threshold { self.threshold = first_threshold }
+        return freed
+    }
+
+    // ---- environments ----
+    //
+    // The global environment is a table with a place for every symbol,
+    // so a global name is found in one step. Every other environment is
+    // a pair: a list of bindings, each a pair of a symbol and its value,
+    // and the environment around it, which ends in the cell `global`.
+
+    func new_env(edit self, around: Ref) -> Ref { return self.cons(self.nil, around) }
+
+    // local is the pair that binds a symbol in the environments inside
+    // the global one.
+    func local(view self, env: Ref, id: u32) -> Option[Ref] {
+        var e: Ref = env
+        while e != self.global && self.is_pair(e) {
+            var b: Ref = self.car_of(e)
+            while self.is_pair(b) {
+                entry := self.car_of(b)
+                match self.heap.sym_of(self.car_of(entry)) {
+                    Some(have) => { if have == id { return Some(entry) } }
+                    None => { }
+                }
+                b = self.cdr_of(b)
+            }
+            e = self.cdr_of(e)
+        }
+        return None
+    }
+
+    // lookup is the value a symbol has in an environment.
+    func lookup(view self, env: Ref, id: u32) -> Result[Ref, Fault] {
+        match self.local(env, id) {
+            Some(entry) => { return Ok(self.cdr_of(entry)) }
+            None => { }
+        }
+        value := self.globals.get(usize(id))
+        if value == self.absent { return Err(self.unbound(id)) }
+        return Ok(value)
+    }
+
+    // assign changes the value a symbol has.
+    func assign(edit self, env: Ref, id: u32, value: Ref) -> Result[(), Fault] {
+        match self.local(env, id) {
+            Some(entry) => {
+                self.heap.set_cdr(entry, value)
+                return Ok(())
+            }
+            None => { }
+        }
+        have := self.globals.get(usize(id))
+        if have == self.absent { return Err(self.unbound(id)) }
+        with slot := self.globals.at(usize(id)) { slot = value }
+        return Ok(())
+    }
+
+    // define binds a symbol in an environment itself, or changes the
+    // binding it has there.
+    func define(edit self, env: Ref, name: Ref, value: Ref) -> Result[(), Fault] {
+        match self.heap.sym_of(name) {
+            Some(id) => {
+                if env == self.global {
+                    with slot := self.globals.at(usize(id)) { slot = value }
+                    return Ok(())
+                }
+                var b: Ref = self.car_of(env)
+                while self.is_pair(b) {
+                    entry := self.car_of(b)
+                    match self.heap.sym_of(self.car_of(entry)) {
+                        Some(have) => {
+                            if have == id {
+                                self.heap.set_cdr(entry, value)
+                                return Ok(())
+                            }
+                        }
+                        None => { }
+                    }
+                    b = self.cdr_of(b)
+                }
+                entry := self.cons(name, value)
+                frame := self.cons(entry, self.car_of(env))
+                self.heap.set_car(env, frame)
+                return Ok(())
+            }
+            None => { return Err(fault("a name must be a symbol")) }
+        }
+    }
+
+    func unbound(view self, id: u32) -> Fault {
+        f := fault("unbound variable: ")
+        f.msg.push_str(self.names.get(usize(id)).as_view())
+        return f
+    }
+
+    // ---- the reader ----
+
+    func skip_blank(view self, src: view[]u8, from: usize) -> usize {
+        var i: usize = from
+        while i < len(src) {
+            if src[i] == 59u8 {
+                while i < len(src) && src[i] != 10u8 { i = i + 1usize }
+            } else if str.is_space(src[i]) {
+                i = i + 1usize
+            } else {
+                break
+            }
+        }
+        return i
+    }
+
+    // read reads one datum from src at rd.at and moves rd.at past it;
+    // None is the end of the text.
+    func read(edit self, src: view[]u8, rd: edit[Reader]) -> Result[Option[Ref], Fault] {
+        rd.at = self.skip_blank(src, rd.at)
+        if rd.at >= len(src) { return Ok(None) }
+        c := src[rd.at]
+        if c == 40u8 {
+            rd.at = rd.at + 1usize
+            if rd.depth >= max_nesting { return Err(fault("lists are nested too deeply")) }
+            rd.depth = rd.depth + 1usize
+            list := self.read_list(src, rd)?
+            rd.depth = rd.depth - 1usize
+            return Ok(Some(list))
+        }
+        if c == 41u8 { return Err(fault("a ) with no list to close")) }
+        if c == 39u8 {
+            rd.at = rd.at + 1usize
+            match self.read(src, rd)? {
+                Some(quoted) => {
+                    tail := self.cons(quoted, self.nil)
+                    return Ok(Some(self.cons(self.symbol(SQuote), tail)))
+                }
+                None => {
+                    var f: Fault = fault("nothing after a quote")
+                    f.incomplete = true
+                    return Err(f)
+                }
+            }
+        }
+        if c == 34u8 { return self.read_string(src, rd) }
+        start := rd.at
+        while rd.at < len(src) && !str.is_space(src[rd.at]) && src[rd.at] != 40u8 && src[rd.at] != 41u8 && src[rd.at] != 39u8 && src[rd.at] != 59u8 && src[rd.at] != 34u8 {
+            rd.at = rd.at + 1usize
+        }
+        return Ok(Some(self.atom(src[start : rd.at])?))
+    }
+
+    // read_list reads the elements of a list whose ( has been read.
+    func read_list(edit self, src: view[]u8, rd: edit[Reader]) -> Result[Ref, Fault] {
+        items := Vec[Ref].new()
+        var tail: Ref = self.nil
+        while true {
+            rd.at = self.skip_blank(src, rd.at)
+            if rd.at >= len(src) {
+                var f: Fault = fault("a list is not closed")
+                f.incomplete = true
+                return Err(f)
+            }
+            if src[rd.at] == 41u8 {
+                rd.at = rd.at + 1usize
+                break
+            }
+            // a dot that stands alone gives the list its tail
+            if src[rd.at] == 46u8 && items.len() > 0usize && (rd.at + 1usize >= len(src) || str.is_space(src[rd.at + 1usize]) || src[rd.at + 1usize] == 41u8) {
+                rd.at = self.skip_blank(src, rd.at + 1usize)
+                if rd.at >= len(src) { return Err(unfinished("a list is not closed")) }
+                if src[rd.at] == 41u8 { return Err(fault("nothing after the dot")) }
+                match self.read(src, rd)? {
+                    Some(last) => { tail = last }
+                    None => { return Err(fault("nothing after the dot")) }
+                }
+                rd.at = self.skip_blank(src, rd.at)
+                if rd.at >= len(src) { return Err(unfinished("a list is not closed")) }
+                if src[rd.at] != 41u8 { return Err(fault("one datum follows the dot")) }
+                rd.at = rd.at + 1usize
+                break
+            }
+            match self.read(src, rd)? {
+                Some(item) => items.push(item)
+                None => { }
+            }
+        }
+        var list: Ref = tail
+        while true {
+            match items.pop() {
+                Some(item) => { list = self.cons(item, list) }
+                None => { break }
+            }
+        }
+        return Ok(list)
+    }
+
+    func read_string(edit self, src: view[]u8, rd: edit[Reader]) -> Result[Option[Ref], Fault] {
+        text := str.String.new()
+        var i: usize = rd.at + 1usize
+        while i < len(src) && src[i] != 34u8 {
+            if src[i] == 92u8 && i + 1usize < len(src) {
+                i = i + 1usize
+                if src[i] == 110u8 { text.push(10u8) } else { text.push(src[i]) }
+            } else {
+                text.push(src[i])
+            }
+            i = i + 1usize
+        }
+        if i >= len(src) {
+            var f: Fault = fault("a string is not closed")
+            f.incomplete = true
+            return Err(f)
+        }
+        rd.at = i + 1usize
+        return Ok(Some(self.heap.alloc(Cell.Str(text))))
+    }
+
+    // atom is what a run of characters stands for: a boolean, a whole
+    // number, or a symbol.
+    func atom(edit self, word: view[]u8) -> Result[Ref, Fault] {
+        if str.equal(word, "#t") { return Ok(self.yes) }
+        if str.equal(word, "#f") { return Ok(self.no) }
+        var negative: bool = false
+        var digits: usize = 0usize
+        if len(word) > 1usize && word[0usize] == 45u8 {
+            negative = true
+            digits = 1usize
+        }
+        if word[digits] >= 48u8 && word[digits] <= 57u8 {
+            match str.parse_u64(word[digits : len(word)]) {
+                Some(n) => {
+                    if negative && n <= 9223372036854775808u64 {
+                        if n == 9223372036854775808u64 { return Ok(self.heap.alloc(Cell.Int(-9223372036854775807i64 - 1i64))) }
+                        return Ok(self.heap.alloc(Cell.Int(0i64 - i64(n))))
+                    }
+                    if !negative && n <= 9223372036854775807u64 { return Ok(self.heap.alloc(Cell.Int(i64(n)))) }
+                    return Err(fault("a number is too large"))
+                }
+                None => { return Err(fault("a number is too large, or has something that is not a digit in it")) }
+            }
+        }
+        id := self.intern(word)
+        return Ok(self.symbol(id))
+    }
+
+    // ---- the printer ----
+
+    // write appends a value's text. quoted says whether a string is
+    // written with its quotes, as the reader would take it back.
+    func write(view self, r: Ref, dst: edit[str.String], quoted: bool, depth: usize) {
+        k := self.heap.kind(r)
+        if k == KNil {
+            dst.push_str("()")
+        } else if k == KTrue {
+            dst.push_str("#t")
+        } else if k == KFalse {
+            dst.push_str("#f")
+        } else if k == KInt {
+            match self.heap.int_of(r) {
+                Some(n) => dst.push_i64(n)
+                None => { }
+            }
+        } else if k == KSym {
+            match self.heap.sym_of(r) {
+                Some(id) => dst.push_str(self.names.get(usize(id)).as_view())
+                None => { }
+            }
+        } else if k == KStr {
+            if quoted { dst.push(34u8) }
+            shown := self.heap.push_text(r, dst)
+            if quoted { dst.push(34u8) }
+        } else if k == KClosure {
+            dst.push_str("#<procedure>")
+        } else if k == KBuiltin {
+            dst.push_str("#<built-in procedure>")
+        } else {
+            // a list: its elements, and a tail after a dot when it does
+            // not end in (); a list that goes on (it may go round) is cut
+            if depth > 50usize {
+                dst.push_str("(...)")
+                return
+            }
+            dst.push(40u8)
+            var p: Ref = r
+            var shown: usize = 0usize
+            while self.is_pair(p) {
+                if shown > 0usize { dst.push(32u8) }
+                if shown == 64usize {
+                    dst.push_str("...")
+                    p = self.nil
+                    break
+                }
+                self.write(self.car_of(p), dst, quoted, depth + 1usize)
+                shown = shown + 1usize
+                p = self.cdr_of(p)
+            }
+            if self.heap.kind(p) != KNil {
+                dst.push_str(" . ")
+                self.write(p, dst, quoted, depth + 1usize)
+            }
+            dst.push(41u8)
+        }
+    }
+
+    // ---- the evaluator ----
+
+    // special is the number of the special form a list's head names, or
+    // NotSpecial.
+    func special(view self, head: Ref) -> u32 {
+        match self.heap.sym_of(head) {
+            Some(id) => {
+                if id < NotSpecial { return id }
+                return NotSpecial
+            }
+            None => { return NotSpecial }
+        }
+    }
+
+    // eval is the value of an expression in an environment.
+    func eval(edit self, x: Ref, env: Ref, depth: usize) -> Result[Ref, Fault] {
+        base := self.roots.len()
+        self.roots.push(x)
+        self.roots.push(env)
+        r := self.eval_at(base, depth)
+        self.unroot(base)
+        return r
+    }
+
+    // eval_at evaluates the expression in roots[base] in the environment
+    // in roots[base + 1]. A form in tail position (the branch of an if,
+    // the last form of a body, a call of a procedure defined in the
+    // language) replaces the two and goes round the loop, so a procedure
+    // that calls itself last runs in constant space.
+    func eval_at(edit self, base: usize, depth: usize) -> Result[Ref, Fault] {
+        if depth > max_depth { return Err(fault("the recursion is too deep")) }
+        while true {
+            if self.heap.live() >= self.threshold { freed := self.collect() }
+            x := self.root(base)
+            env := self.root(base + 1usize)
+            k := self.heap.kind(x)
+            if k == KSym {
+                match self.heap.sym_of(x) {
+                    Some(id) => { return self.lookup(env, id) }
+                    None => { }
+                }
+            }
+            if k != KPair { return Ok(x) }
+            form := self.pair(x, "a form")?
+            head := form.a
+            rest := form.b
+            which := self.special(head)
+            if which == SQuote {
+                return self.nth(rest, 0usize, "quote")
+            } else if which == SIf {
+                test := self.nth(rest, 0usize, "if")?
+                chosen := self.eval(test, env, depth + 1usize)?
+                if self.truthy(chosen) {
+                    self.set_root(base, self.nth(rest, 1usize, "if")?)
+                } else if self.is_pair(self.cdr_of(self.cdr_of(rest))) {
+                    self.set_root(base, self.nth(rest, 2usize, "if")?)
+                } else {
+                    return Ok(self.nil)
+                }
+            } else if which == SDefine {
+                target := self.nth(rest, 0usize, "define")?
+                if self.is_pair(target) {
+                    // (define (name parameters...) body...)
+                    sig := self.pair(target, "define")?
+                    proc := self.heap.alloc(Cell.Closure(sig.b, self.cdr_of(rest), env))
+                    self.define(env, sig.a, proc)?
+                } else {
+                    value := self.eval(self.nth(rest, 1usize, "define")?, env, depth + 1usize)?
+                    self.define(env, target, value)?
+                }
+                return Ok(self.nil)
+            } else if which == SSet {
+                target := self.nth(rest, 0usize, "set!")?
+                value := self.eval(self.nth(rest, 1usize, "set!")?, env, depth + 1usize)?
+                match self.heap.sym_of(target) {
+                    Some(id) => { self.assign(env, id, value)? }
+                    None => { return Err(fault("set!: a name must be a symbol")) }
+                }
+                return Ok(self.nil)
+            } else if which == SLambda {
+                params := self.nth(rest, 0usize, "lambda")?
+                return Ok(self.heap.alloc(Cell.Closure(params, self.cdr_of(rest), env)))
+            } else if which == SBegin {
+                if !self.is_pair(rest) { return Ok(self.nil) }
+                var p: Ref = rest
+                while self.is_pair(self.cdr_of(p)) {
+                    value := self.eval(self.car_of(p), env, depth + 1usize)?
+                    p = self.cdr_of(p)
+                }
+                self.set_root(base, self.car_of(p))
+            } else if which == SLet {
+                // the values are evaluated around the new environment and
+                // kept in the roots until they are bound in it
+                first := self.roots.len()
+                names := Vec[Ref].new()
+                var b: Ref = self.nth(rest, 0usize, "let")?
+                while self.is_pair(b) {
+                    entry := self.car_of(b)
+                    names.push(self.nth(entry, 0usize, "let")?)
+                    value := self.eval(self.nth(entry, 1usize, "let")?, env, depth + 1usize)?
+                    self.roots.push(value)
+                    b = self.cdr_of(b)
+                }
+                inner := self.new_env(env)
+                for i in 0usize..names.len() {
+                    name := names.get(i)
+                    self.define(inner, name, self.root(first + i))?
+                }
+                body := self.cons(self.symbol(SBegin), self.cdr_of(rest))
+                self.set_root(base, body)
+                self.set_root(base + 1usize, inner)
+                self.unroot(first)
+            } else if which == SCond {
+                var clause: Ref = rest
+                var found: bool = false
+                while !found && self.is_pair(clause) {
+                    c := self.car_of(clause)
+                    test := self.nth(c, 0usize, "cond")?
+                    var value: Ref = self.yes
+                    if self.special(test) != SElse { value = self.eval(test, env, depth + 1usize)? }
+                    if self.truthy(value) {
+                        if !self.is_pair(self.cdr_of(c)) { return Ok(value) }
+                        body := self.cons(self.symbol(SBegin), self.cdr_of(c))
+                        self.set_root(base, body)
+                        found = true
+                    }
+                    clause = self.cdr_of(clause)
+                }
+                if !found { return Ok(self.nil) }
+            } else {
+                // a call: the procedure and its arguments go into the
+                // roots as they are evaluated
+                first := self.roots.len()
+                proc := self.eval(head, env, depth + 1usize)?
+                self.roots.push(proc)
+                var p: Ref = rest
+                while self.is_pair(p) {
+                    value := self.eval(self.car_of(p), env, depth + 1usize)?
+                    self.roots.push(value)
+                    p = self.cdr_of(p)
+                }
+                count := self.roots.len() - first - 1usize
+                match self.heap.builtin_of(proc) {
+                    Some(id) => {
+                        r := self.builtin(id, first + 1usize, count)
+                        self.unroot(first)
+                        return r
+                    }
+                    None => { }
+                }
+                match self.heap.closure_of(proc) {
+                    Some(c) => {
+                        inner := self.new_env(c.c)
+                        self.bind(inner, c.a, first + 1usize, count)?
+                        body := self.cons(self.symbol(SBegin), c.b)
+                        self.set_root(base, body)
+                        self.set_root(base + 1usize, inner)
+                        self.unroot(first)
+                    }
+                    None => { return Err(fault("what is called is not a procedure")) }
+                }
+            }
+        }
+        return Ok(self.nil)
+    }
+
+    // bind binds a procedure's parameters to the count arguments in the
+    // roots from first. A parameter list that ends in a symbol, or is
+    // one, binds that symbol to the arguments that are left.
+    func bind(edit self, env: Ref, params: Ref, first: usize, count: usize) -> Result[(), Fault] {
+        var p: Ref = params
+        var i: usize = 0usize
+        while self.is_pair(p) {
+            if i == count { return Err(fault("a procedure was called with too few arguments")) }
+            self.define(env, self.car_of(p), self.root(first + i))?
+            i = i + 1usize
+            p = self.cdr_of(p)
+        }
+        if self.heap.kind(p) == KSym {
+            var more: Ref = self.nil
+            var j: usize = count
+            while j > i {
+                j = j - 1usize
+                more = self.cons(self.root(first + j), more)
+            }
+            return self.define(env, p, more)
+        }
+        if i != count { return Err(fault("a procedure was called with too many arguments")) }
+        return Ok(())
+    }
+
+    // ---- the built-in procedures ----
+
+    func number(view self, r: Ref) -> Result[i64, Fault] {
+        match self.heap.int_of(r) {
+            Some(n) => { return Ok(n) }
+            None => { return Err(fault("a number is needed")) }
+        }
+    }
+    func integer(edit self, n: Option[i64], what: view[]u8) -> Result[Ref, Fault] {
+        match n {
+            Some(v) => { return Ok(self.heap.alloc(Cell.Int(v))) }
+            None => { return Err(fault(what)) }
+        }
+    }
+    func same(view self, a: Ref, b: Ref) -> bool {
+        if a == b { return true }
+        match self.heap.int_of(a) {
+            Some(x) => {
+                match self.heap.int_of(b) {
+                    Some(y) => { return x == y }
+                    None => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+
+    // builtin calls the built-in procedure id with the count arguments
+    // in the roots from first.
+    func builtin(edit self, id: u32, first: usize, count: usize) -> Result[Ref, Fault] {
+        if id <= 2u32 {
+            // + - *: checked, so a result that does not fit is a fault
+            if id == 1u32 && count == 1usize { return self.integer(checked_sub(0i64, self.number(self.root(first))?), "a number is too large") }
+            var acc: i64 = 0i64
+            if id == 2u32 { acc = 1i64 }
+            for i in 0usize..count {
+                n := self.number(self.root(first + i))?
+                var next: Option[i64] = None
+                if id == 0u32 {
+                    next = checked_add(acc, n)
+                } else if id == 2u32 {
+                    next = checked_mul(acc, n)
+                } else if i == 0usize {
+                    next = Some(n)
+                } else {
+                    next = checked_sub(acc, n)
+                }
+                match next {
+                    Some(v) => { acc = v }
+                    None => { return Err(fault("a number is too large")) }
+                }
+            }
+            return Ok(self.heap.alloc(Cell.Int(acc)))
+        }
+        if id >= 20u32 && id <= 21u32 && count == 0usize {
+            if id == 20u32 {
+                freed := self.collect()
+                return Ok(self.heap.alloc(Cell.Int(i64(freed))))
+            }
+            return Ok(self.heap.alloc(Cell.Int(i64(self.heap.live()))))
+        }
+        if id == 19u32 && count == 0usize {
+            self.written.push(10u8)
+            return Ok(self.nil)
+        }
+        if id == 13u32 {
+            var list: Ref = self.nil
+            var j: usize = count
+            while j > 0usize {
+                j = j - 1usize
+                list = self.cons(self.root(first + j), list)
+            }
+            return Ok(list)
+        }
+        if count == 1usize {
+            a := self.root(first)
+            if id == 11u32 || id == 12u32 {
+                p := self.pair(a, "car or cdr")?
+                if id == 11u32 { return Ok(p.a) }
+                return Ok(p.b)
+            }
+            if id == 14u32 { return Ok(self.boolean(self.heap.kind(a) == KNil)) }
+            if id == 15u32 { return Ok(self.boolean(self.is_pair(a))) }
+            if id == 17u32 { return Ok(self.boolean(!self.truthy(a))) }
+            if id == 18u32 {
+                text := str.String.new()
+                self.write(a, text, false, 0usize)
+                self.written.push_str(text.as_view())
+                return Ok(self.nil)
+            }
+        }
+        if count == 2usize {
+            a := self.root(first)
+            b := self.root(first + 1usize)
+            if id == 3u32 { return self.integer(checked_div(self.number(a)?, self.number(b)?), "division by zero, or a quotient that is too large") }
+            if id == 4u32 { return self.integer(checked_rem(self.number(a)?, self.number(b)?), "division by zero, or a remainder that is too large") }
+            if id >= 5u32 && id <= 9u32 {
+                x := self.number(a)?
+                y := self.number(b)?
+                if id == 5u32 { return Ok(self.boolean(x == y)) }
+                if id == 6u32 { return Ok(self.boolean(x < y)) }
+                if id == 7u32 { return Ok(self.boolean(x > y)) }
+                if id == 8u32 { return Ok(self.boolean(x <= y)) }
+                return Ok(self.boolean(x >= y))
+            }
+            if id == 10u32 { return Ok(self.cons(a, b)) }
+            if id == 16u32 { return Ok(self.boolean(self.same(a, b))) }
+            if id == 22u32 || id == 23u32 {
+                if !self.is_pair(a) { return Err(fault("set-car! and set-cdr! change a pair")) }
+                if id == 22u32 { self.heap.set_car(a, b) } else { self.heap.set_cdr(a, b) }
+                return Ok(self.nil)
+            }
+        }
+        f := fault("a built-in procedure was called with the wrong number of arguments: ")
+        name := self.builtins.get(usize(id))
+        f.msg.push_str(self.names.get(usize(name)).as_view())
+        return Err(f)
+    }
+
+    // ---- running a program ----
+
+    // Run evaluates every form of src in the global environment. What
+    // display wrote goes to the output; with echo, so does the value of
+    // each form that has one, on a line of its own. The output is taken
+    // with TakeOutput.
+    func Run(edit self, src: view[]u8, echo: bool) -> Result[(), Fault] {
+        var rd: Reader = Reader { at: 0usize, depth: 0usize }
+        while true {
+            match self.read(src, rd)? {
+                Some(form) => {
+                    value := self.eval(form, self.global, 0usize)?
+                    if echo && self.heap.kind(value) != KNil {
+                        text := str.String.new()
+                        self.write(value, text, true, 0usize)
+                        self.written.push_str(text.as_view())
+                        self.written.push(10u8)
+                    }
+                }
+                None => { return Ok(()) }
+            }
+        }
+        return Ok(())
+    }
+
+    // TakeOutput appends what has been written to dst and forgets it.
+    func TakeOutput(edit self, dst: edit[str.String]) {
+        dst.push_str(self.written.as_view())
+        self.written.clear()
+    }
+
+    func Cells(view self) -> usize { return self.heap.live() }
+    func Collections(view self) -> u64 { return self.heap.collections }
+    func Freed(view self) -> u64 { return self.heap.freed }
+    func Allocated(view self) -> u64 { return self.heap.allocated }
+    // Collect frees what the program can no longer reach.
+    func Collect(edit self) -> usize { return self.collect() }
+}
+
+// Reader is where the reader is in its text.
+struct Reader { at: usize; depth: usize }
+
+// Balanced reports whether a text closes every list and string it
+// opens: what a prompt asks before it evaluates what was typed.
+func Balanced(src: view[]u8) -> bool {
+    var open: i64 = 0i64
+    var i: usize = 0usize
+    while i < len(src) {
+        c := src[i]
+        if c == 59u8 {
+            while i < len(src) && src[i] != 10u8 { i = i + 1usize }
+        } else if c == 34u8 {
+            i = i + 1usize
+            while i < len(src) && src[i] != 34u8 {
+                if src[i] == 92u8 { i = i + 1usize }
+                i = i + 1usize
+            }
+            if i >= len(src) { return false }
+        } else if c == 40u8 {
+            open = open + 1i64
+        } else if c == 41u8 {
+            open = open - 1i64
+        }
+        i = i + 1usize
+    }
+    return open <= 0i64
+}

@@ -1,0 +1,71 @@
+-- numbers and lists
+> (+ 1 2 3)
+6
+> (map (lambda (x) (* x x)) (range 1 8))
+(1 4 9 16 25 36 49)
+> (filter (lambda (x) (= 0 (remainder x 3))) (range 0 20))
+(0 3 6 9 12 15 18)
+> (fold + 0 (range 1 101))
+5050
+> (reverse '(a (b . c) "text" #t))
+(#t "text" (b . c) a)
+> (display "hello, ") (display 'world) (newline)
+hello, world
+-- a closure keeps what it closed over
+> (define (make-counter) (let ((n 0)) (lambda () (set! n (+ n 1)) n)))
+> (define tick (make-counter))
+> (tick) (tick) (tick)
+1
+2
+3
+-- recursion, and a call in tail position
+> (define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+> (fib 12)
+144
+> (define (count n acc) (if (= n 0) acc (count (- n 1) (+ acc 1))))
+> (count 500 0)
+500
+> (define (deep n) (if (= n 0) 0 (+ 1 (deep (- n 1)))))
+> (deep 100)
+100
+> (deep 1000)
+error: the recursion is too deep
+-- garbage
+> (define (churn n) (if (= n 0) 'done (begin (range 0 20) (churn (- n 1)))))
+> (churn 25)
+done
+> (gc)
+547
+> (define keep (range 0 10))
+> (gc)
+86
+> keep
+(0 1 2 3 4 5 6 7 8 9)
+-- a ring is garbage too, once nothing reaches it
+> (define ring (list 1 2 3))
+> (set-cdr! (cdr (cdr ring)) ring)
+> (car (cdr (cdr (cdr (cdr ring)))))
+2
+> (set! ring '())
+> (gc)
+37
+-- faults
+> (car '())
+error: car or cdr: not a list where one is needed
+> (nobody 1 2)
+error: unbound variable: nobody
+> (+ 9223372036854775807 1)
+error: a number is too large
+> (quotient 7 0)
+error: division by zero, or a quotient that is too large
+> (1 2 3)
+error: what is called is not a procedure
+> (display "written before the fault") (newline) (cdr 5)
+written before the fault
+error: car or cdr: not a list where one is needed
+> (define (f x
+error: a list is not closed
+> (f 1))
+error: unbound variable: f
+-- the heap
+cells made: 16782, collections: 26, cells freed: 16312, cells live: 470

@@ -1,0 +1,34 @@
+-- 2,000 lines under a budget of 4,096 bytes
+  2000 lines, 32 runs, 2 merges before the last; the most memory held was within the budget: true
+  the input was in order: false; the output is: true; it has the same lines: true
+-- the same lines with room for all of them
+  2000 lines, 0 runs, 0 merges before the last; the most memory held was within the budget: true
+  byte for byte the same output: true
+-- unique lines of the same, in reverse
+  in order: true; no more lines than before: true
+-- by their bytes
+  10
+  9
+  Banana
+  apple
+  apple
+  fig
+  pear
+-- by the number each begins with
+  -3 minus three
+  no number
+  007 seven
+  9 again
+  9 nine
+  10 ten
+  100
+-- in reverse, one of each
+  pear
+  fig
+  apple
+-- a last line with no newline, and an empty line
+  
+  a
+  b
+-- a line that no budget of this size can hold
+  refused: a line does not fit the memory given
