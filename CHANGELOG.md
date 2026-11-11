@@ -8,6 +8,26 @@ section of this file into a GitHub release is `docs/releasing.md`.
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-11-11
+
+Two defects of v0.2.0 that safe code reached, both found by writing
+programs on it, with the library those programs asked for and the
+programs themselves.
+
+- A scoped thread's handle (`Join`) that was used or destroyed after
+  its block read freed memory in a native program (under "Runtimes and
+  targets").
+- A lock taken inside a statement, `bump(m.lock())`, was never
+  released (under "Language").
+
+Three changes can alter a program written for v0.2.0, each listed in
+its place below: destroying a `Join` no longer waits for its thread;
+the results of handles left to the end of a scope's block are destroyed
+in the order of the spawns, where it was the reverse order of the
+handles; and `std/net` imports `std/signal`. `spec/rules.lock` is
+unchanged, and the machine API answers the schema versions it answered
+in v0.2.0 (0.2 to 0.5).
+
 ### Language
 
 - Fixed: an access that came with a release function and was passed as
@@ -372,6 +392,7 @@ intend to. Diagnostic codes stay frozen to their rule numbers in
 machine-API versions a release answers, and any change to either is listed
 here.
 
-[Unreleased]: https://github.com/dshills/kern/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dshills/kern/compare/v0.2.1...HEAD
+[v0.2.1]: https://github.com/dshills/kern/releases/tag/v0.2.1
 [v0.2.0]: https://github.com/dshills/kern/releases/tag/v0.2.0
 [v0.1.0]: https://github.com/dshills/kern/releases/tag/v0.1.0
