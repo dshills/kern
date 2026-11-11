@@ -1,7 +1,7 @@
 // kern hosted runtime: startup.
 // Included by kern_rt.c; see kern_rt.h for the entries.
 
-// kern_rt_abi_2 is the ABI symbol every program references (RA4).
+// kern_rt_abi_3 is the ABI symbol every program references (RA4).
 const int32_t KERN_RT_ABI_SYMBOL = KERN_RT_ABI;
 
 // kern_at_exit runs when main returns: what kern_exit does before it ends

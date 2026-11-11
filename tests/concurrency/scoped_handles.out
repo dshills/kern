@@ -1,0 +1,34 @@
+-- asked for after the block
+the block ends
+the block has ended, and no result with it
+took result 3
+result 3 destroyed
+took result 2
+result 2 destroyed
+took result 1
+result 1 destroyed
+-- destroyed after the block
+the block ends
+the block has ended
+result 12 destroyed
+result 11 destroyed
+the handles are gone
+-- destroyed while its thread runs
+both handles are gone, and nothing waited
+the block ends
+result 21 destroyed
+result 22 destroyed
+the block has ended
+-- never used: destroyed where the block ends
+the block ends
+result 31 destroyed
+result 32 destroyed
+the block has ended
+-- three threads of one scope
+took result 41
+the block ends
+result 41 destroyed
+result 42 destroyed
+the block has ended
+took result 43
+result 43 destroyed

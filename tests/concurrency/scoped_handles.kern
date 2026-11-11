@@ -1,0 +1,146 @@
+//! phase: 6
+//! expect: output scoped_handles
+//! tsan: clean
+// The handle of a scoped thread (Rule 5.5.3) and its thread's result.
+// The result is taken by get, inside the block or after it; it is
+// destroyed with a handle that is destroyed after the block; and when the
+// handle is destroyed inside the block, which waits for nothing, the
+// scope destroys the result at its join, in the order the threads were
+// spawned. Until 2026-11-10 a handle used or destroyed after its block
+// read a thread record the scope had freed, and destroying a handle
+// waited for its thread.
+module cc
+struct Res nocopy { id: u64 }
+impl Res {
+    destructor(edit self) {
+        print_str("result ")
+        print_u64(self.id)
+        print_str(" destroyed")
+        println()
+    }
+}
+func say(s: view[]u8) { print_str(s); println() }
+func took(r: view[Res]) {
+    print_str("took result ")
+    print_u64(r.id)
+    println()
+}
+func wait_for(flag: view[Atomic[u32]]) {
+    while flag.load(Ordering.seq_cst) == 0u32 { yield_now() }
+}
+func make(id: u64) -> Res { return Res { id: id } }
+// gated returns its result only once the gate is raised.
+func gated(id: u64, gate: view[Atomic[u32]]) -> Res {
+    wait_for(gate)
+    return Res { id: id }
+}
+
+func taken_after() {
+    say("-- asked for after the block")
+    handles := Vec[Join[Res]].new()
+    with s := thread.scope() {
+        for id in 1u64..4u64 {
+            match s.spawn(make, id) {
+                Ok(j) => handles.push(j)
+                Err(e) => say("no thread")
+            }
+        }
+        say("the block ends")
+    }
+    say("the block has ended, and no result with it")
+    while true {
+        match handles.pop() {
+            Some(j) => {
+                r := j.get()
+                took(r)
+            }
+            None => { break }
+        }
+    }
+}
+
+func destroyed_after() {
+    say("-- destroyed after the block")
+    handles := Vec[Join[Res]].new()
+    with s := thread.scope() {
+        for id in 11u64..13u64 {
+            match s.spawn(make, id) {
+                Ok(j) => handles.push(j)
+                Err(e) => say("no thread")
+            }
+        }
+        say("the block ends")
+    }
+    say("the block has ended")
+    drop(handles)
+    say("the handles are gone")
+}
+
+func destroyed_while_running() -> Result[(), SpawnErr] {
+    say("-- destroyed while its thread runs")
+    gate := Atomic[u32].new(0u32)
+    with s := thread.scope() {
+        a := s.spawn(gated, 21u64, gate)?
+        b := s.spawn(gated, 22u64, gate)?
+        drop(b)
+        drop(a)
+        say("both handles are gone, and nothing waited")
+        gate.store(1u32, Ordering.seq_cst)
+        say("the block ends")
+    }
+    say("the block has ended")
+    return Ok(())
+}
+
+func left_to_the_block() -> Result[(), SpawnErr] {
+    say("-- never used: destroyed where the block ends")
+    with s := thread.scope() {
+        a := s.spawn(make, 31u64)?
+        b := s.spawn(make, 32u64)?
+        say("the block ends")
+    }
+    say("the block has ended")
+    return Ok(())
+}
+
+func each_its_own_way() -> Result[(), SpawnErr] {
+    say("-- three threads of one scope")
+    kept := Vec[Join[Res]].new()
+    with s := thread.scope() {
+        a := s.spawn(make, 41u64)?
+        b := s.spawn(make, 42u64)?
+        c := s.spawn(make, 43u64)?
+        kept.push(c)
+        drop(b)
+        r := a.get()
+        took(r)
+        say("the block ends")
+    }
+    say("the block has ended")
+    match kept.pop() {
+        Some(j) => {
+            r := j.get()
+            took(r)
+        }
+        None => say("no handle")
+    }
+    return Ok(())
+}
+
+func main() -> i32 {
+    taken_after()
+    destroyed_after()
+    match destroyed_while_running() {
+        Ok(u) => { }
+        Err(e) => say("no thread")
+    }
+    match left_to_the_block() {
+        Ok(u) => { }
+        Err(e) => say("no thread")
+    }
+    match each_its_own_way() {
+        Ok(u) => { }
+        Err(e) => say("no thread")
+    }
+    return 0i32
+}

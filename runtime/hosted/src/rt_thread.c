@@ -82,8 +82,27 @@ uint64_t kern_thread_available_parallelism(void) {
 // stack is the thread's own: mapped by the spawner, so that a spawn that
 // cannot have one fails before any thread exists, and unmapped by the
 // thread when its function has returned.
+//
+// A scoped thread (Rule 5.5.3) is never detached. Its record is shared by
+// the scope, which joins it when the block ends, and by its handle, which
+// may be asked for the result or destroyed before that, during it (the
+// handle is Send) or after it. Under the record's lock:
+//
+//   the handle takes the result (get): it waits for `finished`, never
+//       for the scope, and copies the result out
+//   the handle is destroyed before the scope has ended: it leaves the
+//       result's destructor in the record and does not wait
+//   the scope ends: it joins the thread (only the scope calls
+//       pthread_join), then destroys the result if the handle left it
+//   the handle is destroyed after the scope has ended: it destroys the
+//       result
+//
+// So the result is taken or destroyed exactly once, and the record is
+// freed by whichever of the scope's end and the handle's end comes
+// second, always after the join.
 
 enum { KERN_T_RUNNING = 0, KERN_T_FINISHED = 1, KERN_T_DETACHED = 2 };
+enum { KERN_H_LIVE = 0, KERN_H_TAKEN = 1, KERN_H_DESTROYED = 2 };
 
 #define KERN_ALTSTACK 65536u
 
@@ -95,11 +114,17 @@ struct kern_thread {
     void *altmap;    // the alternate signal stack's mapping: a guard page, then KERN_ALTSTACK bytes
     size_t altlen;
     kern_glue glue;  // the result's destructor, set by the handle's destruction before it detaches
-    _Atomic int state;
-    int joined;      // pthread_join has returned (a scoped thread may be asked for twice)
+    _Atomic int state; // an unscoped thread's: a scoped one is never detached, and stays KERN_T_RUNNING
+    // a scoped thread's, the last three under mu
+    int scoped;
+    pthread_mutex_t mu;
+    pthread_cond_t done; // signalled when finished is set
+    int finished;    // the function has returned: the result is in the block
+    int handle;      // KERN_H_LIVE, or what became of the handle
+    int released;    // the scope has ended, and so has the thread
 };
 struct kern_scope { kern_thread **joins; int64_t n, cap; };
-struct kern_join { kern_thread *t; int taken; };
+struct kern_join { kern_thread *t; };
 
 // kern_altstack_map maps an alternate signal stack with a guard page below
 // it; NULL when the system has none to give.
@@ -121,7 +146,10 @@ static void kern_thread_leave(void *altmap, size_t altlen) {
     munmap(altmap, altlen);
 }
 
-static void kern_thread_free(kern_thread *t) { kern_obj_free(t); }
+static void kern_thread_free(kern_thread *t) {
+    if (t->scoped) { pthread_cond_destroy(&t->done); pthread_mutex_destroy(&t->mu); }
+    kern_obj_free(t);
+}
 
 static void *kern_thread_run(void *arg) {
     kern_thread *t = arg;
@@ -129,6 +157,14 @@ static void *kern_thread_run(void *arg) {
     kern_thread_enter(t->altmap);
     t->thunk(t->block);
     kern_thread_leave(t->altmap, t->altlen);
+    if (t->scoped) {
+        // the record outlives this: nothing frees it before the scope has joined
+        pthread_mutex_lock(&t->mu);
+        t->finished = 1;
+        pthread_cond_broadcast(&t->done);
+        pthread_mutex_unlock(&t->mu);
+        return NULL;
+    }
     int running = KERN_T_RUNNING;
     if (!atomic_compare_exchange_strong(&t->state, &running, KERN_T_FINISHED)) {
         // detached: nobody will take the result
@@ -150,7 +186,7 @@ void kern_test_fail_next_spawn(void) { atomic_store(&kern_fail_spawn, 1); }
 // acquired before the thread is created. On failure the packed arguments
 // are freed as bytes only: the kern side destroys the owned ones it kept
 // (Rule 5.5.3), since no thread took them.
-static kern_thread *kern_spawn_common(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, const kern_loc *loc) {
+static kern_thread *kern_spawn_common(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, const kern_loc *loc, int scoped) {
     if (atomic_load(&kern_fail_spawn) && atomic_exchange(&kern_fail_spawn, 0)) return NULL;
     // one allocation: the record, then the block at the next multiple of
     // 16 bytes, the alignment malloc gives a block of its own
@@ -161,8 +197,14 @@ static kern_thread *kern_spawn_common(void (*thunk)(void *), const void *pack, i
     t->altmap = kern_altstack_map(&t->altlen);
     if (t->altmap == NULL) { kern_obj_free(t); return NULL; }
     kern_copy(t->block, pack, (size_t)size);
-    t->thunk = thunk; t->roff = roff; t->glue = NULL; t->joined = 0;
+    t->thunk = thunk; t->roff = roff; t->glue = NULL;
+    t->scoped = 0; t->finished = 0; t->handle = KERN_H_LIVE; t->released = 0;
     atomic_init(&t->state, KERN_T_RUNNING);
+    if (scoped) {
+        if (pthread_mutex_init(&t->mu, NULL) != 0) { munmap(t->altmap, t->altlen); kern_obj_free(t); return NULL; }
+        if (pthread_cond_init(&t->done, NULL) != 0) { pthread_mutex_destroy(&t->mu); munmap(t->altmap, t->altlen); kern_obj_free(t); return NULL; }
+        t->scoped = 1;
+    }
     pthread_attr_t at;
     int ok = pthread_attr_init(&at) == 0;
     if (ok) {
@@ -173,13 +215,13 @@ static kern_thread *kern_spawn_common(void (*thunk)(void *), const void *pack, i
     return t;
 }
 void kern_thread_spawn(void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off, const kern_loc *at) {
-    kern_thread *t = kern_spawn_common(thunk, pack, size, roff, at);
+    kern_thread *t = kern_spawn_common(thunk, pack, size, roff, at, 0);
     if (t == NULL) { out[0] = 1; return; }
     out[0] = 0;
     memcpy(out + off, &t, sizeof t);
 }
 void kern_thread_join(kern_thread *t, void *dst, int64_t size) {
-    if (!t->joined) { pthread_join(t->t, NULL); t->joined = 1; }
+    pthread_join(t->t, NULL);
     kern_copy(dst, t->block + t->roff, (size_t)size);
     kern_thread_free(t);
 }
@@ -209,24 +251,35 @@ void kern_scope_spawn(kern_scope *sc, void (*thunk)(void *), const void *pack, i
     }
     kern_join *j = kern_try_alloc(sizeof *j, at);
     if (j == NULL) { out[0] = 1; return; }
-    kern_thread *t = kern_spawn_common(thunk, pack, size, roff, at);
+    kern_thread *t = kern_spawn_common(thunk, pack, size, roff, at, 1);
     if (t == NULL) { kern_obj_free(j); out[0] = 1; return; }
     sc->joins[sc->n++] = t;
-    j->t = t; j->taken = 0;
+    j->t = t;
     out[0] = 0;
     memcpy(out + off, &j, sizeof j);
 }
 void kern_join_get(kern_join *j, void *dst, int64_t size) {
-    if (!j->t->joined) { pthread_join(j->t->t, NULL); j->t->joined = 1; }
-    kern_copy(dst, j->t->block + j->t->roff, (size_t)size);
-    j->taken = 1;
+    kern_thread *t = j->t;
+    pthread_mutex_lock(&t->mu);
+    while (!t->finished) pthread_cond_wait(&t->done, &t->mu);
+    kern_copy(dst, t->block + t->roff, (size_t)size);
+    t->handle = KERN_H_TAKEN;
+    int released = t->released;
+    pthread_mutex_unlock(&t->mu);
+    if (released) kern_thread_free(t); // the scope left the record to the handle
     kern_obj_free(j);
 }
 void kern_join_drop(kern_join *j, kern_glue g) {
     if (j == NULL) return;
-    if (!j->taken) {
-        if (!j->t->joined) { pthread_join(j->t->t, NULL); j->t->joined = 1; }
-        if (g) g(j->t->block + j->t->roff);
+    kern_thread *t = j->t;
+    pthread_mutex_lock(&t->mu);
+    int released = t->released;
+    if (!released) { t->handle = KERN_H_DESTROYED; t->glue = g; } // the scope destroys the result at its join
+    pthread_mutex_unlock(&t->mu);
+    if (released) {
+        // the scope has ended, and the thread with it: the result is the handle's to destroy
+        if (g != NULL) g(t->block + t->roff);
+        kern_thread_free(t);
     }
     kern_obj_free(j);
 }
@@ -234,8 +287,14 @@ void kern_scope_drop(kern_scope *sc) {
     if (sc == NULL) return;
     for (int64_t i = 0; i < sc->n; i++) {
         kern_thread *t = sc->joins[i];
-        if (!t->joined) { pthread_join(t->t, NULL); t->joined = 1; }
-        kern_thread_free(t);
+        pthread_join(t->t, NULL);
+        pthread_mutex_lock(&t->mu);
+        t->released = 1;
+        int handle = t->handle;
+        kern_glue g = t->glue;
+        pthread_mutex_unlock(&t->mu);
+        if (handle == KERN_H_DESTROYED && g != NULL) g(t->block + t->roff);
+        if (handle != KERN_H_LIVE) kern_thread_free(t); // else the handle frees it
     }
     free(sc->joins); kern_obj_free(sc);
 }

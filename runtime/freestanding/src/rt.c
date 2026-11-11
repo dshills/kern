@@ -10,9 +10,9 @@
 #include "kern_rt_fs.h"
 #include "kern_board.h"
 
-// kern_rt_abi_2 is the ABI symbol every image references (RA4).
-_Static_assert(KERN_RT_ABI == 2, "the ABI symbol's name carries KERN_RT_ABI");
-const int32_t kern_rt_abi_2 = KERN_RT_ABI;
+// kern_rt_abi_3 is the ABI symbol every image references (RA4).
+_Static_assert(KERN_RT_ABI == 3, "the ABI symbol's name carries KERN_RT_ABI");
+const int32_t kern_rt_abi_3 = KERN_RT_ABI;
 
 typedef struct { uint8_t kind; uint8_t pad[7]; const char *file; uint64_t start, end, thread_id; } kern_trapinfo;
 

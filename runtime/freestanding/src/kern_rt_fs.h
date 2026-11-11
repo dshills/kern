@@ -14,8 +14,8 @@
 
 // KERN_RT_ABI is the version of this interface, the hosted runtime's
 // (kern_rt.h); every image references the symbol kern_rt_abi_<KERN_RT_ABI>.
-#define KERN_RT_ABI 2
-extern const int32_t kern_rt_abi_2;
+#define KERN_RT_ABI 3
+extern const int32_t kern_rt_abi_3;
 
 // kern_loc is the location of a user-level call: a byte span and the file
 // (null: the program's file).

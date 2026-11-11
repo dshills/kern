@@ -75,8 +75,8 @@
 // entry's prototype or contract changes; every program references the
 // symbol kern_rt_abi_<KERN_RT_ABI>, so one built for another version does
 // not link (RA4).
-#define KERN_RT_ABI 2
-#define KERN_RT_ABI_SYMBOL kern_rt_abi_2
+#define KERN_RT_ABI 3
+#define KERN_RT_ABI_SYMBOL kern_rt_abi_3
 extern const int32_t KERN_RT_ABI_SYMBOL;
 
 // kern_glue is a destructor the compiler emits for a type: it destroys the
@@ -458,11 +458,11 @@ uint64_t kern_thread_available_parallelism(void);
 void *kern_scope_new(const kern_loc *at);
 // Starts a scoped thread, as kern_thread_spawn, into the Result at out: Ok(join handle) or Err(SpawnErr).
 void kern_scope_spawn(kern_scope *sc, void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off, const kern_loc *at);
-// Waits for a scoped thread and copies its size-byte result to dst.
+// Waits for a scoped thread's function to return, copies its size-byte result to dst and frees the handle; the scope may have ended.
 void kern_join_get(kern_join *j, void *dst, int64_t size);
-// Destroys a join handle; a result not taken is destroyed with g after the thread ends.
+// Destroys a join handle without waiting: the scope destroys the result with g at its join, or it is destroyed with g now when the scope has ended.
 void kern_join_drop(kern_join *j, kern_glue g);
-// Joins every thread of the scope in creation order and frees it.
+// Joins every thread of the scope in creation order, destroying each result whose handle was destroyed, and frees the scope; a live handle keeps its result.
 void kern_scope_drop(kern_scope *sc);
 // Yields the processor to another thread.
 void kern_yield(void);

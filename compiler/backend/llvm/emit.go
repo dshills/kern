@@ -812,7 +812,7 @@ func (e *emitter) markerFor(idx int64) string {
 // abiSymbol is the runtime's ABI symbol (kern_rt.h KERN_RT_ABI_SYMBOL,
 // specs/runtime RA4): every program references it, so a program and a
 // runtime of different ABI versions do not link.
-const abiSymbol = "kern_rt_abi_2"
+const abiSymbol = "kern_rt_abi_3"
 
 // startCall declares the startup entries and returns the call that
 // initializes the runtime, passing the ABI symbol's address.

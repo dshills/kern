@@ -385,7 +385,7 @@ func TestEmitFunctionMarkers(t *testing.T) {
 	if !strings.Contains(text, "call void @kern_set_lines(ptr @kern.files, i64 1)") || !regexp.MustCompile(`@kern\.lines\.0 = private constant \[8 x i32\] \[i32 0, i32 9, `).MatchString(text) || !strings.Contains(text, fmt.Sprintf("i64 8, i64 %d }", len(src))) {
 		t.Errorf("no line table for the source file\n%s", text)
 	}
-	if !strings.Contains(text, "define i32 @main(i32 %argc, ptr %argv) {") || !strings.Contains(text, "call void @kern_start(ptr @kern_rt_abi_2)\n  %s = call i32 @kern_run_main(ptr @kern.entry)\n  ret i32 %s") {
+	if !strings.Contains(text, "define i32 @main(i32 %argc, ptr %argv) {") || !strings.Contains(text, "call void @kern_start(ptr @kern_rt_abi_3)\n  %s = call i32 @kern_run_main(ptr @kern.entry)\n  ret i32 %s") {
 		t.Errorf("the entry does not follow the startup contract\n%s", text)
 	}
 	table := regexp.MustCompile(`@kern\.fn_locs = private constant \[3 x \{ i64, i64, ptr, ptr \}\] \[(.*)\]`).FindStringSubmatch(text)

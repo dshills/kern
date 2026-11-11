@@ -1,0 +1,11 @@
+-- a pool whose handles are dropped as it is made
+workers started, none waited for: 4
+the sum of what they were sent: 5050
+-- given to another thread of the scope
+the sibling asked and got, plus 100: 102
+-- given to a thread that asks after the block
+the block has ended
+it asked and got, plus 1000: 1003
+-- asked for and destroyed by other threads as the scope ends
+the sum of the results asked for: 20100
+results destroyed, of 400: 400

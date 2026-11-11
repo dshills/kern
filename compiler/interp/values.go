@@ -341,14 +341,29 @@ type Thread struct {
 	elem     resolve.Type // the result's type, set when the handle is destroyed first
 }
 
-// Join is a scoped thread handle.
+// Join is a scoped thread handle. Its result is taken by get, destroyed
+// with a handle that is destroyed after the scope has ended, or destroyed
+// by the scope at its join when the handle was destroyed first (Rule
+// 5.5.3): mu orders the handle's end against the scope's, so that it
+// happens exactly once.
 type Join struct {
 	Result Value
 	Done   bool
 	done   chan struct{}
 	trap   *Trap
-	Taken  bool
+	mu     sync.Mutex
+	// handle is joinLive until the handle is consumed by get (joinTaken)
+	// or destroyed while its scope is alive (joinDestroyed)
+	handle   int
+	released bool         // the scope has ended, and the thread with it
+	elem     resolve.Type // the result's type, set when the handle is destroyed first
 }
+
+const (
+	joinLive = iota
+	joinTaken
+	joinDestroyed
+)
 
 // SysAlloc is the hosted allocator stand-in.
 type SysAlloc struct{}

@@ -652,9 +652,13 @@ func init() {
 			return []Value{t.Result}
 		},
 		"Join.get": func(it *Interp, a []Value, _ callCtx) []Value {
+			// get waits for the thread, never for the scope, which may
+			// have ended already
 			j := a[0].(*Join)
 			it.await(j.done)
-			j.Taken = true
+			j.mu.Lock()
+			j.handle = joinTaken
+			j.mu.Unlock()
 			return []Value{j.Result}
 		},
 		// trap handler: a seq_cst exchange

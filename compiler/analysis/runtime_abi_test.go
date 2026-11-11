@@ -389,7 +389,7 @@ func TestRuntimeABIVersion(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatal(errs)
 	}
-	if !strings.Contains(text, "@kern_rt_abi_2") {
+	if !strings.Contains(text, "@kern_rt_abi_3") {
 		t.Fatalf("the program does not reference the ABI symbol")
 	}
 	ll := filepath.Join(dir, "p.ll")
@@ -404,11 +404,11 @@ func TestRuntimeABIVersion(t *testing.T) {
 	if out, err := link(); err != nil {
 		t.Fatalf("the program does not link against its own runtime: %v\n%s", err, out)
 	}
-	out, err := link("-Dkern_rt_abi_2=kern_rt_abi_other")
+	out, err := link("-Dkern_rt_abi_3=kern_rt_abi_other")
 	if err == nil {
 		t.Fatalf("the program linked against a runtime of another ABI version")
 	}
-	if !strings.Contains(string(out), "kern_rt_abi_2") {
+	if !strings.Contains(string(out), "kern_rt_abi_3") {
 		t.Fatalf("the link failure does not name the ABI symbol:\n%s", out)
 	}
 }

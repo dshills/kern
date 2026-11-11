@@ -1629,12 +1629,17 @@ func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
 	case *Condvar:
 		// nothing is owned: waiters, if any, hold their own reference
 	case *Scope:
-		// the scope's end joins every thread it spawned
+		// the scope's end joins every thread it spawned, in creation
+		// order, and destroys the result of each whose handle was
+		// destroyed before; a live handle keeps its result
 		for _, j := range x.Joins {
 			it.await(j.done)
-			if !j.Taken {
-				j.Taken = true
-				it.destroy(j.Result, elem(0))
+			j.mu.Lock()
+			j.released = true
+			left, ty := j.handle == joinDestroyed, j.elem
+			j.mu.Unlock()
+			if left && j.trap == nil {
+				it.destroy(j.Result, ty)
 			}
 		}
 	case *Thread:
@@ -1651,9 +1656,16 @@ func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
 			it.destroy(x.Result, elem(0))
 		}
 	case *Join:
-		if !x.Taken {
-			it.await(x.done)
-			x.Taken = true
+		// A handle destroyed while its scope is alive does not wait: it
+		// leaves the result to the scope. After the scope the thread has
+		// ended, and the result is the handle's to destroy.
+		x.mu.Lock()
+		after := x.released && x.handle == joinLive
+		if x.handle == joinLive {
+			x.handle, x.elem = joinDestroyed, elem(0)
+		}
+		x.mu.Unlock()
+		if after && x.trap == nil {
 			it.destroy(x.Result, elem(0))
 		}
 	}

@@ -1,0 +1,161 @@
+//! phase: 6
+//! expect: output scoped_handles_moved
+//! tsan: clean
+// Handles of scoped threads that leave the thread which spawned them
+// (Join is Send, Rule 5.5.3): a pool of workers whose handles are
+// dropped in the loop that spawns them, which waits for no worker; a
+// handle given to another thread of the same scope; a handle given to a
+// thread that outlives the block and asks after it; and handles asked
+// for, or destroyed, by other threads at the moment their scope ends.
+// Whatever the order, each result is taken or destroyed once.
+module cc
+import "std/sync"
+func say(s: view[]u8) { print_str(s); println() }
+func num(label: view[]u8, n: u64) { print_str(label); print_str(" "); print_u64(n); println() }
+func wait_for(flag: view[Atomic[u32]]) {
+    while flag.load(Ordering.seq_cst) == 0u32 { yield_now() }
+}
+
+// ---- a pool ----
+
+func worker(jobs: view[sync.Channel[u64]], total: view[Atomic[u64]]) -> u64 {
+    var mine: u64 = 0u64
+    while true {
+        match jobs.recv() {
+            Some(v) => {
+                before := total.fetch_add(v, Ordering.seq_cst)
+                mine = mine + 1u64
+            }
+            None => { return mine }
+        }
+    }
+    return mine
+}
+
+func pool() {
+    say("-- a pool whose handles are dropped as it is made")
+    jobs := sync.Channel[u64].new(4usize)
+    total := Atomic[u64].new(0u64)
+    var started: u64 = 0u64
+    with s := thread.scope() {
+        for i in 0usize..4usize {
+            match s.spawn(worker, jobs, total) {
+                Ok(j) => { started = started + 1u64 }
+                Err(e) => { }
+            }
+        }
+        num("workers started, none waited for:", started)
+        for v in 1u64..101u64 {
+            match jobs.send(v) {
+                Ok(u) => { }
+                Err(back) => { }
+            }
+        }
+        jobs.close()
+    }
+    num("the sum of what they were sent:", total.load(Ordering.seq_cst))
+}
+
+// ---- a handle in another thread's hands ----
+
+func plus_one(n: u64) -> u64 { return n + 1u64 }
+func ask(j: own Join[u64]) -> u64 { return j.get() + 100u64 }
+func ask_when(j: own Join[u64], gate: own Shared[Atomic[u32]]) -> u64 {
+    wait_for(gate.get())
+    return j.get() + 1000u64
+}
+
+func to_a_sibling() -> Result[(), SpawnErr] {
+    say("-- given to another thread of the scope")
+    with s := thread.scope() {
+        x := s.spawn(plus_one, 1u64)?
+        y := s.spawn(ask, x)?
+        num("the sibling asked and got, plus 100:", y.get())
+    }
+    return Ok(())
+}
+
+func to_a_thread_that_stays() -> Result[(), SpawnErr] {
+    say("-- given to a thread that asks after the block")
+    gate := Shared[Atomic[u32]].new(Atomic[u32].new(0u32))
+    var late: Option[Thread[u64]] = None
+    with s := thread.scope() {
+        x := s.spawn(plus_one, 2u64)?
+        late = Some(thread.spawn(ask_when, x, gate.clone())?)
+    }
+    say("the block has ended")
+    gate.get().store(1u32, Ordering.seq_cst)
+    match replace(late, None) {
+        Some(t) => num("it asked and got, plus 1000:", t.join())
+        None => say("no thread")
+    }
+    return Ok(())
+}
+
+// ---- at the moment the scope ends ----
+
+// Counted is a result that counts its destructions.
+struct Counted nocopy { n: u64; destroyed: Shared[Atomic[u64]] }
+impl Counted {
+    destructor(edit self) { before := self.destroyed.get().fetch_add(1u64, Ordering.seq_cst) }
+}
+func counted(n: u64, destroyed: own Shared[Atomic[u64]]) -> Counted { return Counted { n: n, destroyed: destroyed } }
+func take_it(j: own Join[Counted]) -> u64 {
+    r := j.get()
+    return r.n
+}
+func discard(j: own Join[Counted]) -> u64 {
+    drop(j)
+    return 0u64
+}
+
+// One round: two scoped threads, whose handles go to two threads that do
+// not belong to the scope. One asks, one destroys, both while the scope
+// may be ending.
+func round(n: u64, destroyed: view[Shared[Atomic[u64]]]) -> Result[u64, SpawnErr] {
+    var asking: Option[Thread[u64]] = None
+    var discarding: Option[Thread[u64]] = None
+    with s := thread.scope() {
+        a := s.spawn(counted, n, destroyed.clone())?
+        b := s.spawn(counted, n, destroyed.clone())?
+        asking = Some(thread.spawn(take_it, a)?)
+        discarding = Some(thread.spawn(discard, b)?)
+    }
+    var got: u64 = 0u64
+    match replace(asking, None) {
+        Some(t) => { got = t.join() }
+        None => { }
+    }
+    match replace(discarding, None) {
+        Some(t) => { got = got + t.join() }
+        None => { }
+    }
+    return Ok(got)
+}
+
+func racing() -> Result[(), SpawnErr] {
+    say("-- asked for and destroyed by other threads as the scope ends")
+    destroyed := Shared[Atomic[u64]].new(Atomic[u64].new(0u64))
+    var sum: u64 = 0u64
+    for n in 1u64..201u64 { sum = sum + round(n, destroyed)? }
+    num("the sum of the results asked for:", sum)
+    num("results destroyed, of 400:", destroyed.get().load(Ordering.seq_cst))
+    return Ok(())
+}
+
+func main() -> i32 {
+    pool()
+    match to_a_sibling() {
+        Ok(u) => { }
+        Err(e) => say("no thread")
+    }
+    match to_a_thread_that_stays() {
+        Ok(u) => { }
+        Err(e) => say("no thread")
+    }
+    match racing() {
+        Ok(u) => { }
+        Err(e) => say("no thread")
+    }
+    return 0i32
+}

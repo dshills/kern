@@ -26,8 +26,8 @@ no socket imports no socket call.
 
 Every function compiled kern code may call is declared in the header with
 a one-line contract; section 13 lists them all. The header's
-`KERN_RT_ABI` (2) is the interface's version: every program references
-the symbol `kern_rt_abi_2`, so a program and a runtime of different
+`KERN_RT_ABI` (3) is the interface's version: every program references
+the symbol `kern_rt_abi_3`, so a program and a runtime of different
 versions do not link. The number changes when an existing entry's
 prototype or contract changes.
 
@@ -655,9 +655,9 @@ entry raises its traps.
 | `uint64_t kern_thread_available_parallelism(void)` | Returns the number of processors the process may run on, at least 1. |
 | `void *kern_scope_new(const kern_loc *at)` | Creates a scope for scoped spawns; traps oom. |
 | `void kern_scope_spawn(kern_scope *sc, void (*thunk)(void *), const void *pack, int64_t size, int64_t roff, char *out, int64_t off, const kern_loc *at)` | Starts a scoped thread, as kern_thread_spawn, into the Result at out: Ok(join handle) or Err(SpawnErr). |
-| `void kern_join_get(kern_join *j, void *dst, int64_t size)` | Waits for a scoped thread and copies its size-byte result to dst. |
-| `void kern_join_drop(kern_join *j, kern_glue g)` | Destroys a join handle; a result not taken is destroyed with g after the thread ends. |
-| `void kern_scope_drop(kern_scope *sc)` | Joins every thread of the scope in creation order and frees it. |
+| `void kern_join_get(kern_join *j, void *dst, int64_t size)` | Waits for a scoped thread's function to return, copies its size-byte result to dst and frees the handle; the scope may have ended. |
+| `void kern_join_drop(kern_join *j, kern_glue g)` | Destroys a join handle without waiting: the scope destroys the result with g at its join, or it is destroyed with g now when the scope has ended. |
+| `void kern_scope_drop(kern_scope *sc)` | Joins every thread of the scope in creation order, destroying each result whose handle was destroyed, and frees the scope; a live handle keeps its result. |
 | `void kern_yield(void)` | Yields the processor to another thread. |
 
 ### The freestanding runtime (`runtime/freestanding/src/kern_rt_fs.h`)

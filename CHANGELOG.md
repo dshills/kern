@@ -8,6 +8,23 @@ section of this file into a GitHub release is `docs/releasing.md`.
 
 ## [Unreleased]
 
+### Runtimes and targets
+
+- Fixed: in a native program, the handle of a scoped thread (`Join`)
+  that was asked for its result, or destroyed, after the block of its
+  scope had ended read memory the scope had freed. A handle now keeps
+  its thread's record for as long as it lives, so `get` works inside the
+  block and after it, as the reference says (Rule 5.5.3).
+- Destroying a `Join` no longer waits for its thread. Inside the block
+  it leaves the result to the scope, which destroys it when it joins the
+  thread, in the order the threads were spawned; after the block the
+  handle destroys the result itself. Workers spawned in a loop whose
+  handles are dropped there no longer stop the loop, and the results of
+  handles left to the end of a block are destroyed in the order of the
+  spawns, where it was the reverse order of the handles.
+- The runtime's interface version is 3 (`kern_rt_abi_3`): the contracts
+  of `kern_join_get`, `kern_join_drop` and `kern_scope_drop` changed.
+
 ## [v0.2.0] - 2026-11-10
 
 The runtime: what runs under a kern program, on a host and on a board, and
