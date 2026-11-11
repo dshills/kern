@@ -1,0 +1,18 @@
+//! expect: reject ASSIGN_IMMUTABLE rule=T.5
+// A type with only the view getter gives no loop an edit of its elements
+// (specs/for-bindings §1, F3).
+module m
+struct Two { a: u64; b: u64 }
+impl Two {
+    func cursor_first(view self) -> usize { return 0usize }
+    func cursor_next(view self, at: usize) -> usize { return at + 1usize }
+    func cursor_end(view self) -> usize { return 2usize }
+    func cursor_get(view self, at: usize) -> view[u64] {
+        if at == 0usize { return self.a }
+        return self.b
+    }
+}
+func f(t: edit[Two]) {
+    for x in t { x = 0u64 }   // ASSIGN_IMMUTABLE
+}
+func main() -> i32 { return 0i32 }

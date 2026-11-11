@@ -101,6 +101,26 @@ func TestHoverMatchBinding(t *testing.T) {
 	}
 }
 
+// A for loop's Copy variable is reported as what the body makes it
+// (specs/for-bindings A5).
+func TestHoverForVariable(t *testing.T) {
+	const prog = "module app\nfunc main() -> i32 {\n    var xs: [3]u64 = [1u64, 2u64, 3u64]\n    for x in xs { x = x + 1u64 }\n    for x in xs { print_u64(x) }\n    return 0i32\n}\n"
+	dir := writeTree(t, map[string]string{"app.kern": prog})
+	uri := URIOf(filepath.Join(dir, "app.kern"))
+	c := start(t, Options{})
+	c.initialize(nil, true)
+	c.open(uri, prog)
+	for i, want := range []string{"```kern\nbinding edit x: u64\n```", "```kern\nlocal x: u64\n```"} {
+		h, e := c.hoverAt(uri, at(prog, "for x in", i, len("for ")))
+		if e != nil || h == nil || !strings.HasPrefix(h.Contents.Value, want) {
+			t.Errorf("hover on x in loop %d: %+v %+v, want it to begin %q", i, h, e, want)
+		}
+	}
+	if s := c.stop(); s != 0 {
+		t.Errorf("status %d", s)
+	}
+}
+
 func TestHoverPanic(t *testing.T) {
 	dir := writeTree(t, map[string]string{"app.kern": ownProgram})
 	uri := URIOf(filepath.Join(dir, "app.kern"))

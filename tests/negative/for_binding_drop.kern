@@ -1,0 +1,12 @@
+//! expect: reject NAME_UNRESOLVED rule=T.1
+// A Copy loop variable that the body writes is an access binding for the
+// whole body, so a drop of it is refused even before the write
+// (specs/for-bindings F4).
+module m
+func f(xs: edit[]u64) {
+    for x in xs {
+        drop(x)   // NAME_UNRESOLVED
+        x = 1u64
+    }
+}
+func main() -> i32 { return 0i32 }

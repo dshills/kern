@@ -1,0 +1,8 @@
+//! expect: reject ASSIGN_IMMUTABLE rule=T.5
+// A Copy loop variable that the body writes is an edit of the element,
+// which a loop over a view does not allow (specs/for-bindings F3).
+module m
+func f(xs: view[]u64) {
+    for x in xs { x = x + 1u64 }   // ASSIGN_IMMUTABLE
+}
+func main() -> i32 { return 0i32 }

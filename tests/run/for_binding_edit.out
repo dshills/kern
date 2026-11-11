@@ -1,0 +1,26 @@
+a slice through an edit parameter: 255 254 253 0
+an array: 2 4 6 8
+with its index: 2 5 8 11
+a Vec through as_edit: 3 6 9 12
+a field, then an edit self method: 103 107
+an edit parameter: 102 105 108 111
+replace: 7 7 7 7
+take: 0 0 0 0
+what they gave: 454
+a closure: 11 12 13 14
+continue and break: 0 12 0 14
+a nested array: 10 20 30
+a nested array: 40 50 60
+a match on the element: 2 0 4
+over an arm's binding: 2 3 4 5
+and over a slice of it: 2 0 0 5
+a map's values, summed: 66
+a cursor of one name: 3 6 9
+a cursor over an arm's binding: 6 7 8
+neither written, read: 66
+the first written: 11/10 22/20 33/30
+the second written: 11/21 22/42 33/63
+both written: 0/22 0/43 0/64
+generic, constrained Copy: 9 9 9
+generic, unconstrained: 9 9 9
+their twin: 9 9 9

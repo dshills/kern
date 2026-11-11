@@ -1,0 +1,12 @@
+//! expect: reject ACC_CONFLICT rule=5.4.4
+// A cursor loop that writes its variable binds an edit, so a loop over the
+// same place does not nest in it (specs/for-bindings F7).
+module m
+import "std/map"
+func f(m: edit[map.Map[u64, u64]]) {
+    for k, v in m {
+        v = v + 1u64
+        for k2, v2 in m { print_u64(v2) }   // ACC_CONFLICT
+    }
+}
+func main() -> i32 { return 0i32 }

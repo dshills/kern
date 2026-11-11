@@ -18,6 +18,18 @@ type fnCtx struct {
 	unsafe       int
 	inDestructor bool
 	dtor         *ast.Destructor
+	// cursorCopies holds, for the statement a cursor loop's desugaring
+	// generates to copy a Copy element out of the getter's access, what the
+	// variable it declares is to be marked with (specs/for-bindings).
+	cursorCopies map[ast.Stmt]cursorCopy
+}
+
+// cursorCopy says of a cursor loop's Copy variable whether the loop is
+// editable for it, and which Copy binding the loop iterates a path of, if
+// any.
+type cursorCopy struct {
+	edit bool
+	root *Symbol
 }
 
 func (r *resolver) checkBodies(m *Module) {
@@ -190,7 +202,12 @@ func (c *fnCtx) stmt(sc *scope, s ast.Stmt) {
 				c.errorf("ACC_UNBOUND_PROJECTION", s.Pos, "closure bound with :=; a closure is passed as an argument")
 			}
 		}
-		c.declare(sc, s, s.Name, SymLocal, t, ast.ConvValue, s.Pos)
+		sym := c.declare(sc, s, s.Name, SymLocal, t, ast.ConvValue, s.Pos)
+		if cc, ok := c.cursorCopies[s]; ok {
+			// a cursor loop's Copy variable: a copy unless the body uses it
+			// as an edit (specs/for-bindings F1, F2, F6)
+			sym.CopyBound, sym.CopyEdit, sym.Derived = true, cc.edit, cc.root
+		}
 	case *ast.Assign:
 		c.demandEdit(sc, s.Target)
 		tt := c.expr(sc, s.Target, nil)
@@ -301,7 +318,7 @@ func (c *fnCtx) with(sc *scope, s *ast.With) {
 		// a binding of a path of a match arm's Copy binding (a slice of it)
 		// is derived from it: an edit use of the one is an edit use of the
 		// other (specs/match-bindings §1, item 6)
-		if root := c.placeRoot(sc, s.Subject); root != nil && root.armBound() {
+		if root := c.placeRoot(sc, s.Subject); root != nil && root.copyBound() {
 			sym.Derived = root
 		}
 	case *Tuple:
@@ -369,7 +386,7 @@ func (c *fnCtx) match(sc *scope, s *ast.Match) {
 		owned = true
 	} else {
 		subjT = c.expr(sc, s.Subject, nil)
-		if sym := c.placeRoot(sc, s.Subject); sym != nil && sym.armBound() {
+		if sym := c.placeRoot(sc, s.Subject); sym != nil && sym.copyBound() {
 			root = sym
 		}
 		if a, ok := subjT.(*Access); ok {
@@ -377,10 +394,10 @@ func (c *fnCtx) match(sc *scope, s *ast.Match) {
 			edit = a.Edit
 		} else if isTemporary(s.Subject) {
 			owned = true
-		} else if sym := c.placeRoot(sc, s.Subject); sym != nil && sym.ArmCopy {
+		} else if sym := c.placeRoot(sc, s.Subject); sym != nil && sym.CopyBound {
 			// a Copy binding not yet used as an edit: a write through this
 			// match would make it one, which the outer subject must allow
-			edit = sym.ArmEdit
+			edit = sym.CopyEdit
 		} else if sym != nil && sym.Kind == SymAccess {
 			edit = sym.Conv == ast.ConvEdit
 		} else if sym != nil && sym.Kind == SymParam && sym.Conv == ast.ConvEdit {
@@ -445,7 +462,7 @@ func (c *fnCtx) match(sc *scope, s *ast.Match) {
 				if !owned {
 					// a Copy binding of a place match: a copy unless the arm
 					// uses it as an edit (specs/match-bindings M1, M2)
-					sym.ArmCopy, sym.ArmEdit, sym.Derived = true, edit, root
+					sym.CopyBound, sym.CopyEdit, sym.Derived = true, edit, root
 				}
 				c.r.prog.Info.Decls[&arm.BindPos[i]] = sym
 				continue
@@ -530,7 +547,14 @@ func (c *fnCtx) forStmt(sc *scope, s *ast.For) {
 		name, pos = s.Var2, s.Var2Pos
 	}
 	if IsCopy(elem) {
-		c.declare(inner, s, name, SymLocal, elem, ast.ConvValue, pos)
+		// a copy of the element unless the body uses it as an edit, as a
+		// match arm's Copy binding is (specs/for-bindings F1, F2); over a
+		// path of such a binding it is derived from it (F6)
+		sym := c.declare(inner, s, name, SymLocal, elem, ast.ConvValue, pos)
+		sym.CopyBound, sym.CopyEdit = true, edit
+		if root := c.placeRoot(sc, s.Iter); root != nil && root.copyBound() {
+			sym.Derived = root
+		}
 	} else {
 		conv := ast.ConvView
 		if edit {
@@ -612,8 +636,25 @@ func (c *fnCtx) cursorFor(sc *scope, s *ast.For, t Type) bool {
 	if a, isAcc := t.(*Access); isAcc {
 		mutable = a.Edit
 	}
+	// editable[i]: the loop gives the i-th name an edit where its element is
+	// not Copy, which is what a Copy variable the body writes then gets
+	// (specs/for-bindings §1): the place is mutable, the type has the _mut
+	// getter, and that getter returns an edit of the same element type for
+	// the name
+	editable := make([]bool, want)
+	if mm := method(getter + "_mut"); mutable && mm != nil && len(mm.Ret) == want {
+		for i, r := range mm.Ret {
+			if a, isAcc := Subst(r, subst).(*Access); isAcc && a.Edit && Identical(accessElem(a), elems[i]) {
+				editable[i] = true
+			}
+		}
+	}
 	if mutable && !IsCopy(elems[want-1]) && method(getter+"_mut") != nil {
 		getter += "_mut"
+	}
+	var iterRoot *Symbol
+	if root := c.placeRoot(sc, s.Iter); root != nil && root.copyBound() {
+		iterRoot = root
 	}
 	ip, sp := s.Iter.Span(), s.Pos
 	it := s.Iter
@@ -633,13 +674,20 @@ func (c *fnCtx) cursorFor(sc *scope, s *ast.For, t Type) bool {
 	names := []string{s.Var, s.Var2}[:want]
 	poses := []ast.Pos{s.VarPos, s.Var2Pos}[:want]
 	var copies []ast.Stmt
+	copyOf := make([]*ast.ShortDecl, want) // the copy statement of each Copy name
 	withNames := make([]string, want)
 	for i := range names {
 		withNames[i] = names[i]
 		if IsCopy(elems[i]) {
-			// a Copy element is bound as a copy of the getter's access
+			// a Copy element is bound as a copy of the getter's access,
+			// unless the body turns out to use it as an edit (below)
 			withNames[i] = "#e" + string(rune('0'+i))
-			copies = append(copies, &ast.ShortDecl{Pos: poses[i], Name: names[i], Value: &ast.Ident{Pos: poses[i], Name: withNames[i]}})
+			copyOf[i] = &ast.ShortDecl{Pos: poses[i], Name: names[i], Value: &ast.Ident{Pos: poses[i], Name: withNames[i]}}
+			copies = append(copies, copyOf[i])
+			if c.cursorCopies == nil {
+				c.cursorCopies = map[ast.Stmt]cursorCopy{}
+			}
+			c.cursorCopies[copyOf[i]] = cursorCopy{edit: editable[i], root: iterRoot}
 		}
 	}
 	get := &ast.With{Pos: sp, Names: withNames, NamePos: poses, Subject: call(getter, id("#cur")), Body: &ast.Block{Pos: s.Body.Pos, Stmts: append(copies, s.Body)}}
@@ -660,7 +708,95 @@ func (c *fnCtx) cursorFor(sc *scope, s *ast.For, t Type) bool {
 	}
 	s.SetCursor(blk)
 	c.block(sc, blk)
+	c.rebindCursor(sc, get, copyOf, names, getter, it, wrap)
 	return true
+}
+
+// rebindCursor finishes a cursor loop whose body has been resolved. A Copy
+// variable that the body used as an edit, in a loop that is editable for
+// it, is by now an access binding (promote), but the loop was desugared to
+// copy it out of the view getter's access. The loop is rebuilt in place as
+// the _mut loop it would have been for an element that is not Copy
+// (specs/for-bindings F7): the copy statement goes, the with binds the
+// variable's own symbol, and the getter call becomes the _mut one.
+//
+// What holds afterwards, which the checker and the lowering rely on:
+// Info.Decls has no entry for a removed copy statement, and the with's
+// entry for each name is the symbol bound to the getter's access for it,
+// with that access's permission; Info.Calls and Info.Types of the getter
+// call are those of the method it now names; the with is in
+// Info.CursorViews only if it calls the view getter.
+func (c *fnCtx) rebindCursor(sc *scope, get *ast.With, copyOf []*ast.ShortDecl, names []string, getter string, it ast.Expr, wrap bool) {
+	info := c.r.prog.Info
+	withSym := func(i int) *Symbol {
+		if len(copyOf) == 1 {
+			return info.Decls[get]
+		}
+		return info.Decls[&get.NamePos[i]]
+	}
+	rebuilt := false
+	for i, cp := range copyOf {
+		if cp == nil {
+			continue
+		}
+		sym := info.Decls[cp]
+		delete(c.cursorCopies, cp)
+		if sym == nil || sym.EditUse == nil || !sym.CopyEdit {
+			continue
+		}
+		for j, st := range get.Body.Stmts {
+			if st == ast.Stmt(cp) {
+				get.Body.Stmts = append(get.Body.Stmts[:j:j], get.Body.Stmts[j+1:]...)
+				break
+			}
+		}
+		delete(info.Decls, cp)
+		get.Names[i] = names[i]
+		if len(copyOf) == 1 {
+			info.Decls[get] = sym
+		} else {
+			info.Decls[&get.NamePos[i]] = sym
+		}
+		rebuilt = true
+	}
+	if !rebuilt || strings.HasSuffix(getter, "_mut") {
+		return
+	}
+	call := get.Subject.(*ast.CallExpr)
+	call.Fn.(*ast.FieldExpr).Name = getter + "_mut"
+	delete(info.CursorViews, get)
+	// the call is resolved again where its generated names mean what they
+	// meant the first time
+	tmp := sc.child()
+	if cur, ok := call.Args[0].X.(*ast.Ident); ok && info.Idents[cur] != nil {
+		tmp.vars[cur.Name] = info.Idents[cur]
+	}
+	if id, ok := it.(*ast.Ident); wrap && ok && info.Idents[id] != nil {
+		tmp.vars[id.Name] = info.Idents[id]
+	}
+	var accs []Type
+	switch t := c.expr(tmp, call, nil).(type) {
+	case *Access:
+		accs = []Type{t}
+	case *Tuple:
+		accs = t.Elems
+	}
+	if len(accs) != len(copyOf) {
+		return // the call did not resolve; that has been reported
+	}
+	// a name that was not rebound is bound to the _mut getter's access for
+	// it now, and has that access's permission
+	for i := range copyOf {
+		ws := withSym(i)
+		acc, isAcc := accs[i].(*Access)
+		if !isAcc || ws == nil || ws.EditUse != nil {
+			continue
+		}
+		ws.Conv = ast.ConvView
+		if acc.Edit {
+			ws.Conv = ast.ConvEdit
+		}
+	}
 }
 
 // FieldPath reports a name or a path of field accesses from a name.
@@ -713,7 +849,7 @@ func (c *fnCtx) placeIsMutable(sc *scope, e ast.Expr) bool {
 		// caller that requires the place to be writable calls demandEdit
 		// first, which makes the binding the access it then is; a caller
 		// that only asks (a slice's or a loop's permission) does not
-		return !sym.ArmCopy || sym.ArmEdit
+		return !sym.CopyBound || sym.CopyEdit
 	case SymGlobal:
 		return true
 	case SymParam:
@@ -738,9 +874,10 @@ func (c *fnCtx) interiorWrite(t Type) bool {
 	return c.unsafe > 0
 }
 
-// armBound reports whether the symbol is, or was until the arm wrote it, a
-// match arm's Copy binding, or is derived from one.
-func (s *Symbol) armBound() bool { return s.ArmCopy || s.EditUse != nil || s.Derived != nil }
+// copyBound reports whether the symbol is, or was until its arm or loop
+// body wrote it, a Copy binding (a match arm's, a for loop's), or is
+// derived from one.
+func (s *Symbol) copyBound() bool { return s.CopyBound || s.EditUse != nil || s.Derived != nil }
 
 // demandEdit records that the place e is used as an edit: an assignment's
 // target, an edit argument or receiver, the place of a take or a replace,
@@ -768,13 +905,13 @@ func (c *fnCtx) demandEdit(sc *scope, e ast.Expr) {
 // check refuses the use (M3). The uses of the name as an owned local met
 // so far get the diagnostic an access binding gets (M4).
 func (c *fnCtx) promote(sym *Symbol, at ast.Pos) {
-	if !sym.ArmCopy {
+	if !sym.CopyBound {
 		return
 	}
-	sym.ArmCopy = false
+	sym.CopyBound = false
 	sym.Kind = SymAccess
 	sym.Conv = ast.ConvView
-	if sym.ArmEdit {
+	if sym.CopyEdit {
 		sym.Conv = ast.ConvEdit
 	}
 	sym.EditUse = &at
@@ -788,7 +925,7 @@ func (c *fnCtx) promote(sym *Symbol, at ast.Pos) {
 // argument) that is an error if sym, a Copy arm binding so far only read,
 // is later used as an edit; promote reports it then.
 func (c *fnCtx) ownedUse(sym *Symbol, code diag.Code, pos ast.Pos, format string, args ...any) {
-	if sym.ArmCopy {
+	if sym.CopyBound {
 		sym.ownedUses = append(sym.ownedUses, ownedUse{code: code, pos: pos, msg: fmt.Sprintf(format, args...)})
 	}
 }

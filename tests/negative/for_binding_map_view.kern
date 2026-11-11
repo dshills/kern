@@ -1,0 +1,9 @@
+//! expect: reject ASSIGN_IMMUTABLE rule=T.5
+// A loop over a view of a map is not editable for its value
+// (specs/for-bindings F3).
+module m
+import "std/map"
+func f(m: view[map.Map[u64, u64]]) {
+    for k, v in m { v = v + 1u64 }   // ASSIGN_IMMUTABLE
+}
+func main() -> i32 { return 0i32 }

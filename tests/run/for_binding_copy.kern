@@ -1,0 +1,47 @@
+//! phase: 6
+//! expect: output for_binding_copy
+// What specs/for-bindings leaves as it was: a loop variable of a Copy
+// element that the body only reads is a copy (F1); a range loop's variable
+// is a local holding the counter's value, and assigning to it does not
+// change the iteration (F9); loops that only read nest over one map.
+module t
+import "std/map"
+
+func main() -> i32 {
+    var xs: [3]u64 = [1u64, 2u64, 3u64]
+    var sum: u64 = 0u64
+    for x in xs {
+        // a local made from the variable is the program's to change
+        var twice: u64 = x
+        twice = twice * 2u64
+        sum = sum + twice
+    }
+    print_str("read: ")
+    print_u64(sum)
+    print_str(", and the array still sums to ")
+    print_u64(xs[0usize] + xs[1usize] + xs[2usize])
+    println()
+
+    var rounds: u64 = 0u64
+    for i in 0u64..4u64 {
+        i = i + 100u64
+        rounds = rounds + 1u64
+        sum = sum + i
+    }
+    print_str("a range loop that assigns to its variable ran ")
+    print_u64(rounds)
+    print_str(" times, to ")
+    print_u64(sum)
+    println()
+
+    m := map.Map[u64, u64].new()
+    for i in 1u64..4u64 { was := m.insert(i, i * 10u64) }
+    var pairs: u64 = 0u64
+    for k, v in m {
+        for k2, v2 in m { pairs = pairs + v * v2 }
+    }
+    print_str("two loops over one map: ")
+    print_u64(pairs)
+    println()
+    return 0i32
+}

@@ -1,0 +1,9 @@
+//! expect: reject ACC_PERMISSION_ESCALATION rule=5.3.4
+// Passing a Copy loop variable to an edit parameter makes it an edit of
+// the element, which a loop over a view does not allow (specs/for-bindings F3).
+module m
+func add(v: edit[u64]) { v = v + 1u64 }
+func f(xs: view[]u64) {
+    for x in xs { add(x) }   // ACC_PERMISSION_ESCALATION
+}
+func main() -> i32 { return 0i32 }

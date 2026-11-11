@@ -116,6 +116,14 @@ func in_a_block(a: edit[Gate], b: edit[Gate]) {
     say("a for")
     for x in a.all() { x = x * 2u64 }
     say("  after the for")
+    // the body wrote through its variable to the guarded items
+    // (specs/for-bindings F2)
+    print_str("  the items hold")
+    for x in a.items {
+        print_str(" ")
+        print_u64(x)
+    }
+    println()
 }
 
 func returns_early(a: edit[Gate], b: edit[Gate]) -> u64 {

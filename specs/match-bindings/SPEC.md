@@ -1,6 +1,8 @@
 # Match arm bindings of Copy payload fields
 
-**Version:** 0.4 (2026-11-11). **Scope:** Rule 5.3.1 of `docs/ownership.md`
+**Version:** 0.5 (2026-11-11; v0.4 is what v0.2.2 released, and v0.5 is
+amended by `specs/for-bindings/SPEC.md` D4: a `for` loop's Copy variable is
+now a derived binding and no longer a plain copy). **Scope:** Rule 5.3.1 of `docs/ownership.md`
 (the `match` form) and the comment of its §8 arena example; the resolver's
 treatment of a `match` arm's bindings (`compiler/resolve`); the checker's
 freeze of a `match` subject (`compiler/check`); fixtures under `tests/run`,
@@ -84,18 +86,19 @@ writes through a `Copy` arm binding at all.
 
   A binding is **derived from `n`** when it is bound by a `with` whose
   subject is a path of `n`, or by a pattern of a place match whose subject
-  is a path of `n`, or when it is derived in one of these two ways from a
-  binding derived from `n`; items 1 to 5 are then read with the derived
-  binding in the place of `n`. (Of the paths of `n`, today's compiler
+  is a path of `n`, or is the Copy variable (and only a Copy variable,
+  `specs/for-bindings` F6) of a `for` over a path of `n`, or when it is
+  derived in one of these three ways from a binding derived from `n`;
+  items 1 to 5 are then read with the derived binding in the place of
+  `n`. (Of the paths of `n`, today's compiler
   accepts only a slice as the subject of a `with`; the definition covers
   every path, so that it holds unchanged if more are accepted.)
 
   Nothing else is an edit use. In particular these are not: reading a path
   of `n`; passing it by value or to a `view` parameter; calling a
   `view self` method on it; slicing it and reading the slice, bound by a
-  `with` or not; matching it without item 6; and iterating it with `for`,
-  whose variable is a copy of a `Copy` element (M9), so that a write to
-  the variable changes that copy and is not a write through `n`.
+  `with` or not; matching it without item 6; and iterating it with a `for`
+  whose body does not write its variable.
 
 ## 2. Requirements
 
@@ -155,9 +158,9 @@ writes through a `Copy` arm binding at all.
   subject in every program that compiles, generic or not.
 - **M9.** Unchanged: a `match` with an owned subject (its payload fields are
   moved or copied into arm-owned locals, which are writable; nothing of
-  the subject remains); bindings of non-`Copy` fields; `with`; and `for`,
-  whose variable is a copy for a `Copy` element (Rule 5.3.1 (3)), so that
-  assigning to it changes the copy.
+  the subject remains); bindings of non-`Copy` fields; and `with`. (A
+  `for` loop's variable was listed here in v0.4; its rule is now
+  `specs/for-bindings/SPEC.md`.)
 - **M10.** The interpreter, a native debug build and a native release build
   agree on every program of §4.
 
@@ -271,9 +274,9 @@ M6 changes no accepted program.
 
 ## 7. Non-goals
 
-- A `for` variable of a `Copy` element stays a writable copy (M9), although
-  assigning to it is lost in the same way. It is documented behaviour;
-  changing it is a separate decision.
+- A `for` variable of a `Copy` element was left a writable copy in v0.4, as
+  a separate decision; the owner has since taken it
+  (`specs/for-bindings/SPEC.md`).
 - No new syntax (a marker on a pattern to ask for an edit or a copy).
 - Which subjects are editable (§1) is not revisited, a module-level
   variable's included.

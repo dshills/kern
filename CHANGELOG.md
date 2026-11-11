@@ -8,6 +8,30 @@ section of this file into a GitHub release is `docs/releasing.md`.
 
 ## [Unreleased]
 
+### Language
+
+- Fixed: a write through a `for` loop's variable of a `Copy` element was
+  lost. `for b in data { b = table[usize(b)] }` changed a copy of each
+  element and left `data` as it was, in both engines; the reference said
+  so, and the same text in a generic function did write to the
+  sequence. The variable is now an edit of the element when the body
+  uses it as one, by the rule v0.2.2 gave a `match` arm's binding, and
+  through a nested `match`, `with` or `for` on it as well; over a map
+  (`for k, v in m { v = v + 1u64 }`) the loop then uses the editing
+  getter. A variable the body only reads is still a copy, and a
+  function with no such write is compiled to the code it was compiled
+  to. Three kinds of program change, and no other:
+  - in a loop over an edit (an `edit` sequence, a mutable array, a
+    mutable map's value), the write now reaches the element;
+  - in a loop over a view, and for a map's key, the write no longer
+    compiles (`ASSIGN_IMMUTABLE`, or `ACC_PERMISSION_ESCALATION` for an
+    `edit` argument, an `edit self` method, `take` and `replace`): copy
+    the variable into a local to keep the old meaning;
+  - a map loop that writes its value and has a loop over the same map
+    nested in it no longer compiles (`ACC_CONFLICT`), as a loop that
+    edits values that are not `Copy` never did.
+  A range loop's variable is unchanged.
+
 ## [v0.2.2] - 2026-11-11
 
 Two defects of v0.2.1 that five more programs written on it found, with

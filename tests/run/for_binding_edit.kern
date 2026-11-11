@@ -1,0 +1,275 @@
+//! phase: 6
+//! expect: output for_binding_edit
+// A for loop's variable of a Copy element is an edit of the element when
+// the body uses it as one, so that a write through it reaches the sequence
+// (specs/for-bindings F2); until 2026-11-11 it changed a copy. Each case
+// prints the sequence after its loop.
+module t
+import "std/map"
+
+struct P { x: u64; y: u64 }
+impl P {
+    func grow(edit self) { self.x = self.x + 100u64 }
+}
+union U { R(cells: [4]u64); T(trio: Trio); Empty }
+
+// Trio is a Copy type with the cursor protocol, one name.
+struct Trio { a: u64; b: u64; c: u64 }
+impl Trio {
+    func cursor_first(view self) -> usize { return 0usize }
+    func cursor_next(view self, at: usize) -> usize { return at + 1usize }
+    func cursor_end(view self) -> usize { return 3usize }
+    func cursor_get(view self, at: usize) -> view[u64] {
+        if at == 0usize { return self.a }
+        if at == 1usize { return self.b }
+        return self.c
+    }
+    func cursor_get_mut(edit self, at: usize) -> edit[u64] {
+        if at == 0usize { return self.a }
+        if at == 1usize { return self.b }
+        return self.c
+    }
+}
+
+// Pairs has the cursor protocol with two names, and its _mut getter gives
+// an edit of both.
+struct Pairs { left: Vec[u64]; right: Vec[u64] }
+impl Pairs {
+    func cursor_first(view self) -> usize { return 0usize }
+    func cursor_next(view self, at: usize) -> usize { return at + 1usize }
+    func cursor_end(view self) -> usize { return self.left.len() }
+    contract { invariant "left and right are distinct vectors of one length, so the accesses are disjoint and at is in both" }
+    func cursor_entry(view self, at: usize) -> (view[u64], view[u64]) {
+        if at >= self.left.len() || at >= self.right.len() { trap() }
+        unsafe { return ptr_view2(self.left.ptr_at(at), self.right.ptr_at(at)) }
+    }
+    contract { invariant "left and right are distinct vectors of one length, so the accesses are disjoint and at is in both" }
+    func cursor_entry_mut(edit self, at: usize) -> (edit[u64], edit[u64]) {
+        if at >= self.left.len() || at >= self.right.len() { trap() }
+        unsafe { return ptr_edit2(self.left.ptr_at(at), self.right.ptr_at(at)) }
+    }
+}
+func new_pairs() -> Pairs {
+    p := Pairs { left: Vec[u64].new(), right: Vec[u64].new() }
+    for i in 1u64..4u64 {
+        p.left.push(i)
+        p.right.push(i * 10u64)
+    }
+    return p
+}
+
+func show(label: view[]u8, xs: view[]u64) {
+    print_str(label)
+    print_str(":")
+    for x in xs {
+        print_str(" ")
+        print_u64(x)
+    }
+    println()
+}
+func show_pairs(label: view[]u8, p: view[Pairs]) {
+    print_str(label)
+    print_str(":")
+    for l, r in p {
+        print_str(" ")
+        print_u64(l)
+        print_str("/")
+        print_u64(r)
+    }
+    println()
+}
+func add(v: edit[u64], k: u64) { v = v + k }
+func apply(f: closure()) { f() }
+
+// The function of the spec's §0.
+func translate(data: edit[]u8, table: view[[256]u8]) {
+    for b in data { b = table[usize(b)] }
+}
+
+// A type parameter is not Copy, so its variable was always an edit: the
+// generic function and its twin now agree (F10).
+func fill_generic[T: Copy](xs: edit[]T, v: T) {
+    for x in xs { x = v }
+}
+func set_all[T](xs: edit[]T, make: closure() -> T) {
+    for x in xs { x = make() }
+}
+func set_all_u64(xs: edit[]u64, v: u64) {
+    for x in xs { x = v }
+}
+
+func main() -> i32 {
+    var table: [256]u8 = zero()
+    for i in 0usize..256usize { table[i] = u8(255usize - i) }
+    var data: [4]u8 = [0u8, 1u8, 2u8, 255u8]
+    translate(data, table)
+    print_str("a slice through an edit parameter:")
+    for b in data {
+        print_str(" ")
+        print_u64(u64(b))
+    }
+    println()
+
+    var xs: [4]u64 = [1u64, 2u64, 3u64, 4u64]
+    for x in xs { x = x * 2u64 }
+    show("an array", xs)
+
+    for i, x in xs { x = x + u64(i) }
+    show("with its index", xs)
+
+    v := Vec[u64].new()
+    v.extend(xs)
+    for x in v.as_edit() { x = x + 1u64 }
+    show("a Vec through as_edit", v.as_view())
+
+    var ps: [2]P = [P { x: 1u64, y: 2u64 }, P { x: 3u64, y: 4u64 }]
+    for p in ps { p.x = p.x + p.y }
+    for p in ps { p.grow() }
+    print_str("a field, then an edit self method:")
+    for p in ps {
+        print_str(" ")
+        print_u64(p.x)
+    }
+    println()
+
+    for x in xs { add(x, 100u64) }
+    show("an edit parameter", xs)
+
+    var olds: u64 = 0u64
+    for x in xs { olds = olds + replace(x, 7u64) }
+    show("replace", xs)
+    for x in xs { olds = olds + take(x) }
+    show("take", xs)
+    print_str("what they gave: ")
+    print_u64(olds)
+    println()
+
+    xs = [1u64, 2u64, 3u64, 4u64]
+    for x in xs { apply(|| { x = x + 10u64 }) }
+    show("a closure", xs)
+
+    // a write on one path, a continue and a break on others
+    for x in xs {
+        if x == 12u64 { continue }
+        if x == 14u64 { break }
+        x = 0u64
+    }
+    show("continue and break", xs)
+
+    var grid: [2][3]u64 = [[1u64, 2u64, 3u64], [4u64, 5u64, 6u64]]
+    for row in grid {
+        for c in row { c = c * 10u64 }
+    }
+    for row in grid { show("a nested array", row) }
+
+    var opts: [3]Option[u64] = [Some(1u64), None, Some(3u64)]
+    for o in opts {
+        match o {
+            Some(n) => { n = n + 1u64 }
+            None => { o = Some(0u64) }
+        }
+    }
+    print_str("a match on the element:")
+    for o in opts {
+        match o {
+            Some(n) => {
+                print_str(" ")
+                print_u64(n)
+            }
+            None => { print_str(" none") }
+        }
+    }
+    println()
+
+    // a loop over an arm's binding writes through to the matched place
+    var u: U = U.R([1u64, 2u64, 3u64, 4u64])
+    match u {
+        R(cells) => {
+            for c in cells { c = c + 1u64 }
+        }
+        _ => { }
+    }
+    match u {
+        R(cells) => { show("over an arm's binding", cells) }
+        _ => { }
+    }
+    match u {
+        R(cells) => {
+            with s := cells[1usize : 3usize] {
+                for c in s { c = 0u64 }
+            }
+        }
+        _ => { }
+    }
+    match u {
+        R(cells) => { show("and over a slice of it", cells) }
+        _ => { }
+    }
+
+    // cursor loops: a map's value
+    m := map.Map[u64, u64].new()
+    for i in 1u64..4u64 { was := m.insert(i, i * 10u64) }
+    for k, val in m { val = val + k }
+    var sum: u64 = 0u64
+    for k, val in m { sum = sum + val }
+    print_str("a map's values, summed: ")
+    print_u64(sum)
+    println()
+
+    // a type of this program's own, one name, as a local and as an arm's
+    // binding
+    var trio: Trio = Trio { a: 1u64, b: 2u64, c: 3u64 }
+    for x in trio { x = x * 3u64 }
+    print_str("a cursor of one name:")
+    for x in trio {
+        print_str(" ")
+        print_u64(x)
+    }
+    println()
+    var held: U = U.T(Trio { a: 1u64, b: 2u64, c: 3u64 })
+    match held {
+        T(t3) => {
+            for x in t3 { x = x + 5u64 }
+        }
+        _ => { }
+    }
+    match held {
+        T(t3) => {
+            print_str("a cursor over an arm's binding:")
+            for x in t3 {
+                print_str(" ")
+                print_u64(x)
+            }
+            println()
+        }
+        _ => { }
+    }
+
+    // two names, with neither, the first, the second and both written
+    pairs := new_pairs()
+    var seen: u64 = 0u64
+    for l, r in pairs { seen = seen + l + r }
+    print_str("neither written, read: ")
+    print_u64(seen)
+    println()
+    for l, r in pairs { l = l + r }
+    show_pairs("the first written", pairs)
+    for l, r in pairs { r = r + l }
+    show_pairs("the second written", pairs)
+    for l, r in pairs {
+        l = 0u64
+        r = r + 1u64
+    }
+    show_pairs("both written", pairs)
+
+    var ys: [3]u64 = [1u64, 2u64, 3u64]
+    var zs: [3]u64 = [1u64, 2u64, 3u64]
+    var ws: [3]u64 = [1u64, 2u64, 3u64]
+    fill_generic(ys, 9u64)
+    set_all(zs, || 9u64)
+    set_all_u64(ws, 9u64)
+    show("generic, constrained Copy", ys)
+    show("generic, unconstrained", zs)
+    show("their twin", ws)
+    return 0i32
+}

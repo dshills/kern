@@ -1,0 +1,9 @@
+//! expect: reject ASSIGN_IMMUTABLE rule=T.5
+// A map loop is not editable for its key: cursor_entry_mut returns a view
+// of it (specs/for-bindings §1, F3).
+module m
+import "std/map"
+func f(m: edit[map.Map[u64, u64]]) {
+    for k, v in m { k = k + 1u64 }   // ASSIGN_IMMUTABLE
+}
+func main() -> i32 { return 0i32 }

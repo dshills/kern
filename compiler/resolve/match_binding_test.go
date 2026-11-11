@@ -65,18 +65,18 @@ func f(u: edit[U], o: edit[Option[u64]], w: view[Option[u64]]) -> u64 {
 		t.Fatalf("unexpected diagnostics:\n%s", codes(p))
 	}
 	a, b := armBinding(t, p, "a", 0), armBinding(t, p, "b", 0)
-	if a.Kind != SymAccess || a.Conv != ast.ConvEdit || a.EditUse == nil || a.ArmCopy {
+	if a.Kind != SymAccess || a.Conv != ast.ConvEdit || a.EditUse == nil || a.CopyBound {
 		t.Errorf("a, which the arm writes: kind %v conv %v edit use %v", a.Kind, a.Conv, a.EditUse)
 	}
-	if b.Kind != SymLocal || !b.ArmCopy || !b.ArmEdit || b.EditUse != nil {
-		t.Errorf("b, which the arm reads: kind %v arm copy %v", b.Kind, b.ArmCopy)
+	if b.Kind != SymLocal || !b.CopyBound || !b.CopyEdit || b.EditUse != nil {
+		t.Errorf("b, which the arm reads: kind %v arm copy %v", b.Kind, b.CopyBound)
 	}
 	read, written, viewed := armBinding(t, p, "n", 0), armBinding(t, p, "n", 1), armBinding(t, p, "n", 2)
 	if read.Kind != SymLocal || written.Kind != SymAccess || written.Conv != ast.ConvEdit {
 		t.Errorf("n read: %v, n written: %v %v", read.Kind, written.Kind, written.Conv)
 	}
-	if viewed.Kind != SymLocal || !viewed.ArmCopy || viewed.ArmEdit {
-		t.Errorf("n of a view subject: kind %v, arm copy %v, editable %v", viewed.Kind, viewed.ArmCopy, viewed.ArmEdit)
+	if viewed.Kind != SymLocal || !viewed.CopyBound || viewed.CopyEdit {
+		t.Errorf("n of a view subject: kind %v, arm copy %v, editable %v", viewed.Kind, viewed.CopyBound, viewed.CopyEdit)
 	}
 }
 

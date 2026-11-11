@@ -1,0 +1,13 @@
+//! expect: reject NAME_UNRESOLVED rule=T.1
+// A Copy loop variable that the body writes is an access binding, which
+// is not moved (specs/for-bindings F4).
+module m
+func f(xs: edit[]u64) -> u64 {
+    var last: u64 = 0u64
+    for x in xs {
+        x = 1u64
+        last = move x   // NAME_UNRESOLVED
+    }
+    return last
+}
+func main() -> i32 { return 0i32 }

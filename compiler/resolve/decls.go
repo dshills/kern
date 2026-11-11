@@ -339,7 +339,7 @@ type SymbolKind int
 
 // Symbol kinds.
 const (
-	SymLocal  SymbolKind = iota // owned local variable (var/:=/for-copy/arm-owned/match-move, and a match arm's Copy binding that the arm only reads)
+	SymLocal  SymbolKind = iota // owned local variable (var/:=/arm-owned/match-move, and a match arm's or a for loop's Copy binding that is only read)
 	SymParam                    // function parameter
 	SymAccess                   // with/match/for binding holding an access
 	SymFunc
@@ -366,20 +366,23 @@ type Symbol struct {
 	TParam *TypeParamType
 	ID     int
 	File   string // declaring file (locals, parameters, bindings)
-	// The four fields below serve a match arm's binding of a Copy payload
-	// field (specs/match-bindings). Such a binding is a copy, a SymLocal,
-	// until the arm uses it as an edit; it is then an access binding.
+	// The four fields below serve a Copy binding: a match arm's binding of
+	// a Copy payload field (specs/match-bindings) and a for loop's variable
+	// of a Copy element (specs/for-bindings). Such a binding is a copy, a
+	// SymLocal, until the arm or the loop body uses it as an edit; it is
+	// then an access binding.
 	//
-	// ArmCopy: a Copy binding of a place match with no edit use so far.
-	// ArmEdit: that match's subject is editable.
-	// Derived: the binding this one is derived from (a nested match's or a
-	// with's binding of a path of it), or nil.
+	// CopyBound: a Copy binding with no edit use so far.
+	// CopyEdit: the matched place, or the loop for this variable, is
+	// editable.
+	// Derived: the Copy binding this one is derived from (it is a nested
+	// match's, a with's or a for's binding of a path of it), or nil.
 	// EditUse: for a Copy binding that became an access binding, the span
 	// of its edit use that starts first in the source; nil otherwise.
-	ArmCopy bool
-	ArmEdit bool
-	Derived *Symbol
-	EditUse *ast.Pos
+	CopyBound bool
+	CopyEdit  bool
+	Derived   *Symbol
+	EditUse   *ast.Pos
 	// ownedUses are the diagnostics a use of the binding as an owned local
 	// (move, drop, an out argument) gets if the binding turns out to be an
 	// access binding: reported when it is promoted.
