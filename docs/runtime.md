@@ -314,7 +314,10 @@ The modules hold the policy.
   `F_OFD_SETLK`), and needs the file open for reading (a shared lock) or
   for writing (an exclusive one). The two are different kinds of lock:
   macOS has each see the other, Linux does not, so a file is guarded with
-  one kind.
+  one kind. On macOS that holds within one open file too: a `File` that
+  holds its whole-file lock is refused a range of its own bytes
+  (`try_lock_range` is `false`, and `lock_range` waits for good), and the
+  other way round.
 - **A mapped file** (`mem.map_file`) is the file's own pages: a write
   through a writable mapping is a write to the file, seen at once by
   every other mapping and read of it. A byte past the end of a file cut

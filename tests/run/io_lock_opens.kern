@@ -1,0 +1,51 @@
+//! phase: 6
+//! expect: output io_lock_opens
+// A file lock belongs to the open file that took it (docs/runtime.md §8):
+// a second open of the file does not get it, and closing a third open of
+// the file, one that never held it, does not end it. The same for a lock
+// on a range of bytes. Only unlock, or closing the holder, lets go.
+module t
+import "std/io"
+func tried(label: view[]u8, r: Result[bool, io.IoErr]) {
+    print_str(label); print_str(": ")
+    match r {
+        Ok(b) => { print_bool(b); println() }
+        Err(e) => { print_str("error"); println() }
+    }
+}
+func rw(p: view[]u8) -> Result[io.File, io.IoErr] {
+    o := io.options()
+    o.read = true
+    o.write = true
+    return io.open(p, o)
+}
+func run() -> Result[(), io.IoErr] {
+    path := io.make_temp_file("kp-lock-")?
+    a := rw(path.as_view())?
+    b := rw(path.as_view())?
+    a.lock(true)?
+    tried("b while a holds", b.try_lock(true))
+    {
+        c := rw(path.as_view())?
+        tried("c while a holds", c.try_lock(true))
+    }
+    tried("b after c closed", b.try_lock(true))
+    a.unlock()?
+    tried("b after a unlocked", b.try_lock(true))
+    b.unlock()?
+    a.lock_range(0u64, 10u64, true)?
+    {
+        c := rw(path.as_view())?
+        tried("c range while a holds", c.try_lock_range(0u64, 10u64, true))
+    }
+    tried("b range after c closed", b.try_lock_range(0u64, 10u64, true))
+    io.remove_file(path.as_view())?
+    return Ok(())
+}
+func main() -> i32 {
+    match run() {
+        Ok(u) => { print_str("done"); println() }
+        Err(e) => { print_str("failed"); println() }
+    }
+    return 0i32
+}

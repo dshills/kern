@@ -1,0 +1,56 @@
+min i64 [-9223372036854775808]
+zero i64 [0]
+hex 0 [0]
+hex max [ffffffffffffffff]
+hex 4096 [1000]
+padded 7 in 3 [007]
+padded 12345 in 3 [12345]
+padded 5 in 0 [5]
+u64 max [18446744073709551615]
+rune surrogate d800 false
+rune surrogate dfff false
+rune 110000 false
+nothing appended, len 0
+rune 10ffff true
+rune d7ff true
+rune e000 true
+len after three 10
+count 3
+parse max 18446744073709551615
+parse max+1 none
+parse 20 nines none
+parse empty none
+parse +1 none
+parse 007 7
+parse 1 space none
+find empty in abc 0
+find empty in empty 0
+find long in short none
+find at end 2
+find whole 0
+find first of two 0
+starts long false
+starts empty true
+ends long false
+ends empty true
+ends yes true
+trim blank lo==hi 0
+trim empty 0
+trim lo 2
+trim hi 5
+hash empty 14695981039346656037
+hash a 12638187200555641996
+valid empty true
+decode at len: none
+overlong c0 80 false
+surrogate ed a0 80 false
+f4 90 80 80 false
+truncated e2 82 false
+json 01 false
+json -0 true
+json 1. false
+json 1e false
+json 1E+2 true
+json .5 false
+json empty false
+json - false

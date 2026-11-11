@@ -1,0 +1,96 @@
+//! phase: 6
+//! expect: output str_edges
+// The edges of std/str's contracts, each as its comment states it
+// (docs/reports/reference-conformance.md, the library sweep): the
+// smallest i64 and the largest u64 in decimal, hexadecimal with no leading
+// zeros, a number wider than its padding, scalar values push_rune refuses,
+// parse_u64 at and past the largest u64, a needle that is empty or longer
+// than its text, trims that leave nothing, the FNV-1a constants, and the
+// forms utf8_valid and json_number rule out.
+module t
+import "std/str"
+
+func say(s: view[]u8) { print_str(s); println() }
+func show(label: view[]u8, s: view[str.String]) { print_str(label); print_str(" ["); print_str(s.as_view()); say("]") }
+func opt(label: view[]u8, o: Option[u64]) {
+    print_str(label); print_str(" ")
+    match o {
+        Some(v) => { print_u64(v); println() }
+        None => say("none")
+    }
+}
+func at(label: view[]u8, o: Option[usize]) {
+    print_str(label); print_str(" ")
+    match o {
+        Some(v) => { print_u64(u64(v)); println() }
+        None => say("none")
+    }
+}
+func yes(label: view[]u8, b: bool) { print_str(label); print_str(" "); print_bool(b); println() }
+
+func main() {
+    s := str.String.new()
+    s.push_i64(-9223372036854775808i64)
+    show("min i64", s)
+    s.clear(); s.push_i64(0i64); show("zero i64", s)
+    s.clear(); s.push_hex(0u64); show("hex 0", s)
+    s.clear(); s.push_hex(18446744073709551615u64); show("hex max", s)
+    s.clear(); s.push_hex(4096u64); show("hex 4096", s)
+    s.clear(); s.push_padded(7u64, 3usize, 48u8); show("padded 7 in 3", s)
+    s.clear(); s.push_padded(12345u64, 3usize, 48u8); show("padded 12345 in 3", s)
+    s.clear(); s.push_padded(5u64, 0usize, 32u8); show("padded 5 in 0", s)
+    s.clear(); s.push_u64(18446744073709551615u64); show("u64 max", s)
+    s.clear()
+    yes("rune surrogate d800", s.push_rune(55296u32))
+    yes("rune surrogate dfff", s.push_rune(57343u32))
+    yes("rune 110000", s.push_rune(1114112u32))
+    at("nothing appended, len", Some(s.len()))
+    yes("rune 10ffff", s.push_rune(1114111u32))
+    yes("rune d7ff", s.push_rune(55295u32))
+    yes("rune e000", s.push_rune(57344u32))
+    at("len after three", Some(s.len()))
+    at("count", str.utf8_count(s.as_view()))
+    opt("parse max", str.parse_u64("18446744073709551615"))
+    opt("parse max+1", str.parse_u64("18446744073709551616"))
+    opt("parse 20 nines", str.parse_u64("99999999999999999999"))
+    opt("parse empty", str.parse_u64(""))
+    opt("parse +1", str.parse_u64("+1"))
+    opt("parse 007", str.parse_u64("007"))
+    opt("parse 1 space", str.parse_u64("1 "))
+    at("find empty in abc", str.find("abc", ""))
+    at("find empty in empty", str.find("", ""))
+    at("find long in short", str.find("ab", "abc"))
+    at("find at end", str.find("xxab", "ab"))
+    at("find whole", str.find("ab", "ab"))
+    at("find first of two", str.find("abab", "ab"))
+    yes("starts long", str.starts_with("ab", "abc"))
+    yes("starts empty", str.starts_with("ab", ""))
+    yes("ends long", str.ends_with("ab", "xab"))
+    yes("ends empty", str.ends_with("", ""))
+    yes("ends yes", str.ends_with("xab", "ab"))
+    b := str.trim(" \t\r\n")
+    at("trim blank lo==hi", Some(b.hi - b.lo))
+    e := str.trim("")
+    at("trim empty", Some(e.hi - e.lo))
+    m := str.trim("\n a b \t")
+    at("trim lo", Some(m.lo)); at("trim hi", Some(m.hi))
+    print_str("hash empty "); print_u64(str.hash("")); println()
+    print_str("hash a "); print_u64(str.hash("a")); println()
+    yes("valid empty", str.utf8_valid(""))
+    match str.utf8_decode("a", 1usize) {
+        Some(r) => say("decode at len: some")
+        None => say("decode at len: none")
+    }
+    yes("overlong c0 80", str.utf8_valid("\xc0\x80"))
+    yes("surrogate ed a0 80", str.utf8_valid("\xed\xa0\x80"))
+    yes("f4 90 80 80", str.utf8_valid("\xf4\x90\x80\x80"))
+    yes("truncated e2 82", str.utf8_valid("\xe2\x82"))
+    yes("json 01", str.json_number("01"))
+    yes("json -0", str.json_number("-0"))
+    yes("json 1.", str.json_number("1."))
+    yes("json 1e", str.json_number("1e"))
+    yes("json 1E+2", str.json_number("1E+2"))
+    yes("json .5", str.json_number(".5"))
+    yes("json empty", str.json_number(""))
+    yes("json -", str.json_number("-"))
+}

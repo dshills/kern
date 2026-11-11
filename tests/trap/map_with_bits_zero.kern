@@ -1,0 +1,12 @@
+//! phase: 6
+//! expect: trap explicit
+// with_bits takes 1 to 58 bits: 0 (no slots) traps explicit, as std/map's
+// comment says (docs/reports/reference-conformance.md, the library sweep).
+module t
+import "std/map"
+func main() -> i32 {
+    var m: map.Map[u64, u64] = map.with_bits(0u32)   // trap explicit
+    print_str("not reached")
+    println()
+    return 0i32
+}

@@ -1,0 +1,7 @@
+b while a holds: false
+c while a holds: false
+b after c closed: false
+b after a unlocked: true
+c range while a holds: false
+b range after c closed: false
+done

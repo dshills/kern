@@ -1,0 +1,14 @@
+//! phase: 6
+//! expect: trap explicit
+// A generator whose four words of state are all zero would give zeros for
+// ever: Rng.from_state traps explicit (std/rand's comment;
+// docs/reports/reference-conformance.md, the library sweep).
+module t
+import "std/rand"
+func main() -> i32 {
+    var z: [4]u64 = zero()
+    r := rand.Rng.from_state(z)   // trap explicit
+    print_str("not reached")
+    println()
+    return 0i32
+}

@@ -751,3 +751,80 @@ func TestAbstractSocketNames(t *testing.T) {
 		})
 	}
 }
+
+// A program that makes a temporary directory and a temporary file and
+// says whether each is under the directory named by its argument.
+const tempUnder = `module t
+import "std/io"
+import "std/str"
+func main() -> i32 {
+    args := io.args()
+    want := args.get(1usize).clone()
+    match io.make_temp_dir("kp-") {
+        Ok(p) => {
+            print_str("dir under TMPDIR: "); print_bool(str.starts_with(p.as_view(), want.as_view())); println()
+            match io.remove_dir_all(p.as_view()) {
+                Ok(u) => {}
+                Err(e) => { print_str("rm failed"); println() }
+            }
+        }
+        Err(e) => { print_str("make_temp_dir failed"); println() }
+    }
+    match io.make_temp_file("kp-") {
+        Ok(p) => {
+            print_str("file under TMPDIR: "); print_bool(str.starts_with(p.as_view(), want.as_view())); println()
+            match io.remove_file(p.as_view()) {
+                Ok(u) => {}
+                Err(e) => { print_str("rm failed"); println() }
+            }
+        }
+        Err(e) => { print_str("make_temp_file failed"); println() }
+    }
+    match io.make_temp_dir("a/b") {
+        Ok(p) => { print_str("a prefix with a slash made "); print_str(p.as_view()); println() }
+        Err(e) => { print_str("a prefix with a slash is refused"); println() }
+    }
+    return 0i32
+}
+`
+
+// docs/runtime.md §9 and std/io's temp_path: make_temp_dir and
+// make_temp_file make their paths in $TMPDIR, with or without a slash at
+// its end, and in /tmp when the variable is empty (the unset case takes
+// the same path in the runtime and is not run here); a prefix that holds
+// a slash is refused.
+func TestTempPathsFollowTMPDIR(t *testing.T) {
+	want := "dir under TMPDIR: true\nfile under TMPDIR: true\na prefix with a slash is refused\n"
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, engine := range []string{"native", "interpreter"} {
+		for _, c := range []struct{ name, value, under string }{
+			{"set", dir, dir}, {"trailing slash", dir + "/", dir}, {"empty", "", "/tmp"},
+		} {
+			t.Run(engine+"/"+c.name, func(t *testing.T) {
+				// built before the variable changes: the build has its own temporary files
+				exe := ""
+				if engine == "native" {
+					exe = buildProgram(t, tempUnder, native.Options{})
+				}
+				t.Setenv("TMPDIR", c.value)
+				var cmd *exec.Cmd
+				if exe != "" {
+					cmd = exec.Command(exe, c.under)
+				} else {
+					file := filepath.Join(dir, "t.kern")
+					if werr := os.WriteFile(file, []byte(tempUnder), 0o644); werr != nil {
+						t.Fatal(werr)
+					}
+					cmd = exec.Command(kernBinary(t), "run", file, "--", c.under)
+				}
+				out, rerr := cmd.CombinedOutput()
+				if rerr != nil || string(out) != want {
+					t.Errorf("the program ended with %v and wrote %q, want %q", rerr, out, want)
+				}
+			})
+		}
+	}
+}

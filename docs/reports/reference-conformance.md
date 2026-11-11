@@ -86,4 +86,43 @@ obligations, and `std/sync` across threads.
 - The standard library's own references (`docs/runtime.md` beyond `exit`,
   and the comments at the head of each `std/` module). Finding 1 came
   from the language reference, but the same gap, a stated behaviour
-  with no test, is as likely there.
+  with no test, is as likely there. The section below takes them up.
+
+## The runtime reference and the library, 2026-11-11
+
+**Subject:** `docs/runtime.md` sections 2 to 10 and the comments of
+`std/str`, `std/map`, `std/time`, `std/rand`, `std/sync`, `std/signal`
+and the file locks and temporary paths of `std/io`. **Host:** macOS 27.2
+on arm64; the Linux gate was not run for this section.
+
+The method was the first sweep's, with one step before it: each
+statement was first looked for in `tests/`, by the names it uses, and a
+program was written only for one that nothing exercised. That step
+settled most of them: the runtime work wrote a test per requirement
+(`specs/runtime/STATUS.md`), and every trap these modules' comments
+state already had its trap fixture. A search shows that a test makes
+the call, not that it checks the sentence, so this section is weaker
+evidence than the first sweep's for the statements it did not turn into
+programs. What nothing exercised became programs, run in the
+interpreter and natively at debug and release.
+
+| | Where | What is said | What happened | Outcome |
+|---|---|---|---|---|
+| 1 | `docs/runtime.md` §8, `File.lock_range` | a file's whole-file lock and its range locks are separate kinds, which macOS has see each other, so a file is guarded with one kind | true, and on macOS further than the text went: a `File` that holds its own whole-file lock is refused a range of its own bytes, so `try_lock_range` is `false` and `lock_range` never returns (and the other way round) | both texts now say so; the behaviour is the system's and is unchanged |
+
+Statements that held and now have the fixture named:
+
+| Where | Statement | Fixture |
+|---|---|---|
+| `std/str` | 56 edges of its contracts: the smallest `i64`, hexadecimal of 0 and of the largest `u64`, a number wider than its padding, the scalar values `push_rune` refuses, `parse_u64` at and past the largest `u64`, an empty needle and one longer than its text, trims that leave nothing, the FNV-1a constants, the forms `utf8_valid` and `json_number` rule out | `run/str_edges` |
+| `std/map` | `with_bits` outside 1 to 58 traps `explicit` | `trap/map_with_bits_zero`, `map_with_bits_over` |
+| `std/rand` | `Rng.from_state` of four zero words traps `explicit` | `trap/rand_from_state_zero` |
+| `docs/runtime.md` §8 | a file lock belongs to the open file: another open does not get it, and closing a third open that never held it does not end it; the same for a range | `run/io_lock_opens` |
+| `docs/runtime.md` §9, `io.temp_path` | temporary paths are made in `$TMPDIR`, with or without a slash at its end, and in `/tmp` when it is unset or empty; a prefix that holds a slash is refused | `TestTempPathsFollowTMPDIR` (the unset case was run by hand only) |
+
+Not covered by this section: `std/net`, `std/process`, `std/json` and
+the containers of `std/core` beyond a search for their stated traps,
+each of which has its own fixtures and, for JSON and UTF-8, a
+differential test; sections 11 and 12 of `docs/runtime.md`, which the
+freestanding suite owns; and the statements no test can provoke on this
+host (a set-user-ID process, an interrupted system call).
