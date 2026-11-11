@@ -602,7 +602,10 @@ impl File {
     // exclusive lock needs it open for writing: kind InvalidInput
     // otherwise. A file's range locks and its whole-file lock are
     // separate kinds: whether one sees the other is the system's choice,
-    // so a file is guarded with one kind.
+    // so a file is guarded with one kind. Where they do see each other
+    // (macOS), a File that holds one kind is refused the other even on
+    // its own bytes: the try_ form is false and the waiting form never
+    // returns.
     func lock_range(edit self, start: u64, n: u64, exclusive: bool) -> Result[(), IoErr] {
         var op: i32 = 0i32
         if exclusive { op = 1i32 }
