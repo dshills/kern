@@ -1,0 +1,71 @@
+a return from an inner block
+  return
+  drop 3
+  drop 2
+  drop 1
+the same function, to its end
+  drop 3
+  drop 4
+  drop 2
+  the end
+  drop 5
+  drop 1
+a ? that leaves
+  drop 12
+  drop 11
+  left
+a ? that does not
+  drop 13
+  drop 12
+  the end
+  drop 14
+  drop 11
+  ok
+continue and break
+  continue
+  drop 22
+  drop 21
+  break
+  drop 34
+  drop 33
+  drop 31
+  after the loop
+  drop 20
+a with over an owned value, left by return
+  return from the block
+  drop 43
+  holder 42 destroyed
+the same, to the block's end
+  the block ends
+  drop 43
+  holder 42 destroyed
+  after the block
+the same in a loop, left by continue and by break
+  holder 50 destroyed
+  holder 51 destroyed
+  after the loop
+a destructor, then the fields, last first
+  the scope ends: the array, declared last, goes first
+  drop 73
+  drop 72
+  drop 71
+  outer's destructor, before its fields
+  drop 64
+  inner's destructor, before its fields
+  drop 63
+  drop 62
+  drop 61
+an owned match
+  the arm owns both, and uses 91
+  drop 92
+  drop 91
+  after the match
+  drop 93
+  the wildcard arm, which destroyed the whole value first
+  after the match
+take and replace
+  take left the default, None
+  replace handed back the default
+  the scope ends: older, was, b
+  drop 81
+  drop 82

@@ -1,0 +1,18 @@
+//! phase: 6
+//! expect: trap bounds
+// A trap runs no release function (Rule 5.3.5): the access is entered,
+// the block traps, and leave is never called.
+module t
+struct G { v: u64 }
+impl G {
+    func enter(edit self) -> edit[u64] release leave { print_str("enter"); println(); return self.v }
+    func leave(edit self) { print_str("leave"); println() }
+}
+func main() -> i32 {
+    g := G { v: 0u64 }
+    with v := g.enter() {
+        var a: [2]u64 = zero()
+        a[usize(v) + 2usize] = 1u64
+    }
+    return 0i32
+}

@@ -1,0 +1,7 @@
+//! phase: 1
+//! expect: trap overflow
+// The remainder of the minimum of a signed type by -1 traps overflow, as
+// the division does (Rule 4.1.2, the accepted decision of spec section 13).
+module t
+func f(a: i64, b: i64) -> i64 { return a % b }
+func main() -> i32 { x := f(-9223372036854775807i64 - 1i64, -1i64); return 0i32 }

@@ -855,15 +855,28 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 	// from (`make().as_view()` passed on), dies with the call unless the
 	// call returns an access, which may be derived from it: then it lives
 	// as long as that access (the first of a tuple, which ends last).
+	// An argument access that came with a release function is released
+	// here too, when the call that consumed it has returned (Rule 5.3.5),
+	// unless the call returns an access: that one may be derived from it,
+	// and the release waits for it. (Until 2026-11-10 an access passed as
+	// an argument ended without its release function: `bump(m.lock())`
+	// left the Mutex locked.)
+	var released []*ir.Value // oldest first
 	for i := len(argAccs) - 1; i >= 0; i-- {
-		fl.emit(&ir.AccessEnd{Access: argAccs[i]})
-		if retIsAccess {
-			callTemps = append(callTemps, fl.tied[argAccs[i]]...)
-		} else {
-			fl.dropTied(argAccs[i])
+		acc := argAccs[i]
+		if !retIsAccess {
+			fl.endAccess(acc)
+			continue
 		}
+		if _, ok := fl.relOf[acc]; ok || len(fl.after[acc]) > 0 {
+			released = append([]*ir.Value{acc}, released...)
+			continue
+		}
+		fl.emit(&ir.AccessEnd{Access: acc})
+		callTemps = append(callTemps, fl.tied[acc]...)
 	}
 	if retIsAccess {
+		fl.endAfter(dsts[0], released)
 		fl.tie(dsts[0], callTemps)
 	} else {
 		for i := len(callTemps) - 1; i >= 0; i-- {
@@ -1024,8 +1037,7 @@ func (fl *fnLower) wideAccess(x *ast.CallExpr, name string, t resolve.Type, edit
 	fl.emit(&ir.CheckBounds{Index: last, Len: ln, Prov: ir.RuntimeChecked, Pos: x.Pos})
 	end := func() {
 		for i := len(opened) - 1; i >= 0; i-- {
-			fl.emit(&ir.AccessEnd{Access: opened[i]})
-			fl.dropTied(opened[i])
+			fl.endAccess(opened[i]) // with its release function, if it came with one
 		}
 	}
 	if edit {
@@ -1175,7 +1187,7 @@ func (fl *fnLower) spawn(x *ast.CallExpr, info *resolve.CallInfo, t resolve.Type
 		for _, acc := range spawned {
 			at := scopeFrame
 			if inner > scopeFrame {
-				if _, rel := fl.relOf[acc]; rel {
+				if _, rel := fl.relOf[acc]; rel || len(fl.after[acc]) > 0 {
 					fl.fail(x.Pos, "a scoped spawn argument with a release must be spawned in the scope's own block, not in a block nested inside it")
 				}
 				at = inner
@@ -1184,8 +1196,7 @@ func (fl *fnLower) spawn(x *ast.CallExpr, info *resolve.CallInfo, t resolve.Type
 		}
 	} else {
 		for _, acc := range spawned {
-			fl.emit(&ir.AccessEnd{Access: acc})
-			fl.dropTied(acc)
+			fl.endAccess(acc)
 		}
 	}
 	return operand{val: v, owned: true}

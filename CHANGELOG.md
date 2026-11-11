@@ -8,6 +8,18 @@ section of this file into a GitHub release is `docs/releasing.md`.
 
 ## [Unreleased]
 
+### Language
+
+- Fixed: an access that came with a release function and was passed as
+  an argument ended without the release function being called, in both
+  engines. `bump(m.lock())` left the `Mutex` locked for good, and the
+  next lock on that thread trapped; a `with` block released as it
+  should. The release function now runs when the call that took the
+  access returns, or, when that call returns an access derived from it,
+  when that access ends (Rule 5.3.5, whose wording now says so).
+- The reference no longer speaks of payload fields a pattern leaves
+  unbound: a pattern names every field of its variant.
+
 ### Runtimes and targets
 
 - Fixed: in a native program, the handle of a scoped thread (`Join`)
@@ -24,6 +36,17 @@ section of this file into a GitHub release is `docs/releasing.md`.
   spawns, where it was the reverse order of the handles.
 - The runtime's interface version is 3 (`kern_rt_abi_3`): the contracts
   of `kern_join_get`, `kern_join_drop` and `kern_scope_drop` changed.
+
+### Tooling
+
+- The test suite gained fixtures for behaviour the reference states and
+  nothing exercised (`docs/reports/reference-conformance.md`): release
+  accessors at every kind of exit, destruction at every scope exit, the
+  arithmetic traps beyond one sum and one division, the order of a
+  pool's checks, slot retirement, a trap inside a destructor, and who
+  destroys a value that threads share. A trap fixture may now state what
+  the program wrote before it trapped, and the examples that run are
+  part of the sanitized corpus.
 
 ### Examples
 

@@ -1,0 +1,87 @@
+a statement
+  enter 1
+  leave 1
+  the statement has ended
+two in one statement
+  enter 1
+  enter 2
+  leave 2
+  leave 1
+  the statement has ended
+an access derived from it, in a statement
+  enter 1
+  leave 1
+  the statement has ended
+an access derived from it, bound by a block
+  enter 1
+  inside
+  leave 1
+  after the block
+read through, twice in one statement
+  enter 1
+  leave 1
+  enter 1
+  leave 1
+  the statement has ended
+as a condition
+  enter 1
+  leave 1
+  in the body, after the release
+a field of what it gives
+  enter 1
+  leave 1
+  the statement has ended
+a with block
+  enter 1
+  inside
+  leave 1
+  after the block
+nested blocks
+  enter 1
+  enter 2
+  inside both
+  leave 2
+  between
+  leave 1
+a match
+  enter 1
+  leave 1
+  after the match
+a for
+  enter 1
+  leave 1
+  after the for
+return
+  enter 1
+  enter 2
+  returning from inside both
+  leave 2
+  leave 1
+  returned
+a ? that leaves
+  enter 1
+  leave 1
+  it left with the error
+a ? that does not
+  enter 1
+  the ? went on
+  leave 1
+  ok
+continue, then break
+  enter 1
+  continue
+  leave 1
+  enter 1
+  break
+  leave 1
+  after the loop
+break out of a for over an access
+  enter 1
+  leave 1
+  after the for
+gate 1 entered and left: 18 18
+gate 2 entered and left: 3 3
+a Mutex locked for one statement
+  free again: true
+  the value: 12
+  read twice in one statement, then a field edited: 6 5

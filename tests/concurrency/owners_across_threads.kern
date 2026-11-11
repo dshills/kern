@@ -1,0 +1,131 @@
+//! phase: 6
+//! expect: output owners_across_threads
+//! tsan: clean
+// One owner, one destruction (Rule 5.1.1), when the owner is a library
+// type that several threads reach (Rules 5.5.2, 5.5.4): a value sent to a
+// closed channel comes back to its sender; values left in a channel are
+// destroyed with it; a value received is the receiver's; a Shared value
+// is destroyed by its last owner, whichever thread that is; a Mutex
+// destroys what it guards; and a thread's result is the joiner's.
+module cc
+import "std/sync"
+struct Noisy nocopy { id: u64 }
+impl Noisy {
+    destructor(edit self) {
+        print_str("  drop ")
+        print_u64(self.id)
+        println()
+    }
+}
+func say(s: view[]u8) { print_str(s); println() }
+func make(id: u64) -> Noisy { return Noisy { id: id } }
+func wait_for(flag: view[Atomic[u32]]) {
+    while flag.load(Ordering.seq_cst) == 0u32 { yield_now() }
+}
+
+func channel() {
+    say("a channel")
+    ch := sync.Channel[Noisy].new(4usize)
+    match ch.send(make(1u64)) {
+        Ok(u) => { }
+        Err(back) => say("  refused")
+    }
+    match ch.send(make(2u64)) {
+        Ok(u) => { }
+        Err(back) => say("  refused")
+    }
+    match ch.send(make(3u64)) {
+        Ok(u) => { }
+        Err(back) => say("  refused")
+    }
+    match ch.recv() {
+        Some(v) => {
+            print_str("  received ")
+            print_u64(v.id)
+            println()
+        }
+        None => say("  nothing")
+    }
+    say("  closed")
+    ch.close()
+    match ch.send(make(4u64)) {
+        Ok(u) => say("  sent to a closed channel")
+        Err(back) => {
+            print_str("  the value came back: ")
+            print_u64(back.id)
+            println()
+        }
+    }
+    match ch.try_send(make(5u64)) {
+        Ok(u) => say("  sent to a closed channel")
+        Err(back) => {
+            print_str("  and from try_send: ")
+            print_u64(back.id)
+            println()
+        }
+    }
+    say("  the channel is destroyed with two values in it")
+}
+
+// keeps holds its owner until the gate is raised, then lets go of it.
+func keeps(v: own Shared[Noisy], gate: own Shared[Atomic[u32]], gone: own Shared[Atomic[u32]]) -> u64 {
+    wait_for(gate.get())
+    id := v.get().id
+    drop(v)
+    gone.get().store(1u32, Ordering.seq_cst)
+    return id
+}
+
+func shared() -> Result[(), SpawnErr] {
+    say("a shared value whose last owner is another thread")
+    gate := Shared[Atomic[u32]].new(Atomic[u32].new(0u32))
+    gone := Shared[Atomic[u32]].new(Atomic[u32].new(0u32))
+    v := Shared[Noisy].new(make(11u64))
+    t := thread.spawn(keeps, v.clone(), gate.clone(), gone.clone())?
+    drop(v)
+    say("  the first owner is gone, the value is not")
+    gate.get().store(1u32, Ordering.seq_cst)
+    wait_for(gone.get())
+    say("  the thread let go of it")
+    n := t.join()
+    say("a shared value whose last owner is this thread")
+    w := Shared[Noisy].new(make(12u64))
+    gate2 := Shared[Atomic[u32]].new(Atomic[u32].new(1u32))
+    gone2 := Shared[Atomic[u32]].new(Atomic[u32].new(0u32))
+    t2 := thread.spawn(keeps, w.clone(), gate2.clone(), gone2.clone())?
+    m := t2.join()
+    say("  the thread has ended, the value has not")
+    drop(w)
+    return Ok(())
+}
+
+func produce(id: u64) -> Noisy { return make(id) }
+
+func results() -> Result[(), SpawnErr] {
+    say("a thread's result")
+    t := thread.spawn(produce, 21u64)?
+    r := t.join()
+    print_str("  joined, and holds ")
+    print_u64(r.id)
+    println()
+    drop(r)
+    say("a Mutex and what it guards")
+    m := Mutex[Noisy].new(make(31u64))
+    with g := m.lock() { g.id = 32u64 }
+    drop(m)
+    say("  the Mutex is gone")
+    return Ok(())
+}
+
+func main() -> i32 {
+    channel()
+    match shared() {
+        Ok(u) => { }
+        Err(e) => say("no thread")
+    }
+    match results() {
+        Ok(u) => { }
+        Err(e) => say("no thread")
+    }
+    return 0i32
+}

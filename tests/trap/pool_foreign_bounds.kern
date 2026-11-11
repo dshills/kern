@@ -1,0 +1,24 @@
+//! phase: 3
+//! expect: trap bounds
+// A handle is not bound to its pool (Rule 5.6.2): one whose index is past
+// another pool's slots traps bounds there, in every build, before the
+// debug build's identity check.
+module t
+func run() -> Result[u64, AllocErr] {
+    big := Pool[u64].new()
+    small := Pool[u64].new()
+    var last: Option[PoolId[u64]] = None
+    for i in 0u64..40u64 { last = Some(big.alloc(i)?) }
+    s := small.alloc(1u64)?
+    match last {
+        Some(id) => { return Ok(small.get(id)) }
+        None => { return Ok(0u64) }
+    }
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => { }
+        Err(e) => { }
+    }
+    return 0i32
+}

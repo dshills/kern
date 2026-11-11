@@ -1,0 +1,217 @@
+//! phase: 6
+//! expect: output release_accessor
+// A release accessor (Rule 5.3.5): the release function runs exactly once
+// when the access it came with ends, wherever that is. The end of the
+// statement that consumed it; the closing brace of the with, match or
+// for that bound it; a return, a `?`, a break or a continue that leaves
+// that block. Several in one statement, or nested, are released in the
+// reverse of the order they were made in, and an access that a call
+// derives from it keeps it until that access ends. Until 2026-11-10 an
+// access passed as an argument ended without its release function, so
+// `bump(m.lock())` left a Mutex locked.
+module t
+struct Gate { id: u64; value: u64; items: [3]u64; slot: Option[u64]; entered: u64; left: u64 }
+impl Gate {
+    func enter(edit self) -> edit[u64] release leave {
+        self.entered = self.entered + 1u64
+        print_str("  enter ")
+        print_u64(self.id)
+        println()
+        return self.value
+    }
+    func all(edit self) -> edit[]u64 release leave {
+        self.entered = self.entered + 1u64
+        print_str("  enter ")
+        print_u64(self.id)
+        println()
+        return self.items[0usize : 3usize]
+    }
+    func maybe(edit self) -> edit[Option[u64]] release leave {
+        self.entered = self.entered + 1u64
+        print_str("  enter ")
+        print_u64(self.id)
+        println()
+        return self.slot
+    }
+    func leave(edit self) {
+        self.left = self.left + 1u64
+        print_str("  leave ")
+        print_u64(self.id)
+        println()
+    }
+}
+func gate(id: u64) -> Gate { return Gate { id: id, value: 0u64, items: [1u64, 2u64, 3u64], slot: Some(7u64), entered: 0u64, left: 0u64 } }
+func say(s: view[]u8) { print_str(s); println() }
+func bump(v: edit[u64]) { v = v + 1u64 }
+func both(a: edit[u64], b: edit[u64]) { a = a + 1u64; b = b + 1u64 }
+
+func in_a_statement(a: edit[Gate], b: edit[Gate]) {
+    say("a statement")
+    bump(a.enter())
+    say("  the statement has ended")
+    say("two in one statement")
+    both(a.enter(), b.enter())
+    say("  the statement has ended")
+}
+
+// last_of returns an access derived from the one it is given.
+func last_of(xs: edit[]u64) -> edit[u64] { return xs[len(xs) - 1usize] }
+func sum(xs: view[]u64) -> u64 {
+    var s: u64 = 0u64
+    for x in xs { s = s + x }
+    return s
+}
+
+func through_another(a: edit[Gate]) {
+    say("an access derived from it, in a statement")
+    bump(last_of(a.all()))
+    say("  the statement has ended")
+    say("an access derived from it, bound by a block")
+    with v := last_of(a.all()) {
+        v = v + 1u64
+        say("  inside")
+    }
+    say("  after the block")
+    say("read through, twice in one statement")
+    n := sum(a.all()) + sum(a.all())
+    say("  the statement has ended")
+    say("as a condition")
+    if sum(a.all()) > 0u64 { say("  in the body, after the release") }
+    say("a field of what it gives")
+    bump(a.all()[0usize])
+    say("  the statement has ended")
+}
+
+func in_a_block(a: edit[Gate], b: edit[Gate]) {
+    say("a with block")
+    with v := a.enter() {
+        v = v + 1u64
+        say("  inside")
+    }
+    say("  after the block")
+    say("nested blocks")
+    with v := a.enter() {
+        with w := b.enter() {
+            both(v, w)
+            say("  inside both")
+        }
+        say("  between")
+    }
+    say("a match")
+    match a.maybe() {
+        Some(n) => { n = n + 1u64 }
+        None => { }
+    }
+    say("  after the match")
+    say("a for")
+    for x in a.all() { x = x * 2u64 }
+    say("  after the for")
+}
+
+func returns_early(a: edit[Gate], b: edit[Gate]) -> u64 {
+    with v := a.enter() {
+        with w := b.enter() {
+            say("  returning from inside both")
+            return v + w
+        }
+    }
+    return 0u64
+}
+
+func fails(yes: bool) -> Result[u64, u8] {
+    if yes { return Err(1u8) }
+    return Ok(5u64)
+}
+
+func asks(a: edit[Gate], yes: bool) -> Result[u64, u8] {
+    with v := a.enter() {
+        n := fails(yes)?
+        v = v + n
+        say("  the ? went on")
+    }
+    return Ok(0u64)
+}
+
+func in_a_loop(a: edit[Gate]) {
+    say("continue, then break")
+    for round in 0u64..5u64 {
+        with v := a.enter() {
+            if round == 0u64 {
+                say("  continue")
+                continue
+            }
+            say("  break")
+            break
+        }
+    }
+    say("  after the loop")
+    say("break out of a for over an access")
+    for x in a.all() {
+        if x > 0u64 { break }
+    }
+    say("  after the for")
+}
+
+struct Pair { first: u64; second: u64 }
+func first(p: view[Pair]) -> u64 { return p.first }
+
+// A Mutex's lock is such an access, and unlock its release function: a
+// lock taken for one statement is free again after it.
+func a_mutex() {
+    say("a Mutex locked for one statement")
+    m := Mutex[u64].new(0u64)
+    bump(m.lock())
+    bump(m.lock())
+    print_str("  free again: ")
+    print_bool(m.try_with(|v| { v = v + 10u64 }))
+    println()
+    with v := m.lock() {
+        print_str("  the value: ")
+        print_u64(v)
+        println()
+    }
+    p := Mutex[Pair].new(Pair { first: 3u64, second: 4u64 })
+    n := first(p.lock()) + first(p.lock())
+    bump(p.lock().second)
+    with q := p.lock() {
+        print_str("  read twice in one statement, then a field edited: ")
+        print_u64(n)
+        print_str(" ")
+        print_u64(q.second)
+        println()
+    }
+}
+
+func main() -> i32 {
+    a := gate(1u64)
+    b := gate(2u64)
+    in_a_statement(a, b)
+    through_another(a)
+    in_a_block(a, b)
+    say("return")
+    r := returns_early(a, b)
+    say("  returned")
+    say("a ? that leaves")
+    match asks(a, true) {
+        Ok(n) => say("  ok")
+        Err(e) => say("  it left with the error")
+    }
+    say("a ? that does not")
+    match asks(a, false) {
+        Ok(n) => say("  ok")
+        Err(e) => say("  it left with the error")
+    }
+    in_a_loop(a)
+    print_str("gate 1 entered and left: ")
+    print_u64(a.entered)
+    print_str(" ")
+    print_u64(a.left)
+    println()
+    print_str("gate 2 entered and left: ")
+    print_u64(b.entered)
+    print_str(" ")
+    print_u64(b.left)
+    println()
+    a_mutex()
+    return 0i32
+}

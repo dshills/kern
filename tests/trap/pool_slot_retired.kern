@@ -1,0 +1,32 @@
+//! phase: 3
+//! expect: trap vacant
+//! test-hooks: true
+// A slot whose generation would wrap is retired and never reused (Rule
+// 5.6.2). The slot is seeded at the last generation, allocated and freed:
+// the next allocations take other slots, the pool's count shows them, and
+// the old handle traps vacant for good. Were the slot reused, with its
+// generation back at zero, the old handle would trap generation instead.
+module t
+func run() -> Result[u64, AllocErr] {
+    p := Pool[u64].new()
+    testing.seed_generation(p, 0u32, 4294967295u32)
+    a := p.alloc(1u64)?
+    print_u64(p.get(a))
+    println()
+    p.free(a)
+    b := p.alloc(2u64)?
+    c := p.alloc(3u64)?
+    print_u64(p.get(b) + p.get(c))
+    print_str(" in ")
+    print_u64(u64(p.len()))
+    print_str(" live slots")
+    println()
+    return Ok(p.get(a))
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => { }
+        Err(e) => { }
+    }
+    return 0i32
+}

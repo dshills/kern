@@ -1,0 +1,33 @@
+//! phase: 6
+//! expect: output exit_runs_no_destructors
+// exit ends the program where it is called: standard output is flushed
+// and no destructor runs, neither of the function that called it nor of
+// main's own values (docs/runtime.md, section 2). A return from main
+// destroys main's values, which a_return shows first.
+module t
+struct Noisy nocopy { id: u64 }
+impl Noisy {
+    destructor(edit self) {
+        print_str("drop ")
+        print_u64(self.id)
+        println()
+    }
+}
+func a_return() {
+    a := Noisy { id: 1u64 }
+    print_str("returning")
+    println()
+}
+func leaves() {
+    b := Noisy { id: 2u64 }
+    print_str("calling exit, with no newline after this")
+    exit(0i32)
+}
+func main() -> i32 {
+    a_return()
+    c := Noisy { id: 3u64 }
+    leaves()
+    print_str("after exit")
+    println()
+    return 0i32
+}

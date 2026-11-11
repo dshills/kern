@@ -1,0 +1,23 @@
+//! phase: 1
+//! expect: trap bounds
+// A trap inside a destructor terminates the program (Rule 5.7.4): the
+// value destroyed first is destroyed whole, the second traps in its
+// destructor, and nothing runs after that.
+module t
+struct T { id: u64 }
+impl T {
+    destructor(edit self) {
+        print_str("in the destructor"); println()
+        var a: [2]u64 = zero()
+        a[usize(self.id)] = 1u64
+        print_str("after the trap"); println()
+    }
+}
+func main() -> i32 {
+    {
+        t := T { id: 5u64 }
+        u := T { id: 0u64 }
+    }
+    print_str("after the scope"); println()
+    return 0i32
+}

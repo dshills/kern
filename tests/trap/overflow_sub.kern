@@ -1,0 +1,7 @@
+//! phase: 1
+//! expect: trap overflow
+// Subtraction below zero of an unsigned type traps overflow (Rule 4.1.2),
+// in every build configuration.
+module t
+func f(a: u8, b: u8) -> u8 { return a - b }
+func main() -> i32 { x := f(1u8, 2u8); return 0i32 }

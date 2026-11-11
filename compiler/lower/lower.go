@@ -349,6 +349,11 @@ type fnLower struct {
 	// must outlive the access and is destroyed when it ends (spec §5.7:
 	// every owned value is destroyed exactly once)
 	tied map[*ir.Value][]*ir.Local
+	// after holds, for an access a call returned, the argument accesses
+	// with a release function that the call was given: the returned
+	// access may be derived from them (`first(m.lock())`), so they end,
+	// and their release functions run, when it does (Rule 5.3.5)
+	after map[*ir.Value][]*ir.Value
 }
 
 // frame mirrors one checker scope: the symbols bound in it (whose exits the
@@ -638,11 +643,26 @@ func (fl *fnLower) endAccess(v *ir.Value) {
 	if rel, ok := fl.relOf[v]; ok {
 		// the obligation is the same on every exit path, so it is kept
 		fl.emit(&ir.AccessEnd{Access: v, Release: rel.fn, Recv: rel.recv})
-		fl.dropTied(v)
+	} else {
+		fl.emit(&ir.AccessEnd{Access: v})
+	}
+	// the accesses v was derived from, newest first: release functions
+	// run in the reverse of the order their accesses were made in
+	for i := len(fl.after[v]) - 1; i >= 0; i-- {
+		fl.endAccess(fl.after[v][i])
+	}
+	fl.dropTied(v)
+}
+
+// endAfter makes the accesses end when the access v does.
+func (fl *fnLower) endAfter(v *ir.Value, accs []*ir.Value) {
+	if len(accs) == 0 {
 		return
 	}
-	fl.emit(&ir.AccessEnd{Access: v})
-	fl.dropTied(v)
+	if fl.after == nil {
+		fl.after = map[*ir.Value][]*ir.Value{}
+	}
+	fl.after[v] = append(fl.after[v], accs...)
 }
 
 // heldValue is an owned value in flight: an SSA value, or a temporary

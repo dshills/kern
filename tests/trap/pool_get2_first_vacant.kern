@@ -1,0 +1,21 @@
+//! phase: 3
+//! expect: trap vacant
+// get2 validates its first handle before anything else (Rule 5.6.2): a
+// freed first handle traps vacant though the second is live.
+module t
+struct C { v: u64 }
+func run() -> Result[u64, AllocErr] {
+    p := Pool[C].new()
+    a := p.alloc(C { v: 1u64 })?
+    b := p.alloc(C { v: 2u64 })?
+    p.free(a)
+    with x, y := p.get2(a, b) { x.v = y.v }
+    return Ok(0u64)
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => { }
+        Err(e) => { }
+    }
+    return 0i32
+}

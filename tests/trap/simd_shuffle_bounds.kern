@@ -1,0 +1,10 @@
+//! phase: 1
+//! expect: trap bounds
+// simd_shuffle traps bounds on a lane index of 2N or more (Rule 4.1.6).
+module t
+func f(i: u32) -> [4]u32 {
+    a := [1u32, 2u32, 3u32, 4u32]
+    b := [5u32, 6u32, 7u32, 8u32]
+    return simd_shuffle(a, b, [0u32, 1u32, 2u32, i])
+}
+func main() -> i32 { x := f(8u32); return 0i32 }

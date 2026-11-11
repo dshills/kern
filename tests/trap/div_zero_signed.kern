@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: trap div_zero
+// A signed division by zero traps div_zero (Rule 4.1.2).
+module t
+func f(a: i16, b: i16) -> i16 { return a / b }
+func main() -> i32 { x := f(7i16, 0i16); return 0i32 }

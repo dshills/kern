@@ -27,7 +27,8 @@ var sanitizedKnown = map[string]string{}
 var sanitizerReports = []string{"ERROR: AddressSanitizer", "ERROR: LeakSanitizer", "runtime error:", "AddressSanitizer:DEADLYSIGNAL"}
 
 // TestFixturesSanitized is specs/runtime RA5: every tests/run and
-// tests/concurrency fixture, built natively at debug with AddressSanitizer
+// tests/concurrency fixture, and every example that runs (the programs
+// people will copy from), built natively at debug with AddressSanitizer
 // and UndefinedBehaviorSanitizer in the program and the runtime, produces
 // its expected output and no sanitizer report. It runs when KERN_SANITIZE
 // is set (a CI job sets it on Linux, where the leak checker runs too).
@@ -49,13 +50,16 @@ func TestFixturesSanitized(t *testing.T) {
 	ran := 0
 	for _, path := range fixtures(t) {
 		rel := filepath.ToSlash(path)
-		if !strings.HasPrefix(rel, "run/") && !strings.HasPrefix(rel, "concurrency/") {
+		if !strings.HasPrefix(rel, "run/") && !strings.HasPrefix(rel, "concurrency/") && !strings.HasPrefix(rel, "../examples/") {
 			continue
 		}
 		f, all := loadFixture(t, path)
 		h := parseHeader(t, f)
 		if h.phase > Phase || h.env == "freestanding" || h.cfile != "" || h.tsan == "race" {
 			continue
+		}
+		if strings.HasPrefix(rel, "../examples/") && h.expect != "output" {
+			continue // an example that is only checked has no main to run
 		}
 		switch h.expect {
 		case "accept", "output":

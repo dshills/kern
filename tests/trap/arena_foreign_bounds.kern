@@ -1,0 +1,23 @@
+//! phase: 3
+//! expect: trap bounds
+// An arena handle whose index is past another arena's elements traps
+// bounds there (Rule 5.6.2).
+module t
+func run() -> Result[u64, AllocErr] {
+    big := Arena[u64].new()
+    small := Arena[u64].new()
+    var last: Option[ArenaId[u64]] = None
+    for i in 0u64..40u64 { last = Some(big.alloc(i)?) }
+    s := small.alloc(1u64)?
+    match last {
+        Some(id) => { return Ok(small.get(id)) }
+        None => { return Ok(0u64) }
+    }
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => { }
+        Err(e) => { }
+    }
+    return 0i32
+}

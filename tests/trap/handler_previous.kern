@@ -1,0 +1,27 @@
+//! phase: 2
+//! expect: trap bounds
+//! trap-record: none
+// trap.set_handler returns the handler it replaced (the reference's
+// section on trap handlers): the first handler is installed, replaced by
+// a second, and put back from what the second installation returned, so
+// it is the first that runs. It runs once, and the program ends there.
+module t
+func first(info: view[TrapInfo]) {
+    print_str("the first handler")
+    println()
+}
+func second(info: view[TrapInfo]) {
+    print_str("the second handler")
+    println()
+}
+func main() -> i32 {
+    original := trap.set_handler(first)
+    replaced := trap.set_handler(second)
+    again := trap.set_handler(replaced)
+    var a: [2]u64 = zero()
+    i := 5usize
+    a[i] = 1u64
+    print_str("after the trap")
+    println()
+    return 0i32
+}

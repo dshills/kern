@@ -1,0 +1,23 @@
+a map
+  insert handed back 11
+  drop 11
+  remove handed back 12
+  drop 12
+  nothing for a key that is not there
+  the map is destroyed with two values in it
+  drop 14
+  drop 13
+a BoxIn that cannot allocate
+  drop 21
+  the allocator is destroyed
+  Err, after the value and then the allocator
+a VecIn whose second growth is refused
+  pushed
+  drop 35
+  refused after 4 values, and it holds 4
+  the vector is destroyed: its values, last first, then the allocator
+  drop 34
+  drop 33
+  drop 32
+  drop 31
+  the allocator is destroyed

@@ -1,0 +1,24 @@
+a channel
+  received 1
+  drop 1
+  closed
+  the value came back: 4
+  drop 4
+  and from try_send: 5
+  drop 5
+  the channel is destroyed with two values in it
+  drop 2
+  drop 3
+a shared value whose last owner is another thread
+  the first owner is gone, the value is not
+  drop 11
+  the thread let go of it
+a shared value whose last owner is this thread
+  the thread has ended, the value has not
+  drop 12
+a thread's result
+  joined, and holds 21
+  drop 21
+a Mutex and what it guards
+  drop 32
+  the Mutex is gone

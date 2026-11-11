@@ -1,0 +1,189 @@
+//! phase: 6
+//! expect: output scope_exits
+// Where owned values are destroyed (Rules 5.1.9, 5.3.1, 5.7.2). A scope
+// that is left, by its end, a return, a `?`, a break or a continue,
+// destroys its owned locals, newest first, and those of the scopes
+// around it that are left with it. A `with` over an owned value destroys
+// it where the block is left. A value is destroyed by its destructor,
+// then its fields from the last to the first, and an array from its last
+// element to its first. An owned match moves the payload into the arm,
+// which destroys it where it ends, newest first, and a wildcard arm
+// destroys the whole value; take leaves the default and replace the new
+// value, each handing back what was there.
+module t
+struct Noisy { id: u64 }
+impl Noisy {
+    destructor(edit self) {
+        print_str("  drop ")
+        print_u64(self.id)
+        println()
+    }
+}
+func say(s: view[]u8) { print_str(s); println() }
+func make(id: u64) -> Noisy { return Noisy { id: id } }
+func fails(yes: bool) -> Result[u64, u8] {
+    if yes { return Err(1u8) }
+    return Ok(0u64)
+}
+
+func returns_from_inside(early: bool) -> u64 {
+    a := make(1u64)
+    {
+        b := make(2u64)
+        {
+            c := make(3u64)
+            if early {
+                say("  return")
+                return 1u64
+            }
+        }
+        d := make(4u64)
+    }
+    e := make(5u64)
+    say("  the end")
+    return 0u64
+}
+
+func asks(yes: bool) -> Result[u64, u8] {
+    a := make(11u64)
+    {
+        b := make(12u64)
+        n := fails(yes)?
+        c := make(13u64)
+    }
+    d := make(14u64)
+    say("  the end")
+    return Ok(0u64)
+}
+
+func loops() {
+    outer := make(20u64)
+    for round in 0u64..3u64 {
+        a := make(21u64 + round * 10u64)
+        if round == 0u64 {
+            b := make(22u64)
+            say("  continue")
+            continue
+        }
+        c := make(23u64 + round * 10u64)
+        if round == 1u64 {
+            d := make(34u64)
+            say("  break")
+            break
+        }
+    }
+    say("  after the loop")
+}
+
+struct Holder { id: u64 }
+impl Holder {
+    destructor(edit self) {
+        print_str("  holder ")
+        print_u64(self.id)
+        say(" destroyed")
+    }
+}
+func holder(id: u64) -> Holder { return Holder { id: id } }
+
+func owned_with(early: bool) -> u64 {
+    with h := holder(41u64) {
+        h.id = h.id + 1u64
+        inner := make(43u64)
+        if early {
+            say("  return from the block")
+            return 1u64
+        }
+        say("  the block ends")
+    }
+    say("  after the block")
+    return 0u64
+}
+
+func owned_with_in_a_loop() {
+    for round in 0u64..2u64 {
+        with h := holder(50u64 + round) {
+            if round == 0u64 { continue }
+            break
+        }
+    }
+    say("  after the loop")
+}
+
+struct Inner { x: Noisy; y: Noisy }
+impl Inner {
+    destructor(edit self) { say("  inner's destructor, before its fields") }
+}
+struct Outer { first: Noisy; mid: Inner; last: Noisy }
+impl Outer {
+    destructor(edit self) { say("  outer's destructor, before its fields") }
+}
+
+func order() {
+    o := Outer { first: make(61u64), mid: Inner { x: make(62u64), y: make(63u64) }, last: make(64u64) }
+    arr := [make(71u64), make(72u64), make(73u64)]
+    say("  the scope ends: the array, declared last, goes first")
+}
+
+union Shape { Pair(a: Noisy, b: Noisy); Lone(Noisy); Nothing }
+
+func matched(s: own Shape) {
+    match move s {
+        Pair(a, b) => {
+            print_str("  the arm owns both, and uses ")
+            print_u64(a.id)
+            println()
+        }
+        _ => say("  the wildcard arm, which destroyed the whole value first")
+    }
+    say("  after the match")
+}
+
+struct Box2 { held: Option[Noisy] }
+
+func take_and_replace() {
+    b := Box2 { held: Some(make(81u64)) }
+    was := take(b.held)
+    match b.held {
+        Some(n) => say("  still there")
+        None => say("  take left the default, None")
+    }
+    older := replace(b.held, Some(make(82u64)))
+    match older {
+        Some(n) => say("  replace handed back a value")
+        None => say("  replace handed back the default")
+    }
+    say("  the scope ends: older, was, b")
+}
+
+func main() -> i32 {
+    say("a return from an inner block")
+    r := returns_from_inside(true)
+    say("the same function, to its end")
+    r = returns_from_inside(false)
+    say("a ? that leaves")
+    match asks(true) {
+        Ok(n) => say("  ok")
+        Err(e) => say("  left")
+    }
+    say("a ? that does not")
+    match asks(false) {
+        Ok(n) => say("  ok")
+        Err(e) => say("  left")
+    }
+    say("continue and break")
+    loops()
+    say("a with over an owned value, left by return")
+    r = owned_with(true)
+    say("the same, to the block's end")
+    r = owned_with(false)
+    say("the same in a loop, left by continue and by break")
+    owned_with_in_a_loop()
+    say("a destructor, then the fields, last first")
+    order()
+    say("an owned match")
+    matched(Shape.Pair(make(91u64), make(92u64)))
+    matched(Shape.Lone(make(93u64)))
+    say("take and replace")
+    take_and_replace()
+    return 0i32
+}

@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: trap overflow
+// A signed product past its type traps overflow (Rule 4.1.2).
+module t
+func f(a: i32, b: i32) -> i32 { return a * b }
+func main() -> i32 { x := f(65536i32, 65536i32); return 0i32 }

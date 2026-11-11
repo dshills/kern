@@ -1,0 +1,6 @@
+//! phase: 1
+//! expect: trap overflow
+// A signed sum past its type traps overflow (Rule 4.1.2).
+module t
+func f(a: i64, b: i64) -> i64 { return a + b }
+func main() -> i32 { x := f(9223372036854775807i64, 1i64); return 0i32 }

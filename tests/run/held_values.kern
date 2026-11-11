@@ -1,0 +1,107 @@
+//! phase: 6
+//! expect: output held_values
+// What a container hands back and what it destroys (Rules 5.1.1, 5.6.1,
+// 5.6.5). A Map's insert over a key hands back the value it replaced and
+// remove the value it held, and the map destroys the values still in it;
+// BoxIn.try_new_in that cannot allocate destroys the value, then the
+// allocator; VecIn.try_push that cannot allocate destroys its value and
+// keeps the vector as it was.
+module t
+import "std/map"
+struct Noisy nocopy { id: u64 }
+impl Noisy {
+    destructor(edit self) {
+        print_str("  drop ")
+        print_u64(self.id)
+        println()
+    }
+}
+func say(s: view[]u8) { print_str(s); println() }
+func make(id: u64) -> Noisy { return Noisy { id: id } }
+
+func a_map() {
+    say("a map")
+    m := map.Map[u64, Noisy].new()
+    first := m.insert(1u64, make(11u64))
+    second := m.insert(2u64, make(12u64))
+    match m.insert(1u64, make(13u64)) {
+        Some(old) => {
+            print_str("  insert handed back ")
+            print_u64(old.id)
+            println()
+        }
+        None => say("  insert handed back nothing")
+    }
+    match m.remove(2u64) {
+        Some(old) => {
+            print_str("  remove handed back ")
+            print_u64(old.id)
+            println()
+        }
+        None => say("  remove handed back nothing")
+    }
+    match m.remove(9u64) {
+        Some(old) => say("  a value for a key that is not there")
+        None => say("  nothing for a key that is not there")
+    }
+    third := m.insert(3u64, make(14u64))
+    say("  the map is destroyed with two values in it")
+}
+
+// Refusing is an allocator that grants nothing, or one request, and says
+// when it is destroyed.
+struct Refusing nocopy { grants: u64; inner: SystemAllocator }
+impl Refusing {
+    destructor(edit self) { say("  the allocator is destroyed") }
+}
+impl Allocator for Refusing {
+    contract { requires "size and align meet the allocator obligations of spec §6" }
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] {
+        if self.grants == 0u64 { return Err(OutOfMemory) }
+        self.grants = self.grants - 1u64
+        unsafe { return self.inner.alloc(size, align) }
+    }
+    contract { requires "ptr, size and align are those of one earlier alloc, not yet freed" }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) {
+        unsafe { self.inner.free(ptr, size, align) }
+    }
+}
+func refusing(grants: u64) -> Refusing { return Refusing { grants: grants, inner: SystemAllocator.new() } }
+
+func a_box() {
+    say("a BoxIn that cannot allocate")
+    match BoxIn[Noisy, Refusing].try_new_in(make(21u64), refusing(0u64)) {
+        Ok(b) => say("  allocated")
+        Err(e) => say("  Err, after the value and then the allocator")
+    }
+}
+
+func a_vec() {
+    say("a VecIn whose second growth is refused")
+    v := VecIn[Noisy, Refusing].new_in(refusing(1u64))
+    match v.try_push(make(31u64)) {
+        Ok(u) => say("  pushed")
+        Err(e) => say("  refused")
+    }
+    var pushed: u64 = 1u64
+    var refused: bool = false
+    while !refused {
+        match v.try_push(make(31u64 + pushed)) {
+            Ok(u) => { pushed = pushed + 1u64 }
+            Err(e) => { refused = true }
+        }
+    }
+    print_str("  refused after ")
+    print_u64(pushed)
+    print_str(" values, and it holds ")
+    print_u64(u64(v.len()))
+    println()
+    say("  the vector is destroyed: its values, last first, then the allocator")
+}
+
+func main() -> i32 {
+    a_map()
+    a_box()
+    a_vec()
+    return 0i32
+}

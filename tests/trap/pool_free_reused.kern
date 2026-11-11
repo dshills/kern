@@ -1,0 +1,20 @@
+//! phase: 3
+//! expect: trap generation
+// Pool.free makes the checks a dereference makes (Rule 5.6.2): freeing
+// through a handle whose slot was freed and reused traps generation.
+module t
+func run() -> Result[u64, AllocErr] {
+    p := Pool[u64].new()
+    a := p.alloc(1u64)?
+    p.free(a)
+    b := p.alloc(2u64)?
+    p.free(a)
+    return Ok(0u64)
+}
+func main() -> i32 {
+    match run() {
+        Ok(v) => { }
+        Err(e) => { }
+    }
+    return 0i32
+}

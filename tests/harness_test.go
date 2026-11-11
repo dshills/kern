@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -510,6 +511,16 @@ func execute(t *testing.T, path string, files []*source.File, h header) {
 		}
 		if bytes.Count(bytes.TrimSpace(errb.Bytes()), []byte("\n")) != 0 {
 			t.Fatalf("expected exactly one trap record, got %q", errb.String())
+		}
+		// a trap fixture may say what the program wrote before it
+		// trapped, in a file of its own name: what a trap must not run
+		// (a destructor, a release function) then shows by its absence
+		want, err := os.ReadFile(expectedOutput(path, strings.TrimSuffix(filepath.Base(path), ".kern")))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("the file of output before the trap: %v", err)
+		}
+		if err == nil && !bytes.Equal(out.Bytes(), want) {
+			t.Fatalf("output before the trap:\n--- want\n%s\n--- got\n%s", want, out.String())
 		}
 	case "output", "accept":
 		if status == 134 {
