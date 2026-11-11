@@ -1,0 +1,48 @@
+-- two clients, one store
+a> SET lang kern
+a< OK
+a> SET motto no first-class references
+a< OK
+b> GET lang
+b< VALUE kern
+b> GET motto
+b< VALUE no first-class references
+b> GET missing
+b< NONE
+b> DEL motto
+b< OK
+a> GET motto
+a< NONE
+a> DEL motto
+a< NONE
+a> COUNT
+a< COUNT 1
+-- three commands in one write
+a> SET x 1 / SET y 2 / GET x
+a< OK
+a< OK
+a< VALUE 1
+-- what the server refuses
+b> FLY away
+b< ERR unknown command
+b> SET lonely
+b< ERR usage: SET key value
+b> GET
+b< ERR usage: GET key
+-- leaving
+b> QUIT
+b< BYE
+b: the server closed the connection
+the server ran 16 lines
+-- the log, read by a new store
+3 entries from 5 records
+lang = kern
+x = 1
+y = 2
+motto is not there
+-- compacted
+3 entries from 3 records
+-- a record that a crash cut short
+3 entries from 3 records
+half is not there
+the log is its whole records again: true

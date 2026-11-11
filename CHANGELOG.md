@@ -25,6 +25,30 @@ section of this file into a GitHub release is `docs/releasing.md`.
 - The runtime's interface version is 3 (`kern_rt_abi_3`): the contracts
   of `kern_join_get`, `kern_join_drop` and `kern_scope_drop` changed.
 
+### Examples
+
+- Five applications written on the runtime, under `examples/`. Each is a
+  tool to use (its usage is the comment at its head) and, run with no
+  arguments, a demonstration of itself whose output the test suite
+  compares in both engines:
+  - `kq`: queries over a JSON document, in the manner of jq (paths,
+    `[]`, `length`, `keys`, `type`, `select`, pipes), with results that
+    are views of the document passed through closures.
+  - `kvstore`: a key-value server that one thread runs for every
+    connection on a `net.Poller`, with an append-only log synced once a
+    round before the round's replies are sent, replayed at start, and
+    rewritten by `COMPACT`.
+  - `ksearch`: a search for a pattern (a small regular-expression
+    dialect) over directory trees: one thread walks, the others search
+    mapped files, and the results are sorted by path.
+  - `supervise`: starts the programs a JSON configuration names, passes
+    on their output line by line, restarts them by policy with a growing
+    delay, and on Interrupt or Terminate stops them, with Kill after a
+    grace.
+  - `httpd`: serves a directory over HTTP/1.1 from a pool of threads fed
+    by a channel, with a time limit on a request's head, directory
+    listings, and nothing served from outside its root.
+
 ## [v0.2.0] - 2026-11-10
 
 The runtime: what runs under a kern program, on a host and on a board, and

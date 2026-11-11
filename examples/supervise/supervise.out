@@ -1,0 +1,41 @@
+-- six services
+once     * started
+once     | hello
+once     | no newline at the end
+once     * exited with status 0
+flaky    * started
+flaky    | trying
+flaky    * exited with status 3
+flaky    * restart 1 of 2 in 5 ms
+flaky    * started
+flaky    | trying
+flaky    * exited with status 3
+flaky    * restart 2 of 2 in 10 ms
+flaky    * started
+flaky    | trying
+flaky    * exited with status 3
+flaky    * not restarted: it has been restarted as often as max_restarts allows
+twice    * started
+twice    | hello from /
+twice    * exited with status 0
+twice    * restart 1 of 1 in 5 ms
+twice    * started
+twice    | hello from /
+twice    * exited with status 0
+twice    * not restarted: it has been restarted as often as max_restarts allows
+missing  * cannot be started
+sleeper  * started
+sleeper  * asked to stop
+sleeper  * ended by signal 15
+stubborn * started
+stubborn | ignoring Terminate
+stubborn * asked to stop
+stubborn * still running; killed
+stubborn * ended by signal 9
+8 processes were started
+-- configurations that are refused
+supervise: the configuration is not JSON
+supervise: there are no services
+supervise: service web: command is a list of strings, the program first
+supervise: service web: restart is "never", "on-failure" or "always"
+supervise: service web: env is an object of strings

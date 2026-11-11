@@ -1,0 +1,47 @@
+$ kq -c '.'
+{"name":"kern","version":"0.2.0","targets":[{"os":"linux","arch":"arm64","size":2711458},{"os":"linux","arch":"amd64","size":2993303},{"os":"darwin","arch":"arm64","size":2804220},{"os":"darwin","arch":"amd64","size":3023667}],"features":{"threads":true,"tls":false,"café":"au lait"},"notes":null}
+$ kq '.targets[0]'
+{
+  "os": "linux",
+  "arch": "arm64",
+  "size": 2711458
+}
+$ kq '.name'
+"kern"
+$ kq -r '.name'
+kern
+$ kq -c 'keys'
+["features","name","notes","targets","version"]
+$ kq '.targets | length'
+4
+$ kq -r '.targets[] | select(.os == "linux") | .arch'
+arm64
+amd64
+$ kq -c '.targets[] | select(.size != 2804220) | .size'
+2711458
+2993303
+3023667
+$ kq -c '.targets[] | select(.size == 2.80422e6)'
+{"os":"darwin","arch":"arm64","size":2804220}
+$ kq -r '.features[] | type'
+boolean
+boolean
+string
+$ kq -c '.features | ."caf\u00e9" | length'
+7
+$ kq -c '.targets[9].os'
+null
+$ kq -c '.notes.anything[3]'
+null
+$ kq -c '.targets | keys'
+[0,1,2,3]
+$ kq -c '.name[]'
+kq: [] does not apply to a value of type string (exit 1)
+$ kq -c '.targets['
+kq: the filter cannot be read at byte 9: an index is a number (exit 2)
+$ kq -c '.targets | | length'
+kq: the filter cannot be read at byte 11: a step is missing before | (exit 2)
+$ kq -c 'select(.name == [1])'
+kq: the filter cannot be read at byte 16: select compares with a string, a number, true, false or null (exit 2)
+$ kq -c '.'
+kq: the document is not JSON: a syntax error at byte 14 (exit 2)

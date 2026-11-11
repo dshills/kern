@@ -1,0 +1,106 @@
+-- files
+> GET /
+< HTTP/1.1 200 OK
+< Content-Type: text/html; charset=utf-8
+< Content-Length: 31
+| <h1>A site served by kern</h1>
+> HEAD /style.css
+< HTTP/1.1 200 OK
+< Content-Type: text/css; charset=utf-8
+< Content-Length: 26
+> GET /docs/guide.txt
+< HTTP/1.1 200 OK
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 26
+| Read the reference first.
+> GET /a%20b.txt?version=2
+< HTTP/1.1 200 OK
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 26
+| a name with a space in it
+> GET /big.bin
+< 300000 bytes of body, every one as it is in the file: true
+-- directories
+> GET /docs
+< HTTP/1.1 301 Moved Permanently
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 22
+< Location: /docs/
+| 301 Moved Permanently
+> GET /docs/
+< HTTP/1.1 200 OK
+< Content-Type: text/html; charset=utf-8
+< Content-Length: 234
+| <!doctype html>
+| <title>Index of /docs/</title>
+| <h1>Index of /docs/</h1>
+| <ul>
+| <li><a href="Q%26A%20%3Cdraft%3E.md">Q&amp;A &lt;draft&gt;.md</a></li>
+| <li><a href="guide.txt">guide.txt</a></li>
+| <li><a href="notes/">notes/</a></li>
+| </ul>
+-- what is not served
+> GET /missing.html
+< HTTP/1.1 404 Not Found
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 14
+| 404 Not Found
+> GET /../secret.txt
+< HTTP/1.1 400 Bad Request
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 16
+| 400 Bad Request
+> GET /docs/%2e%2e/%2e%2e/secret.txt
+< HTTP/1.1 400 Bad Request
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 16
+| 400 Bad Request
+> GET /leak.txt (a symbolic link to a file outside the site)
+< HTTP/1.1 404 Not Found
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 14
+| 404 Not Found
+> GET /.env
+< HTTP/1.1 404 Not Found
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 14
+| 404 Not Found
+> GET /a%2xb.txt
+< HTTP/1.1 400 Bad Request
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 16
+| 400 Bad Request
+> POST /
+< HTTP/1.1 405 Method Not Allowed
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 23
+< Allow: GET, HEAD
+| 405 Method Not Allowed
+> hello?
+< HTTP/1.1 400 Bad Request
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 16
+| 400 Bad Request
+> (a client that connects and says nothing)
+< HTTP/1.1 408 Request Timeout
+< Content-Type: text/plain; charset=utf-8
+< Content-Length: 20
+| 408 Request Timeout
+-- the server's log
+GET / 200 31
+HEAD /style.css 200 0
+GET /docs/guide.txt 200 26
+GET /a%20b.txt?version=2 200 26
+GET /big.bin 200 300000
+GET /docs 301 22
+GET /docs/ 200 234
+GET /missing.html 404 14
+GET /../secret.txt 400 16
+GET /docs/%2e%2e/%2e%2e/secret.txt 400 16
+GET /leak.txt 404 14
+GET /.env 404 14
+GET /a%2xb.txt 400 16
+POST / 405 23
+? 400 16
+- 408 20
+16 connections were answered

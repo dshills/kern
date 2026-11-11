@@ -1,0 +1,589 @@
+//! phase: 6
+//! expect: output kvstore
+// kvstore: a key-value server that one thread runs for any number of
+// connections, and that keeps what it is told across restarts.
+//
+//     kvstore ADDRESS LOG        for example: kvstore 127.0.0.1:7070 store.log
+//
+// A client sends lines and gets one line back for each:
+//
+//     SET key value...   OK                 the value is the rest of the line
+//     GET key            VALUE value...     or NONE
+//     DEL key            OK                 or NONE
+//     COUNT              COUNT n
+//     COMPACT            OK n               the log rewritten, n records
+//     QUIT               BYE                and the connection is closed
+//
+// How it is built:
+//   - One thread waits on a net.Poller for the listener and every
+//     connection, and reads only what is ready, so no connection waits
+//     for another to speak. (Replies are written without waiting for
+//     readiness: a client that sent a great deal and read none of the
+//     replies would hold the loop. A server for strangers would watch
+//     for writability too.)
+//   - Every change is a record appended to the log file. The records of
+//     one round of the loop are written and synced together, and only
+//     then are that round's replies sent: an OK means the change is on
+//     the disk, at the cost of one sync for however many clients wrote.
+//   - At start the log is read back. A last record that a crash cut
+//     short has no newline: it was never acknowledged, and it is cut off.
+//   - COMPACT writes the live entries to a second file and renames it
+//     over the log, so the log is whole at every moment. (A store that
+//     must survive a power failure during the rename would sync the
+//     directory too.)
+//   - Interrupt and Terminate end the loop at the next round.
+//
+// With no arguments the program starts a server on a port of the
+// system's choosing, talks to it from two connections, stops it and reads
+// the log again, which is how it runs as a test.
+module kvstore
+import "std/io"
+import "std/map"
+import "std/net"
+import "std/signal"
+import "std/str"
+import "std/time"
+
+// ---- the store ----
+
+// Store is the entries, the open log, and the records of the current
+// round that are not in the log yet.
+struct Store { path: Vec[u8]; data: map.Map[str.String, str.String]; log: io.File; pending: Vec[u8]; records: usize }
+
+// word_at is the run of bytes other than spaces that begins at or after
+// from; empty at the end of the line.
+func word_at(line: view[]u8, from: usize) -> str.Bounds {
+    var lo: usize = from
+    while lo < len(line) && line[lo] == 32u8 { lo = lo + 1usize }
+    var hi: usize = lo
+    while hi < len(line) && line[hi] != 32u8 { hi = hi + 1usize }
+    return str.Bounds { lo: lo, hi: hi }
+}
+
+func put(data: edit[map.Map[str.String, str.String]], key: view[]u8, value: view[]u8) {
+    old := data.insert(str.String.from(key), str.String.from(value))
+}
+
+func del(data: edit[map.Map[str.String, str.String]], key: view[]u8) -> bool {
+    match data.remove(str.String.from(key)) {
+        Some(v) => { return true }
+        None => { return false }
+    }
+}
+
+// replay applies one record of the log: `SET key value` or `DEL key`,
+// exactly as execute wrote it. It is false for anything else.
+func replay(data: edit[map.Map[str.String, str.String]], line: view[]u8) -> bool {
+    w := word_at(line, 0usize)
+    k := word_at(line, w.hi)
+    if k.lo == k.hi { return false }
+    if str.equal(line[w.lo : w.hi], "SET") && k.hi < len(line) {
+        put(data, line[k.lo : k.hi], line[k.hi + 1usize : len(line)])
+        return true
+    }
+    if str.equal(line[w.lo : w.hi], "DEL") {
+        gone := del(data, line[k.lo : k.hi])
+        return true
+    }
+    return false
+}
+
+// open_store reads the log at path, if there is one, and opens it for
+// appending. What follows the last newline is a record that was never
+// finished, and is cut off.
+func open_store(path: view[]u8) -> Result[Store, io.IoErr] {
+    data := map.Map[str.String, str.String].new()
+    var records: usize = 0usize
+    var good: usize = 0usize
+    var size: usize = 0usize
+    if io.exists(path) {
+        bytes := io.read_file(path)?
+        size = bytes.len()
+        with b := bytes.as_view() {
+            var start: usize = 0usize
+            var i: usize = 0usize
+            while i < len(b) {
+                if b[i] == 10u8 {
+                    if replay(data, b[start : i]) { records = records + 1usize }
+                    start = i + 1usize
+                    good = start
+                }
+                i = i + 1usize
+            }
+        }
+    }
+    log := io.open_append(path)?
+    if good < size { log.set_len(u64(good))? }
+    own_path := Vec[u8].new()
+    own_path.extend(path)
+    return Ok(Store { path: own_path, data: data, log: log, pending: Vec[u8].new(), records: records })
+}
+
+// commit puts the round's records in the log and has the system write
+// them to the disk.
+func commit(store: edit[Store]) -> Result[(), io.IoErr] {
+    if store.pending.len() == 0usize { return Ok(()) }
+    store.log.write_all(store.pending.as_view())?
+    store.log.sync()?
+    store.pending.clear()
+    return Ok(())
+}
+
+// compact replaces the log with one record for each entry.
+func compact(store: edit[Store]) -> Result[usize, io.IoErr] {
+    snapshot := Vec[u8].new()
+    store.data.each(|k, v| {
+        snapshot.extend("SET ")
+        snapshot.extend(k.as_view())
+        snapshot.push(32u8)
+        snapshot.extend(v.as_view())
+        snapshot.push(10u8)
+    })
+    beside := Vec[u8].new()
+    beside.extend(store.path.as_view())
+    beside.extend(".tmp")
+    f := io.create(beside.as_view())?
+    f.write_all(snapshot.as_view())?
+    f.sync()?
+    f.close()?
+    io.rename(beside.as_view(), store.path.as_view())?
+    store.log = io.open_append(store.path.as_view())?
+    // the snapshot holds this round's changes too
+    store.pending.clear()
+    store.records = store.data.len()
+    return Ok(store.records)
+}
+
+// ---- the protocol ----
+
+func push_number(to: edit[Vec[u8]], n: u64) {
+    t := str.String.new()
+    t.push_u64(n)
+    to.extend(t.as_view())
+}
+
+// record appends a record to the round's batch.
+func record(store: edit[Store], verb: view[]u8, key: view[]u8) {
+    store.pending.extend(verb)
+    store.pending.push(32u8)
+    store.pending.extend(key)
+    store.records = store.records + 1usize
+}
+
+// execute runs one line and appends its reply to `to`. It is false when
+// the connection is to be closed once the reply is sent.
+func execute(store: edit[Store], line: view[]u8, to: edit[Vec[u8]]) -> bool {
+    w := word_at(line, 0usize)
+    k := word_at(line, w.hi)
+    var open: bool = true
+    if str.equal(line[w.lo : w.hi], "SET") {
+        if k.lo == k.hi || k.hi == len(line) {
+            to.extend("ERR usage: SET key value")
+        } else {
+            put(store.data, line[k.lo : k.hi], line[k.hi + 1usize : len(line)])
+            record(store, "SET", line[k.lo : k.hi])
+            store.pending.push(32u8)
+            store.pending.extend(line[k.hi + 1usize : len(line)])
+            store.pending.push(10u8)
+            to.extend("OK")
+        }
+    } else if str.equal(line[w.lo : w.hi], "GET") {
+        if k.lo == k.hi {
+            to.extend("ERR usage: GET key")
+        } else {
+            match map.find_text(store.data, line[k.lo : k.hi]) {
+                Some(slot) => {
+                    to.extend("VALUE ")
+                    to.extend(store.data.value_at(slot).as_view())
+                }
+                None => to.extend("NONE")
+            }
+        }
+    } else if str.equal(line[w.lo : w.hi], "DEL") {
+        if k.lo == k.hi {
+            to.extend("ERR usage: DEL key")
+        } else if del(store.data, line[k.lo : k.hi]) {
+            record(store, "DEL", line[k.lo : k.hi])
+            store.pending.push(10u8)
+            to.extend("OK")
+        } else {
+            to.extend("NONE")
+        }
+    } else if str.equal(line[w.lo : w.hi], "COUNT") {
+        to.extend("COUNT ")
+        push_number(to, u64(store.data.len()))
+    } else if str.equal(line[w.lo : w.hi], "COMPACT") {
+        match compact(store) {
+            Ok(n) => {
+                to.extend("OK ")
+                push_number(to, u64(n))
+            }
+            Err(e) => to.extend("ERR the log could not be rewritten")
+        }
+    } else if str.equal(line[w.lo : w.hi], "QUIT") {
+        to.extend("BYE")
+        open = false
+    } else {
+        to.extend("ERR unknown command")
+    }
+    to.push(10u8)
+    return open
+}
+
+// ---- the server ----
+
+// Conn is a connection: what it sent that is not a whole line yet, and
+// the replies it is owed.
+struct Conn { stream: net.TcpStream; inbuf: Vec[u8]; owed: Vec[u8]; open: bool }
+
+const max_line: usize = 65536usize
+
+// feed reads what a connection has ready and runs every whole line of it.
+func feed(c: edit[Conn], store: edit[Store], served: edit[u64]) {
+    var buf: [4096]u8 = zero()
+    match c.stream.read(buf) {
+        Ok(n) => {
+            if n == 0usize {
+                c.open = false
+                return
+            }
+            c.inbuf.extend(buf[0usize : n])
+        }
+        Err(e) => {
+            c.open = false
+            return
+        }
+    }
+    var open: bool = true
+    rest := Vec[u8].new()
+    with b := c.inbuf.as_view() {
+        var start: usize = 0usize
+        var i: usize = 0usize
+        while i < len(b) && open {
+            if b[i] == 10u8 {
+                var end: usize = i
+                if end > start && b[end - 1usize] == 13u8 { end = end - 1usize }
+                open = execute(store, b[start : end], c.owed)
+                served = served + 1u64
+                start = i + 1usize
+            }
+            i = i + 1usize
+        }
+        rest.extend(b[start : len(b)])
+    }
+    c.inbuf = rest
+    if c.inbuf.len() > max_line {
+        c.owed.extend("ERR line too long\n")
+        open = false
+    }
+    if !open { c.open = false }
+}
+
+// settle sends a connection the replies it is owed, and closes it when
+// it is finished. Closing the socket ends its watch.
+func settle(slot: edit[Option[Conn]]) {
+    var close: bool = false
+    match slot {
+        Some(c) => {
+            if c.owed.len() > 0usize {
+                match c.stream.write_all(c.owed.as_view()) {
+                    Ok(u) => { }
+                    Err(e) => { c.open = false }
+                }
+                c.owed.clear()
+            }
+            close = !c.open
+        }
+        None => { }
+    }
+    if close { slot = None }
+}
+
+func is_free(slot: view[Option[Conn]]) -> bool {
+    match slot {
+        Some(c) => { return false }
+        None => { return true }
+    }
+}
+
+// accept_all takes every connection that waits, and watches each under
+// the number of its slot plus one: 0 is the listener's.
+func accept_all(l: edit[net.TcpListener], p: edit[net.Poller], conns: edit[Vec[Option[Conn]]]) -> Result[(), io.IoErr] {
+    while true {
+        match l.accept_timeout(time.millis(0u64))? {
+            Some(s) => {
+                var at: usize = conns.len()
+                var i: usize = 0usize
+                while i < conns.len() && at == conns.len() {
+                    if is_free(conns.get(i)) { at = i }
+                    i = i + 1usize
+                }
+                p.watch(s, u64(at) + 1u64, true, false)?
+                c := Conn { stream: s, inbuf: Vec[u8].new(), owed: Vec[u8].new(), open: true }
+                if at == conns.len() {
+                    conns.push(Some(c))
+                } else {
+                    with slot := conns.at(at) { slot = Some(c) }
+                }
+            }
+            None => { return Ok(()) }
+        }
+    }
+    return Ok(())
+}
+
+// serve runs the loop until stop says so, and returns the number of
+// lines it ran.
+func serve(l: own net.TcpListener, store: edit[Store], stop: closure() -> bool) -> Result[u64, io.IoErr] {
+    p := net.Poller.new()?
+    p.watch(l, 0u64, true, false)?
+    events := Vec[net.Ready].new()
+    conns := Vec[Option[Conn]].new()
+    var served: u64 = 0u64
+    while !stop() {
+        n := p.wait_timeout(events, time.millis(50u64))?
+        for k in 0usize..n {
+            e := events.get(k)
+            if e.token == 0u64 {
+                accept_all(l, p, conns)?
+            } else {
+                with slot := conns.at(usize(e.token - 1u64)) {
+                    match slot {
+                        Some(c) => feed(c, store, served)
+                        None => { }
+                    }
+                }
+            }
+        }
+        // the round's records reach the disk before any of its replies
+        // reaches a client
+        commit(store)?
+        for i in 0usize..conns.len() { settle(conns.at(i)) }
+    }
+    return Ok(served)
+}
+
+// ---- the program ----
+
+func say(s: view[]u8) { print_str(s); println() }
+
+func caught(s: Option[signal.Signal]) -> bool {
+    match s {
+        Some(which) => { return true }
+        None => { return false }
+    }
+}
+
+func run(address: view[]u8, path: view[]u8) -> Result[u64, io.IoErr] {
+    match net.parse_addr(address) {
+        Some(a) => {
+            store := open_store(path)?
+            l := net.TcpListener.bind(a)?
+            print_str("kvstore: ")
+            print_u64(u64(store.data.len()))
+            print_str(" entries, listening on ")
+            say(net.format_addr(l.local_addr()?).as_view())
+            sigs := signal.catch(signal.Signal.Interrupt)
+            sigs.add(signal.Signal.Terminate)
+            return serve(l, store, || caught(sigs.try_next()))
+        }
+        None => { return Err(io.error_of(io.ErrKind.InvalidInput)) }
+    }
+}
+
+// ---- the demonstration ----
+
+// Client is the other end: a connection and what it has read of the
+// replies.
+struct Client { stream: net.TcpStream; inbuf: Vec[u8]; at: usize }
+
+func connect(at: net.SocketAddr) -> Result[Client, io.IoErr] {
+    s := net.TcpStream.connect(at)?
+    return Ok(Client { stream: s, inbuf: Vec[u8].new(), at: 0usize })
+}
+
+// reply reads one line of reply.
+func reply(c: edit[Client], into: edit[Vec[u8]]) -> Result[(), io.IoErr] {
+    into.clear()
+    while true {
+        var i: usize = c.at
+        with b := c.inbuf.as_view() {
+            while i < len(b) && b[i] != 10u8 { i = i + 1usize }
+            if i < len(b) { into.extend(b[c.at : i]) }
+        }
+        if i < c.inbuf.len() {
+            c.at = i + 1usize
+            return Ok(())
+        }
+        var buf: [512]u8 = zero()
+        n := c.stream.read(buf)?
+        if n == 0usize { return Err(io.error_of(io.ErrKind.ConnectionReset)) }
+        c.inbuf.extend(buf[0usize : n])
+    }
+    return Ok(())
+}
+
+func show_reply(c: edit[Client], who: view[]u8) -> Result[(), io.IoErr] {
+    line := Vec[u8].new()
+    reply(c, line)?
+    print_str(who)
+    print_str("< ")
+    say(line.as_view())
+    return Ok(())
+}
+
+func ask(c: edit[Client], who: view[]u8, line: view[]u8) -> Result[(), io.IoErr] {
+    print_str(who)
+    print_str("> ")
+    say(line)
+    c.stream.write_all(line)?
+    c.stream.write_all("\n")?
+    return show_reply(c, who)
+}
+
+func converse(at: net.SocketAddr) -> Result[(), io.IoErr] {
+    a := connect(at)?
+    b := connect(at)?
+    say("-- two clients, one store")
+    ask(a, "a", "SET lang kern")?
+    ask(a, "a", "SET motto no first-class references")?
+    ask(b, "b", "GET lang")?
+    ask(b, "b", "GET motto")?
+    ask(b, "b", "GET missing")?
+    ask(b, "b", "DEL motto")?
+    ask(a, "a", "GET motto")?
+    ask(a, "a", "DEL motto")?
+    ask(a, "a", "COUNT")?
+    say("-- three commands in one write")
+    say("a> SET x 1 / SET y 2 / GET x")
+    a.stream.write_all("SET x 1\nSET y 2\r\nGET x\n")?
+    show_reply(a, "a")?
+    show_reply(a, "a")?
+    show_reply(a, "a")?
+    say("-- what the server refuses")
+    ask(b, "b", "FLY away")?
+    ask(b, "b", "SET lonely")?
+    ask(b, "b", "GET")?
+    say("-- leaving")
+    ask(b, "b", "QUIT")?
+    var buf: [8]u8 = zero()
+    n := b.stream.read(buf)?
+    if n == 0usize { say("b: the server closed the connection") }
+    return Ok(())
+}
+
+// demo_server is the server's thread: it opens the store and serves
+// until the flag is raised.
+func demo_server(l: own net.TcpListener, path: own Vec[u8], flag: own Shared[Atomic[u32]]) -> u64 {
+    match open_store(path.as_view()) {
+        Ok(store) => {
+            match serve(l, store, || flag.get().load(Ordering.seq_cst) != 0u32) {
+                Ok(n) => { return n }
+                Err(e) => { return 0u64 }
+            }
+        }
+        Err(e) => { return 0u64 }
+    }
+}
+
+func show_entry(store: view[Store], key: view[]u8) {
+    print_str(key)
+    match map.find_text(store.data, key) {
+        Some(slot) => {
+            print_str(" = ")
+            say(store.data.value_at(slot).as_view())
+        }
+        None => say(" is not there")
+    }
+}
+
+func counts(store: view[Store]) {
+    print_u64(u64(store.data.len()))
+    print_str(" entries from ")
+    print_u64(u64(store.records))
+    say(" records")
+}
+
+// demo makes a directory for the demonstration and removes it
+// afterwards, whether the demonstration succeeded or not.
+func demo() -> Result[(), io.IoErr] {
+    dir := io.make_temp_dir("kvstore")?
+    done := demo_in(dir.as_view())
+    removed := io.remove_dir_all(dir.as_view())
+    done?
+    return removed
+}
+
+func demo_in(dir: view[]u8) -> Result[(), io.IoErr] {
+    path := io.join(dir, "store.log")
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    at := l.local_addr()?
+    flag := Shared[Atomic[u32]].new(Atomic[u32].new(0u32))
+    match thread.spawn(demo_server, l, path.clone(), flag.clone()) {
+        Ok(t) => {
+            talked := converse(at)
+            flag.get().store(1u32, Ordering.seq_cst)
+            served := t.join()
+            talked?
+            print_str("the server ran ")
+            print_u64(served)
+            say(" lines")
+        }
+        Err(e) => say("no thread for the server")
+    }
+
+    say("-- the log, read by a new store")
+    store := open_store(path.as_view())?
+    counts(store)
+    show_entry(store, "lang")
+    show_entry(store, "x")
+    show_entry(store, "y")
+    show_entry(store, "motto")
+    say("-- compacted")
+    n := compact(store)?
+    counts(store)
+    drop(store)
+
+    say("-- a record that a crash cut short")
+    whole := io.metadata(path.as_view())?.size
+    torn := io.open_append(path.as_view())?
+    torn.write_all("SET half writ")?
+    torn.close()?
+    again := open_store(path.as_view())?
+    counts(again)
+    show_entry(again, "half")
+    print_str("the log is its whole records again: ")
+    print_bool(io.metadata(path.as_view())?.size == whole)
+    println()
+    drop(again)
+    return Ok(())
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize {
+        match demo() {
+            Ok(u) => { return 0i32 }
+            Err(e) => {
+                say("the demonstration failed")
+                return 1i32
+            }
+        }
+    }
+    if args.len() != 3usize {
+        eprint_str("usage: kvstore ADDRESS LOG\n")
+        return 2i32
+    }
+    match run(args.get(1usize).as_view(), args.get(2usize).as_view()) {
+        Ok(served) => {
+            print_str("kvstore: stopped after ")
+            print_u64(served)
+            say(" lines")
+            return 0i32
+        }
+        Err(e) => {
+            eprint_str("kvstore: cannot serve (a bad address, a log that cannot be opened, or a failed write)\n")
+            return 1i32
+        }
+    }
+}

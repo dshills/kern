@@ -1,0 +1,45 @@
+$ ksearch 'func' .
+src/main.kern:5:func main() -> i32 {
+src/util/text.kern:5:func upper(b: u8) -> u8 {
+  [files: 5, taken to be binary: 1, matching lines: 2]
+$ ksearch -i 'todo' .
+notes.txt:2:- todo: write the README
+notes.txt:4:- Todo: a flag for whole words
+src/main.kern:7:    // TODO: print the total
+  [files: 5, taken to be binary: 1, matching lines: 3]
+$ ksearch '^import "std/[a-z]+"$' .
+src/main.kern:2:import "std/io"
+src/main.kern:3:import "std/str"
+src/util/text.kern:2:import "std/str"
+  [files: 5, taken to be binary: 1, matching lines: 3]
+$ ksearch '[0-9]+u8 [^ ]' .
+src/util/text.kern:6:    if b >= 97u8 && b <= 122u8 { return b - 32u8 }
+  [files: 5, taken to be binary: 1, matching lines: 1]
+$ ksearch '\d+u64' .
+src/main.kern:6:    total := 40u64 + 2u64
+  [files: 5, taken to be binary: 1, matching lines: 1]
+$ ksearch '-> *[a-z]+\d* *{$' .
+src/main.kern:5:func main() -> i32 {
+src/util/text.kern:5:func upper(b: u8) -> u8 {
+  [files: 5, taken to be binary: 1, matching lines: 2]
+$ ksearch '^$' .
+src/main.kern:4:
+src/util/text.kern:3:
+  [files: 5, taken to be binary: 1, matching lines: 2]
+$ ksearch -l 'std/str' .
+src/main.kern
+src/util/text.kern
+  [files: 5, taken to be binary: 1, matching lines: 2]
+$ ksearch -j 0 'README' .
+notes.txt:2:- todo: write the README
+  [files: 5, taken to be binary: 1, matching lines: 1]
+$ ksearch -i '\Todo: \Write' .
+notes.txt:2:- todo: write the README
+  [files: 5, taken to be binary: 1, matching lines: 1]
+$ ksearch 'goto' .
+(no line matches)
+  [files: 5, taken to be binary: 1, matching lines: 0]
+$ ksearch '[a-' .
+ksearch: the pattern cannot be read at byte 1
+$ ksearch '*x' .
+ksearch: the pattern cannot be read at byte 0

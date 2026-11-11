@@ -1,0 +1,623 @@
+//! phase: 6
+//! expect: output supervise
+// supervise: starts the programs a configuration names, passes on what
+// they write, restarts those that end, and stops them all when it is
+// told to stop.
+//
+//     supervise CONFIG.json
+//
+// The configuration is one JSON object:
+//
+//     { "grace_ms": 2000,
+//       "services": [
+//         { "name": "web",
+//           "command": ["python3", "-m", "http.server", "8000"],
+//           "restart": "on-failure",      or "always", or "never" (the default)
+//           "max_restarts": 3,            the default
+//           "backoff_ms": 200,            the default; doubled at every restart
+//           "dir": "/srv/www",
+//           "env": { "LANG": "C" } } ] }
+//
+// Each line a service writes to its standard output is written as
+// `name | line`, and what the supervisor does with a service as
+// `name * event`. Interrupt or Terminate stops every service: each is
+// sent Terminate, and Kill when it is still running grace_ms later.
+//
+// How it is built:
+//   - Each service has a thread, which starts the program (std/process),
+//     reads its output through a pipe with a time limit, so that it looks
+//     at the stop flag between reads, and decides about the restart.
+//   - The threads are scoped: they hold views of the configuration, the
+//     stop flag and the output, all of which the supervising function
+//     owns, and the function cannot return before they have ended.
+//   - Output goes through one mutex, so two services' lines never mix.
+//   - The main thread waits for a signal (std/signal) with a time limit
+//     and raises the flag; nothing is done in a signal handler.
+//
+// With no arguments the program supervises six small shell commands and
+// writes each service's lines together, which is how it runs as a test.
+module supervise
+import "std/io"
+import "std/json"
+import "std/process"
+import "std/signal"
+import "std/str"
+import "std/time"
+
+// ---- the configuration ----
+
+struct Pair { name: Vec[u8]; value: Vec[u8] }
+
+// Service is one program to run. restart is 0 for never, 1 for
+// on-failure, 2 for always; an empty dir is the supervisor's own.
+struct Service { name: Vec[u8]; command: Vec[Vec[u8]]; restart: u8; max_restarts: u64; backoff_ms: u64; dir: Vec[u8]; env: Vec[Pair] }
+
+struct Config { services: Vec[Service]; grace_ms: u64 }
+
+func bytes_of(s: view[]u8) -> Vec[u8] {
+    v := Vec[u8].new()
+    v.extend(s)
+    return v
+}
+
+// complain keeps the first problem found.
+func complain(problem: edit[str.String], about: view[]u8, what: view[]u8) {
+    if problem.len() > 0usize { return }
+    if len(about) > 0usize {
+        problem.push_str("service ")
+        problem.push_str(about)
+        problem.push_str(": ")
+    }
+    problem.push_str(what)
+}
+
+// with_member calls f with the member of the object v that is named key;
+// it is false when v is not an object or has no such member.
+func with_member(v: view[json.Value], key: view[]u8, f: closure(view[json.Value])) -> bool {
+    match v {
+        Object(members) => {
+            for m in members.as_view() {
+                if m.key.equals(key) {
+                    f(m.value)
+                    return true
+                }
+            }
+            return false
+        }
+        _ => { return false }
+    }
+}
+
+// text_member copies a member that is a string. The result is 0 when
+// there is no such member, 1 when it was copied, 2 when it is not a string.
+func text_member(v: view[json.Value], key: view[]u8, into: edit[Vec[u8]]) -> u8 {
+    var state: u8 = 2u8
+    present := with_member(v, key, |x| {
+        match x {
+            Text(t) => {
+                into.extend(t.as_view())
+                state = 1u8
+            }
+            _ => { }
+        }
+    })
+    if !present { return 0u8 }
+    return state
+}
+
+// number_member reads a member that is a whole number, with the same
+// result as text_member.
+func number_member(v: view[json.Value], key: view[]u8, into: edit[u64]) -> u8 {
+    var state: u8 = 2u8
+    present := with_member(v, key, |x| {
+        match json.as_u64(x) {
+            Some(n) => {
+                into = n
+                state = 1u8
+            }
+            None => { }
+        }
+    })
+    if !present { return 0u8 }
+    return state
+}
+
+func read_service(item: view[json.Value], problem: edit[str.String]) -> Option[Service] {
+    var svc: Service = Service { name: Vec[u8].new(), command: Vec[Vec[u8]].new(), restart: 0u8, max_restarts: 3u64, backoff_ms: 200u64, dir: Vec[u8].new(), env: Vec[Pair].new() }
+    if text_member(item, "name", svc.name) != 1u8 || svc.name.len() == 0usize {
+        complain(problem, "", "a service has no name")
+        return None
+    }
+    var bad: bool = false
+    listed := with_member(item, "command", |c| {
+        match c {
+            Array(words) => {
+                for w in words.as_view() {
+                    match w {
+                        Text(t) => svc.command.push(bytes_of(t.as_view()))
+                        _ => { bad = true }
+                    }
+                }
+            }
+            _ => { bad = true }
+        }
+    })
+    if !listed || bad || svc.command.len() == 0usize {
+        complain(problem, svc.name.as_view(), "command is a list of strings, the program first")
+        return None
+    }
+    policy := Vec[u8].new()
+    stated := text_member(item, "restart", policy)
+    if stated == 1u8 && str.equal(policy.as_view(), "always") {
+        svc.restart = 2u8
+    } else if stated == 1u8 && str.equal(policy.as_view(), "on-failure") {
+        svc.restart = 1u8
+    } else if stated != 0u8 && !str.equal(policy.as_view(), "never") {
+        complain(problem, svc.name.as_view(), "restart is \"never\", \"on-failure\" or \"always\"")
+        return None
+    }
+    if number_member(item, "max_restarts", svc.max_restarts) == 2u8 || number_member(item, "backoff_ms", svc.backoff_ms) == 2u8 {
+        complain(problem, svc.name.as_view(), "max_restarts and backoff_ms are whole numbers")
+        return None
+    }
+    if text_member(item, "dir", svc.dir) == 2u8 {
+        complain(problem, svc.name.as_view(), "dir is a string")
+        return None
+    }
+    has_env := with_member(item, "env", |e| {
+        match e {
+            Object(members) => {
+                for m in members.as_view() {
+                    match m.value {
+                        Text(t) => svc.env.push(Pair { name: bytes_of(m.key.as_view()), value: bytes_of(t.as_view()) })
+                        _ => { bad = true }
+                    }
+                }
+            }
+            _ => { bad = true }
+        }
+    })
+    if bad {
+        complain(problem, svc.name.as_view(), "env is an object of strings")
+        return None
+    }
+    return Some(svc)
+}
+
+// parse_config reads a configuration; an error is a sentence that says
+// what is wrong with it.
+func parse_config(text: view[]u8) -> Result[Config, str.String] {
+    problem := str.String.new()
+    match json.parse(text) {
+        Ok(root) => {
+            var cfg: Config = Config { services: Vec[Service].new(), grace_ms: 2000u64 }
+            if number_member(root, "grace_ms", cfg.grace_ms) == 2u8 { complain(problem, "", "grace_ms is a whole number") }
+            listed := with_member(root, "services", |list| {
+                match list {
+                    Array(items) => {
+                        for item in items.as_view() {
+                            match read_service(item, problem) {
+                                Some(svc) => cfg.services.push(svc)
+                                None => { }
+                            }
+                        }
+                    }
+                    _ => complain(problem, "", "services is a list")
+                }
+            })
+            if !listed || cfg.services.len() == 0usize { complain(problem, "", "there are no services") }
+            if problem.len() > 0usize { return Err(problem) }
+            return Ok(cfg)
+        }
+        Err(e) => {
+            problem.push_str("the configuration is not JSON")
+            return Err(problem)
+        }
+    }
+}
+
+// ---- what the supervisor writes ----
+
+struct Line { service: usize; text: Vec[u8] }
+
+// Sink is where lines go: straight to standard output when live, else
+// kept, to be written service by service at the end.
+struct Sink { live: bool; names: Vec[Vec[u8]]; width: usize; lines: Vec[Line] }
+
+func new_sink(cfg: view[Config], live: bool) -> Sink {
+    names := Vec[Vec[u8]].new()
+    var width: usize = 0usize
+    for svc in cfg.services.as_view() {
+        names.push(svc.name.clone())
+        if svc.name.len() > width { width = svc.name.len() }
+    }
+    return Sink { live: live, names: names, width: width, lines: Vec[Line].new() }
+}
+
+func write_line(names: view[Vec[Vec[u8]]], width: usize, service: usize, text: view[]u8) {
+    with name := names.get(service).as_view() {
+        print_str(name)
+        var pad: usize = len(name)
+        while pad < width + 1usize {
+            print_str(" ")
+            pad = pad + 1usize
+        }
+    }
+    print_str(text)
+    println()
+}
+
+// note writes one line for a service: mark is `|` for what the service
+// wrote and `*` for what the supervisor did.
+func note(sink: view[Mutex[Sink]], service: usize, mark: u8, text: view[]u8) {
+    line := Vec[u8].new()
+    line.push(mark)
+    line.push(32u8)
+    line.extend(text)
+    with s := sink.lock() {
+        if s.live {
+            write_line(s.names, s.width, service, line.as_view())
+            flushed := io.flush_stdout()
+            drop(line)
+        } else {
+            s.lines.push(Line { service: service, text: line })
+        }
+    }
+}
+
+func event(sink: view[Mutex[Sink]], service: usize, text: view[]u8) { note(sink, service, 42u8, text) }
+
+// ---- one service ----
+
+func command_of(svc: view[Service]) -> process.Command {
+    with argv := svc.command.as_view() {
+        cmd := process.Command.new(argv[0usize].as_view())
+        for k in 1usize..len(argv) { cmd.arg(argv[k].as_view()) }
+        if svc.dir.len() > 0usize { cmd.dir(svc.dir.as_view()) }
+        for p in svc.env.as_view() { cmd.env_set(p.name.as_view(), p.value.as_view()) }
+        cmd.stdin(process.Stdio.Null)
+        cmd.stdout(process.Stdio.Piped)
+        return cmd
+    }
+}
+
+// absorb adds what was read to what is kept of an unfinished line, and
+// writes every line that is whole.
+func absorb(kept: edit[Vec[u8]], chunk: view[]u8, sink: view[Mutex[Sink]], service: usize) {
+    kept.extend(chunk)
+    rest := Vec[u8].new()
+    with b := kept.as_view() {
+        var start: usize = 0usize
+        var i: usize = 0usize
+        while i < len(b) {
+            if b[i] == 10u8 {
+                var end: usize = i
+                if end > start && b[end - 1usize] == 13u8 { end = end - 1usize }
+                note(sink, service, 124u8, b[start : end])
+                start = i + 1usize
+            }
+            i = i + 1usize
+        }
+        rest.extend(b[start : len(b)])
+    }
+    kept = rest
+}
+
+// ended writes how a run ended, and is true when it failed.
+func ended(status: process.ExitStatus, sink: view[Mutex[Sink]], service: usize) -> bool {
+    msg := str.String.new()
+    match status {
+        Exited(code) => {
+            msg.push_str("exited with status ")
+            msg.push_i64(i64(code))
+        }
+        Signaled(number) => {
+            msg.push_str("ended by signal ")
+            msg.push_i64(i64(number))
+        }
+    }
+    event(sink, service, msg.as_view())
+    return !status.success()
+}
+
+// attend stays with a running child until it has ended, and is true when
+// it failed. It reads the child's output until the pipe is closed, then
+// waits for its status; once the stop flag is up it sends Terminate, and
+// Kill when the grace has passed.
+func attend(child: own process.Child, service: usize, grace_ms: u64, stop: view[Atomic[u32]], sink: view[Mutex[Sink]]) -> bool {
+    var reading: bool = true
+    var asked: bool = false
+    var killed: bool = false
+    var deadline: u64 = 0u64
+    kept := Vec[u8].new()
+    var buf: [1024]u8 = zero()
+    match child.take_stdout() {
+        Ok(pipe) => {
+            while true {
+                if reading {
+                    match pipe.read_timeout(buf, time.millis(50u64)) {
+                        Ok(got) => {
+                            match got {
+                                Some(n) => {
+                                    if n == 0usize { reading = false } else { absorb(kept, buf[0usize : n], sink, service) }
+                                }
+                                None => {
+                                    // quiet: a child that has ended while something
+                                    // it started keeps the pipe open is not read further
+                                    match child.try_wait() {
+                                        Ok(st) => {
+                                            match st {
+                                                Some(status) => { reading = false }
+                                                None => { }
+                                            }
+                                        }
+                                        Err(e) => { reading = false }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => { reading = false }
+                    }
+                } else {
+                    match child.wait_timeout(time.millis(50u64)) {
+                        Ok(st) => {
+                            match st {
+                                Some(status) => {
+                                    if kept.len() > 0usize { note(sink, service, 124u8, kept.as_view()) }
+                                    return ended(status, sink, service)
+                                }
+                                None => { }
+                            }
+                        }
+                        Err(e) => {
+                            event(sink, service, "its status could not be read")
+                            return true
+                        }
+                    }
+                }
+                if stop.load(Ordering.seq_cst) != 0u32 {
+                    if !asked {
+                        asked = true
+                        deadline = now_ns() + grace_ms * 1000000u64
+                        event(sink, service, "asked to stop")
+                        sent := child.terminate()
+                    } else if !killed && now_ns() >= deadline {
+                        killed = true
+                        event(sink, service, "still running; killed")
+                        sent := child.kill()
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            event(sink, service, "its output could not be read")
+            sent := child.kill()
+            gone := child.wait_timeout(time.seconds(5u64))
+        }
+    }
+    return true
+}
+
+// pause sleeps for ms milliseconds, or until the stop flag is up.
+func pause(ms: u64, stop: view[Atomic[u32]]) {
+    end := now_ns() + ms * 1000000u64
+    while now_ns() < end && stop.load(Ordering.seq_cst) == 0u32 {
+        var left: u64 = end - now_ns()
+        if left > 20000000u64 { left = 20000000u64 }
+        time.sleep(time.nanos(left))
+    }
+}
+
+// keep_running runs a service until it is not to be restarted, and
+// returns how many times it was started.
+func keep_running(svc: view[Service], service: usize, grace_ms: u64, stop: view[Atomic[u32]], sink: view[Mutex[Sink]]) -> u64 {
+    var starts: u64 = 0u64
+    var restarts: u64 = 0u64
+    var delay: u64 = svc.backoff_ms
+    while stop.load(Ordering.seq_cst) == 0u32 {
+        var failed: bool = false
+        cmd := command_of(svc)
+        match cmd.spawn() {
+            Ok(child) => {
+                starts = starts + 1u64
+                event(sink, service, "started")
+                failed = attend(child, service, grace_ms, stop, sink)
+            }
+            Err(e) => {
+                event(sink, service, "cannot be started")
+                return starts
+            }
+        }
+        if stop.load(Ordering.seq_cst) != 0u32 { break }
+        if svc.restart == 0u8 || (svc.restart == 1u8 && !failed) { break }
+        if restarts >= svc.max_restarts {
+            event(sink, service, "not restarted: it has been restarted as often as max_restarts allows")
+            break
+        }
+        restarts = restarts + 1u64
+        msg := str.String.new()
+        msg.push_str("restart ")
+        msg.push_u64(restarts)
+        msg.push_str(" of ")
+        msg.push_u64(svc.max_restarts)
+        msg.push_str(" in ")
+        msg.push_u64(delay)
+        msg.push_str(" ms")
+        event(sink, service, msg.as_view())
+        pause(delay, stop)
+        if delay < 30000u64 { delay = delay * 2u64 }
+    }
+    return starts
+}
+
+// run_service is a service's thread.
+func run_service(cfg: view[Config], service: usize, stop: view[Atomic[u32]], sink: view[Mutex[Sink]], finished: view[Atomic[u32]]) -> u64 {
+    starts := keep_running(cfg.services.get(service), service, cfg.grace_ms, stop, sink)
+    before := finished.fetch_add(1u32, Ordering.seq_cst)
+    return starts
+}
+
+// ---- all of them ----
+
+// supervise runs every service of the configuration and returns, when
+// all have ended, how many processes were started. should_stop is asked
+// again and again until it says yes, and should itself wait a little
+// each time; finished counts the services that have ended, for
+// should_stop to look at. A handle is asked for its thread's result,
+// which waits for the thread, so the handles are kept until every
+// service has ended.
+func supervise(cfg: view[Config], sink: view[Mutex[Sink]], finished: view[Atomic[u32]], should_stop: closure() -> bool) -> u64 {
+    stop := Atomic[u32].new(0u32)
+    handles := Vec[Join[u64]].new()
+    n := cfg.services.len()
+    var starts: u64 = 0u64
+    with s := thread.scope() {
+        for i in 0usize..n {
+            match s.spawn(run_service, cfg, i, stop, sink, finished) {
+                Ok(j) => handles.push(j)
+                Err(e) => {
+                    event(sink, i, "no thread could be started for it")
+                    before := finished.fetch_add(1u32, Ordering.seq_cst)
+                }
+            }
+        }
+        var stopping: bool = false
+        while usize(finished.load(Ordering.seq_cst)) < n {
+            if stopping {
+                time.sleep(time.millis(20u64))
+            } else if should_stop() {
+                stopping = true
+                stop.store(1u32, Ordering.seq_cst)
+            }
+        }
+        while true {
+            match handles.pop() {
+                Some(j) => { starts = starts + j.get() }
+                None => { break }
+            }
+        }
+    }
+    return starts
+}
+
+// ---- the demonstration ----
+
+func say(s: view[]u8) { print_str(s); println() }
+
+func demo_config() -> Vec[u8] {
+    c := Vec[u8].new()
+    c.extend("{\"grace_ms\": 300, \"services\": [")
+    c.extend("{\"name\": \"once\", \"command\": [\"sh\", \"-c\", \"echo hello; printf 'no newline at the end'\"], \"restart\": \"on-failure\"},")
+    c.extend("{\"name\": \"flaky\", \"command\": [\"sh\", \"-c\", \"echo trying; exit 3\"], \"restart\": \"on-failure\", \"max_restarts\": 2, \"backoff_ms\": 5},")
+    c.extend("{\"name\": \"twice\", \"command\": [\"sh\", \"-c\", \"echo \\\"$GREETING from $PWD\\\"\"], \"restart\": \"always\", \"max_restarts\": 1, \"backoff_ms\": 5, \"dir\": \"/\", \"env\": {\"GREETING\": \"hello\"}},")
+    c.extend("{\"name\": \"missing\", \"command\": [\"/nonexistent/program\"]},")
+    c.extend("{\"name\": \"sleeper\", \"command\": [\"sleep\", \"30\"]},")
+    c.extend("{\"name\": \"stubborn\", \"command\": [\"sh\", \"-c\", \"trap '' TERM; echo ignoring Terminate; exec sleep 30\"]}")
+    c.extend("]}")
+    return c
+}
+
+// wrote reports whether a service has written a line of its own yet.
+func wrote(sink: view[Mutex[Sink]], service: usize) -> bool {
+    with s := sink.lock() {
+        for l in s.lines.as_view() {
+            if l.service == service && l.text.get(0usize) == 124u8 { return true }
+        }
+        return false
+    }
+}
+
+// the_rest_is_done is the demonstration's reason to stop: the four
+// services that end by themselves have ended, and the one that ignores
+// Terminate has said so.
+func the_rest_is_done(sink: view[Mutex[Sink]], finished: view[Atomic[u32]]) -> bool {
+    time.sleep(time.millis(10u64))
+    return finished.load(Ordering.seq_cst) >= 4u32 && wrote(sink, 5usize)
+}
+
+func refuse(text: view[]u8) {
+    match parse_config(text) {
+        Ok(cfg) => say("accepted")
+        Err(problem) => {
+            print_str("supervise: ")
+            say(problem.as_view())
+        }
+    }
+}
+
+func demo() -> i32 {
+    text := demo_config()
+    match parse_config(text.as_view()) {
+        Ok(cfg) => {
+            say("-- six services")
+            sink := Mutex[Sink].new(new_sink(cfg, false))
+            finished := Atomic[u32].new(0u32)
+            starts := supervise(cfg, sink, finished, || the_rest_is_done(sink, finished))
+            with s := sink.lock() {
+                for i in 0usize..s.names.len() {
+                    for l in s.lines.as_view() {
+                        if l.service == i { write_line(s.names, s.width, i, l.text.as_view()) }
+                    }
+                }
+            }
+            print_u64(starts)
+            say(" processes were started")
+        }
+        Err(problem) => {
+            say(problem.as_view())
+            return 1i32
+        }
+    }
+    say("-- configurations that are refused")
+    refuse("{\"services\": [")
+    refuse("{\"services\": []}")
+    refuse("{\"services\": [{\"name\": \"web\"}]}")
+    refuse("{\"services\": [{\"name\": \"web\", \"command\": [\"true\"], \"restart\": \"sometimes\"}]}")
+    refuse("{\"services\": [{\"name\": \"web\", \"command\": [\"true\"], \"env\": {\"PORT\": 8000}}]}")
+    return 0i32
+}
+
+// ---- the program ----
+
+func caught(s: Option[signal.Signal]) -> bool {
+    match s {
+        Some(which) => { return true }
+        None => { return false }
+    }
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize { return demo() }
+    if args.len() != 2usize {
+        eprint_str("usage: supervise CONFIG.json\n")
+        return 2i32
+    }
+    match io.read_file(args.get(1usize).as_view()) {
+        Ok(text) => {
+            match parse_config(text.as_view()) {
+                Ok(cfg) => {
+                    sink := Mutex[Sink].new(new_sink(cfg, true))
+                    finished := Atomic[u32].new(0u32)
+                    sigs := signal.catch(signal.Signal.Interrupt)
+                    sigs.add(signal.Signal.Terminate)
+                    starts := supervise(cfg, sink, finished, || caught(sigs.wait_timeout(time.millis(100u64))))
+                    print_str("supervise: every service has ended; ")
+                    print_u64(starts)
+                    say(" processes were started")
+                    return 0i32
+                }
+                Err(problem) => {
+                    eprint_str("supervise: ")
+                    eprint_str(problem.as_view())
+                    eprint_str("\n")
+                    return 2i32
+                }
+            }
+        }
+        Err(e) => {
+            eprint_str("supervise: the configuration cannot be read\n")
+            return 2i32
+        }
+    }
+}

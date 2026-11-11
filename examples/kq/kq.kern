@@ -1,0 +1,643 @@
+//! phase: 6
+//! expect: output kq
+// kq: a query tool for JSON documents, in the manner of jq.
+//
+//     kq [-c] [-r] FILTER [FILE]
+//
+// reads one JSON document from FILE (from standard input without one),
+// applies FILTER to it and writes every result: indented, or on one line
+// each with -c; -r writes a result that is a string without its quotes.
+// A filter is a sequence of steps, and a step turns one value into any
+// number of values:
+//
+//     .                      the value itself
+//     .name  ."any name"     a member of an object, null when it has none
+//     [3]                    an element of an array, null past its end
+//     []                     every element of an array, every member's
+//                            value of an object
+//     length  keys  type     a count, the sorted names, the kind of value
+//     select(PATH == VALUE)  the value itself when some result of PATH
+//                            equals VALUE (a string, a number, true,
+//                            false or null); with != when none does
+//     a | b                  b applied to each result of a; steps written
+//                            side by side are joined the same way
+//
+// The exit status is 0, 1 when a step did not apply to a value it met
+// (the first such is reported), and 2 for a filter or a document that
+// cannot be read. With no arguments the program runs a list of filters
+// over a document of its own, which is how it runs as a test.
+module kq
+import "std/io"
+import "std/json"
+import "std/str"
+
+union Step {
+    Field(name: str.String)
+    Index(at: usize)
+    Each
+    Length
+    Keys
+    Type
+    Select(path: Vec[Step], keep_equal: bool, want: json.Value)
+}
+
+// ---- reading a filter ----
+
+struct Scanner { at: usize }
+struct Bad { at: usize; msg: str.String }
+
+func bad(at: usize, msg: view[]u8) -> Bad { return Bad { at: at, msg: str.String.from(msg) } }
+
+func skip(sc: edit[Scanner], s: view[]u8) {
+    while sc.at < len(s) && str.is_space(s[sc.at]) { sc.at = sc.at + 1usize }
+}
+
+func is_name_byte(b: u8) -> bool {
+    return (b >= 97u8 && b <= 122u8) || (b >= 65u8 && b <= 90u8) || (b >= 48u8 && b <= 57u8) || b == 95u8
+}
+
+// word reads a run of letters, digits and underscores.
+func word(sc: edit[Scanner], s: view[]u8) -> str.Bounds {
+    lo := sc.at
+    while sc.at < len(s) && is_name_byte(s[sc.at]) { sc.at = sc.at + 1usize }
+    return str.Bounds { lo: lo, hi: sc.at }
+}
+
+// eat reads the byte b if it is next.
+func eat(sc: edit[Scanner], s: view[]u8, b: u8) -> bool {
+    if sc.at < len(s) && s[sc.at] == b {
+        sc.at = sc.at + 1usize
+        return true
+    }
+    return false
+}
+
+// parse_path reads `.`, `.name`, `."name"`, `[n]` and `[]`, as many as
+// follow one another, and returns how many it read.
+func parse_path(sc: edit[Scanner], s: view[]u8, into: edit[Vec[Step]]) -> Result[usize, Bad] {
+    var count: usize = 0usize
+    while sc.at < len(s) {
+        if eat(sc, s, 46u8) {
+            if sc.at < len(s) && s[sc.at] == 34u8 {
+                var p: json.Parser = json.Parser { at: sc.at, depth: 0usize }
+                match json.parse_string(p, s) {
+                    Ok(name) => into.push(Step.Field(name))
+                    Err(e) => { return Err(bad(sc.at, "a quoted name that does not end")) }
+                }
+                sc.at = p.at
+            } else if sc.at < len(s) && is_name_byte(s[sc.at]) {
+                w := word(sc, s)
+                into.push(Step.Field(str.String.from(s[w.lo : w.hi])))
+            }
+        } else if eat(sc, s, 91u8) {
+            skip(sc, s)
+            if eat(sc, s, 93u8) {
+                into.push(Step.Each)
+            } else {
+                w := word(sc, s)
+                match str.parse_u64(s[w.lo : w.hi]) {
+                    Some(n) => into.push(Step.Index(usize(n)))
+                    None => { return Err(bad(w.lo, "an index is a number")) }
+                }
+                skip(sc, s)
+                if !eat(sc, s, 93u8) { return Err(bad(sc.at, "] is missing")) }
+            }
+        } else {
+            break
+        }
+        count = count + 1usize
+    }
+    return Ok(count)
+}
+
+// parse_select reads what follows the word select.
+func parse_select(sc: edit[Scanner], s: view[]u8) -> Result[Step, Bad] {
+    skip(sc, s)
+    if !eat(sc, s, 40u8) { return Err(bad(sc.at, "( is missing after select")) }
+    skip(sc, s)
+    path := Vec[Step].new()
+    n := parse_path(sc, s, path)?
+    if n == 0usize { return Err(bad(sc.at, "select begins with a path")) }
+    skip(sc, s)
+    var keep_equal: bool = true
+    if eat(sc, s, 61u8) {
+        if !eat(sc, s, 61u8) { return Err(bad(sc.at, "== or != is missing")) }
+    } else if eat(sc, s, 33u8) {
+        if !eat(sc, s, 61u8) { return Err(bad(sc.at, "== or != is missing")) }
+        keep_equal = false
+    } else {
+        return Err(bad(sc.at, "== or != is missing"))
+    }
+    skip(sc, s)
+    var p: json.Parser = json.Parser { at: sc.at, depth: 0usize }
+    match json.parse_value(p, s) {
+        Ok(want) => {
+            match want {
+                Array(items) => { return Err(bad(sc.at, "select compares with a string, a number, true, false or null")) }
+                Object(members) => { return Err(bad(sc.at, "select compares with a string, a number, true, false or null")) }
+                _ => { }
+            }
+            sc.at = p.at
+            skip(sc, s)
+            if !eat(sc, s, 41u8) { return Err(bad(sc.at, ") is missing")) }
+            return Ok(Step.Select(path, keep_equal, want))
+        }
+        Err(e) => { return Err(bad(sc.at, "select compares with a string, a number, true, false or null")) }
+    }
+}
+
+// parse_filter reads a whole filter.
+func parse_filter(s: view[]u8) -> Result[Vec[Step], Bad] {
+    steps := Vec[Step].new()
+    var sc: Scanner = Scanner { at: 0usize }
+    var need: bool = true // a step must come: at the start and after |
+    while true {
+        skip(sc, s)
+        if sc.at >= len(s) { break }
+        b := s[sc.at]
+        if b == 124u8 {
+            if need { return Err(bad(sc.at, "a step is missing before |")) }
+            sc.at = sc.at + 1usize
+            need = true
+        } else if b == 46u8 || b == 91u8 {
+            n := parse_path(sc, s, steps)?
+            need = false
+        } else if is_name_byte(b) {
+            w := word(sc, s)
+            if str.equal(s[w.lo : w.hi], "length") {
+                steps.push(Step.Length)
+            } else if str.equal(s[w.lo : w.hi], "keys") {
+                steps.push(Step.Keys)
+            } else if str.equal(s[w.lo : w.hi], "type") {
+                steps.push(Step.Type)
+            } else if str.equal(s[w.lo : w.hi], "select") {
+                st := parse_select(sc, s)?
+                steps.push(st)
+            } else {
+                return Err(bad(w.lo, "an unknown word"))
+            }
+            need = false
+        } else {
+            return Err(bad(sc.at, "an unexpected character"))
+        }
+    }
+    if need { return Err(bad(len(s), "a step is missing")) }
+    return Ok(steps)
+}
+
+// ---- applying a filter ----
+
+// Run counts the steps that did not apply and keeps the first one's text.
+struct Run { failed: usize; first: str.String }
+
+// kind_of numbers the kinds of value, and push_kind writes a kind's name.
+func kind_of(v: view[json.Value]) -> u8 {
+    match v {
+        Null => { return 0u8 }
+        Bool(b) => { return 1u8 }
+        Number(t) => { return 2u8 }
+        Text(t) => { return 3u8 }
+        Array(items) => { return 4u8 }
+        Object(members) => { return 5u8 }
+    }
+}
+
+func push_kind(kind: u8, dst: edit[str.String]) {
+    if kind == 0u8 {
+        dst.push_str("null")
+    } else if kind == 1u8 {
+        dst.push_str("boolean")
+    } else if kind == 2u8 {
+        dst.push_str("number")
+    } else if kind == 3u8 {
+        dst.push_str("string")
+    } else if kind == 4u8 {
+        dst.push_str("array")
+    } else {
+        dst.push_str("object")
+    }
+}
+
+func fail(st: edit[Run], what: view[]u8, kind: u8) {
+    if st.failed == 0usize {
+        st.first.push_str(what)
+        push_kind(kind, st.first)
+    }
+    st.failed = st.failed + 1usize
+}
+
+// same compares two values that are not arrays or objects; two numbers
+// are the same when their texts are, or when both have the same value.
+func same(a: view[json.Value], b: view[json.Value]) -> bool {
+    match a {
+        Null => {
+            match b {
+                Null => { return true }
+                _ => { return false }
+            }
+        }
+        Bool(x) => {
+            match b {
+                Bool(y) => { return x == y }
+                _ => { return false }
+            }
+        }
+        Number(x) => {
+            match b {
+                Number(y) => {
+                    if str.equal(x.as_view(), y.as_view()) { return true }
+                    match str.parse_f64(x.as_view()) {
+                        Some(p) => {
+                            match str.parse_f64(y.as_view()) {
+                                Some(q) => { return p == q }
+                                None => { return false }
+                            }
+                        }
+                        None => { return false }
+                    }
+                }
+                _ => { return false }
+            }
+        }
+        Text(x) => {
+            match b {
+                Text(y) => { return str.equal(x.as_view(), y.as_view()) }
+                _ => { return false }
+            }
+        }
+        _ => { return false }
+    }
+}
+
+func bytes_less(a: view[]u8, b: view[]u8) -> bool {
+    var i: usize = 0usize
+    while i < len(a) && i < len(b) {
+        if a[i] != b[i] { return a[i] < b[i] }
+        i = i + 1usize
+    }
+    return len(a) < len(b)
+}
+
+func text_less(a: view[json.Value], b: view[json.Value]) -> bool {
+    match a {
+        Text(x) => {
+            match b {
+                Text(y) => { return bytes_less(x.as_view(), y.as_view()) }
+                _ => { return false }
+            }
+        }
+        _ => { return false }
+    }
+}
+
+// sort_texts orders strings by their bytes.
+func sort_texts(xs: edit[]json.Value) {
+    var i: usize = 1usize
+    while i < len(xs) {
+        var j: usize = i
+        while j > 0usize && text_less(xs[j], xs[j - 1usize]) {
+            swap_at(xs, j, j - 1usize)
+            j = j - 1usize
+        }
+        i = i + 1usize
+    }
+}
+
+// find_member is the index of the first member named name.
+func find_member(members: view[Vec[json.Member]], name: view[]u8) -> Option[usize] {
+    var i: usize = 0usize
+    for m in members.as_view() {
+        if m.key.equals(name) { return Some(i) }
+        i = i + 1usize
+    }
+    return None
+}
+
+// apply runs the steps from at on v and calls emit with every result. A
+// result is a view: of a part of the document, or of a value a step made,
+// which lives until the steps after it have run.
+func apply(steps: view[]Step, at: usize, v: view[json.Value], st: edit[Run], emit: closure(view[json.Value])) {
+    if at == len(steps) {
+        emit(v)
+        return
+    }
+    step(steps[at], steps, at + 1usize, v, st, emit)
+}
+
+// step runs one step s on v, and the steps from next on what it yields.
+// While a match holds a part of a value the value itself is out of
+// reach, so what a branch needs of the whole (its kind, for a message)
+// is taken before the match.
+func step(s: view[Step], steps: view[]Step, next: usize, v: view[json.Value], st: edit[Run], emit: closure(view[json.Value])) {
+    kind := kind_of(v)
+    nothing := json.Value.Null
+    match s {
+        Field(name) => {
+            match v {
+                Object(members) => {
+                    match find_member(members, name.as_view()) {
+                        Some(i) => apply(steps, next, members.get(i).value, st, emit)
+                        None => apply(steps, next, nothing, st, emit)
+                    }
+                }
+                Null => apply(steps, next, nothing, st, emit)
+                _ => fail(st, "a name does not apply to a value of type ", kind)
+            }
+        }
+        Index(i) => {
+            match v {
+                Array(items) => {
+                    if i < items.len() {
+                        apply(steps, next, items.get(i), st, emit)
+                    } else {
+                        apply(steps, next, nothing, st, emit)
+                    }
+                }
+                Null => apply(steps, next, nothing, st, emit)
+                _ => fail(st, "an index does not apply to a value of type ", kind)
+            }
+        }
+        Each => {
+            match v {
+                Array(items) => {
+                    for x in items.as_view() { apply(steps, next, x, st, emit) }
+                }
+                Object(members) => {
+                    for m in members.as_view() { apply(steps, next, m.value, st, emit) }
+                }
+                _ => fail(st, "[] does not apply to a value of type ", kind)
+            }
+        }
+        Length => {
+            var n: u64 = 0u64
+            match v {
+                Null => { }
+                Array(items) => { n = u64(items.len()) }
+                Object(members) => { n = u64(members.len()) }
+                Text(t) => {
+                    match str.utf8_count(t.as_view()) {
+                        Some(k) => { n = u64(k) }
+                        None => { n = u64(t.len()) }
+                    }
+                }
+                _ => {
+                    fail(st, "length does not apply to a value of type ", kind)
+                    return
+                }
+            }
+            count := json.number_u64(n)
+            apply(steps, next, count, st, emit)
+        }
+        Keys => {
+            names := Vec[json.Value].new()
+            match v {
+                Object(members) => {
+                    for m in members.as_view() { names.push(json.text(m.key.as_view())) }
+                    sort_texts(names.as_edit())
+                }
+                Array(items) => {
+                    for i in 0usize..items.len() { names.push(json.number_u64(u64(i))) }
+                }
+                _ => {
+                    fail(st, "keys does not apply to a value of type ", kind)
+                    return
+                }
+            }
+            list := json.Value.Array(names)
+            apply(steps, next, list, st, emit)
+        }
+        Type => {
+            t := str.String.new()
+            push_kind(kind, t)
+            name := json.Value.Text(t)
+            apply(steps, next, name, st, emit)
+        }
+        Select(path, keep_equal, want) => {
+            var hit: bool = false
+            apply(path.as_view(), 0usize, v, st, |x| { if same(x, want) { hit = true } })
+            if hit == keep_equal { apply(steps, next, v, st, emit) }
+        }
+    }
+}
+
+// ---- writing a result ----
+
+func indent(dst: edit[str.String], depth: usize) {
+    var i: usize = 0usize
+    while i < depth {
+        dst.push_str("  ")
+        i = i + 1usize
+    }
+}
+
+// pretty writes v over several lines, two spaces to a level.
+func pretty(v: view[json.Value], depth: usize, dst: edit[str.String]) {
+    if kind_of(v) < 4u8 {
+        json.write(v, dst)
+        return
+    }
+    match v {
+        Array(items) => {
+            if items.len() == 0usize {
+                dst.push_str("[]")
+                return
+            }
+            dst.push_str("[\n")
+            count := items.len()
+            var i: usize = 0usize
+            for x in items.as_view() {
+                indent(dst, depth + 1usize)
+                pretty(x, depth + 1usize, dst)
+                i = i + 1usize
+                if i < count { dst.push(44u8) }
+                dst.push(10u8)
+            }
+            indent(dst, depth)
+            dst.push(93u8)
+        }
+        Object(members) => {
+            if members.len() == 0usize {
+                dst.push_str("{}")
+                return
+            }
+            dst.push_str("{\n")
+            count := members.len()
+            var i: usize = 0usize
+            for m in members.as_view() {
+                indent(dst, depth + 1usize)
+                json.write_string(m.key.as_view(), dst)
+                dst.push_str(": ")
+                pretty(m.value, depth + 1usize, dst)
+                i = i + 1usize
+                if i < count { dst.push(44u8) }
+                dst.push(10u8)
+            }
+            indent(dst, depth)
+            dst.push(125u8)
+        }
+        _ => { }
+    }
+}
+
+struct Style { compact: bool; raw: bool }
+
+func show(v: view[json.Value], style: Style, line: edit[str.String]) {
+    line.clear()
+    var done: bool = false
+    if style.raw {
+        match v {
+            Text(t) => {
+                line.push_str(t.as_view())
+                done = true
+            }
+            _ => { }
+        }
+    }
+    if !done {
+        if style.compact { json.write(v, line) } else { pretty(v, 0usize, line) }
+    }
+    print_str(line.as_view())
+    println()
+}
+
+// ---- the program ----
+
+// query applies filter to the document doc and writes the results; a
+// failure's text is left in msg, and the result is the exit status.
+func query(filter: view[]u8, doc: view[]u8, style: Style, msg: edit[str.String]) -> i32 {
+    match parse_filter(filter) {
+        Ok(steps) => {
+            match json.parse(doc) {
+                Ok(v) => {
+                    var st: Run = Run { failed: 0usize, first: str.String.new() }
+                    line := str.String.new()
+                    apply(steps.as_view(), 0usize, v, st, |x| show(x, style, line))
+                    if st.failed > 0usize {
+                        msg.push_str(st.first.as_view())
+                        return 1i32
+                    }
+                    return 0i32
+                }
+                Err(e) => {
+                    msg.push_str("the document is not JSON: ")
+                    match e {
+                        Syntax(at) => {
+                            msg.push_str("a syntax error at byte ")
+                            msg.push_u64(u64(at))
+                        }
+                        TooDeep(at) => {
+                            msg.push_str("nested too deeply at byte ")
+                            msg.push_u64(u64(at))
+                        }
+                    }
+                    return 2i32
+                }
+            }
+        }
+        Err(b) => {
+            msg.push_str("the filter cannot be read at byte ")
+            msg.push_u64(u64(b.at))
+            msg.push_str(": ")
+            msg.push_str(b.msg.as_view())
+            return 2i32
+        }
+    }
+}
+
+const sample: view[]u8 = "{\"name\": \"kern\", \"version\": \"0.2.0\", \"targets\": [{\"os\": \"linux\", \"arch\": \"arm64\", \"size\": 2711458}, {\"os\": \"linux\", \"arch\": \"amd64\", \"size\": 2993303}, {\"os\": \"darwin\", \"arch\": \"arm64\", \"size\": 2804220}, {\"os\": \"darwin\", \"arch\": \"amd64\", \"size\": 3023667}], \"features\": {\"threads\": true, \"tls\": false, \"caf\\u00e9\": \"au lait\"}, \"notes\": null}"
+
+func try_one(flags: view[]u8, filter: view[]u8, doc: view[]u8, style: Style) {
+    print_str("$ kq ")
+    print_str(flags)
+    print_str("'")
+    print_str(filter)
+    print_str("'")
+    println()
+    msg := str.String.new()
+    code := query(filter, doc, style, msg)
+    if code != 0i32 {
+        print_str("kq: ")
+        print_str(msg.as_view())
+        print_str(" (exit ")
+        print_i64(i64(code))
+        print_str(")")
+        println()
+    }
+}
+
+func demo() -> i32 {
+    lines := Style { compact: true, raw: false }
+    plain := Style { compact: false, raw: false }
+    raw := Style { compact: true, raw: true }
+    try_one("-c ", ".", sample, lines)
+    try_one("", ".targets[0]", sample, plain)
+    try_one("", ".name", sample, plain)
+    try_one("-r ", ".name", sample, raw)
+    try_one("-c ", "keys", sample, lines)
+    try_one("", ".targets | length", sample, plain)
+    try_one("-r ", ".targets[] | select(.os == \"linux\") | .arch", sample, raw)
+    try_one("-c ", ".targets[] | select(.size != 2804220) | .size", sample, lines)
+    try_one("-c ", ".targets[] | select(.size == 2.80422e6)", sample, lines)
+    try_one("-r ", ".features[] | type", sample, raw)
+    try_one("-c ", ".features | .\"caf\\u00e9\" | length", sample, lines)
+    try_one("-c ", ".targets[9].os", sample, lines)
+    try_one("-c ", ".notes.anything[3]", sample, lines)
+    try_one("-c ", ".targets | keys", sample, lines)
+    try_one("-c ", ".name[]", sample, lines)
+    try_one("-c ", ".targets[", sample, lines)
+    try_one("-c ", ".targets | | length", sample, lines)
+    try_one("-c ", "select(.name == [1])", sample, lines)
+    try_one("-c ", ".", "{\"open\": [1, 2", lines)
+    return 0i32
+}
+
+func usage() -> i32 {
+    eprint_str("usage: kq [-c] [-r] FILTER [FILE]\n")
+    return 2i32
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize { return demo() }
+    var style: Style = Style { compact: false, raw: false }
+    var at: usize = 1usize
+    while at < args.len() {
+        if str.equal(args.get(at).as_view(), "-c") {
+            style.compact = true
+        } else if str.equal(args.get(at).as_view(), "-r") {
+            style.raw = true
+        } else {
+            break
+        }
+        at = at + 1usize
+    }
+    if at >= args.len() || at + 2usize < args.len() { return usage() }
+    var doc: Vec[u8] = Vec[u8].new()
+    if at + 1usize < args.len() {
+        match io.read_file(args.get(at + 1usize).as_view()) {
+            Ok(bytes) => { doc = bytes }
+            Err(e) => {
+                eprint_str("kq: cannot read ")
+                eprint_str(args.get(at + 1usize).as_view())
+                eprint_str("\n")
+                return 2i32
+            }
+        }
+    } else {
+        match io.read_stdin() {
+            Ok(bytes) => { doc = bytes }
+            Err(e) => {
+                eprint_str("kq: cannot read standard input\n")
+                return 2i32
+            }
+        }
+    }
+    msg := str.String.new()
+    code := query(args.get(at).as_view(), doc.as_view(), style, msg)
+    if code != 0i32 {
+        eprint_str("kq: ")
+        eprint_str(msg.as_view())
+        eprint_str("\n")
+    }
+    return code
+}

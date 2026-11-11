@@ -1,0 +1,616 @@
+//! phase: 6
+//! expect: output ksearch
+// ksearch: searches the files of directory trees for a pattern, on as
+// many threads as the machine has processors.
+//
+//     ksearch [-i] [-l] [-j N] PATTERN PATH...
+//
+// Every line that the pattern matches is written as path:line:text, the
+// files in the order of their paths; -l writes only the paths of the
+// files that have such a line, -i takes letters in either case, and -j
+// sets the number of threads. Entries whose names begin with a dot,
+// symbolic links, and files with a zero byte among their first 8,192
+// (taken to be binary) are passed over. The exit status is 0 when a line matched, 1 when
+// none did, 2 for a pattern that cannot be read.
+//
+// A pattern is a sequence of items, each of which matches one byte:
+//
+//     a          the byte itself            .       any byte
+//     [a-z_]     any byte of a set          [^0-9]  any byte not in it
+//     \d \w \s   a digit, a word byte, a space; \t a tab; \. the byte .
+//
+// and an item may be followed by * (any number of times), + (once or
+// more) or ? (once or not at all). ^ at the start and $ at the end tie
+// the pattern to the ends of the line.
+//
+// How it is built:
+//   - The pattern becomes a list of 256-bit sets with repeat counts, so
+//     matching a byte against an item is one bit test whatever the item
+//     was, and -i costs nothing after the pattern is read. The matcher
+//     backs off from the longest repeat, which is simple and, for
+//     patterns of many repeats over the same bytes, slow.
+//   - One thread walks the trees and sends paths down a bounded channel;
+//     the others take paths from it, map each file (mem.map_file, so a
+//     file is searched where the system has it and never copied) and
+//     keep its matching lines. A file cut short by another program while
+//     it is mapped is a trap, the price of not copying.
+//   - The results are gathered behind a mutex and sorted by path at the
+//     end, so the output does not depend on which thread was faster.
+//
+// With no arguments the program builds a small tree of files in a
+// temporary directory and searches it, which is how it runs as a test.
+module ksearch
+import "std/io"
+import "std/mem"
+import "std/str"
+import "std/sync"
+
+// ---- the pattern ----
+
+// Atom is one item: the set of bytes it matches (bit b of the set is
+// byte b), whether it must match at least once, and whether it may match
+// more than once.
+struct Atom { set: [32]u8; min: usize; many: bool }
+
+struct Pattern { atoms: Vec[Atom]; at_start: bool; at_end: bool }
+
+func add(set: edit[]u8, b: u8) {
+    i := usize(b >> 3u32)
+    set[i] = set[i] | (1u8 << u32(b & 7u8))
+}
+
+func has(set: view[]u8, b: u8) -> bool {
+    return ((set[usize(b >> 3u32)] >> u32(b & 7u8)) & 1u8) == 1u8
+}
+
+// add_letter adds b, and with fold the same letter in the other case.
+func add_letter(set: edit[]u8, b: u8, fold: bool) {
+    add(set, b)
+    if fold && b >= 97u8 && b <= 122u8 { add(set, b - 32u8) }
+    if fold && b >= 65u8 && b <= 90u8 { add(set, b + 32u8) }
+}
+
+func add_range(set: edit[]u8, lo: u8, hi: u8, fold: bool) {
+    var b: usize = usize(lo)
+    while b <= usize(hi) {
+        add_letter(set, truncate[u8](b), fold)
+        b = b + 1usize
+    }
+}
+
+// add_escape adds what the byte after a backslash stands for: a class of
+// bytes, or the byte itself, which folds as any other letter does.
+func add_escape(set: edit[]u8, c: u8, fold: bool) {
+    if c == 100u8 {
+        add_range(set, 48u8, 57u8, false)
+    } else if c == 119u8 {
+        add_range(set, 48u8, 57u8, false)
+        add_range(set, 65u8, 90u8, false)
+        add_range(set, 97u8, 122u8, false)
+        add(set, 95u8)
+    } else if c == 115u8 {
+        add(set, 32u8)
+        add(set, 9u8)
+        add(set, 13u8)
+    } else if c == 116u8 {
+        add(set, 9u8)
+    } else {
+        add_letter(set, c, fold)
+    }
+}
+
+// class reads a set written between brackets, from the byte after the
+// opening one, and returns the index after the closing one.
+func class(src: view[]u8, from: usize, set: edit[]u8, fold: bool) -> Result[usize, usize] {
+    var i: usize = from
+    var negate: bool = false
+    if i < len(src) && src[i] == 94u8 {
+        negate = true
+        i = i + 1usize
+    }
+    var items: usize = 0usize
+    while i < len(src) && src[i] != 93u8 {
+        if src[i] == 92u8 {
+            if i + 1usize >= len(src) { return Err(i) }
+            add_escape(set, src[i + 1usize], fold)
+            i = i + 2usize
+        } else if i + 2usize < len(src) && src[i + 1usize] == 45u8 && src[i + 2usize] != 93u8 {
+            if src[i] > src[i + 2usize] { return Err(i) }
+            add_range(set, src[i], src[i + 2usize], fold)
+            i = i + 3usize
+        } else {
+            add_letter(set, src[i], fold)
+            i = i + 1usize
+        }
+        items = items + 1usize
+    }
+    if i >= len(src) || items == 0usize { return Err(from) }
+    if negate {
+        for k in 0usize..32usize { set[k] = set[k] ^ 255u8 }
+    }
+    return Ok(i + 1usize)
+}
+
+// compile reads a pattern; an error is the index of the byte that is
+// wrong.
+func compile(src: view[]u8, fold: bool) -> Result[Pattern, usize] {
+    atoms := Vec[Atom].new()
+    var at_start: bool = false
+    var at_end: bool = false
+    var i: usize = 0usize
+    if len(src) > 0usize && src[0usize] == 94u8 {
+        at_start = true
+        i = 1usize
+    }
+    while i < len(src) {
+        c := src[i]
+        if c == 36u8 && i + 1usize == len(src) {
+            at_end = true
+            break
+        }
+        if c == 42u8 || c == 43u8 || c == 63u8 { return Err(i) }
+        var a: Atom = Atom { set: zero(), min: 1usize, many: false }
+        if c == 46u8 {
+            for k in 0usize..32usize { a.set[k] = 255u8 }
+            i = i + 1usize
+        } else if c == 91u8 {
+            i = class(src, i + 1usize, a.set, fold)?
+        } else if c == 92u8 {
+            if i + 1usize >= len(src) { return Err(i) }
+            add_escape(a.set, src[i + 1usize], fold)
+            i = i + 2usize
+        } else {
+            add_letter(a.set, c, fold)
+            i = i + 1usize
+        }
+        // no item matches the end of a line
+        a.set[1usize] = a.set[1usize] & 251u8
+        if i < len(src) {
+            r := src[i]
+            if r == 42u8 {
+                a.min = 0usize
+                a.many = true
+                i = i + 1usize
+            } else if r == 43u8 {
+                a.many = true
+                i = i + 1usize
+            } else if r == 63u8 {
+                a.min = 0usize
+                i = i + 1usize
+            }
+        }
+        atoms.push(a)
+    }
+    return Ok(Pattern { atoms: atoms, at_start: at_start, at_end: at_end })
+}
+
+// match_here reports whether the atoms from ai match text from ti.
+func match_here(atoms: view[]Atom, ai: usize, text: view[]u8, ti: usize, at_end: bool) -> bool {
+    if ai == len(atoms) { return !at_end || ti == len(text) }
+    a := atoms[ai]
+    // the longest run of bytes the item takes, then one fewer at a time
+    var n: usize = 0usize
+    while ti + n < len(text) && has(a.set, text[ti + n]) && (a.many || n == 0usize) { n = n + 1usize }
+    while true {
+        if n >= a.min && match_here(atoms, ai + 1usize, text, ti + n, at_end) { return true }
+        if n == 0usize { return false }
+        n = n - 1usize
+    }
+    return false
+}
+
+// matches reports whether the pattern matches somewhere in the line.
+func matches(p: view[Pattern], line: view[]u8) -> bool {
+    at_start := p.at_start
+    at_end := p.at_end
+    with atoms := p.atoms.as_view() {
+        if at_start { return match_here(atoms, 0usize, line, 0usize, at_end) }
+        var start: usize = 0usize
+        while start <= len(line) {
+            if match_here(atoms, 0usize, line, start, at_end) { return true }
+            start = start + 1usize
+        }
+        return false
+    }
+}
+
+// ---- searching a file ----
+
+struct Hit { line: usize; text: Vec[u8] }
+
+// Found is what one file gave: its matching lines, or that it was taken
+// to be binary, or that it could not be read.
+struct Found { path: Vec[u8]; hits: Vec[Hit]; binary: bool; unread: bool }
+
+func search_bytes(p: view[Pattern], data: view[]u8, into: edit[Found]) {
+    var probe: usize = 0usize
+    while probe < len(data) && probe < 8192usize {
+        if data[probe] == 0u8 {
+            into.binary = true
+            return
+        }
+        probe = probe + 1usize
+    }
+    var start: usize = 0usize
+    var number: usize = 1usize
+    var i: usize = 0usize
+    while i <= len(data) {
+        if i == len(data) || data[i] == 10u8 {
+            // what follows a last newline is not a line
+            if i > start || i < len(data) {
+                var end: usize = i
+                if end > start && data[end - 1usize] == 13u8 { end = end - 1usize }
+                if matches(p, data[start : end]) {
+                    text := Vec[u8].new()
+                    text.extend(data[start : end])
+                    into.hits.push(Hit { line: number, text: text })
+                }
+            }
+            number = number + 1usize
+            start = i + 1usize
+        }
+        i = i + 1usize
+    }
+}
+
+func search_file(p: view[Pattern], path: view[]u8) -> Found {
+    own_path := Vec[u8].new()
+    own_path.extend(path)
+    var found: Found = Found { path: own_path, hits: Vec[Hit].new(), binary: false, unread: false }
+    match io.open_read(path) {
+        Ok(f) => {
+            match mem.map_file(f, false) {
+                Ok(m) => {
+                    with bytes := m.bytes() { search_bytes(p, bytes, found) }
+                }
+                Err(e) => { found.unread = true }
+            }
+        }
+        Err(e) => { found.unread = true }
+    }
+    return found
+}
+
+// ---- walking the trees ----
+
+// walk calls visit with the path of every regular file under dir.
+func walk(dir: view[]u8, visit: closure(view[]u8), unread: edit[usize]) {
+    match io.read_dir(dir) {
+        Ok(entries) => {
+            for e in entries.as_view() {
+                if e.name.len() > 0usize && e.name.get(0usize) != 46u8 {
+                    child := io.join(dir, e.name.as_view())
+                    kind := e.kind
+                    match kind {
+                        RegularFile => visit(child.as_view())
+                        Directory => walk(child.as_view(), visit, unread)
+                        _ => { }
+                    }
+                }
+            }
+        }
+        Err(e) => { unread = unread + 1usize }
+    }
+}
+
+// walk_roots visits every path given: a file itself, a directory's tree.
+func walk_roots(roots: view[]Vec[u8], visit: closure(view[]u8), unread: edit[usize]) {
+    for r in roots {
+        match io.kind_of(r.as_view()) {
+            Ok(kind) => {
+                match kind {
+                    Directory => walk(r.as_view(), visit, unread)
+                    _ => visit(r.as_view())
+                }
+            }
+            Err(e) => { unread = unread + 1usize }
+        }
+    }
+}
+
+// ---- the threads ----
+
+// worker searches the files whose paths come down the channel until the
+// channel is closed and empty.
+func worker(paths: view[sync.Channel[Vec[u8]]], p: view[Pattern], results: view[Mutex[Vec[Found]]]) -> u64 {
+    var searched: u64 = 0u64
+    while true {
+        match paths.recv() {
+            Some(path) => {
+                found := search_file(p, path.as_view())
+                with all := results.lock() { all.push(found) }
+                searched = searched + 1u64
+            }
+            None => { return searched }
+        }
+    }
+    return searched
+}
+
+func send_path(paths: view[sync.Channel[Vec[u8]]], path: view[]u8) {
+    own_path := Vec[u8].new()
+    own_path.extend(path)
+    match paths.send(own_path) {
+        Ok(u) => { }
+        Err(back) => { }
+    }
+}
+
+// search_all searches every file under the roots on the given number of
+// threads beside the one that walks, and returns what each file gave, in
+// no order. A handle is asked for its thread's result, which waits for
+// the thread, so the handles are kept until the channel is closed: only
+// then do the workers end.
+func search_all(p: view[Pattern], roots: view[]Vec[u8], threads: usize, unread: edit[usize]) -> Vec[Found] {
+    results := Mutex[Vec[Found]].new(Vec[Found].new())
+    paths := sync.Channel[Vec[u8]].new(64usize)
+    workers := Vec[Join[u64]].new()
+    with s := thread.scope() {
+        for t in 0usize..threads {
+            match s.spawn(worker, paths, p, results) {
+                Ok(j) => workers.push(j)
+                Err(e) => { }
+            }
+        }
+        if workers.len() > 0usize {
+            walk_roots(roots, |path| send_path(paths, path), unread)
+        } else {
+            // no thread was asked for, or none could be started: this
+            // one does the searching
+            walk_roots(roots, |path| {
+                found := search_file(p, path)
+                with all := results.lock() { all.push(found) }
+            }, unread)
+        }
+        paths.close()
+        while true {
+            match workers.pop() {
+                Some(j) => { searched := j.get() }
+                None => { break }
+            }
+        }
+    }
+    all := Vec[Found].new()
+    with r := results.lock() {
+        while true {
+            match r.pop() {
+                Some(found) => all.push(found)
+                None => { break }
+            }
+        }
+    }
+    return all
+}
+
+// ---- the results ----
+
+func bytes_less(a: view[]u8, b: view[]u8) -> bool {
+    var i: usize = 0usize
+    while i < len(a) && i < len(b) {
+        if a[i] != b[i] { return a[i] < b[i] }
+        i = i + 1usize
+    }
+    return len(a) < len(b)
+}
+
+func before(xs: view[]Found, i: usize, j: usize) -> bool {
+    return bytes_less(xs[i].path.as_view(), xs[j].path.as_view())
+}
+
+// sift moves the element at root down a heap of n elements to its place.
+func sift(xs: edit[]Found, from: usize, n: usize) {
+    var root: usize = from
+    while 2usize * root + 1usize < n {
+        var child: usize = 2usize * root + 1usize
+        if child + 1usize < n && before(xs, child, child + 1usize) { child = child + 1usize }
+        if !before(xs, root, child) { return }
+        swap_at(xs, root, child)
+        root = child
+    }
+}
+
+// sort_by_path is a heap sort: the files of a large tree are many, and
+// only swaps are needed, which any type allows.
+func sort_by_path(xs: edit[]Found) {
+    n := len(xs)
+    var i: usize = n / 2usize
+    while i > 0usize {
+        i = i - 1usize
+        sift(xs, i, n)
+    }
+    var end: usize = n
+    while end > 1usize {
+        end = end - 1usize
+        swap_at(xs, 0usize, end)
+        sift(xs, 0usize, end)
+    }
+}
+
+struct Options { fold: bool; names_only: bool; threads: usize }
+
+struct Totals { files: usize; lines: usize; binary: usize; unread: usize }
+
+// report writes the results, each path without its first skip bytes.
+func report(all: view[]Found, names_only: bool, skip: usize) -> Totals {
+    var t: Totals = Totals { files: len(all), lines: 0usize, binary: 0usize, unread: 0usize }
+    line := str.String.new()
+    for found in all {
+        if found.binary { t.binary = t.binary + 1usize }
+        if found.unread { t.unread = t.unread + 1usize }
+        with path := found.path.as_view() {
+            if names_only && found.hits.len() > 0usize {
+                print_str(path[skip : len(path)])
+                println()
+            }
+            for h in found.hits.as_view() {
+                t.lines = t.lines + 1usize
+                if !names_only {
+                    line.clear()
+                    line.push_str(path[skip : len(path)])
+                    line.push(58u8)
+                    line.push_u64(u64(h.line))
+                    line.push(58u8)
+                    line.push_str(h.text.as_view())
+                    print_str(line.as_view())
+                    println()
+                }
+            }
+        }
+    }
+    return t
+}
+
+// search compiles the pattern, searches and reports. None is a pattern
+// that cannot be read, after a message that says where.
+func search(pattern: view[]u8, roots: view[]Vec[u8], o: Options, skip: usize, complain: closure(view[]u8)) -> Option[Totals] {
+    match compile(pattern, o.fold) {
+        Ok(p) => {
+            var unread: usize = 0usize
+            all := search_all(p, roots, o.threads, unread)
+            sort_by_path(all.as_edit())
+            var t: Totals = report(all.as_view(), o.names_only, skip)
+            t.unread = t.unread + unread
+            return Some(t)
+        }
+        Err(at) => {
+            msg := str.String.new()
+            msg.push_str("the pattern cannot be read at byte ")
+            msg.push_u64(u64(at))
+            complain(msg.as_view())
+            return None
+        }
+    }
+}
+
+// ---- the demonstration ----
+
+func say(s: view[]u8) { print_str(s); println() }
+
+func write_under(dir: view[]u8, name: view[]u8, content: view[]u8) -> Result[(), io.IoErr] {
+    path := io.join(dir, name)
+    return io.write_file(path.as_view(), content)
+}
+
+func build_tree(dir: view[]u8) -> Result[(), io.IoErr] {
+    src := io.join(dir, "src")
+    util := io.join(src.as_view(), "util")
+    hidden := io.join(dir, ".cache")
+    io.create_dir_all(util.as_view())?
+    io.make_dir(hidden.as_view())?
+    write_under(src.as_view(), "main.kern", "module main\nimport \"std/io\"\nimport \"std/str\"\n\nfunc main() -> i32 {\n    total := 40u64 + 2u64\n    // TODO: print the total\n    return 0i32\n}\n")?
+    write_under(util.as_view(), "text.kern", "module text\nimport \"std/str\"\n\n// upper is the letter in upper case.\nfunc upper(b: u8) -> u8 {\n    if b >= 97u8 && b <= 122u8 { return b - 32u8 }\n    return b\n}\n")?
+    write_under(dir, "notes.txt", "Things to do\r\n- todo: write the README\r\n- measure the search on a large tree\r\n- Todo: a flag for whole words")?
+    write_under(dir, "empty.txt", "")?
+    write_under(dir, "image.bin", "func\x00\x01\x02 not text\n")?
+    write_under(hidden.as_view(), "index", "func hidden() { }\n")?
+    return Ok(())
+}
+
+func try_one(flags: view[]u8, pattern: view[]u8, roots: view[]Vec[u8], o: Options, skip: usize) {
+    print_str("$ ksearch ")
+    print_str(flags)
+    print_str("'")
+    print_str(pattern)
+    say("' .")
+    match search(pattern, roots, o, skip, |msg| { print_str("ksearch: "); say(msg) }) {
+        Some(t) => {
+            if t.lines == 0usize { say("(no line matches)") }
+            print_str("  [files: ")
+            print_u64(u64(t.files))
+            print_str(", taken to be binary: ")
+            print_u64(u64(t.binary))
+            print_str(", matching lines: ")
+            print_u64(u64(t.lines))
+            say("]")
+        }
+        None => { }
+    }
+}
+
+// demo makes a directory for the demonstration and removes it
+// afterwards, whether the demonstration succeeded or not.
+func demo() -> Result[(), io.IoErr] {
+    dir := io.make_temp_dir("ksearch")?
+    done := demo_in(dir.as_view())
+    removed := io.remove_dir_all(dir.as_view())
+    done?
+    return removed
+}
+
+func demo_in(dir: view[]u8) -> Result[(), io.IoErr] {
+    build_tree(dir)?
+    roots := Vec[Vec[u8]].new()
+    root := Vec[u8].new()
+    root.extend(dir)
+    roots.push(root)
+    skip := len(dir) + 1usize
+    plain := Options { fold: false, names_only: false, threads: 3usize }
+    folded := Options { fold: true, names_only: false, threads: 3usize }
+    names := Options { fold: false, names_only: true, threads: 3usize }
+    alone := Options { fold: false, names_only: false, threads: 0usize }
+    try_one("", "func", roots.as_view(), plain, skip)
+    try_one("-i ", "todo", roots.as_view(), folded, skip)
+    try_one("", "^import \"std/[a-z]+\"$", roots.as_view(), plain, skip)
+    try_one("", "[0-9]+u8 [^ ]", roots.as_view(), plain, skip)
+    try_one("", "\\d+u64", roots.as_view(), plain, skip)
+    try_one("", "-> *[a-z]+\\d* *{$", roots.as_view(), plain, skip)
+    try_one("", "^$", roots.as_view(), plain, skip)
+    try_one("-l ", "std/str", roots.as_view(), names, skip)
+    try_one("-j 0 ", "README", roots.as_view(), alone, skip)
+    try_one("-i ", "\\Todo: \\Write", roots.as_view(), folded, skip)
+    try_one("", "goto", roots.as_view(), plain, skip)
+    try_one("", "[a-", roots.as_view(), plain, skip)
+    try_one("", "*x", roots.as_view(), plain, skip)
+    return Ok(())
+}
+
+// ---- the program ----
+
+func usage() -> i32 {
+    eprint_str("usage: ksearch [-i] [-l] [-j N] PATTERN PATH...\n")
+    return 2i32
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize {
+        match demo() {
+            Ok(u) => { return 0i32 }
+            Err(e) => {
+                say("the demonstration failed")
+                return 1i32
+            }
+        }
+    }
+    var o: Options = Options { fold: false, names_only: false, threads: thread.available_parallelism() }
+    var at: usize = 1usize
+    while at < args.len() {
+        if str.equal(args.get(at).as_view(), "-i") {
+            o.fold = true
+        } else if str.equal(args.get(at).as_view(), "-l") {
+            o.names_only = true
+        } else if str.equal(args.get(at).as_view(), "-j") && at + 1usize < args.len() {
+            at = at + 1usize
+            match str.parse_u64(args.get(at).as_view()) {
+                Some(n) => { if n <= 256u64 { o.threads = usize(n) } else { return usage() } }
+                None => { return usage() }
+            }
+        } else {
+            break
+        }
+        at = at + 1usize
+    }
+    if at + 2usize > args.len() { return usage() }
+    with rest := args.as_view() {
+        match search(rest[at].as_view(), rest[at + 1usize : len(rest)], o, 0usize, |msg| { eprint_str("ksearch: "); eprint_str(msg); eprint_str("\n") }) {
+            Some(t) => {
+                if t.unread > 0usize {
+                    eprint_str("ksearch: some files or directories could not be read\n")
+                }
+                if t.lines > 0usize { return 0i32 }
+                return 1i32
+            }
+            None => { return 2i32 }
+        }
+    }
+}
