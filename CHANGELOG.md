@@ -95,6 +95,16 @@ Five more examples, written to find flaws, and what they found.
   slots builds the smallest table that fits in one step. `Map.try_rebuild`
   now does the same: asked for fewer slots than the map has entries it
   never returned.
+- `str.equal`, `starts_with`, `ends_with` and `find` compare eight bytes
+  at a step, and `str.find_byte` (new) finds a byte the same way; the
+  line readers (`BufReader.read_line`, `LineBuf`) find their newline with
+  it, so `std/io` imports `std/str`. On long inputs a native build takes
+  0.9 to 1.5 instructions a byte where it took 6 to 9 (`find` with a
+  common first byte 4.9 for 9.8), and none of these reads is
+  bounds-checked at run time. Short inputs pay for it in places: `find`
+  in a text under about 9 bytes costs 30 to 45 instructions more a call,
+  `find_byte` under 8 bytes 2 to 11 more, `equal` of 1 to 3 equal bytes
+  1 to 3 more (from 4 bytes it is faster).
 - `needs_drop[T]()` says whether destroying a `T` does anything; `Vec`,
   `VecIn`, `Arena` and `Pool` ask it before a loop that takes and drops
   each element, which for plain elements only counted down (a native
@@ -156,6 +166,16 @@ Five more examples, written to find flaws, and what they found.
 - The interpreter answers `size_of`, `align_of` and `needs_drop` when it
   compiles a call of them. With the destroy loops gone the examples'
   demonstrations run 5 to 31% fewer instructions (ksort and kzip 31%).
+- The interpreter reads `load_le` and `load_be` from raw memory as one
+  span, where it made a place and decoded a value for each byte (about
+  4,700 host instructions for a `u64`). With the word-wise `std/str`
+  kcache's demonstration runs 8% fewer instructions than before either
+  change and kvstore's 2% more.
+- `go test ./tests` builds the fixtures' native programs ahead of the
+  fixture loop, 16 at a time (`KERN_TEST_JOBS` sets the number), and
+  the self-hosted parser's diagnostics test runs its inputs through a
+  pool: the package takes 245 s where it took 350 to 385 s on the same
+  loaded host, with the same subtests and results.
 - The language server converts positions through a table of line starts
   made once for a document's text: it decoded the whole file at every
   conversion, four times a symbol in an outline (`kvm.kern`'s outline,

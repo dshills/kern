@@ -845,8 +845,27 @@ had `go test ./tests` stop at Go's ten-minute limit (it takes about 530 s
 alone); section 6.3 is the remedy, and until it is in the suite is run
 with `-timeout 60m`.
 
-Open of the larger items: byte comparison and search (2.4) and the
-fixture builds in parallel (6.3) were still being implemented when this
-was written; float formatting (1.5), the checksum and the other library
-additions (2.6), the interpreter's frames and layouts (5.5, 5.6), and the
-language server's caching (6.2, second bullet) are not started.
+Two more followed the same day, with a change to the interpreter that the
+first of them called for:
+
+| item | change | before | after |
+|---|---|---|---|
+| 2.4 | `str.equal`, `starts_with`, `ends_with`, `find` and a new `str.find_byte` work eight bytes at a step in safe kern (`load_le`, the has-zero-byte test), every read proven in range; the line readers of `std/io` use `find_byte` | native release, instructions / cycles a byte on 1 MiB: `equal` 6.00 / 1.00, byte scan 6.00 / 1.01, `find` (first byte absent) 9.00 / 1.07, (common first byte) 9.83 / 3.44, (worst case) 57.0 / 6.04; `BufReader.read_line` 11.98 / 2.07 | 0.875 / 0.13; 1.25 / 0.13; 1.25 / 0.13; 4.92 / 2.18; 28.0 / 4.19; 4.54 / 1.01 |
+| 5 | the interpreter's `load_le`/`load_be` read a span of raw memory (they made a place and decoded a value for each byte: about 4,700 host instructions for a `u64` against 920 for one indexed byte) | with the word-wise `std/str`: kcache 5,300 M, kvstore 2,275 M (before 2.4: 4,920 M and 2,090 M) | 4,540 M (−8% from before 2.4), 2,140 M (+2%) |
+| 6.3 | `go test ./tests` builds the native programs of the fixtures ahead of the fixture loop, 16 at a time (928 builds; `KERN_TEST_JOBS`), each subtest taking its result from a table; `TestSelfhostDiags` runs its 3,707 inputs through a pool | `TestFixtures` 333–442 s under load, the package 352–386 s in the whole suite; `TestSelfhostDiags` 30–33 s | 183–259 s; 245 s; 13 s; the same 663 results |
+
+The word-wise routines cost short inputs something, which is the price of
+the long ones: `find` in a text under about 9 bytes is 30 to 45
+instructions a call slower (it is a call now where the byte loop was
+inlined), `find_byte` under 8 bytes 2 to 11 (the `Option` it returns is
+not folded after inlining), and `equal` of 1 to 3 equal bytes 1 to 3;
+`equal` is faster from 4 bytes and `find` from about 12. kvstore's 2% in
+the interpreter is the same cost seen there.
+
+Open of the larger items: float formatting (1.5), the checksum and the
+other library additions (2.6), the interpreter's frames and layouts (5.5,
+5.6), the language server's caching (6.2, second bullet), and the builds
+`go test ./tests` still makes one at a time (the 27 sanitizer builds and
+the freestanding fixtures, 6.3). Found on the way and not done:
+`LineBuf.read_line` zeroes a 4,096-byte array at every call (more than
+half of what a 64-byte line costs it).
