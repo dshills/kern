@@ -364,11 +364,15 @@ func accessElem(a *Access) Type {
 // call's result, a literal, a moved variable, what take and replace move
 // out of a place, and the Ok value that `?` unwraps from one of these.
 func isTemporary(e ast.Expr) bool {
-	switch x := e.(type) {
+	switch e.(type) {
 	case *ast.CallExpr, *ast.StructLit, *ast.Move, *ast.Take, *ast.Replace:
 		return true
 	case *ast.Try:
-		return isTemporary(x.X)
+		// what ? unwraps is a value of its own whatever it was applied to:
+		// of a variable it has moved the variable (which was counted as
+		// moved while the match bound views, so the value was never
+		// destroyed)
+		return true
 	}
 	return false
 }
@@ -404,6 +408,10 @@ func (c *fnCtx) match(sc *scope, s *ast.Match) {
 			edit = true
 		} else if sym != nil && (sym.Kind == SymLocal || sym.Conv == ast.ConvOwn || sym.Conv == ast.ConvOut) {
 			edit = true
+		} else if acc := c.projectionBase(s.Subject); sym == nil && acc != nil {
+			// a part of what an accessor returned (at(i).field): as
+			// writable as that access
+			edit = acc.Edit
 		}
 	}
 	n, ok := subjT.(*Named)

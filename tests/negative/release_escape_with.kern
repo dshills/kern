@@ -1,0 +1,11 @@
+//! expect: reject ACC_RELEASE_ESCAPE rule=5.3.4
+//! twin: release_escape_with_ok
+// A view of what a lock guards, returned through the with that holds the
+// guard, would outlive the unlock the end of the with runs: another thread
+// could then write what the caller reads. (It was accepted through a with,
+// while `return m.lock()` was refused.)
+module m
+struct W { b: u64 }
+func grab(m: view[Mutex[W]]) -> view[W] {
+    with g := m.lock() { return g }   // ACC_RELEASE_ESCAPE
+}

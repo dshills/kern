@@ -1,0 +1,11 @@
+//! phase: 1
+//! expect: accept
+//! twin: intrinsic_func_value
+// A function of the program that calls it is one.
+module m
+func show(n: u64) { print_u64(n) }
+func main() -> i32 {
+    p := show
+    p(4u64)
+    return 0i32
+}

@@ -388,8 +388,16 @@ func (fl *fnLower) field(x *ast.FieldExpr) operand {
 				}
 			}
 		}
-		// a function value through a static reference (Type.func) is not
-		// supported in Phase 1
+		// a type's static function as a value (Type.f, Type[Args].f)
+		if sf := fl.l.info.StaticFuncs[x]; sf != nil {
+			sub := map[string]resolve.Type{}
+			for k, a := range sf.Subst {
+				sub[k] = fl.ty(a)
+			}
+			v := fl.newValue(t)
+			fl.emit(&ir.FuncRef{Dst: v, Name: fl.l.request(sf.Func, sub, fl.file), Pos: x.Pos})
+			return operand{val: v}
+		}
 		fl.fail(x.Pos, "unsupported field expression %s", x.Name)
 	}
 	base := fl.expr(x.X, nil)
@@ -748,6 +756,17 @@ func (fl *fnLower) call(x *ast.CallExpr, want resolve.Type) operand {
 			r := fl.expr(a.X, nil)
 			var acc *ir.Value
 			switch {
+			case r.access != nil && !r.isPlace() && seqOfArray(pt, r.access.Type):
+				// an array an accessor returned, for a sequence parameter:
+				// an access to its elements made from the accessor's, as
+				// for an array place (the accessor's own is to the array,
+				// which is not what the callee is passed)
+				if r.ownsAccess {
+					opened(r.access) // the parent ends after its child
+				}
+				acc = fl.newValue(pt)
+				fl.emit(&ir.AccessBegin{Dst: acc, Edit: p.Conv == ast.ConvEdit, Place: ir.Place{Access: r.access}, Pos: a.Pos})
+				opened(acc)
 			case r.access != nil && !r.isPlace():
 				acc = r.access
 				if r.ownsAccess {
@@ -1264,4 +1283,19 @@ func (fl *fnLower) isTrapKindCall(e ast.Expr) bool {
 	}
 	info := fl.l.info.Calls[call]
 	return info != nil && info.Fn != nil && info.Fn.Module == "core" && info.Fn.Receiver == nil && info.Fn.Name == "trap_kind"
+}
+
+// seqOfArray reports whether a parameter of type param takes a sequence
+// while the access given is to an array.
+func seqOfArray(param, given resolve.Type) bool {
+	pa, ok := param.(*resolve.Access)
+	if !ok || !pa.Seq {
+		return false
+	}
+	ga, ok := given.(*resolve.Access)
+	if !ok || ga.Seq {
+		return false
+	}
+	_, isArray := ga.Elem.(*resolve.Array)
+	return isArray
 }

@@ -103,8 +103,18 @@ func (fl *fnLower) discard(r operand) {
 }
 
 func (fl *fnLower) assign(s *ast.Assign) {
-	target := fl.place(s.Target)
-	v := fl.value(s.Value, fl.typeOf(s.Target))
+	var target operand
+	var v *ir.Value
+	if throughCall(s.Target) {
+		// the target is reached through an accessor's result: the value is
+		// evaluated before that access is made (§4, and the order the
+		// checker judges), so the value may read what the accessor edits
+		v = fl.value(s.Value, fl.typeOf(s.Target))
+		target = fl.place(s.Target)
+	} else {
+		target = fl.place(s.Target)
+		v = fl.value(s.Value, fl.typeOf(s.Target))
+	}
 	for _, sym := range fl.l.info.Drops[s] {
 		fl.dropSym(sym)
 	}
@@ -130,6 +140,21 @@ func (fl *fnLower) assign(s *ast.Assign) {
 	if target.access != nil && target.ownsAccess {
 		fl.endAccess(target.access)
 	}
+}
+
+// throughCall reports whether a target's path starts at a call's result.
+func throughCall(e ast.Expr) bool {
+	switch x := e.(type) {
+	case *ast.CallExpr:
+		return true
+	case *ast.FieldExpr:
+		return throughCall(x.X)
+	case *ast.IndexExpr:
+		return throughCall(x.X)
+	case *ast.Paren:
+		return throughCall(x.X)
+	}
+	return false
 }
 
 func (fl *fnLower) with(s *ast.With) {
@@ -197,9 +222,11 @@ func (fl *fnLower) match(s *ast.Match) {
 	owned := fl.l.info.OwnedSubject[s] || s.Move
 	var tmp *ir.Local
 	switch {
-	case r.access != nil:
+	case r.access != nil && r.pl.Access == nil:
 		subj = ir.Place{Access: r.access}
 	case r.isPlace():
+		// also a part of what an accessor returned (get(i).field): the
+		// place is the access with its path
 		if owned && r.pl.Local != nil && len(r.pl.Path) == 0 {
 			tmp = fl.newTemp(r.pl.Local.Type)
 			mv := fl.newValue(r.pl.Local.Type)
@@ -218,8 +245,19 @@ func (fl *fnLower) match(s *ast.Match) {
 		owned = true
 	}
 	mf := fl.pushFrame()
+	// An access the subject made (an accessor's result) is open for an arm
+	// only while the arm has a binding that is an access into it: an arm
+	// whose bindings are all copies, or that has none, leaves the matched
+	// place free (Rule 5.3.1), so the access ends on entering it. One with
+	// a release function is the exception: it is held for the whole match,
+	// so that the release runs at one point whichever arm is taken.
+	var armAcc *ir.Value
 	if r.access != nil && r.ownsAccess {
-		mf.accs = append(mf.accs, r.access)
+		if r.release {
+			mf.accs = append(mf.accs, r.access)
+		} else {
+			armAcc = r.access
+		}
 	}
 	if tmp != nil && !owned {
 		mf.temps = append(mf.temps, tmp)
@@ -245,7 +283,8 @@ func (fl *fnLower) match(s *ast.Match) {
 				fl.emit(&ir.Init{Place: ir.Place{Local: fl.local(outVar)}})
 			}
 		}
-		fl.pushFrame()
+		af := fl.pushFrame()
+		holds := false
 		if vd == nil && owned && tmp != nil {
 			// a wildcard arm of an owned subject: nothing is bound, so the
 			// whole subject is destroyed on entry
@@ -282,7 +321,15 @@ func (fl *fnLower) match(s *ast.Match) {
 					fl.emit(&ir.AccessBegin{Dst: v, Edit: sym.Conv == ast.ConvEdit, Place: fieldPlace, Pos: arm.BindPos[i]})
 					fl.accs[sym] = v
 					fl.bindSym(sym)
+					holds = true
 				}
+			}
+		}
+		if armAcc != nil {
+			if holds {
+				af.late = append(af.late, armAcc) // after the bindings into it
+			} else {
+				fl.endAccess(armAcc)
 			}
 		}
 		fl.block(arm.Body)

@@ -1,0 +1,92 @@
+//! phase: 6
+//! expect: output match_accessor_field
+// A match whose subject is a part of what an accessor returned
+// (get(i).field, at(i).field). The arm's bindings are of that part: views
+// of a view, edits of an edit, copies of Copy payloads the arm only reads.
+// An arm without an access binding leaves the container free, so it may
+// edit self. (The part's path was lost, which failed in both engines; the
+// accessor's access stayed open through such an arm, an internal error;
+// and an edit accessor's bindings were read-only.) A conversion reads
+// through an accessor's Copy result.
+module main
+import "std/str"
+
+union Body { Text(s: str.String); Items(v: Vec[u64]); Num(n: u64); Nothing }
+struct Obj { body: Body; id: u32 }
+struct Heap { objs: Vec[Obj]; at: usize }
+
+impl Heap {
+    func advance(edit self) { self.at = self.at + 1usize }
+    // a copy binding, then an edit of self in the arm
+    func next_num(edit self) -> u64 {
+        match self.objs.get(self.at).body {
+            Num(n) => {
+                self.advance()
+                return n
+            }
+            _ => { self.advance() }
+        }
+        return 0u64
+    }
+    // a view binding of a payload that is not Copy
+    func size(view self, i: usize) -> usize {
+        match self.objs.get(i).body {
+            Text(s) => { return s.len() }
+            Items(v) => { return v.len() }
+            _ => { }
+        }
+        return 0usize
+    }
+    // a view returned through the arm's binding
+    func text(view self, i: usize) -> view[]u8 {
+        match self.objs.get(i).body {
+            Text(s) => { return s.as_view() }
+            _ => { }
+        }
+        trap()
+    }
+    // the same inside a with: a binding of a binding of self
+    func text_with(view self, i: usize) -> view[]u8 {
+        with o := self.objs.get(i) {
+            match o.body {
+                Text(s) => { return s.as_view() }
+                _ => { }
+            }
+        }
+        trap()
+    }
+    // edits through an edit accessor
+    func items(edit self, i: usize) -> edit[Vec[u64]] {
+        match self.objs.at(i).body {
+            Items(v) => { return v }
+            _ => { }
+        }
+        trap()
+    }
+    func bump(edit self, i: usize) {
+        match self.objs.at(i).body {
+            Num(n) => { n = n + 1u64 }
+            Items(v) => { v.push(9u64) }
+            _ => { }
+        }
+    }
+    func wide_id(view self, i: usize) -> u64 { return u64(self.objs.get(i).id) + 1u64 }
+}
+
+func main() -> i32 {
+    h := Heap { objs: Vec[Obj].new(), at: 0usize }
+    h.objs.push(Obj { body: Body.Num(4u64), id: 10u32 })
+    h.objs.push(Obj { body: Body.Text(str.String.from("hello")), id: 11u32 })
+    h.objs.push(Obj { body: Body.Items(Vec[u64].new()), id: 12u32 })
+    h.objs.push(Obj { body: Body.Nothing, id: 13u32 })
+    print_u64(h.next_num()); print_str(" "); print_u64(h.next_num()); print_str(" at "); print_u64(u64(h.at)); println()
+    print_u64(u64(h.size(1usize))); print_str(" "); print_u64(u64(h.size(2usize))); print_str(" "); print_u64(u64(h.size(3usize))); println()
+    print_str(h.text(1usize)); print_str(" "); print_str(h.text_with(1usize)); println()
+    with v := h.items(2usize) { v.push(1u64) }
+    h.bump(2usize)
+    h.bump(0usize)
+    h.at = 0usize
+    print_u64(u64(h.size(2usize))); print_str(" "); print_u64(h.next_num()); println()
+    print_u64(h.wide_id(3usize)); println()
+    return 0i32
+}

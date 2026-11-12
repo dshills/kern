@@ -246,6 +246,10 @@ type Info struct {
 	// explicit type arguments (`f[T]`), the argument bound to each of the
 	// function's type parameters.
 	FuncInsts map[*ast.IndexExpr]map[string]Type
+	// StaticFuncs records, for a type's static function used as a value
+	// (Type.f, Type[Args].f), the function and the type's arguments by
+	// parameter name.
+	StaticFuncs map[*ast.FieldExpr]*StaticFunc
 	// Consumed maps a `move x` or `drop(x)` expression to the identifier
 	// record the resolver made for its variable (an entry of Idents).
 	Consumed map[ast.Expr]*ast.Ident
@@ -296,7 +300,7 @@ type TwoPhaseArg struct {
 
 func newInfo() *Info {
 	return &Info{
-		Types: map[ast.Expr]Type{}, FuncInsts: map[*ast.IndexExpr]map[string]Type{}, Idents: map[*ast.Ident]*Symbol{}, Calls: map[*ast.CallExpr]*CallInfo{},
+		Types: map[ast.Expr]Type{}, FuncInsts: map[*ast.IndexExpr]map[string]Type{}, StaticFuncs: map[*ast.FieldExpr]*StaticFunc{}, Idents: map[*ast.Ident]*Symbol{}, Calls: map[*ast.CallExpr]*CallInfo{},
 		Funcs: map[*ast.FuncDecl]*FuncDecl{}, Decls: map[any]*Symbol{}, Consts: map[ast.Expr]bool{}, ImportedConsts: map[*ast.FieldExpr]*ConstDecl{},
 		Fields: map[*ast.FieldExpr]*FieldDecl{}, Variants: map[*ast.Arm]*VariantDecl{}, Closures: map[*ast.ClosureExpr]*ClosureInfo{}, Consumed: map[ast.Expr]*ast.Ident{},
 		Drops: map[any][]*Symbol{}, OutFieldDrops: map[any]map[*Symbol][]string{}, AssignDrop: map[*ast.Assign]bool{}, OwnedSubject: map[any]bool{},
@@ -1965,4 +1969,10 @@ func (r *resolver) noClosure(file string, pos ast.Pos, t Type, msg string) Type 
 		r.errorf("ACC_ESCAPE_STORE", file, pos, "%s", msg)
 	}
 	return t
+}
+
+// StaticFunc is a type's static function named as a value.
+type StaticFunc struct {
+	Func  *FuncDecl
+	Subst map[string]Type
 }

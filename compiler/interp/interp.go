@@ -998,6 +998,13 @@ func (it *Interp) length(fr *frame, p ir.Place) int {
 	if seq != nil {
 		return seq.length()
 	}
+	// an array in raw memory (a field of a boxed or contained value) has
+	// its length in its type: reading the place would decode every element
+	if rr, ok := cur.(rawRef); ok {
+		if arr, ok := rr.t.(*resolve.Array); ok {
+			return arr.Len
+		}
+	}
 	if arr, ok := cur.get().(*Array); ok {
 		return len(arr.Elems)
 	}

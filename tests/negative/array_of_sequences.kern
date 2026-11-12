@@ -1,0 +1,12 @@
+//! expect: reject ACC_ESCAPE_STORE rule=5.2.2
+//! twin: array_of_sequences_ok
+// A string literal is a view of bytes: an array literal cannot hold it,
+// since a sequence is reached only through an access and an access is not
+// stored. (It was accepted, and failed in both engines.)
+module m
+func show(s: view[]u8) { print_str(s) }
+func main() -> i32 {
+    names := ["one", "two", "three"]
+    show(names[1usize])
+    return 0i32
+}

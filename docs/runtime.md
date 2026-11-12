@@ -297,6 +297,12 @@ The modules hold the policy.
   macOS opens every descriptor sent before it looks at the room a
   receive gave, so the runtime gives room for all a message can carry
   on every receive from a Unix-domain socket and closes the rest.
+  The sender keeps its own descriptor until the receiver has taken the
+  one sent, which the receiver says with an answer on the stream: on
+  macOS a socket closed by its sender while still in flight can arrive
+  already at its end, with what its peer wrote lost (seen with other
+  Unix-domain sockets being closed at the same time; `examples/kpass`
+  acknowledges each one).
   `peer_credentials` is the system's record of the user, group and
   process at the other end.
 - **A Unix-domain path whose first byte is zero** names a socket in

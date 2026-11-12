@@ -1,0 +1,19 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: iface_static_on_value_ok
+//! fix: none
+// A function an interface declares without a receiver is called on the type
+// parameter, not on a value of it. (The call on a value was an internal
+// error.)
+module m
+interface Zero {
+    func unit() -> u64
+}
+struct Ev { at: u64 }
+impl Zero for Ev {
+    func unit() -> u64 { return 7u64 }
+}
+func u[Z: Zero](z: view[Z]) -> u64 { return z.unit() }
+func main() -> i32 {
+    e := Ev { at: 1u64 }
+    return i32(u(e) - 7u64)
+}

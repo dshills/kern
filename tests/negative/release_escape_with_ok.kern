@@ -1,0 +1,9 @@
+//! phase: 1
+//! expect: accept
+//! twin: release_escape_with
+// The value is copied out while the guard is held.
+module m
+struct W { b: u64 }
+func grab(m: view[Mutex[W]]) -> u64 {
+    with g := m.lock() { return g.b }
+}

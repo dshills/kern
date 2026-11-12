@@ -181,7 +181,7 @@ func (c *fnCtx) expr(sc *scope, e ast.Expr, want Type) Type {
 	case *ast.TrapExpr:
 		return c.record(e, &Unit{})
 	case *ast.ConvExpr:
-		t := c.expr(sc, x.X, nil)
+		t := valueOf(c.expr(sc, x.X, nil)) // of a Copy value an accessor returned, the value
 		to := &Prim{Name: x.To}
 		if _, bad := t.(*Bad); bad {
 			return c.record(e, to) // already reported where the operand failed
@@ -207,6 +207,18 @@ func (c *fnCtx) expr(sc *scope, e ast.Expr, want Type) Type {
 	}
 	c.errorf("SYNTAX", e.Span(), "unsupported expression")
 	return c.record(e, &Bad{})
+}
+
+// valueFunc reports whether f can be a function value. A function the
+// runtime provides has no body to refer to: a call of it is compiled in
+// place, so as a value it is refused (it was accepted, and failed in both
+// engines).
+func (c *fnCtx) valueFunc(f *FuncDecl, pos ast.Pos, name string) bool {
+	if !f.Intrinsic {
+		return true
+	}
+	c.errorf("TYPE_MISMATCH", pos, "%s is provided by the runtime and cannot be used as a function value; wrap it in a function", name)
+	return false
 }
 
 // valueOf strips an access type to the value type it denotes.
@@ -303,6 +315,8 @@ func (c *fnCtx) ident(sc *scope, x *ast.Ident, want Type) Type {
 		}
 		if isUnsafeOp(sym.Func) {
 			c.errorf("UNSAFE_OP_OUTSIDE_UNSAFE", x.Pos, "%s is an unsafe operation and cannot be used as a function value", x.Name)
+		} else if !c.valueFunc(sym.Func, x.Pos, x.Name) {
+			return &Bad{}
 		}
 		return sym.Func.Type
 	case SymType, SymModule, SymTypeParam:
@@ -474,7 +488,25 @@ func (c *fnCtx) fieldWant1(sc *scope, x *ast.FieldExpr, want Type) Type {
 			return &Bad{}
 		}
 		if m := td.Methods[x.Name]; m != nil {
-			return m.Type
+			// the value is one function: the type's parameters and the
+			// function's own must all be known here
+			if len(m.TypeParams) > 0 || len(explicit) != len(td.TypeParams) {
+				c.errorf("TYPE_INFER_FAILED", x.Pos, "%s.%s as a value needs every type argument; call it, or wrap it in a function", td.Name, x.Name)
+				return &Bad{}
+			}
+			subst := map[string]Type{}
+			for i, tp := range td.TypeParams {
+				subst[tp.Name] = explicit[i]
+			}
+			if isUnsafeOp(m) {
+				c.errorf("UNSAFE_OP_OUTSIDE_UNSAFE", x.Pos, "%s.%s is an unsafe operation and cannot be used as a function value", td.Name, x.Name)
+				return &Bad{}
+			}
+			if !c.valueFunc(m, x.Pos, td.Name+"."+x.Name) {
+				return &Bad{}
+			}
+			c.r.prog.Info.StaticFuncs[x] = &StaticFunc{Func: m, Subst: subst}
+			return Subst(m.Type, subst)
 		}
 		c.errorf("NAME_UNRESOLVED", x.Pos, "%s has no member %s", td.Name, x.Name)
 		return &Bad{}
@@ -485,6 +517,13 @@ func (c *fnCtx) fieldWant1(sc *scope, x *ast.FieldExpr, want Type) Type {
 				c.r.prog.Info.Idents[id] = &Symbol{Kind: SymModule, Name: id.Name, Module: mod}
 				if !isExported(x.Name) && !mod.Std {
 					c.errorf("NAME_PRIVATE", x.Pos, "%s.%s is private to module %s", id.Name, x.Name, mod.Name)
+				}
+				if len(f.TypeParams) > 0 {
+					c.errorf("TYPE_INFER_FAILED", x.Pos, "generic function %s.%s used as a value needs explicit type arguments", id.Name, x.Name)
+					return &Bad{}
+				}
+				if !c.valueFunc(f, x.Pos, id.Name+"."+x.Name) {
+					return &Bad{}
 				}
 				return f.Type
 			}
@@ -624,6 +663,9 @@ func (c *fnCtx) index(sc *scope, x *ast.IndexExpr, want Type) Type {
 			for i, tp := range f.TypeParams {
 				m[tp.Name] = args[i]
 				c.r.checkConstraints(c.file, x.Args[i].Span(), args[i], tp)
+			}
+			if !c.valueFunc(f, x.Pos, f.Name) {
+				return &Bad{}
 			}
 			c.r.prog.Info.FuncInsts[x] = m
 			return Subst(f.Type, m)
@@ -781,6 +823,15 @@ func (c *fnCtx) arrayLit(sc *scope, x *ast.ArrayLit, want Type) Type {
 	}
 	for i, e := range x.Elems {
 		t := valueOf(c.exprExpect(sc, e, elem))
+		if _, ok := t.(*Slice); ok {
+			// a sequence has no size of its own and is reached only
+			// through an access, which an array cannot hold (Rule 5.2.2)
+			c.errorf("ACC_ESCAPE_STORE", e.Span(), "array element %d is a %s, which is reached only through an access and cannot be stored", i, typeString(t))
+			for _, rest := range x.Elems[i+1:] {
+				c.expr(sc, rest, nil)
+			}
+			return &Array{Elem: &Bad{}, Len: len(x.Elems)}
+		}
 		if elem == nil {
 			elem = t
 		} else if i > 0 && !Identical(t, elem) {

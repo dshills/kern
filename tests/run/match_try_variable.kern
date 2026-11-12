@@ -1,0 +1,61 @@
+//! phase: 6
+//! expect: output match_try_variable
+// What ? unwraps is an owned match subject whatever it was applied to: of a
+// variable as of a call, the arm owns the payloads and destroys them. (Of a
+// variable the arm had views of a value nothing owned, and the destructors
+// never ran.)
+module main
+struct D nocopy { id: u64 }
+impl D {
+    destructor(edit self) { print_str("destroyed "); print_u64(self.id); println() }
+}
+union Two { Both(D, D) }
+func make() -> Result[Two, u8] { return Ok(Both(D { id: 1u64 }, D { id: 2u64 })) }
+func through_variable() -> Result[u64, u8] {
+    var made: Result[Two, u8] = make()
+    var n: u64 = 0u64
+    match made? {
+        Both(a, b) => {
+            n = a.id + b.id
+            print_str("in the arm\n")
+        }
+    }
+    print_str("after the match\n")
+    return Ok(n)
+}
+// the same with the call as the subject: both values are destroyed
+func direct() -> Result[u64, u8] {
+    var n: u64 = 0u64
+    match make()? {
+        Both(a, b) => {
+            n = a.id + b.id
+            print_str("in the arm\n")
+        }
+    }
+    print_str("after the match\n")
+    return Ok(n)
+}
+// the same with no match at all: the unwrapped value is a temporary
+func unused() -> Result[u64, u8] {
+    var made: Result[Two, u8] = make()
+    print_str("before\n")
+    made?
+    print_str("after\n")
+    return Ok(0u64)
+}
+func show(r: Result[u64, u8]) {
+    match r {
+        Ok(n) => print_u64(n)
+        Err(e) => { }
+    }
+    println()
+}
+func main() -> i32 {
+    print_str("-- match made? { ... }\n")
+    show(through_variable())
+    print_str("-- match make()? { ... }\n")
+    show(direct())
+    print_str("-- made? as a statement\n")
+    show(unused())
+    return 0i32
+}

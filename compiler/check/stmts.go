@@ -247,9 +247,12 @@ func (f *fn) assign(st *flow, s *ast.Assign) *flow {
 		r := f.expr(st, s.Target)
 		if r != nil && r.isAccess {
 			// assignment through a returned projection, e.g. v.at(i) = x
+			// the projection ends where the store through it happens: left
+			// open across the store's own access it conflicted with itself,
+			// which refused every such assignment
+			f.closeAccess(r)
 			t := f.tick()
 			f.accs = append(f.accs, &access{pl: r.pl, kind: accEdit, start: t, end: t, pos: s.Target.Span()})
-			f.closeAccess(r)
 			if r.pl.perm != ast.ConvEdit {
 				f.errorf("ACC_PERMISSION_ESCALATION", s.Target.Span(), "assignment through a view")
 			}
@@ -820,12 +823,21 @@ func (f *fn) returnAccess(st *flow, s *ast.Return) {
 	}
 	root := r.pl.root
 	src := f.accessParams[0]
-	if root != src {
-		if root != nil && root.Kind == resolve.SymAccess {
-			if br := f.bindRoots[root]; br != nil && br.pl.root == src {
-				root = src
-			}
+	// a binding stands for what it was bound to, through as many bindings
+	// as there are: a match arm's inside a with's
+	for hops := 0; root != src && root != nil && root.Kind == resolve.SymAccess && hops < 64; hops++ {
+		br := f.bindRoots[root]
+		if br == nil || br.pl.root == root {
+			break
 		}
+		if br.release {
+			// bound to what a releasing accessor returned (a lock's
+			// guard): the access would outlive the release that the end
+			// of the binding runs. (It was accepted through a with.)
+			f.errorf("ACC_RELEASE_ESCAPE", s.Value.Span(), "returned access derives from %s, which carries a pending release function", rootName(root))
+			return
+		}
+		root = br.pl.root
 	}
 	if root != src {
 		f.errorf("ACC_ESCAPE_RETURN", s.Value.Span(), "returned access derives from %s, not from the access parameter %s", rootName(root), src.Name)

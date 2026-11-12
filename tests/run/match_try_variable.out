@@ -1,0 +1,18 @@
+-- match made? { ... }
+in the arm
+destroyed 2
+destroyed 1
+after the match
+3
+-- match make()? { ... }
+in the arm
+destroyed 2
+destroyed 1
+after the match
+3
+-- made? as a statement
+before
+destroyed 2
+destroyed 1
+after
+0

@@ -1,0 +1,44 @@
+//! phase: 6
+//! expect: output projection_targets
+// What an accessor returns is an assignment target (Rule 5.3.3): the whole
+// place, whose previous value the store destroys, or a part of it. (Every
+// such assignment was refused as a conflict of the projection with
+// itself.) An array an accessor returned coerces to a sequence at a call,
+// as an array place does (Rule 5.2.4).
+module main
+
+struct D nocopy { id: u64 }
+impl D {
+    destructor(edit self) { print_str("destroyed "); print_u64(self.id); println() }
+}
+struct Frame { pno: u32; tick: u64 }
+struct Pager { frames: Vec[Frame]; ds: Vec[D] }
+
+func sum(p: view[]u8) -> u64 {
+    var n: u64 = 0u64
+    for b in p { n = n + u64(b) }
+    return n
+}
+func fill(p: edit[]u8, b: u8) {
+    for i in 0usize..len(p) { p[i] = b }
+}
+
+func main() -> i32 {
+    pg := Pager { frames: Vec[Frame].new(), ds: Vec[D].new() }
+    pg.frames.push(Frame { pno: 1u32, tick: 0u64 })
+    pg.frames.at(0usize) = Frame { pno: 2u32, tick: 1u64 }
+    pg.frames.at(0usize).tick = pg.frames.get(0usize).tick + 6u64
+    print_u64(u64(pg.frames.get(0usize).pno)); print_str(" "); print_u64(pg.frames.get(0usize).tick); println()
+    pg.ds.push(D { id: 1u64 })
+    print_str("store\n")
+    pg.ds.at(0usize) = D { id: 2u64 }
+    print_str("stored\n")
+    pages := Vec[[8]u8].new()
+    var z: [8]u8 = zero()
+    pages.push(z)
+    pages.push(z)
+    fill(pages.at(1usize), 3u8)
+    pages.at(1usize)[0usize] = 10u8
+    print_u64(sum(pages.get(0usize))); print_str(" "); print_u64(sum(pages.get(1usize))); println()
+    return 0i32
+}

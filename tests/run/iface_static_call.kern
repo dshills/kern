@@ -1,0 +1,53 @@
+//! phase: 6
+//! expect: output iface_static_call
+// A function an interface declares without a receiver is called through a
+// type parameter, T.f(...), and is the implementing type's: of a struct, a
+// primitive and a generic type, from a generic function and from a method
+// of a generic type.
+module main
+
+interface Unit {
+    func unit() -> u64
+    func scaled(view self) -> u64
+}
+
+struct Metre { n: u64 }
+struct Pair[T: Unit] {
+    a: T
+    b: T
+}
+
+impl Unit for Metre {
+    func unit() -> u64 { return 100u64 }
+    func scaled(view self) -> u64 { return self.n * Metre.unit() }
+}
+impl Unit for u8 {
+    func unit() -> u64 { return 8u64 }
+    func scaled(view self) -> u64 { return u64(self) * 8u64 }
+}
+impl[T: Unit] Unit for Pair[T] {
+    func unit() -> u64 { return 2u64 * T.unit() }
+    func scaled(view self) -> u64 { return self.a.scaled() + self.b.scaled() }
+}
+
+func unit_of[U: Unit]() -> u64 { return U.unit() }
+func both[U: Unit](v: view[U]) -> u64 { return v.scaled() + U.unit() }
+
+struct Box2[T: Unit] { v: T }
+impl[T: Unit] Box2[T] {
+    func width(view self) -> u64 { return T.unit() }
+}
+
+func main() -> i32 {
+    print_u64(unit_of[Metre]()); println()
+    print_u64(unit_of[u8]()); println()
+    print_u64(unit_of[Pair[Metre]]()); println()
+    print_u64(unit_of[Pair[Pair[u8]]]()); println()
+    m := Metre { n: 3u64 }
+    print_u64(both(m)); println()
+    p := Pair[u8] { a: 1u8, b: 2u8 }
+    print_u64(both(p)); println()
+    b := Box2[Metre] { v: Metre { n: 1u64 } }
+    print_u64(b.width()); println()
+    return 0i32
+}

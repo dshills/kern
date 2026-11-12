@@ -1124,6 +1124,10 @@ impl UnixStream {
     // system took; send_file attaches an open file. The descriptor
     // travels with the first byte: the receiver gets a descriptor of its
     // own for the same open socket or file, and this program keeps its.
+    // Keep it until the receiver has taken the descriptor (an answer on
+    // this stream says so): on macOS a socket closed here while it is
+    // still in flight can arrive already at its end, with what its peer
+    // wrote lost.
     // Empty data is an error of kind InvalidInput.
     func send_with[S: Source](edit self, data: view[]u8, pass: view[S]) -> Result[usize, io.IoErr] {
         r := net_send_fd(self.fd, data, pass.descriptor())

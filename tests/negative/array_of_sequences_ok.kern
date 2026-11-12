@@ -1,0 +1,13 @@
+//! phase: 1
+//! expect: accept
+//! twin: array_of_sequences
+// The literals are named one at a time, where each is used.
+module m
+func show(s: view[]u8) { print_str(s) }
+func name(i: usize) {
+    if i == 0usize { show("one") } else if i == 1usize { show("two") } else { show("three") }
+}
+func main() -> i32 {
+    name(1usize)
+    return 0i32
+}

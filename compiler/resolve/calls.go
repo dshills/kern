@@ -83,6 +83,30 @@ func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 		}
 	case *ast.FieldExpr:
 		// Static member: Type.method(...), Type[Args].Variant(...), module.func(...)
+		if id, ok := fn.X.(*ast.Ident); ok {
+			if sym := sc.lookup(id.Name); sym != nil && sym.Kind == SymTypeParam {
+				// T.f(...): a function without a receiver that one of the
+				// parameter's interfaces declares, dispatched like a
+				// method to the implementing type's
+				for _, cs := range sym.TParam.Constraints {
+					if cs.Iface == nil {
+						continue
+					}
+					im, ok := cs.Iface.Methods[fn.Name]
+					if !ok {
+						continue
+					}
+					if len(im.Params) > 0 && im.Params[0].Self {
+						c.errorf("TYPE_MISMATCH", fn.Pos, "%s.%s is a method; call it on a value", id.Name, fn.Name)
+						return &Bad{}
+					}
+					c.r.prog.Info.Idents[id] = sym
+					return c.callFunc(sc, x, info, im, map[string]Type{"Self": sym.TParam}, nil, want)
+				}
+				c.errorf("CONSTRAINT_REQUIRED", fn.Pos, "type parameter %s has no interface constraint providing %s", id.Name, fn.Name)
+				return &Bad{}
+			}
+		}
 		if td, explicit, ok := c.typeExprOf(sc, fn.X); ok {
 			for _, v := range td.Variants {
 				if v.Name == fn.Name {
@@ -144,6 +168,10 @@ func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 			for _, cs := range t.Constraints {
 				if cs.Iface != nil {
 					if im, ok := cs.Iface.Methods[fn.Name]; ok {
+						if len(im.Params) == 0 || !im.Params[0].Self {
+							c.errorf("TYPE_MISMATCH", fn.Pos, "%s.%s is not a method; call it on the type parameter", cs.Iface.Name, fn.Name)
+							return &Bad{}
+						}
 						info.Method = true
 						c.checkReceiver(sc, fn, im.Params[0].Conv, recvT)
 						return c.callFunc(sc, x, info, im, map[string]Type{"Self": t}, nil, want)
@@ -192,6 +220,9 @@ func (c *fnCtx) call(sc *scope, x *ast.CallExpr, want Type) Type {
 func (c *fnCtx) callValue(sc *scope, x *ast.CallExpr, info *CallInfo, ft Type) Type {
 	f, ok := ft.(*Func)
 	if !ok {
+		if _, bad := ft.(*Bad); bad {
+			return &Bad{} // already reported where the callee failed
+		}
 		c.errorf("TYPE_MISMATCH", x.Fn.Span(), "%s is not callable", typeString(ft))
 		return &Bad{}
 	}
@@ -382,7 +413,14 @@ func (c *fnCtx) checkArgs(sc *scope, x *ast.CallExpr, info *CallInfo, fps []Func
 				if p.Conv == ast.ConvEdit && !acc.Edit {
 					c.errorf("ACC_PERMISSION_ESCALATION", a.Pos, "edit parameter given a view")
 				}
-				c.unifyArg(a.X, accessElemPattern(p.Type), accessElem(acc), params, m)
+				el := accessElem(acc)
+				// an array an accessor returned coerces as an array place does
+				if pa, ok := p.Type.(*Access); ok && pa.Seq && !acc.Seq {
+					if arr, ok := el.(*Array); ok {
+						el = &Slice{Elem: arr.Elem}
+					}
+				}
+				c.unifyArg(a.X, accessElemPattern(p.Type), el, params, m)
 				continue
 			}
 			if !c.isPlace(sc, a.X) {

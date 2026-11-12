@@ -1,0 +1,11 @@
+//! expect: reject TYPE_MISMATCH rule=T.5
+//! twin: intrinsic_func_value_ok
+//! fix: none
+// A function the runtime provides has no body to refer to, so it is not a
+// function value. (It was accepted, and failed in both engines.)
+module m
+func main() -> i32 {
+    p := print_u64
+    p(4u64)
+    return 0i32
+}
