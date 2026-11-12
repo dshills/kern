@@ -173,7 +173,7 @@ The two freestanding targets give the same list.
 | `File.lock_range` | `kern_io_lock_range` |
 | `File.metadata` | `kern_io_fstat` |
 | `File.read` | `kern_io_read` |
-| `File.read_all` | `kern_io_read` |
+| `File.read_all` | `kern_io_fstat`, `kern_io_read` |
 | `File.seek` | `kern_io_err_code`, `kern_io_seek` |
 | `File.set_len` | `kern_io_set_len` |
 | `File.sync` | `kern_io_sync` |
@@ -330,10 +330,10 @@ The two freestanding targets give the same list.
 | `io.open_append` | `kern_io_err_code`, `kern_io_open` |
 | `io.open_read` | `kern_io_err_code`, `kern_io_open` |
 | `io.read_dir` | `kern_io_list`, `kern_io_stat` |
-| `io.read_file` | `kern_io_close`, `kern_io_open`, `kern_io_read` |
-| `io.read_from` | `kern_io_read` |
+| `io.read_file` | `kern_io_close`, `kern_io_fstat`, `kern_io_open`, `kern_io_read` |
+| `io.read_from` | `kern_io_fstat`, `kern_io_read` |
 | `io.read_link` | `kern_io_err_code`, `kern_io_getcwd`, `kern_io_readlink`, `kern_io_realpath` |
-| `io.read_stdin` | `kern_io_read` |
+| `io.read_stdin` | `kern_io_fstat`, `kern_io_read` |
 | `io.read_to_end` | `kern_io_read`, `kern_net_recv` |
 | `io.remove_dir` | `kern_io_rmdir` |
 | `io.remove_dir_all` | `kern_io_err_code`, `kern_io_list`, `kern_io_remove`, `kern_io_rmdir`, `kern_io_stat` |

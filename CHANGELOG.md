@@ -69,15 +69,71 @@ Five more examples, written to find flaws, and what they found.
   }`, a reader, hashing workers and an ordered writer joined by
   `sync.Channel`s).
 
+- Two files of one module with `move x` or `drop(x)` of the same name at
+  the same byte offsets (files begun from one template) passed the check
+  and then failed with an internal error in most runs: the checker and
+  the lowering found the variable by position and name across the whole
+  program and took the other file's.
+
 ### Library
 
+- `Vec.clone` (and so `String.clone`) writes its copies straight into
+  the new storage: a megabyte of bytes took 50 times the instructions
+  through `push`.
+- A vector's first growth gives it 16 bytes' worth of one- to three-byte
+  elements, not four of them: a `String` built by pushes reallocated
+  three times inside the allocator's smallest block (`json.parse` of a
+  2.6 MB document, 24% fewer instructions). `capacity()` of a small byte
+  vector reads 16 where it read 4 or 8.
+- `io.read_file` asks a regular file's size and reads into a vector of
+  that size, where it read 4,096 bytes at a time through a buffer (a
+  256 MiB file: 570M instructions to 173M); pipes and terminals are read
+  16 KiB at a time.
 - `UnixStream.send_with` and `docs/runtime.md` say that the sender
   keeps its descriptor until the receiver has taken the one sent: on
   macOS a socket closed by its sender while in flight can arrive
   already at its end, with what its peer wrote lost.
 
+### Runtimes and targets
+
+- Every allocation wrote one flag shared by all threads (the test hook
+  for a failed allocation, exchanged where it only needed reading): four
+  threads allocating took nine times as long as one. It is read first
+  now, and four threads take about a fifth of the cycles they did.
+- The system allocator uses `malloc` for an alignment of 16 or less,
+  where it always called `aligned_alloc`: an allocation and its free
+  take 18% fewer instructions.
+- `swap_at` is three constant-size copies in the program's own code,
+  where it was a call of the runtime that copied through a buffer: a swap
+  of two `u64` goes from 123 instructions to about 10. The runtimes'
+  `kern_swap` entry is gone with its last caller.
+
 ### Tooling
 
+- `kern run`, `kern test` and every command but `kern lsp` let Go's heap
+  reach 64 MiB before a collection starts (nothing changes above that,
+  and `GOGC` or `GOMEMLIMIT` in the environment is obeyed as before).
+  With a few megabytes live the collector was 20 to 45% of what the
+  interpreter executed: example demonstrations run 20 to 40% fewer
+  instructions in about half the processor time, for 50 to 60 MB more
+  memory.
+- The interpreter makes the host's network poller before a program
+  runs. On macOS it is a descriptor made at first use and kept, so a
+  program that counted its open descriptors before its first socket and
+  after its last could find one more than it opened; it had existed at
+  start only when a collection during start-up happened to make it
+  (`TestConnectsThatFailLeaveNoDescriptor` failed now and then for that
+  reason, and every time under the heap floor).
+- The interpreter compiles an indexed load or store, `len`, and a
+  union's tag (a tag of a container's element was read by decoding the
+  whole union): with the above, ksum's demonstration runs 57% fewer
+  instructions, klisp's 46%.
+- The IR validator keeps a function's locals in a slice, not a map
+  copied at every block: it was about 60% of a release build's front end
+  (kvm, 1.79 G instructions to 0.83 G with the heap floor; the IR is
+  byte-identical).
+- `bench/REPORT.md`'s text bytes count a kern program's own code: the
+  harness read only `__text`, which in a kern binary is the C runtime.
 - The interpreter read every element of an array held in a `Box` or a
   container each time it checked an index into it through a sequence
   parameter (55 µs an access for 4,096 bytes; a length now comes from
