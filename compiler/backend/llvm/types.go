@@ -165,7 +165,7 @@ func fnSym(name string) string { return "@" + quote(name) }
 
 // needsDrop reports whether destroying a value of type t does anything.
 func needsDrop(t resolve.Type) bool {
-	return !resolve.IsCopy(t) && !isUnit(t)
+	return resolve.NeedsDrop(t)
 }
 
 func isUnit(t resolve.Type) bool {

@@ -80,6 +80,13 @@ func ptr_store_seq[T](p: RawPtr[T], src: view[]T)
 func swap_at[T](xs: edit[]T, i: usize, j: usize)
 // size_of and align_of are the §4.1 size and alignment of T in bytes.
 func size_of[T]() -> usize
+func align_of[T]() -> usize
+// needs_drop is whether destroying a T does anything: false for a Copy
+// type, whose values own nothing. A container asks before a loop that
+// takes and drops each of its elements: for such a T the loop only counts
+// down, which a native build deletes and the interpreter ran an element at
+// a time (destroying a byte vector cost as much as filling it).
+func needs_drop[T]() -> bool
 
 // first_cap is the capacity a vector's first growth gives it: four
 // elements, or for elements of one to three bytes as many as fill 16
@@ -91,7 +98,6 @@ func first_cap[T]() -> usize {
     if s == 0usize || s >= 4usize { return 4usize }
     return 16usize / s
 }
-func align_of[T]() -> usize
 // trap_kind terminates with the given trap kind, written as a literal
 // variant (trap_kind(bounds)); the span reported is the call that entered
 // the library, as for every trap raised inside std/core.
@@ -558,6 +564,7 @@ impl Vec[T] {
     // bitwise duplicates of it are exactly what further copies would be.
     contract { requires "data addresses cap elements of which the first size are live; an all-zero copy of x owns nothing" }
     func resize(edit self, n: usize, x: own T) {
+        if self.size > n && !needs_drop[T]() { self.size = n }
         while self.size > n {
             self.size = self.size - 1usize
             unsafe {
@@ -681,6 +688,7 @@ impl Vec[T] {
     // growing, every fallible step runs before the vector is written.
     contract { requires "data addresses cap elements of which the first size are live; an all-zero copy of x owns nothing" }
     func try_resize(edit self, n: usize, x: own T) -> Result[(), AllocErr] where T: Copy {
+        if self.size > n && !needs_drop[T]() { self.size = n }
         while self.size > n {
             self.size = self.size - 1usize
             unsafe {
@@ -747,6 +755,7 @@ impl Vec[T] {
     // clear destroys the elements from the last to the first; the capacity stays.
     contract { requires "data addresses cap elements of which the first size are live" }
     func clear(edit self) {
+        if !needs_drop[T]() { self.size = 0usize }
         while self.size > 0usize {
             self.size = self.size - 1usize
             unsafe {
@@ -763,6 +772,7 @@ impl Vec[T] {
     func remove_prefix(edit self, n: usize) {
         if n > self.size { trap_kind(bounds) }
         var i: usize = n
+        if !needs_drop[T]() { i = 0usize }
         while i > 0usize {
             i = i - 1usize
             unsafe {
@@ -977,6 +987,7 @@ impl[T, A: Allocator] VecIn[T, A] {
     // clear destroys the elements from the last to the first; the capacity stays.
     contract { requires "data addresses cap elements allocated from a, of which the first size are live" }
     func clear(edit self) {
+        if !needs_drop[T]() { self.size = 0usize }
         while self.size > 0usize {
             self.size = self.size - 1usize
             unsafe {
@@ -1299,6 +1310,7 @@ impl Pool[T] {
     func release(edit self) {
         unsafe {
             i := self.count
+            if !needs_drop[T]() { i = 0usize }
             while i > 0usize {
                 i = i - 1usize
                 m := ptr_load(self.meta_at(i))
@@ -1437,6 +1449,7 @@ impl Arena[T] {
     contract { requires "data addresses cap elements of which the first size are live" }
     func release(edit self) {
         unsafe {
+            if !needs_drop[T]() { self.size = 0usize }
             while self.size > 0usize {
                 self.size = self.size - 1usize
                 v := ptr_take(ptr_offset(self.data, truncate[isize](self.size)))
@@ -1588,6 +1601,7 @@ impl[T, A: Allocator] ArenaIn[T, A] {
     contract { requires "data addresses cap elements allocated from a, of which the first size are live" }
     func release(edit self) {
         unsafe {
+            if !needs_drop[T]() { self.size = 0usize }
             while self.size > 0usize {
                 self.size = self.size - 1usize
                 v := ptr_take(ptr_offset(self.data, truncate[isize](self.size)))
@@ -1869,6 +1883,7 @@ impl[T, A: Allocator] PoolIn[T, A] {
     func release(edit self) {
         unsafe {
             i := self.count
+            if !needs_drop[T]() { i = 0usize }
             while i > 0usize {
                 i = i - 1usize
                 m := ptr_load(self.meta_at(i))

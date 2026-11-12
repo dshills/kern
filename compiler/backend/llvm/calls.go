@@ -1041,6 +1041,13 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 		fe.vals[dst()] = sz(fe.elemType(c, 0))
 	case "align_of":
 		fe.vals[dst()] = al(fe.elemType(c, 0))
+	case "needs_drop":
+		// a constant: the loop a container guards with it folds away
+		if needsDrop(fe.elemType(c, 0)) {
+			fe.vals[dst()] = "true"
+		} else {
+			fe.vals[dst()] = "false"
+		}
 	case "container_identity":
 		setDst(fe.rt("kern_next_identity", "i32 ()", ""))
 	case "fence":

@@ -814,6 +814,11 @@ func init() {
 		"ptr_view_edit": func(it *Interp, a []Value, c callCtx) []Value {
 			return []Value{&Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}}, &Access{Ref: rawRef{it: it, addr: u64(a[1]), t: c.targ(1)}, Edit: true}}
 		},
+		// needs_drop: whether destroying a T does anything, as the backend
+		// answers it
+		"needs_drop": func(_ *Interp, _ []Value, c callCtx) []Value {
+			return []Value{Bool(resolve.NeedsDrop(c.targ(0)))}
+		},
 		"container_identity": func(it *Interp, a []Value, _ callCtx) []Value {
 			return []Value{mkInt(tyU32, uint64(it.newIdentity()))}
 		},

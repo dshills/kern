@@ -338,6 +338,12 @@ func compileInstr(fi *funcInfo, in ir.Instr) op {
 	return generic(in)
 }
 
+// typeConstant names the intrinsics whose result depends on their type
+// argument alone (size_of, align_of, needs_drop). compileCall asks each
+// once, with no interpreter and no arguments, so an entry named here must
+// read neither.
+var typeConstant = map[string]bool{"size_of": true, "align_of": true, "needs_drop": true}
+
 // compileCall is a direct call with its target held: what exec does for
 // a call whose target funcInfo resolved (not through a function value).
 func compileCall(fi *funcInfo, i *ir.Call) op {
@@ -369,6 +375,19 @@ func compileCall(fi *funcInfo, i *ir.Call) op {
 		return out
 	}
 	switch {
+	case typeConstant[i.Intrinsic] && len(dsts) == 1:
+		// a question about a type alone has one answer for this call: it is
+		// asked now, and the op stores the answer
+		d := dsts[0]
+		var v Value
+		if fn := fastIntrinsics[i.Intrinsic]; fn != nil {
+			v = fn(nil, nil, callCtx{targs: typeArgs})
+		} else if target.intrinsic != nil {
+			v = target.intrinsic(nil, nil, callCtx{targs: typeArgs})[0]
+		} else {
+			return nil // not compiled: the caller's generic path runs it
+		}
+		return func(_ *Interp, fr *frame) { fr.vals[d] = v }
 	case i.Intrinsic != "" && fastIntrinsics[i.Intrinsic] != nil:
 		fn := fastIntrinsics[i.Intrinsic]
 		d := -1

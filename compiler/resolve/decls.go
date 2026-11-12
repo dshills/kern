@@ -1610,6 +1610,14 @@ func sigMatches(im, fd *FuncDecl, target Type, ifaceArgs map[string]Type) bool {
 // IsCopy reports whether t is Copy.
 func IsCopy(t Type) bool { return markerOf(t, markerCopy, map[string]bool{}) }
 
+// NeedsDrop reports whether destroying a value of t does anything: t is
+// neither Copy nor the unit type. It is what the needs_drop intrinsic
+// answers in every engine.
+func NeedsDrop(t Type) bool {
+	_, unit := t.(*Unit)
+	return !unit && !IsCopy(t)
+}
+
 // IsZeroable reports whether t has a valid all-zero value (spec/types.md §1):
 // Copy, and containing no function type.
 func IsZeroable(t Type) bool {
