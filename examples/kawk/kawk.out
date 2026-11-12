@@ -1,0 +1,245 @@
+== fields, NF and assigning to a field ==
+    | { print NR ": " NF " fields, first [" $1 "] last [" $NF "]" }
+    | NR == 2 { $2 = "CHANGED"; print; print NF }
+    | NR == 3 { $6 = "sixth"; print; NF = 2; print; print NF }
+    | NR == 4 { print "empty record: NF is " NF " and $1 is [" $1 "]" }
+    | END { OFS = "-"; $0 = "a b c"; $1 = $1; print; print $(NF - 1) $NF; print NR " records" }
+1: 3 fields, first [alpha] last [gamma]
+2: 3 fields, first [leading] last [trailing]
+leading CHANGED trailing
+3
+3: 3 fields, first [one] last [three]
+one two three   sixth
+one two
+2
+4: 0 fields, first [] last []
+empty record: NF is 0 and $1 is []
+5: 1 fields, first [last-one] last [last-one]
+a-b-c
+bc
+5 records
+
+== separators: one character, a tab, a regular expression, none, and paragraphs ==
+    | BEGIN {
+    |     FS = ":"; $0 = "root:x:0:0::/root:/bin/sh"; print NF, $1, $6, "[" $5 "]"
+    |     FS = "\t"; $0 = "a b\tc d\t\te"; print NF, $2, "[" $3 "]"
+    |     FS = ", *|;"; $0 = "p, q,r;s"; print NF, $1 $2 $3 $4
+    |     FS = "|"; $0 = "x|y|z"; print NF, $2
+    |     FS = ""; $0 = "kern"; print NF, $4 $3 $2 $1
+    |     FS = " "; RS = ""
+    | }
+    | { print "paragraph " NR ": " NF " words, from " $1 " to " $NF }
+    | END { RS = ";"; print NR " paragraphs" }
+7 root /root []
+4 c d []
+4 pqrs
+3 y
+4 nrek
+paragraph 1: 6 words, from the to lines
+paragraph 2: 2 words, from the to second
+paragraph 3: 6 words, from the to long
+3 paragraphs
+
+== patterns: regular expressions, comparisons, ranges, next ==
+    | /^#/ { comments++; next }
+    | /start/, /stop/ { print "in range:  " $0; next }
+    | $2 >= 10 && $1 ~ /^[a-c]/ { print "big a-c:   " $1, $2 }
+    | $2 < 10
+    | NR == 2, NR == 4 { early++ }
+    | END { print comments " comments, " early " early, " NR " lines" }
+big a-c:   alpha 12
+beta 7
+in range:  start here
+in range:  gamma 99
+in range:  stop here
+big a-c:   carol 31
+zeta 3
+2 comments, 5 early, 10 lines
+
+== arrays: counting, in, delete, several subscripts, for in ==
+    | function sorted(arr, keys,   n, i, j, t, k) {
+    |     for (k in arr) keys[++n] = k
+    |     for (i = 2; i <= n; i++) {
+    |         t = keys[i]
+    |         for (j = i - 1; j >= 1 && keys[j] > t; j--) keys[j + 1] = keys[j]
+    |         keys[j + 1] = t
+    |     }
+    |     return n
+    | }
+    | { for (i = 1; i <= NF; i++) count[tolower($i)]++ }
+    | END {
+    |     n = sorted(count, words)
+    |     for (i = 1; i <= n; i++) if (count[words[i]] > 1) printf "%-6s %d\n", words[i], count[words[i]]
+    |     print n " different words;", ("fox" in count) ? "a fox," : "no fox,", ("cat" in count) ? "a cat" : "no cat"
+    |     delete count["the"]; print length(count) " after delete"
+    |     for (r = 1; r <= 3; r++) for (c = 1; c <= 3; c++) grid[r, c] = r * c
+    |     print grid[2, 3], ((3, 3) in grid), ((4, 1) in grid), length(grid)
+    |     for (k in grid) { split(k, rc, SUBSEP); total += rc[1] * 10 + rc[2] }
+    |     print total
+    |     delete grid; print length(grid)
+    | }
+dog    2
+fox    3
+quick  2
+the    4
+13 different words; a fox, no cat
+12 after delete
+6 1 0 9
+198
+0
+
+== functions: recursion, locals, arrays by reference ==
+    | function fact(n) { return n <= 1 ? 1 : n * fact(n - 1) }
+    | function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2) }
+    | function gcd(a, b) { return b == 0 ? a : gcd(b, a % b) }
+    | function hanoi(n, from, to, via) {
+    |     if (n == 0) return 0
+    |     return hanoi(n - 1, from, via, to) + 1 + hanoi(n - 1, via, to, from)
+    | }
+    | function fill(arr, n,   i) { for (i = 1; i <= n; i++) arr[i] = i * i }
+    | function sum(arr,   k, s) { for (k in arr) s += arr[k]; return s }
+    | function reverse(s,   i, r) { for (i = length(s); i > 0; i--) r = r substr(s, i, 1); return r }
+    | function twice(x) { x = x x; return x }
+    | BEGIN {
+    |     print fact(10), fact(20), fib(12), gcd(1071, 462), hanoi(6, "a", "c", "b")
+    |     fill(squares, 10); print sum(squares), length(squares)
+    |     i = "kept"; s = "abc"; print reverse("kern awk"), twice(s), s, i
+    | }
+3628800 2432902008176640000 144 21 63
+385 10
+kwa nrek abcabc abc kept
+
+== regular expressions: match, sub, gsub, split ==
+    | BEGIN {
+    |     s = "The year 1999 and the year 2024"
+    |     print match(s, /[0-9]+/), RSTART, RLENGTH, substr(s, RSTART, RLENGTH)
+    |     print match(s, /x+/), RSTART, RLENGTH
+    |     print match("xabcabcabcy", /(abc)+/), RLENGTH, match("foobar", /foo|foobar/), RLENGTH
+    |     t = s; n = gsub(/[0-9]+/, "<&>", t); print n, t
+    |     t = s; sub(/year/, "month", t); print t
+    |     t = s; gsub(/the|The/, "", t); gsub(/  +/, " ", t); sub(/^ /, "", t); print t
+    |     t = "a.b.c"; gsub(/\./, "\\&", t); print t
+    |     t = "banana"; print gsub(/a/, "&&", t), t, gsub(/x*/, "-", t), t
+    |     n = split("2024-11-12T08:30:00", p, /[-T:]/); print n, p[1], p[3], p[6]
+    |     n = split("a1b22c333d", q, /[0-9]+/); print n, q[1] q[2] q[3] q[4]
+    |     pat = "^[A-Z][a-z]+$"; print ("Kern" ~ pat), ("kern" ~ pat), ("KERN" !~ pat)
+    |     print ("aaa" ~ /^a{2,3}$/), ("aaaa" ~ /^a{2,3}$/), ("x9" ~ /^[[:alpha:]][[:digit:]]$/)
+    | }
+    | /[aeiou][aeiou]/ { print "two vowels together: " $0 }
+    | $0 ~ "^.[^ ]* [a-z]" && !/q/ { gsub(/[^a-z]/, ""); print "letters: " $0 }
+10 10 4 1999
+0 0 -1
+2 9 1 6
+2 The year <1999> and the year <2024>
+The month 1999 and the year 2024
+year 1999 and year 2024
+a&b&c
+3 baanaanaa 10 -b-a-a-n-a-a-n-a-a-
+6 2024 12 00
+4 abcd
+1 0 1
+1 0 1
+two vowels together: Read the book
+letters: eadthebook
+two vowels together: A quiet room
+letters: skydryfly
+
+== printf: every conversion, flags, width and precision ==
+    | BEGIN {
+    |     printf "%d|%5d|%-5d|%05d|%+d|% d|%.3d|%i\n", 42, 42, 42, 42, 42, 42, 7, -7.9
+    |     printf "%o|%x|%X|%#o|%#x|%u|%c|%c|%c\n", 64, 255, 255, 8, 255, 3000000000, 65, "kern", 256 + 66
+    |     printf "%f|%.2f|%8.3f|%-8.1f|%+.0f|%e|%.2E\n", 3.14159, 2.675, 3.14159, 2.5, 0.5, 12345.678, 0.000123
+    |     printf "%g|%g|%g|%g|%G|%.3g|%#.3g|%.10g\n", 100000, 1000000, 0.0001, 0.00001, 1e-10, 1234567, 1.5, 0.1
+    |     printf "%s|%10s|%-10s|%.2s|%5.1s|%%|%5s|\n", "kern", "right", "left", "truncate", "x", 3.0
+    |     printf "%*d|%-*d|%.*f|%*.*f\n", 6, 42, 6, 42, 2, 3.14159, 9, 4, 3.14159
+    |     printf "%s %s %s %d %d\n", 1e6, 0.1 + 0.2, 1e300 * 10, "12abc", 2 ^ 31
+    |     OFMT = "%.2f"; CONVFMT = "%.3g"; x = 3.14159; print x, x "", 17, 1e3
+    | }
+42|   42|42   |00042|+42| 42|007|-7
+100|ff|FF|010|0xff|3000000000|A|k|B
+3.141590|2.67|   3.142|2.5     |+0|1.234568e+04|1.23E-04
+100000|1e+06|0.0001|1e-05|1E-10|1.23e+06|1.50|0.1
+kern|     right|left      |tr|    x|%|    3|
+    42|42    |3.14|   3.1416
+1000000 0.3 1.0000000000000000525047602552e+301 12 2147483648
+3.14 3.14 17 1000
+
+== getline from a file, and print to one ==
+    | BEGIN {
+    |     for (i = 1; i <= 4; i++) print "row", i, i * i > tmp
+    |     printf "%s %d %d\n", "row", 5, 25 >> tmp
+    |     close(tmp)
+    |     while ((getline line < tmp) > 0) { n++; split(line, f, " "); squares += f[3] }
+    |     print n " lines read back, squares sum to " squares
+    |     close(tmp); getline < tmp; print "getline < file sets $0: " $0 ", NF " NF ", NR " NR
+    |     getline first < tmp; getline second < tmp; print "then: " first " / " second
+    |     print "appended" >> tmp; close(tmp); n = 0; while ((getline line < tmp) > 0) n++; print n " lines now"
+    |     print "a missing file gives " (getline line < "/no/such/file/kawk")
+    |     close(tmp); printf "" > tmp; close(tmp)
+    | }
+    | NR == 1 { print "record 1: " $0; getline; print "after getline: " $0 ", NR " NR }
+    | NR == 3 { getline held; print "getline var: " held ", $0 still " $0 ", NR " NR }
+    | END { print "at the end getline gives " (getline) ", NR " NR }
+5 lines read back, squares sum to 55
+getline < file sets $0: row 1 1, NF 3, NR 0
+then: row 2 4 / row 3 9
+6 lines now
+a missing file gives -1
+record 1: one
+after getline: two, NR 2
+getline var: four, $0 still three, NR 4
+at the end getline gives 0, NR 5
+
+== strings and numbers: which comparison is made ==
+    | {
+    |     printf "%-6s %-6s ", $1, $2
+    |     if ($1 < $2) printf "less    "; else if ($1 == $2) printf "equal   "; else printf "greater "
+    |     printf "%s %s\n", ($1 "" < $2 "") ? "less as strings," : "not less as strings,", ($1 + 0 == $2 + 0) ? "equal as numbers" : "unequal as numbers"
+    | }
+    | END {
+    |     print (10 < 9), ("10" < "9"), (10 < "9"), ("abc" < 1), (2 < "abc")
+    |     print (x == 0), (x == ""), length(x), x + 1, x "|"
+    |     $0 = "0 00 0.0 abc"; print !$1, !$2, !$3, !$4, !"0", !0, !""
+    |     n = split("10 9 1e1 0x1A", a, " "); print (a[1] > a[2]), (a[1] == a[3]), (a[4] == 26)
+    |     y = "3.0"; z = 3; print (y == z), (y + 0 == z), ("3" == z), 1 " " 2 + 3, 1 2 + 3
+    | }
+10     9      greater less as strings, unequal as numbers
+abc    abd    less    less as strings, equal as numbers
+1e2    100    equal   not less as strings, equal as numbers
+0x10   16     equal   less as strings, equal as numbers
+3.0    3      equal   not less as strings, equal as numbers
++5     5.0    equal   less as strings, equal as numbers
+ten    10     greater not less as strings, unequal as numbers
+0 1 1 0 1
+1 1 0 1 |
+1 1 1 0 0 1 1
+1 1 1
+0 1 1 1 5 15
+
+== the mathematical functions, to six digits ==
+    | BEGIN {
+    |     pi = atan2(0, -1)
+    |     printf "pi %.6f  e %.6f  sqrt(2) %.6f  log(10) %.6f\n", pi, exp(1), sqrt(2), log(10)
+    |     for (d = 0; d <= 180; d += 30) printf "%3d degrees: sin %9.6f cos %9.6f\n", d, sin(d * pi / 180), cos(d * pi / 180)
+    |     printf "atan2 %.6f %.6f %.6f %.6f\n", atan2(1, 1), atan2(1, -1), atan2(-1, -1), atan2(-1, 1)
+    |     printf "exp %.6g %.6g %.6g  log %.6g %.6g %.6g\n", exp(-1), exp(10), exp(0.5), log(2), log(0.001), log(1e10)
+    |     printf "sqrt %.6g %.6g %.6g  int %d %d %d\n", sqrt(1e-6), sqrt(12345), sqrt(2e10), int(3.99), int(-3.99), int("42nd")
+    |     print 2 ^ 10, 2 ^ 0.5, 2 ^ -2, 10 ^ 15, 2 ^ 3 ^ 2, -2 ^ 2, 7 % 3, -7 % 3, 7.5 % 2
+    |     print sin(1e6), cos(1e6), exp(log(8) / 3), sqrt(1e300), log(exp(1)), 1e300 * 1e300, log(-1)
+    |     print 1 / 3, 100 / 3, 1e6, 1e-6, 123456789, 0.1 + 0.2, 2 ^ 53 + 1, 1e30
+    | }
+pi 3.141593  e 2.718282  sqrt(2) 1.414214  log(10) 2.302585
+  0 degrees: sin  0.000000 cos  1.000000
+ 30 degrees: sin  0.500000 cos  0.866025
+ 60 degrees: sin  0.866025 cos  0.500000
+ 90 degrees: sin  1.000000 cos  0.000000
+120 degrees: sin  0.866025 cos -0.500000
+150 degrees: sin  0.500000 cos -0.866025
+180 degrees: sin  0.000000 cos -1.000000
+atan2 0.785398 2.356194 -2.356194 -0.785398
+exp 0.367879 22026.5 1.64872  log 0.693147 -6.90776 23.0259
+sqrt 0.001 111.108 141421  int 3 -3 42
+1024 1.41421 0.25 1000000000000000 512 -4 1 -1 1.5
+-0.349994 0.936752 2 9.99999999999999980835596172437e+149 1 inf nan
+0.333333 33.3333 1000000 1e-06 123456789 0.3 9007199254740992 1.00000000000000001988462483866e+30
+

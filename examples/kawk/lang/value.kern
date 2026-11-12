@@ -1,0 +1,450 @@
+// Values: AWK's numbers and strings, and the conversions between them.
+module lang
+import "std/str"
+
+// A value is a number, a string, or both at once: an input field that
+// looks like a number compares as one. VInput is a string that came from
+// input and has not been looked at yet; VStrNum is one that was, and is
+// a number (n holds it). VUninit is the value of a variable nothing was
+// assigned to: the empty string and zero.
+const VUninit: u8 = 0u8
+const VNum: u8 = 1u8
+const VStr: u8 = 2u8
+const VStrNum: u8 = 3u8
+const VInput: u8 = 4u8
+
+struct Value { tag: u8; n: f64; s: str.String }
+
+func uninit() -> Value { return Value { tag: VUninit, n: 0.0, s: str.String.new() } }
+// num is a number; a negative zero is stored as zero, as the one-true-awk
+// stores it.
+func num(x: f64) -> Value {
+    if x == 0.0 { return Value { tag: VNum, n: 0.0, s: str.String.new() } }
+    return Value { tag: VNum, n: x, s: str.String.new() }
+}
+func flag(b: bool) -> Value {
+    if b { return Value { tag: VNum, n: 1.0, s: str.String.new() } }
+    return Value { tag: VNum, n: 0.0, s: str.String.new() }
+}
+func text(s: view[]u8) -> Value { return Value { tag: VStr, n: 0.0, s: str.String.from(s) } }
+func text_own(s: own str.String) -> Value { return Value { tag: VStr, n: 0.0, s: s } }
+func input(s: view[]u8) -> Value { return Value { tag: VInput, n: 0.0, s: str.String.from(s) } }
+func input_own(s: own str.String) -> Value { return Value { tag: VInput, n: 0.0, s: s } }
+func clone_value(v: view[Value]) -> Value { return Value { tag: v.tag, n: v.n, s: v.s.clone() } }
+
+// NumParse is what reading a number from the front of a string gives: its
+// value, where it ended, whether there was one, and whether it was out of
+// a double's range.
+struct NumParse { value: f64; end: usize; ok: bool; range: bool }
+
+func pow10(k: i64) -> f64 {
+    var r: f64 = 1.0
+    var i: i64 = 0i64
+    while i < k {
+        r = r * 10.0
+        i = i + 1i64
+    }
+    return r
+}
+
+func infinity() -> f64 {
+    var z: f64 = 0.0
+    return 1.0 / z
+}
+
+// scale2 is x times 2 to the power e, exactly when the result is a
+// double.
+func scale2(x: f64, e: i64) -> f64 {
+    var r: f64 = x
+    var k: i64 = e
+    while k >= 64i64 && r != 0.0 {
+        r = r * 18446744073709551616.0
+        k = k - 64i64
+        if r - r != 0.0 { return r }
+    }
+    while k > 0i64 {
+        r = r * 2.0
+        k = k - 1i64
+    }
+    while k <= -64i64 && r != 0.0 {
+        r = r / 18446744073709551616.0
+        k = k + 64i64
+    }
+    while k < 0i64 {
+        r = r / 2.0
+        k = k + 1i64
+    }
+    return r
+}
+
+func lower(c: u8) -> u8 {
+    if c >= 65u8 && c <= 90u8 { return c + 32u8 }
+    return c
+}
+
+// word_at reports whether s holds w, in either case, at i.
+func word_at(s: view[]u8, i: usize, w: view[]u8) -> bool {
+    if i + len(w) > len(s) { return false }
+    for k in 0usize..len(w) {
+        if lower(s[i + k]) != w[k] { return false }
+    }
+    return true
+}
+
+// parse_number reads a number from the front of s as C's strtod does:
+// blanks, a sign, then decimal digits with a fraction and an exponent, or
+// a hexadecimal number, or inf, infinity or nan. The decimal value is
+// correctly rounded: exactly, from a few digits and a small power of ten,
+// and otherwise by the library's reader.
+func parse_number(s: view[]u8) -> NumParse {
+    n := len(s)
+    var i: usize = 0usize
+    while i < n && (s[i] == 32u8 || (s[i] >= 9u8 && s[i] <= 13u8)) { i = i + 1usize }
+    var neg: bool = false
+    if i < n && (s[i] == 43u8 || s[i] == 45u8) {
+        neg = s[i] == 45u8
+        i = i + 1usize
+    }
+    if i >= n { return NumParse { value: 0.0, end: 0usize, ok: false, range: false } }
+    c := s[i]
+    if c == 105u8 || c == 73u8 {
+        if word_at(s, i, "infinity") { return signed_result(infinity(), neg, i + 8usize) }
+        if word_at(s, i, "inf") { return signed_result(infinity(), neg, i + 3usize) }
+        return NumParse { value: 0.0, end: 0usize, ok: false, range: false }
+    }
+    if c == 110u8 || c == 78u8 {
+        if word_at(s, i, "nan") {
+            inf := infinity()
+            return NumParse { value: inf - inf, end: i + 3usize, ok: true, range: false }
+        }
+        return NumParse { value: 0.0, end: 0usize, ok: false, range: false }
+    }
+    if c == 48u8 && i + 1usize < n && (s[i + 1usize] == 120u8 || s[i + 1usize] == 88u8) {
+        h := parse_hex(s, i + 2usize)
+        if h.ok {
+            if neg { return NumParse { value: 0.0 - h.value, end: h.end, ok: true, range: h.range } }
+            return h
+        }
+        // 0x with no digits is the number 0
+        return NumParse { value: 0.0, end: i + 1usize, ok: true, range: false }
+    }
+    // decimal: collect up to 19 significant digits in mant; dexp counts
+    // the powers of ten the digits left out or the fraction stand for
+    start := i
+    var mant: u64 = 0u64
+    var sig: u32 = 0u32
+    var dexp: i64 = 0i64
+    var any: bool = false
+    var inexact: bool = false
+    while i < n && is_digit(s[i]) {
+        any = true
+        if sig < 19u32 {
+            mant = mant * 10u64 + u64(s[i] - 48u8)
+            if mant > 0u64 { sig = sig + 1u32 }
+        } else {
+            dexp = dexp + 1i64
+            if s[i] != 48u8 { inexact = true }
+        }
+        i = i + 1usize
+    }
+    if i < n && s[i] == 46u8 {
+        var j: usize = i + 1usize
+        while j < n && is_digit(s[j]) {
+            any = true
+            if sig < 19u32 {
+                mant = mant * 10u64 + u64(s[j] - 48u8)
+                if mant > 0u64 { sig = sig + 1u32 }
+                dexp = dexp - 1i64
+            } else if s[j] != 48u8 {
+                inexact = true
+            }
+            j = j + 1usize
+        }
+        if any { i = j }
+    }
+    if !any { return NumParse { value: 0.0, end: 0usize, ok: false, range: false } }
+    mant_end := i
+    var written: i64 = 0i64
+    if i < n && (s[i] == 101u8 || s[i] == 69u8) {
+        var j: usize = i + 1usize
+        var eneg: bool = false
+        if j < n && (s[j] == 43u8 || s[j] == 45u8) {
+            eneg = s[j] == 45u8
+            j = j + 1usize
+        }
+        if j < n && is_digit(s[j]) {
+            var ex: i64 = 0i64
+            while j < n && is_digit(s[j]) {
+                if ex < 100000i64 { ex = ex * 10i64 + i64(s[j] - 48u8) }
+                j = j + 1usize
+            }
+            if eneg { written = 0i64 - ex } else { written = ex }
+            i = j
+        }
+    }
+    dexp = dexp + written
+    var v: f64 = 0.0
+    var range: bool = false
+    if mant == 0u64 {
+        v = 0.0
+    } else if !inexact && mant < 9007199254740992u64 && dexp >= -22i64 && dexp <= 22i64 {
+        if dexp >= 0i64 { v = f64(mant) * pow10(dexp) } else { v = f64(mant) / pow10(0i64 - dexp) }
+    } else {
+        v = parse_long(s, start, mant_end, written)
+        range = v - v != 0.0 || v < scale2(1.0, -1022i64)
+    }
+    if neg { v = 0.0 - v }
+    return NumParse { value: v, end: i, ok: true, range: range }
+}
+
+func signed_result(v: f64, neg: bool, end: usize) -> NumParse {
+    if neg { return NumParse { value: 0.0 - v, end: end, ok: true, range: false } }
+    return NumParse { value: v, end: end, ok: true, range: false }
+}
+
+// parse_long is the value of the decimal number whose digits and point
+// are s[start:end] and whose written exponent is `written`, by the
+// library's reader: the digits as one whole number (at most 800 of them:
+// the rest cannot change the result but in a tie) and the power of ten
+// that puts the point back.
+func parse_long(s: view[]u8, start: usize, end: usize, written: i64) -> f64 {
+    t := str.String.new()
+    var frac: i64 = 0i64
+    var seen_point: bool = false
+    var kept: usize = 0usize
+    var dropped: i64 = 0i64
+    for i in start..end {
+        c := s[i]
+        if c == 46u8 {
+            seen_point = true
+        } else {
+            if seen_point { frac = frac + 1i64 }
+            if kept > 0usize || c != 48u8 {
+                if kept < 800usize {
+                    t.push(c)
+                    kept = kept + 1usize
+                } else {
+                    dropped = dropped + 1i64
+                }
+            }
+        }
+    }
+    if kept == 0usize { return 0.0 }
+    t.push(101u8)
+    t.push_i64(written - frac + dropped)
+    return str.str_parse_f64(t.as_view())
+}
+
+// parse_hex reads the digits of a hexadecimal number after its 0x.
+func parse_hex(s: view[]u8, from: usize) -> NumParse {
+    n := len(s)
+    var i: usize = from
+    var mant: u64 = 0u64
+    var bexp: i64 = 0i64
+    var any: bool = false
+    while i < n && hex_value(s[i]) < 16u32 {
+        any = true
+        if mant < 1152921504606846976u64 { mant = mant * 16u64 + u64(hex_value(s[i])) } else { bexp = bexp + 4i64 }
+        i = i + 1usize
+    }
+    if i < n && s[i] == 46u8 {
+        var j: usize = i + 1usize
+        while j < n && hex_value(s[j]) < 16u32 {
+            any = true
+            if mant < 1152921504606846976u64 {
+                mant = mant * 16u64 + u64(hex_value(s[j]))
+                bexp = bexp - 4i64
+            }
+            j = j + 1usize
+        }
+        if any { i = j }
+    }
+    if !any { return NumParse { value: 0.0, end: 0usize, ok: false, range: false } }
+    if i < n && (s[i] == 112u8 || s[i] == 80u8) {
+        var j: usize = i + 1usize
+        var eneg: bool = false
+        if j < n && (s[j] == 43u8 || s[j] == 45u8) {
+            eneg = s[j] == 45u8
+            j = j + 1usize
+        }
+        if j < n && is_digit(s[j]) {
+            var ex: i64 = 0i64
+            while j < n && is_digit(s[j]) {
+                if ex < 100000i64 { ex = ex * 10i64 + i64(s[j] - 48u8) }
+                j = j + 1usize
+            }
+            if eneg { bexp = bexp - ex } else { bexp = bexp + ex }
+            i = j
+        }
+    }
+    v := scale2(f64(mant), bexp)
+    return NumParse { value: v, end: i, ok: true, range: v - v != 0.0 }
+}
+
+// looks_numeric decides whether a string from input is a number: all of
+// it must be one, but for blanks around it, and it must be in range. inf
+// is not one, as the one-true-awk has it, though -inf and nan are.
+func looks_numeric(s: view[]u8) -> NumParse {
+    p := parse_number(s)
+    if !p.ok || p.range { return NumParse { value: p.value, end: p.end, ok: false, range: p.range } }
+    if p.value > 0.0 && p.value - p.value != 0.0 { return NumParse { value: p.value, end: p.end, ok: false, range: false } }
+    var i: usize = p.end
+    while i < len(s) {
+        c := s[i]
+        if c != 32u8 && c != 9u8 && c != 10u8 && c != 13u8 { return NumParse { value: p.value, end: p.end, ok: false, range: false } }
+        i = i + 1usize
+    }
+    return p
+}
+
+// to_num is a value as a number.
+func to_num(v: view[Value]) -> f64 {
+    if v.tag == VNum || v.tag == VStrNum { return v.n }
+    if v.tag == VUninit { return 0.0 }
+    return parse_number(v.s.as_view()).value
+}
+
+// NumView is whether a value compares as a number, and the number.
+struct NumView { is_num: bool; n: f64 }
+
+func num_view(v: view[Value]) -> NumView {
+    if v.tag == VNum || v.tag == VStrNum { return NumView { is_num: true, n: v.n } }
+    if v.tag == VUninit { return NumView { is_num: true, n: 0.0 } }
+    if v.tag == VStr { return NumView { is_num: false, n: 0.0 } }
+    p := looks_numeric(v.s.as_view())
+    return NumView { is_num: p.ok, n: p.value }
+}
+
+// as_number is a variable's own value read as a number. The one-true-awk
+// remembers the reading: a string that looks like a number is, from then
+// on, a number too, so that `v = "0"; n = v + 1; if (v) ...` finds v
+// false. A constant is never changed this way, only what a variable, an
+// element or a field holds.
+func as_number(v: edit[Value]) -> f64 {
+    if v.tag == VNum || v.tag == VStrNum { return v.n }
+    if v.tag == VUninit { return 0.0 }
+    if v.tag == VInput { return parse_number(v.s.as_view()).value }
+    p := looks_numeric(v.s.as_view())
+    if p.ok {
+        v.tag = VStrNum
+        v.n = p.value
+        return p.value
+    }
+    return parse_number(v.s.as_view()).value
+}
+
+// truth is a value as a condition: a number is true when it is above or
+// below zero (not-a-number is neither), a string when it is not empty.
+func truth(v: view[Value]) -> bool {
+    if v.tag == VNum || v.tag == VStrNum { return v.n < 0.0 || v.n > 0.0 }
+    if v.tag == VUninit { return false }
+    if v.tag == VStr { return v.s.len() > 0usize }
+    p := looks_numeric(v.s.as_view())
+    if p.ok { return p.value < 0.0 || p.value > 0.0 }
+    return v.s.len() > 0usize
+}
+
+func trunc(x: f64) -> f64 {
+    if x - x != 0.0 { return x }
+    if x >= 9007199254740992.0 || x <= -9007199254740992.0 { return x }
+    return f64(i64(x))
+}
+
+// sat_i64 and its kin convert as the machine the one-true-awk runs on
+// does: a value out of range becomes the nearest end of the range, and
+// not-a-number becomes zero.
+func sat_i64(x: f64) -> i64 {
+    if x != x { return 0i64 }
+    if x >= 9223372036854775807.0 { return 9223372036854775807i64 }
+    if x <= -9223372036854775808.0 { return -9223372036854775807i64 - 1i64 }
+    return i64(x)
+}
+func sat_u64(x: f64) -> u64 {
+    if x != x || x <= 0.0 { return 0u64 }
+    if x >= 18446744073709551615.0 { return 18446744073709551615u64 }
+    return u64(x)
+}
+func sat_i32(x: f64) -> i64 {
+    if x != x { return 0i64 }
+    if x >= 2147483647.0 { return 2147483647i64 }
+    if x <= -2147483648.0 { return -2147483648i64 }
+    return i64(x)
+}
+
+// push_num appends a number as a string: a whole number in full, any
+// other through fmt (CONVFMT, or OFMT when it is printed).
+func push_num(dst: edit[str.String], x: f64, fmt: view[]u8) {
+    if x - x != 0.0 {
+        if x != x { dst.push_str("nan") } else if x > 0.0 { dst.push_str("inf") } else { dst.push_str("-inf") }
+        return
+    }
+    if x > -1000000000000000000.0 && x < 1000000000000000000.0 {
+        w := i64(x)
+        if f64(w) == x {
+            dst.push_i64(w)
+            return
+        }
+    } else if trunc(x) == x {
+        fmt_float(dst, x, 103u8, 30i64, no_flags(), 0i64)
+        return
+    }
+    if str.equal(fmt, "%.6g") {
+        fmt_float(dst, x, 103u8, 6i64, no_flags(), 0i64)
+        return
+    }
+    one := Vec[Value].new()
+    one.push(num(x))
+    if !format(dst, fmt, one.as_view(), "%.6g") { dst.push_str("") }
+}
+
+// push_value appends a value as a string.
+func push_value(dst: edit[str.String], v: view[Value], fmt: view[]u8) {
+    if v.tag == VNum {
+        push_num(dst, v.n, fmt)
+    } else if v.tag != VUninit {
+        dst.push_str(v.s.as_view())
+    }
+}
+
+// into_text is a value's string, taking the value.
+func into_text(v: own Value, fmt: view[]u8) -> str.String {
+    if v.tag == VNum {
+        s := str.String.new()
+        push_num(s, v.n, fmt)
+        return s
+    }
+    return replace(v.s, str.String.new())
+}
+
+func bytes_order(a: view[]u8, b: view[]u8) -> i32 {
+    var i: usize = 0usize
+    while i < len(a) && i < len(b) {
+        if a[i] < b[i] { return -1i32 }
+        if a[i] > b[i] { return 1i32 }
+        i = i + 1usize
+    }
+    if len(a) < len(b) { return -1i32 }
+    if len(a) > len(b) { return 1i32 }
+    return 0i32
+}
+
+// compare orders two values: as numbers when both are, else as strings.
+// Not-a-number is equal to everything, as the one-true-awk has it.
+func compare(a: view[Value], b: view[Value], fmt: view[]u8) -> i32 {
+    x := num_view(a)
+    if x.is_num {
+        y := num_view(b)
+        if y.is_num {
+            d := x.n - y.n
+            if d < 0.0 { return -1i32 }
+            if d > 0.0 { return 1i32 }
+            return 0i32
+        }
+    }
+    if a.tag != VNum && b.tag != VNum { return bytes_order(a.s.as_view(), b.s.as_view()) }
+    sa := str.String.new()
+    push_value(sa, a, fmt)
+    sb := str.String.new()
+    push_value(sb, b, fmt)
+    return bytes_order(sa.as_view(), sb.as_view())
+}

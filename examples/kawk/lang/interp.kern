@@ -1,0 +1,1345 @@
+// The interpreter: it walks the tree. A statement returns how it ended;
+// an expression returns a value, with shorter paths for an expression
+// wanted only as a number, as a condition or as text to append.
+module lang
+import "std/map"
+import "std/str"
+
+// How a statement ended.
+const StNormal: u8 = 0u8
+const StBreak: u8 = 1u8
+const StContinue: u8 = 2u8
+const StNext: u8 = 3u8
+const StExit: u8 = 4u8
+const StReturn: u8 = 5u8
+
+// A variable's cell holds a scalar, or names an array. CArr names an
+// array that another cell owns or that is global; COwnArr one that a
+// function's local made, freed when the function returns; CUnset is a
+// parameter that was given a variable holding nothing yet: arr is that
+// variable's cell, so that when the function uses the parameter as an
+// array, the caller's variable becomes the same array.
+const CScalar: u8 = 0u8
+const CArr: u8 = 1u8
+const COwnArr: u8 = 2u8
+const CUnset: u8 = 3u8
+struct Cell { kind: u8; arr: u32; v: Value }
+
+// Key is an array's subscript. It is a String with a hash of its own: the
+// library's hash of a String is FNV-1a as it comes, and the map takes a
+// slot from its top bits, which the last bytes of a key barely reach, so
+// that keys like w1, w2, w3 would crowd into a few slots. Here the hash
+// is mixed first.
+struct Key { s: str.String }
+impl map.Hashable for Key {
+    func hash(view self) -> u64 { return map.mix(str.hash(self.s.as_view())) }
+    func eq(view self, other: view[Key]) -> bool { return self.s.equals(other.s.as_view()) }
+}
+func key_of(s: view[]u8) -> Key { return Key { s: str.String.from(s) } }
+
+// Elem is an element of an array, numbered in the order of insertion.
+struct Elem { v: Value; seq: u64 }
+// Grow records that the one-true-awk's table would have grown to `size`
+// buckets just before element seq went in (see keys_in_order).
+struct Grow { seq: u64; size: u64 }
+struct Arr { m: map.Map[Key, Elem]; nseq: u64; size: u64; grows: Vec[Grow] }
+
+func new_arr() -> Arr { return Arr { m: map.Map[Key, Elem].new(), nseq: 0u64, size: 50u64, grows: Vec[Grow].new() } }
+
+// Span is a field: bytes lo..hi of the record. ty says what was assigned
+// to it since the record was split: nothing (0: it is input), a string
+// (1), a number (2, kept in n), or the value of a variable that was never
+// set (3).
+struct Span { lo: usize; hi: usize; ty: u8; n: f64 }
+
+// FsMode is how a record is split: 0 at runs of blanks, 1 at a byte, 2 at
+// matches of a regular expression, 3 into its bytes.
+struct FsMode { kind: u8; ch: u8 }
+
+const max_calls: u32 = 5000u32
+const max_fields: f64 = 10000000.0
+
+struct Interp {
+    cells: Vec[Cell]
+    nglobals: usize
+    base: usize
+    depth: u32
+    arrays: Vec[Arr]
+    free_arrays: Vec[u32]
+    rec: str.String
+    fields: Vec[Span]
+    split_done: bool
+    fs: FsMode
+    fs_re: Regex
+    nr: f64
+    fnr: f64
+    ofs: str.String
+    ors: str.String
+    subsep: str.String
+    convfmt: str.String
+    ofmt: str.String
+    rs_mode: u8
+    rs_ch: u8
+    rs_re: Regex
+    halt: u8
+    exit_code: i32
+    retval: Value
+    range_on: Vec[bool]
+    scratch: Scratch
+    dregs: Vec[Regex]
+    dmap: map.Map[str.String, u32]
+    rng: Random
+    seed: f64
+    obuf: str.String
+    tty: bool
+    outs: Vec[Output]
+    ins: Vec[Input]
+    main: Input
+    main_open: bool
+    argi: f64
+    any_file: bool
+    stdin_text: Vec[u8]
+    stdin_given: bool
+    name: str.String
+    reading: bool
+    late_fs: str.String
+    has_late_fs: bool
+}
+
+func new_interp(p: view[Prog]) -> Interp {
+    it := Interp {
+        cells: Vec[Cell].new(), nglobals: p.globals.len(), base: 0usize, depth: 0u32, arrays: Vec[Arr].new(), free_arrays: Vec[u32].new(),
+        rec: str.String.new(), fields: Vec[Span].new(), split_done: true, fs: FsMode { kind: 0u8, ch: 32u8 }, fs_re: regex_compile(""),
+        nr: 0.0, fnr: 0.0, ofs: str.String.from(" "), ors: str.String.from("\n"), subsep: str.String.from("\x1c"),
+        convfmt: str.String.from("%.6g"), ofmt: str.String.from("%.6g"), rs_mode: 0u8, rs_ch: 10u8, rs_re: regex_compile(""),
+        halt: 0u8, exit_code: 0i32, retval: uninit(), range_on: Vec[bool].new(), scratch: new_scratch(), dregs: Vec[Regex].new(),
+        dmap: map.Map[str.String, u32].new(), rng: new_random(), seed: 1.0, obuf: str.String.new(), tty: false, outs: Vec[Output].new(),
+        ins: Vec[Input].new(), main: new_input("", false), main_open: false, argi: 1.0, any_file: false, stdin_text: Vec[u8].new(),
+        stdin_given: false, name: str.String.from("kawk"), reading: false, late_fs: str.String.new(), has_late_fs: false
+    }
+    for i in 0usize..it.nglobals { it.cells.push(Cell { kind: CScalar, arr: 0u32, v: uninit() }) }
+    for i in 0usize..p.rules.len() { it.range_on.push(false) }
+    // array 0 is where a mistaken use of a scalar as an array lands
+    it.arrays.push(new_arr())
+    it.set_cell(usize(VFS), text(" "))
+    it.set_cell(usize(VOFS), text(" "))
+    it.set_cell(usize(VORS), text("\n"))
+    it.set_cell(usize(VRS), text("\n"))
+    it.set_cell(usize(VSUBSEP), text("\x1c"))
+    it.set_cell(usize(VCONVFMT), text("%.6g"))
+    it.set_cell(usize(VOFMT), text("%.6g"))
+    it.set_cell(usize(VRSTART), num(0.0))
+    it.set_cell(usize(VRLENGTH), num(-1.0))
+    it.set_cell(usize(VFILENAME), text(""))
+    env := it.new_array()
+    with c := it.cells.at(usize(VENVIRON)) {
+        c.kind = CArr
+        c.arr = env
+    }
+    argv := it.new_array()
+    with c := it.cells.at(usize(VARGV)) {
+        c.kind = CArr
+        c.arr = argv
+    }
+    return it
+}
+
+// awk_hash is the one-true-awk's hash of a key, before it is reduced to a
+// bucket; a byte above 127 counts as negative, as a char does where the
+// system awk was built.
+func awk_hash(s: view[]u8) -> u32 {
+    var h: u32 = 0u32
+    for i in 0usize..len(s) {
+        var c: u32 = u32(s[i])
+        if c >= 128u32 { c = wrapping_sub(c, 256u32) }
+        h = wrapping_add(c, wrapping_mul(31u32, h))
+    }
+    return h
+}
+
+struct KeyItem { seq: u64; hash: u32; idx: u32 }
+
+// sort_items sorts by seq, by merging runs of doubling length.
+func sort_items(xs: edit[Vec[KeyItem]]) {
+    n := xs.len()
+    tmp := Vec[KeyItem].new()
+    tmp.resize(n, KeyItem { seq: 0u64, hash: 0u32, idx: 0u32 })
+    var width: usize = 1usize
+    while width < n {
+        var lo: usize = 0usize
+        while lo < n {
+            var mid: usize = lo + width
+            if mid > n { mid = n }
+            var hi: usize = lo + 2usize * width
+            if hi > n { hi = n }
+            var i: usize = lo
+            var j: usize = mid
+            var k: usize = lo
+            while i < mid && j < hi {
+                a := xs.get(i)
+                b := xs.get(j)
+                if a.seq <= b.seq {
+                    with slot := tmp.at(k) { slot = a }
+                    i = i + 1usize
+                } else {
+                    with slot := tmp.at(k) { slot = b }
+                    j = j + 1usize
+                }
+                k = k + 1usize
+            }
+            while i < mid {
+                a := xs.get(i)
+                with slot := tmp.at(k) { slot = a }
+                i = i + 1usize
+                k = k + 1usize
+            }
+            while j < hi {
+                b := xs.get(j)
+                with slot := tmp.at(k) { slot = b }
+                j = j + 1usize
+                k = k + 1usize
+            }
+            lo = hi
+        }
+        for q in 0usize..n {
+            t := tmp.get(q)
+            with slot := xs.at(q) { slot = t }
+        }
+        width = width * 2usize
+    }
+}
+
+const no_item: u32 = 4294967295u32
+
+// keys_in_order lists an array's keys in the order the one-true-awk's
+// `for (k in a)` visits them, which programs written against it have come
+// to print in. Its table has 50 buckets and grows fourfold when it holds
+// more than twice as many elements as buckets; an element goes in at the
+// head of its bucket's chain, and growing moves the chains bucket by
+// bucket, head first, each element to the head of its new chain. The
+// array keeps the order of insertion and the moments of growth, and the
+// chains are rebuilt here from those.
+func keys_in_order(a: view[Arr]) -> Vec[str.String] {
+    keys := Vec[str.String].new()
+    items := Vec[KeyItem].new()
+    for k, e in a.m {
+        items.push(KeyItem { seq: e.seq, hash: awk_hash(k.s.as_view()), idx: truncate[u32](keys.len()) })
+        keys.push(k.s.clone())
+    }
+    sort_items(items)
+    n := items.len()
+    next := Vec[u32].new()
+    next.resize(n, no_item)
+    var size: u64 = 50u64
+    heads := Vec[u32].new()
+    heads.resize(usize(size), no_item)
+    var g: usize = 0usize
+    var i: usize = 0usize
+    while i <= n {
+        var upto: u64 = 18446744073709551615u64
+        if i < n { upto = items.get(i).seq }
+        while g < a.grows.len() && a.grows.get(g).seq <= upto {
+            bigger := a.grows.get(g).size
+            moved := Vec[u32].new()
+            moved.resize(usize(bigger), no_item)
+            for b in 0usize..usize(size) {
+                var cp: u32 = heads.get(b)
+                while cp != no_item {
+                    after := next.get(usize(cp))
+                    h := usize(u64(items.get(usize(cp)).hash) % bigger)
+                    was := moved.get(h)
+                    with slot := next.at(usize(cp)) { slot = was }
+                    with slot := moved.at(h) { slot = cp }
+                    cp = after
+                }
+            }
+            heads = moved
+            size = bigger
+            g = g + 1usize
+        }
+        if i < n {
+            h := usize(u64(items.get(i).hash) % size)
+            was := heads.get(h)
+            with slot := next.at(i) { slot = was }
+            with slot := heads.at(h) { slot = truncate[u32](i) }
+        }
+        i = i + 1usize
+    }
+    ordered := Vec[str.String].new()
+    for b in 0usize..usize(size) {
+        var cp: u32 = heads.get(b)
+        while cp != no_item {
+            at := usize(items.get(usize(cp)).idx)
+            ordered.push(replace(keys.at(at), str.String.new()))
+            cp = next.get(usize(cp))
+        }
+    }
+    return ordered
+}
+
+impl Interp {
+    // ---- failures ----
+
+    // fatal reports an error of the running program and stops it: what
+    // was printed stays printed, END does not run, the status is 2.
+    func fatal(edit self, msg: view[]u8) {
+        if self.halt == 2u8 { return }
+        self.flush_stdout()
+        m := str.String.from(self.name.as_view())
+        m.push_str(": ")
+        m.push_str(msg)
+        m.push(10u8)
+        eprint_str(m.as_view())
+        self.halt = 2u8
+        self.exit_code = 2i32
+    }
+    func fatal2(edit self, msg: view[]u8, what: view[]u8) {
+        m := str.String.from(msg)
+        m.push_str(what)
+        self.fatal(m.as_view())
+    }
+
+    // ---- cells and arrays ----
+
+    func addr(view self, vr: u32) -> usize {
+        if vr & LocalBit != 0u32 { return self.base + usize(vr & 2147483647u32) }
+        return usize(vr)
+    }
+    func set_cell(edit self, a: usize, v: own Value) {
+        with c := self.cells.at(a) {
+            c.kind = CScalar
+            c.v = v
+        }
+    }
+    func new_array(edit self) -> u32 {
+        match self.free_arrays.pop() {
+            Some(id) => { return id }
+            None => { }
+        }
+        id := truncate[u32](self.arrays.len())
+        self.arrays.push(new_arr())
+        return id
+    }
+    func clear_array(edit self, id: u32) {
+        with a := self.arrays.at(usize(id)) { a = new_arr() }
+    }
+    func free_array(edit self, id: u32) {
+        self.clear_array(id)
+        self.free_arrays.push(id)
+    }
+
+    // array_at is the array a cell names, made now if the cell holds
+    // nothing yet.
+    func array_at(edit self, a: usize) -> u32 {
+        var kind: u8 = CScalar
+        var arr: u32 = 0u32
+        var empty: bool = false
+        with c := self.cells.get(a) {
+            kind = c.kind
+            arr = c.arr
+            empty = c.v.tag == VUninit
+        }
+        if kind == CArr || kind == COwnArr { return arr }
+        if kind == CUnset {
+            id := self.array_at(usize(arr))
+            with c := self.cells.at(a) {
+                c.kind = CArr
+                c.arr = id
+            }
+            return id
+        }
+        if !empty || a < usize(special_count) {
+            self.fatal("can't use a scalar as an array")
+            return 0u32
+        }
+        id := self.new_array()
+        with c := self.cells.at(a) {
+            if a < self.nglobals { c.kind = CArr } else { c.kind = COwnArr }
+            c.arr = id
+        }
+        return id
+    }
+    func array_of(edit self, vr: u32) -> u32 { return self.array_at(self.addr(vr)) }
+
+    // slot_of finds an element, making it when it is not there, and
+    // returns its slot in the array's map, good until the next insertion.
+    func slot_of(edit self, id: u32, key: view[Key]) -> usize {
+        with a := self.arrays.at(usize(id)) {
+            match a.m.find(key) {
+                Some(slot) => { return slot }
+                None => { }
+            }
+            if u64(a.m.len()) + 1u64 > 2u64 * a.size {
+                a.size = a.size * 4u64
+                a.grows.push(Grow { seq: a.nseq, size: a.size })
+            }
+            a.m.insert(Key { s: key.s.clone() }, Elem { v: uninit(), seq: a.nseq })
+            a.nseq = a.nseq + 1u64
+            match a.m.find(key) {
+                Some(slot) => { return slot }
+                None => { }
+            }
+        }
+        trap()
+    }
+    func elem_get(edit self, id: u32, key: view[Key]) -> Value {
+        slot := self.slot_of(id, key)
+        return clone_value(self.arrays.get(usize(id)).m.value_at(slot).v)
+    }
+    func elem_num(edit self, id: u32, key: view[Key]) -> f64 {
+        slot := self.slot_of(id, key)
+        with e := self.arrays.at(usize(id)).m.value_at_mut(slot) { return as_number(e.v) }
+    }
+    func elem_set(edit self, id: u32, key: view[Key], v: own Value) {
+        slot := self.slot_of(id, key)
+        with e := self.arrays.at(usize(id)).m.value_at_mut(slot) { e.v = v }
+    }
+    func elem_exists(view self, id: u32, key: view[Key]) -> bool {
+        match self.arrays.get(usize(id)).m.find(key) {
+            Some(slot) => { return true }
+            None => { return false }
+        }
+    }
+
+    // ---- variables ----
+
+    func var_get(edit self, vr: u32) -> Value {
+        a := self.addr(vr)
+        if a < usize(special_count) {
+            if a == usize(VNF) {
+                self.ensure_split()
+                return num(f64(self.fields.len()))
+            }
+            if a == usize(VNR) { return num(self.nr) }
+            if a == usize(VFNR) { return num(self.fnr) }
+        }
+        var bad: bool = false
+        with c := self.cells.get(a) {
+            if c.kind == CScalar { return clone_value(c.v) }
+            bad = c.kind != CUnset
+        }
+        if bad { self.fatal("can't read the value of an array") }
+        return uninit()
+    }
+    func var_num(edit self, vr: u32) -> f64 {
+        a := self.addr(vr)
+        if a >= usize(special_count) {
+            with c := self.cells.at(a) {
+                if c.kind == CScalar { return as_number(c.v) }
+            }
+        }
+        v := self.var_get(vr)
+        return to_num(v)
+    }
+    func var_set(edit self, vr: u32, v: own Value) {
+        a := self.addr(vr)
+        var bad: bool = false
+        with c := self.cells.at(a) {
+            if c.kind == CArr || c.kind == COwnArr {
+                bad = true
+                drop(v)
+            } else {
+                c.kind = CScalar
+                c.v = v
+            }
+        }
+        if bad {
+            self.fatal("can't assign to an array as if it were a scalar")
+            return
+        }
+        if a < usize(special_count) { self.special_set(a) }
+    }
+
+    // special_set is called when a special variable has been assigned:
+    // what the interpreter keeps of it is brought up to date.
+    func special_set(edit self, a: usize) {
+        slot := truncate[u32](a)
+        x := to_num(self.cells.get(a).v)
+        if slot == VNF {
+            self.set_nf(x)
+            return
+        }
+        if slot == VNR {
+            self.nr = x
+            return
+        }
+        if slot == VFNR {
+            self.fnr = x
+            return
+        }
+        if slot == VFS {
+            // a record not yet split is split as FS was when it was read
+            self.ensure_split()
+        }
+        s := str.String.new()
+        push_value(s, self.cells.get(a).v, self.convfmt.as_view())
+        if slot == VFS {
+            if s.len() == 0usize {
+                self.fs = FsMode { kind: 3u8, ch: 0u8 }
+            } else if s.len() > 1usize {
+                re := regex_compile(s.as_view())
+                if re.bad {
+                    self.fatal2("FS is not a well-formed regular expression: ", s.as_view())
+                    drop(re)
+                } else {
+                    self.fs_re = re
+                    self.fs = FsMode { kind: 2u8, ch: 0u8 }
+                }
+            } else if s.byte(0usize) == 32u8 {
+                self.fs = FsMode { kind: 0u8, ch: 32u8 }
+            } else {
+                self.fs = FsMode { kind: 1u8, ch: s.byte(0usize) }
+            }
+            drop(s)
+        } else if slot == VRS {
+            if s.len() == 0usize {
+                self.rs_mode = 1u8
+            } else if s.len() == 1usize {
+                self.rs_mode = 0u8
+                self.rs_ch = s.byte(0usize)
+            } else {
+                re := regex_compile(s.as_view())
+                if re.bad {
+                    self.fatal2("RS is not a well-formed regular expression: ", s.as_view())
+                    drop(re)
+                } else {
+                    self.rs_re = re
+                    self.rs_mode = 2u8
+                }
+            }
+            drop(s)
+        } else if slot == VOFS {
+            self.ofs = s
+        } else if slot == VORS {
+            self.ors = s
+        } else if slot == VSUBSEP {
+            self.subsep = s
+        } else if slot == VCONVFMT {
+            self.convfmt = s
+        } else if slot == VOFMT {
+            self.ofmt = s
+        } else {
+            drop(s)
+        }
+    }
+
+    // ---- the record and its fields ----
+
+    func ensure_split(edit self) {
+        if self.split_done { return }
+        self.split_done = true
+        self.fields.clear()
+        split_text(self.rec.as_view(), self.fs, self.fs_re, self.scratch, self.rs_mode == 1u8, self.fields)
+    }
+
+    // set_record makes s the record; it is split when a field is asked for.
+    func set_record(edit self, s: own str.String) {
+        self.rec = s
+        self.split_done = false
+    }
+
+    // field_index is a field number that can be used, or -1 after
+    // reporting one that cannot.
+    func field_index(edit self, x: f64) -> i64 {
+        if x != x || x < 0.0 || x > max_fields {
+            self.fatal("trying to access a field out of range")
+            return -1i64
+        }
+        return i64(x)
+    }
+
+    func field_get(edit self, x: f64) -> Value {
+        i := self.field_index(x)
+        if i < 0i64 { return uninit() }
+        if i == 0i64 { return input(self.rec.as_view()) }
+        self.ensure_split()
+        if i > i64(self.fields.len()) { return text("") }
+        f := self.fields.get(usize(i) - 1usize)
+        if f.ty == 2u8 { return num(f.n) }
+        if f.ty == 3u8 { return uninit() }
+        with r := self.rec.as_view() {
+            if f.ty == 1u8 { return text(r[f.lo : f.hi]) }
+            return input(r[f.lo : f.hi])
+        }
+    }
+    func field_num(edit self, x: f64) -> f64 {
+        i := self.field_index(x)
+        if i < 0i64 { return 0.0 }
+        if i == 0i64 { return parse_number(self.rec.as_view()).value }
+        self.ensure_split()
+        if i > i64(self.fields.len()) { return 0.0 }
+        f := self.fields.get(usize(i) - 1usize)
+        if f.ty == 2u8 { return f.n }
+        if f.ty == 3u8 { return 0.0 }
+        var numeric: bool = false
+        var value: f64 = 0.0
+        with r := self.rec.as_view() {
+            if f.ty == 1u8 {
+                // a string assigned to the field: read as a number, it is
+                // one from now on if it looks like one (see as_number)
+                p := looks_numeric(r[f.lo : f.hi])
+                numeric = p.ok
+            }
+            value = parse_number(r[f.lo : f.hi]).value
+        }
+        if numeric {
+            with slot := self.fields.at(usize(i) - 1usize) { slot.ty = 0u8 }
+        }
+        return value
+    }
+    // field_text appends a field to dst.
+    func field_text(edit self, x: f64, dst: edit[str.String]) {
+        i := self.field_index(x)
+        if i < 0i64 { return }
+        if i == 0i64 {
+            dst.push_str(self.rec.as_view())
+            return
+        }
+        self.ensure_split()
+        if i > i64(self.fields.len()) { return }
+        f := self.fields.get(usize(i) - 1usize)
+        with r := self.rec.as_view() { dst.push_str(r[f.lo : f.hi]) }
+    }
+
+    // rebuild writes the record anew from its fields joined by OFS, with
+    // field `changed` (from 1) replaced by `with_text`, and with exactly
+    // `count` fields: those past the old ones are empty.
+    func rebuild(edit self, changed: usize, with_text: view[]u8, ty: u8, n: f64, count: usize) {
+        fresh := str.String.new()
+        spans := Vec[Span].new()
+        for k in 1usize..count + 1usize {
+            if k > 1usize { fresh.push_str(self.ofs.as_view()) }
+            lo := fresh.len()
+            if k == changed {
+                fresh.push_str(with_text)
+                spans.push(Span { lo: lo, hi: fresh.len(), ty: ty, n: n })
+            } else if k <= self.fields.len() {
+                f := self.fields.get(k - 1usize)
+                with r := self.rec.as_view() { fresh.push_str(r[f.lo : f.hi]) }
+                spans.push(Span { lo: lo, hi: fresh.len(), ty: f.ty, n: f.n })
+            } else {
+                spans.push(Span { lo: lo, hi: lo, ty: 0u8, n: 0.0 })
+            }
+        }
+        self.rec = fresh
+        self.fields = spans
+        self.split_done = true
+    }
+
+    func field_set(edit self, x: f64, v: own Value) {
+        i := self.field_index(x)
+        if i < 0i64 { return }
+        if i == 0i64 {
+            self.set_record(into_text(v, self.convfmt.as_view()))
+            return
+        }
+        self.ensure_split()
+        var ty: u8 = 0u8
+        if v.tag == VNum { ty = 2u8 } else if v.tag == VStr { ty = 1u8 } else if v.tag == VUninit { ty = 3u8 }
+        n := v.n
+        s := into_text(v, self.convfmt.as_view())
+        var count: usize = self.fields.len()
+        if usize(i) > count { count = usize(i) }
+        self.rebuild(usize(i), s.as_view(), ty, n, count)
+    }
+
+    func set_nf(edit self, x: f64) {
+        if x != x || x < 0.0 || x > max_fields {
+            self.fatal("cannot set NF to that")
+            return
+        }
+        self.ensure_split()
+        self.rebuild(0usize, "", 0u8, 0.0, usize(x))
+    }
+
+    // ---- regular expressions made as the program runs ----
+
+    // dynamic compiles a string as a regular expression, once.
+    func dynamic(edit self, pat: view[]u8) -> usize {
+        match map.find_text(self.dmap, pat) {
+            Some(slot) => {
+                r := self.dmap.value_at(slot)
+                return usize(r)
+            }
+            None => { }
+        }
+        if self.dregs.len() >= 500usize {
+            self.dregs.clear()
+            self.dmap = map.Map[str.String, u32].new()
+        }
+        re := regex_compile(pat)
+        if re.bad { self.fatal2("this is not a well-formed regular expression: ", pat) }
+        r := self.dregs.len()
+        self.dregs.push(re)
+        self.dmap.insert(str.String.from(pat), truncate[u32](r))
+        return r
+    }
+
+    // find searches text for the regular expression an expression means:
+    // the one written between slashes, or the one a string spells.
+    func find(edit self, p: view[Prog], e: u32, text: view[]u8, from: usize, mode: u8) -> Hit {
+        nd := p.nodes.get(usize(e))
+        match nd {
+            Regex(r) => { return re_search(p.regs.get(usize(r)), self.scratch, text, from, mode) }
+            _ => { }
+        }
+        pat := str.String.new()
+        self.eval_text(p, e, pat)
+        r := self.dynamic(pat.as_view())
+        return re_search(self.dregs.get(r), self.scratch, text, from, mode)
+    }
+
+    // ---- expressions ----
+
+    func subscript(edit self, p: view[Prog], first: u32, count: u32) -> Key {
+        key := str.String.new()
+        for i in 0u32..count {
+            if i > 0u32 { key.push_str(self.subsep.as_view()) }
+            self.eval_text(p, p.kids.get(usize(first + i)), key)
+        }
+        return Key { s: key }
+    }
+
+    func arith(edit self, op: u8, x: f64, y: f64) -> f64 {
+        if op == OpAdd { return x + y }
+        if op == OpSub { return x - y }
+        if op == OpMul { return x * y }
+        if op == OpDiv {
+            if y == 0.0 {
+                self.fatal("division by zero")
+                return 0.0
+            }
+            return x / y
+        }
+        if op == OpMod {
+            if y == 0.0 {
+                self.fatal("division by zero in mod")
+                return 0.0
+            }
+            return awk_mod(x, y)
+        }
+        if y >= 0.0 && y - y == 0.0 && trunc(y) == y { return int_power(x, sat_i32(y)) }
+        return m_pow(x, y)
+    }
+
+    func eval(edit self, p: view[Prog], e: u32) -> Value {
+        nd := p.nodes.get(usize(e))
+        match nd {
+            Num(v) => { return num(v) }
+            Str(k) => { return text(p.strs.get(usize(k)).as_view()) }
+            Regex(r) => { return flag(re_search(p.regs.get(usize(r)), self.scratch, self.rec.as_view(), 0usize, re_any).found) }
+            Var(vr) => { return self.var_get(vr) }
+            Field(x) => {
+                i := self.eval_num(p, x)
+                return self.field_get(i)
+            }
+            Index(vr, first, count) => {
+                key := self.subscript(p, first, count)
+                id := self.array_of(vr)
+                return self.elem_get(id, key)
+            }
+            Assign(op, lhs, rhs) => { return self.assign(p, op, lhs, rhs, true) }
+            Cond(c, a, b) => {
+                if self.eval_bool(p, c) { return self.eval(p, a) }
+                return self.eval(p, b)
+            }
+            Concat(a, b) => {
+                s := str.String.new()
+                self.eval_text(p, a, s)
+                self.eval_text(p, b, s)
+                return text_own(s)
+            }
+            IncDec(lhs, delta, post) => { return num(self.incdec(p, lhs, delta, post)) }
+            In(first, count, vr) => {
+                key := self.subscript(p, first, count)
+                id := self.array_of(vr)
+                return flag(self.elem_exists(id, key))
+            }
+            Call(f, first, count) => { return self.call(p, f, first, count) }
+            Builtin(b, first, count) => { return self.builtin(p, b, first, count) }
+            Getline(kind, lhs, src) => { return num(self.getline(p, kind, lhs, src)) }
+            Neg(a) => { return num(self.eval_num(p, e)) }
+            Plus(a) => { return num(self.eval_num(p, e)) }
+            Binary(op, a, b) => { return num(self.eval_num(p, e)) }
+            Cmp(op, a, b) => { return flag(self.eval_bool(p, e)) }
+            Match(neg, a, b) => { return flag(self.eval_bool(p, e)) }
+            And(a, b) => { return flag(self.eval_bool(p, e)) }
+            Or(a, b) => { return flag(self.eval_bool(p, e)) }
+            Not(a) => { return flag(self.eval_bool(p, e)) }
+            _ => { return uninit() }
+        }
+    }
+
+    // eval_num is an expression's value as a number.
+    func eval_num(edit self, p: view[Prog], e: u32) -> f64 {
+        nd := p.nodes.get(usize(e))
+        match nd {
+            Num(v) => { return v }
+            Binary(op, a, b) => {
+                x := self.eval_num(p, a)
+                y := self.eval_num(p, b)
+                return self.arith(op, x, y)
+            }
+            Var(vr) => { return self.var_num(vr) }
+            Field(x) => {
+                i := self.eval_num(p, x)
+                return self.field_num(i)
+            }
+            Neg(a) => { return 0.0 - self.eval_num(p, a) }
+            Plus(a) => { return self.eval_num(p, a) }
+            Index(vr, first, count) => {
+                key := self.subscript(p, first, count)
+                id := self.array_of(vr)
+                return self.elem_num(id, key)
+            }
+            IncDec(lhs, delta, post) => { return self.incdec(p, lhs, delta, post) }
+            _ => {
+                v := self.eval(p, e)
+                return to_num(v)
+            }
+        }
+    }
+
+    // eval_bool is an expression's value as a condition.
+    func eval_bool(edit self, p: view[Prog], e: u32) -> bool {
+        nd := p.nodes.get(usize(e))
+        match nd {
+            Cmp(op, a, b) => {
+                // the left operand, when it is a variable, an element or a
+                // field, is read after the right one is evaluated: the
+                // one-true-awk holds on to the place, not to the value
+                var x: Value = uninit()
+                var y: Value = uninit()
+                lnd := p.nodes.get(usize(a))
+                match lnd {
+                    Var(vr) => {
+                        y = self.eval(p, b)
+                        x = self.var_get(vr)
+                    }
+                    Index(vr, first, count) => {
+                        key := self.subscript(p, first, count)
+                        id := self.array_of(vr)
+                        made := self.slot_of(id, key)
+                        y = self.eval(p, b)
+                        x = self.elem_get(id, key)
+                    }
+                    Field(e2) => {
+                        i := self.eval_num(p, e2)
+                        y = self.eval(p, b)
+                        x = self.field_get(i)
+                    }
+                    _ => {
+                        x = self.eval(p, a)
+                        y = self.eval(p, b)
+                    }
+                }
+                var c: i32 = 0i32
+                if x.tag == VNum && y.tag == VNum {
+                    d := x.n - y.n
+                    if d < 0.0 { c = -1i32 } else if d > 0.0 { c = 1i32 }
+                } else {
+                    c = compare(x, y, self.convfmt.as_view())
+                }
+                if op == CLt { return c < 0i32 }
+                if op == CLe { return c <= 0i32 }
+                if op == CEq { return c == 0i32 }
+                if op == CNe { return c != 0i32 }
+                if op == CGt { return c > 0i32 }
+                return c >= 0i32
+            }
+            Match(neg, a, b) => {
+                s := str.String.new()
+                self.eval_text(p, a, s)
+                return self.find(p, b, s.as_view(), 0usize, re_any).found != neg
+            }
+            And(a, b) => { return self.eval_bool(p, a) && self.eval_bool(p, b) }
+            Or(a, b) => { return self.eval_bool(p, a) || self.eval_bool(p, b) }
+            Not(a) => { return !self.eval_bool(p, a) }
+            Regex(r) => { return re_search(p.regs.get(usize(r)), self.scratch, self.rec.as_view(), 0usize, re_any).found }
+            Num(v) => { return v < 0.0 || v > 0.0 }
+            Nop => { return false }
+            _ => {
+                v := self.eval(p, e)
+                return truth(v)
+            }
+        }
+    }
+
+    // eval_text appends an expression's value as a string to dst.
+    func eval_text(edit self, p: view[Prog], e: u32, dst: edit[str.String]) {
+        nd := p.nodes.get(usize(e))
+        match nd {
+            Str(k) => { dst.push_str(p.strs.get(usize(k)).as_view()) }
+            Concat(a, b) => {
+                self.eval_text(p, a, dst)
+                self.eval_text(p, b, dst)
+            }
+            Field(x) => {
+                i := self.eval_num(p, x)
+                self.field_text_typed(i, dst, false)
+            }
+            Var(vr) => {
+                a := self.addr(vr)
+                var done: bool = false
+                if a >= usize(special_count) {
+                    with c := self.cells.get(a) {
+                        if c.kind == CScalar {
+                            push_value(dst, c.v, self.convfmt.as_view())
+                            done = true
+                        }
+                    }
+                }
+                if !done {
+                    v := self.var_get(vr)
+                    push_value(dst, v, self.convfmt.as_view())
+                }
+            }
+            _ => {
+                v := self.eval(p, e)
+                push_value(dst, v, self.convfmt.as_view())
+            }
+        }
+    }
+
+    // field_text_typed appends a field as a string; a field a number was
+    // assigned to goes through CONVFMT, or OFMT when it is printed.
+    func field_text_typed(edit self, x: f64, dst: edit[str.String], printing: bool) {
+        i := self.field_index(x)
+        if i <= 0i64 || i > i64(self.fields.len()) || !self.split_done {
+            self.field_text(x, dst)
+            return
+        }
+        f := self.fields.get(usize(i) - 1usize)
+        if f.ty == 2u8 && printing {
+            push_num(dst, f.n, self.ofmt.as_view())
+            return
+        }
+        self.field_text(x, dst)
+    }
+
+    // eval_print appends an expression as print writes it: a number
+    // through OFMT.
+    func eval_print(edit self, p: view[Prog], e: u32, dst: edit[str.String]) {
+        nd := p.nodes.get(usize(e))
+        match nd {
+            Str(k) => { dst.push_str(p.strs.get(usize(k)).as_view()) }
+            Concat(a, b) => {
+                self.eval_text(p, a, dst)
+                self.eval_text(p, b, dst)
+            }
+            Field(x) => {
+                i := self.eval_num(p, x)
+                self.field_text_typed(i, dst, true)
+            }
+            _ => {
+                v := self.eval(p, e)
+                push_value(dst, v, self.ofmt.as_view())
+            }
+        }
+    }
+
+    func is_var(view self, p: view[Prog], e: u32) -> bool {
+        nd := p.nodes.get(usize(e))
+        match nd {
+            Var(vr) => { return true }
+            _ => { return false }
+        }
+    }
+
+    // assign stores into a variable, an element or a field. The right
+    // side is evaluated first, then the subscript or the field number,
+    // and with an operator the old value is read last; but a right side
+    // that is just a variable is read after the subscript, as the
+    // one-true-awk reads it (there the right side is the variable itself
+    // until the moment of the store).
+    // The result is the value stored when it is wanted.
+    func assign(edit self, p: view[Prog], op: u8, lhs: u32, rhs: u32, want: bool) -> Value {
+        lnd := p.nodes.get(usize(lhs))
+        match lnd {
+            Var(vr) => {
+                if op == 0u8 {
+                    v := self.eval(p, rhs)
+                    if !want {
+                        self.var_set(vr, v)
+                        return uninit()
+                    }
+                    r := clone_value(v)
+                    self.var_set(vr, v)
+                    return r
+                }
+                y := self.eval_num(p, rhs)
+                old := self.var_num(vr)
+                r := self.arith(op, old, y)
+                self.var_set(vr, num(r))
+                return num(r)
+            }
+            Field(x) => {
+                if op == 0u8 {
+                    if self.is_var(p, rhs) {
+                        i := self.eval_num(p, x)
+                        late := self.eval(p, rhs)
+                        self.field_set(i, late)
+                        if want { return self.field_get(i) }
+                        return uninit()
+                    }
+                    v := self.eval(p, rhs)
+                    i := self.eval_num(p, x)
+                    if !want {
+                        self.field_set(i, v)
+                        return uninit()
+                    }
+                    r := clone_value(v)
+                    self.field_set(i, v)
+                    return r
+                }
+                var y: f64 = 0.0
+                var i: f64 = 0.0
+                if self.is_var(p, rhs) {
+                    i = self.eval_num(p, x)
+                    y = self.eval_num(p, rhs)
+                } else {
+                    y = self.eval_num(p, rhs)
+                    i = self.eval_num(p, x)
+                }
+                old := self.field_num(i)
+                r := self.arith(op, old, y)
+                self.field_set(i, num(r))
+                return num(r)
+            }
+            Index(vr, first, count) => {
+                if op == 0u8 {
+                    if self.is_var(p, rhs) {
+                        key := self.subscript(p, first, count)
+                        id := self.array_of(vr)
+                        late := self.eval(p, rhs)
+                        self.elem_set(id, key, late)
+                        if want { return self.elem_get(id, key) }
+                        return uninit()
+                    }
+                    v := self.eval(p, rhs)
+                    key := self.subscript(p, first, count)
+                    id := self.array_of(vr)
+                    if !want {
+                        self.elem_set(id, key, v)
+                        return uninit()
+                    }
+                    r := clone_value(v)
+                    self.elem_set(id, key, v)
+                    return r
+                }
+                var y: f64 = 0.0
+                if self.is_var(p, rhs) {
+                    key := self.subscript(p, first, count)
+                    id := self.array_of(vr)
+                    y = self.eval_num(p, rhs)
+                    old := self.elem_num(id, key)
+                    r := self.arith(op, old, y)
+                    self.elem_set(id, key, num(r))
+                    return num(r)
+                }
+                y = self.eval_num(p, rhs)
+                key := self.subscript(p, first, count)
+                id := self.array_of(vr)
+                old := self.elem_num(id, key)
+                r := self.arith(op, old, y)
+                self.elem_set(id, key, num(r))
+                return num(r)
+            }
+            _ => { }
+        }
+        return uninit()
+    }
+
+    // incdec adds delta to a variable, an element or a field and returns
+    // its old value (post) or its new one.
+    func incdec(edit self, p: view[Prog], lhs: u32, delta: i8, post: bool) -> f64 {
+        var d: f64 = 1.0
+        if delta < 0i8 { d = -1.0 }
+        lnd := p.nodes.get(usize(lhs))
+        var old: f64 = 0.0
+        match lnd {
+            Var(vr) => {
+                old = self.var_num(vr)
+                self.var_set(vr, num(old + d))
+            }
+            Field(x) => {
+                i := self.eval_num(p, x)
+                old = self.field_num(i)
+                self.field_set(i, num(old + d))
+            }
+            Index(vr, first, count) => {
+                key := self.subscript(p, first, count)
+                id := self.array_of(vr)
+                slot := self.slot_of(id, key)
+                with e := self.arrays.at(usize(id)).m.value_at_mut(slot) {
+                    old = to_num(e.v)
+                    e.v = num(old + d)
+                }
+            }
+            _ => { }
+        }
+        if post { return old }
+        return old + d
+    }
+
+    // call runs a user function. Its parameters are new cells above the
+    // caller's: a scalar is copied, an array is named, and a variable
+    // that holds nothing yet is remembered so that it becomes an array if
+    // the function uses the parameter as one.
+    func call(edit self, p: view[Prog], f: u32, first: u32, count: u32) -> Value {
+        params := p.funcs.get(usize(f)).params
+        body := p.funcs.get(usize(f)).body
+        if !p.funcs.get(usize(f)).defined {
+            self.fatal2("calling undefined function ", p.funcs.get(usize(f)).name.as_view())
+            return uninit()
+        }
+        if self.depth >= max_calls {
+            self.fatal("function calls nested too deeply")
+            return uninit()
+        }
+        frame := self.cells.len()
+        for i in 0u32..count {
+            a := p.kids.get(usize(first + i))
+            if i >= params {
+                // more arguments than parameters: evaluated, then dropped
+                extra := self.eval(p, a)
+                continue
+            }
+            var cell: Cell = Cell { kind: CScalar, arr: 0u32, v: uninit() }
+            var plain: bool = true
+            nd := p.nodes.get(usize(a))
+            match nd {
+                Var(vr) => {
+                    at := self.addr(vr)
+                    if at >= usize(special_count) || at == usize(VENVIRON) || at == usize(VARGV) {
+                        with c := self.cells.get(at) {
+                            if c.kind == CArr || c.kind == COwnArr {
+                                cell = Cell { kind: CArr, arr: c.arr, v: uninit() }
+                                plain = false
+                            } else if c.kind == CUnset || c.v.tag == VUninit {
+                                cell = Cell { kind: CUnset, arr: truncate[u32](at), v: uninit() }
+                                plain = false
+                            }
+                        }
+                    }
+                }
+                _ => { }
+            }
+            if plain { cell = Cell { kind: CScalar, arr: 0u32, v: self.eval(p, a) } }
+            self.cells.push(cell)
+        }
+        var have: u32 = count
+        while have < params {
+            self.cells.push(Cell { kind: CScalar, arr: 0u32, v: uninit() })
+            have = have + 1u32
+        }
+        caller := self.base
+        self.base = frame
+        self.depth = self.depth + 1u32
+        st := self.exec(p, body)
+        result := replace(self.retval, uninit())
+        while self.cells.len() > frame {
+            match self.cells.pop() {
+                Some(c) => {
+                    if c.kind == COwnArr { self.free_array(c.arr) }
+                }
+                None => { }
+            }
+        }
+        self.base = caller
+        self.depth = self.depth - 1u32
+        return result
+    }
+
+    // ---- statements ----
+
+    // run_expr evaluates an expression for what it does.
+    func run_expr(edit self, p: view[Prog], e: u32) {
+        nd := p.nodes.get(usize(e))
+        match nd {
+            Assign(op, lhs, rhs) => { unused := self.assign(p, op, lhs, rhs, false) }
+            IncDec(lhs, delta, post) => { unused := self.incdec(p, lhs, delta, post) }
+            _ => { unused := self.eval(p, e) }
+        }
+    }
+
+    func exec(edit self, p: view[Prog], s: u32) -> u8 {
+        nd := p.nodes.get(usize(s))
+        match nd {
+            Block(first, count) => {
+                for i in 0u32..count {
+                    st := self.exec(p, p.kids.get(usize(first + i)))
+                    if st != StNormal { return st }
+                }
+                return StNormal
+            }
+            ExprStmt(e) => {
+                self.run_expr(p, e)
+                if self.halt != 0u8 { return StExit }
+                return StNormal
+            }
+            Print(first, count, redir, dest) => {
+                self.print(p, first, count, redir, dest)
+                if self.halt != 0u8 { return StExit }
+                return StNormal
+            }
+            Printf(first, count, redir, dest) => {
+                self.printf(p, first, count, redir, dest)
+                if self.halt != 0u8 { return StExit }
+                return StNormal
+            }
+            If(c, a, b) => {
+                yes := self.eval_bool(p, c)
+                if self.halt != 0u8 { return StExit }
+                if yes { return self.exec(p, a) }
+                if b != NoNode { return self.exec(p, b) }
+                return StNormal
+            }
+            While(c, body) => {
+                while self.eval_bool(p, c) {
+                    if self.halt != 0u8 { return StExit }
+                    st := self.exec(p, body)
+                    if st == StBreak { break }
+                    if st != StNormal && st != StContinue { return st }
+                }
+                if self.halt != 0u8 { return StExit }
+                return StNormal
+            }
+            Do(body, c) => {
+                while true {
+                    st := self.exec(p, body)
+                    if st == StBreak { break }
+                    if st != StNormal && st != StContinue { return st }
+                    if !self.eval_bool(p, c) { break }
+                    if self.halt != 0u8 { return StExit }
+                }
+                if self.halt != 0u8 { return StExit }
+                return StNormal
+            }
+            For(init, c, step, body) => {
+                if init != NoNode {
+                    st := self.exec(p, init)
+                    if st != StNormal { return st }
+                }
+                while c == NoNode || self.eval_bool(p, c) {
+                    if self.halt != 0u8 { return StExit }
+                    st := self.exec(p, body)
+                    if st == StBreak { break }
+                    if st != StNormal && st != StContinue { return st }
+                    if step != NoNode {
+                        st2 := self.exec(p, step)
+                        if st2 != StNormal { return st2 }
+                    }
+                }
+                if self.halt != 0u8 { return StExit }
+                return StNormal
+            }
+            ForIn(lhs, vr, body) => {
+                id := self.array_of(vr)
+                keys := keys_in_order(self.arrays.get(usize(id)))
+                var target: u32 = 0u32
+                lnd := p.nodes.get(usize(lhs))
+                match lnd {
+                    Var(v) => { target = v }
+                    _ => { }
+                }
+                for i in 0usize..keys.len() {
+                    self.var_set(target, text(keys.get(i).as_view()))
+                    if self.halt != 0u8 { return StExit }
+                    st := self.exec(p, body)
+                    if st == StBreak { break }
+                    if st != StNormal && st != StContinue { return st }
+                }
+                return StNormal
+            }
+            Next => { return StNext }
+            Exit(e) => {
+                if e != NoNode {
+                    code := sat_i32(self.eval_num(p, e))
+                    if self.halt == 0u8 { self.exit_code = truncate[i32](code & 255i64) }
+                }
+                if self.halt == 0u8 { self.halt = 1u8 }
+                return StExit
+            }
+            Return(e) => {
+                if e != NoNode {
+                    v := self.eval(p, e)
+                    self.retval = v
+                }
+                if self.halt != 0u8 { return StExit }
+                return StReturn
+            }
+            Break => { return StBreak }
+            Continue => { return StContinue }
+            Delete(vr, first, count) => {
+                key := self.subscript(p, first, count)
+                id := self.array_of(vr)
+                with a := self.arrays.at(usize(id)) { gone := a.m.remove(key) }
+                return StNormal
+            }
+            DeleteAll(vr) => {
+                id := self.array_of(vr)
+                self.clear_array(id)
+                return StNormal
+            }
+            Nop => { return StNormal }
+            _ => {
+                self.run_expr(p, s)
+                if self.halt != 0u8 { return StExit }
+                return StNormal
+            }
+        }
+    }
+
+    // ---- the program ----
+
+    // run_rules runs every rule on the record just read.
+    func run_rules(edit self, p: view[Prog]) {
+        for i in 0usize..p.rules.len() {
+            r := p.rules.get(i)
+            var hit: bool = true
+            if r.kind == 1u8 {
+                hit = self.eval_bool(p, r.p1)
+            } else if r.kind == 2u8 {
+                on := self.range_on.get(i)
+                var inside: bool = on
+                hit = on
+                if !on && self.eval_bool(p, r.p1) {
+                    inside = true
+                    hit = true
+                }
+                if inside && self.eval_bool(p, r.p2) { inside = false }
+                with slot := self.range_on.at(i) { slot = inside }
+            }
+            if self.halt != 0u8 { return }
+            if hit {
+                if r.body == NoNode {
+                    line := str.String.from(self.rec.as_view())
+                    line.push_str(self.ors.as_view())
+                    self.write_stdout(line.as_view())
+                } else {
+                    st := self.exec(p, r.body)
+                    if st == StNext { return }
+                    if self.halt != 0u8 { return }
+                }
+            }
+        }
+    }
+
+    // run runs the whole program and returns its exit status.
+    func run(edit self, p: view[Prog]) -> i32 {
+        for i in 0usize..p.begins.len() {
+            if self.halt == 0u8 { st := self.exec(p, p.begins.get(i)) }
+        }
+        if self.halt == 0u8 && (p.rules.len() > 0usize || p.ends.len() > 0usize) {
+            while self.halt == 0u8 && self.next_record(p) { self.run_rules(p) }
+        }
+        // exit in BEGIN or in a rule still runs END; an error does not
+        if self.halt == 1u8 { self.halt = 0u8 }
+        for i in 0usize..p.ends.len() {
+            if self.halt == 0u8 { st := self.exec(p, p.ends.get(i)) }
+        }
+        self.close_all()
+        return self.exit_code
+    }
+}

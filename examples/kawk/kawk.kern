@@ -1,0 +1,162 @@
+//! phase: 6
+//! expect: output kawk
+// kawk: the AWK language.
+//
+//     kawk [-F fs] [-v var=value]... 'program' [file | var=value]...
+//     kawk [-F fs] [-v var=value]... -f progfile [file | var=value]...
+//
+// It reads the standard input when no file is named, and for the file -.
+// The exit status is the one `exit` gives; a program that is not well
+// formed is reported with its line and the status is 2, as it is when a
+// running program fails (a division by zero, a file that cannot be
+// opened).
+//
+// The language is POSIX awk as the one-true-awk implements it, which is
+// the awk of the system this was written on and the reference it was
+// checked against, case by case: patterns and ranges, BEGIN and END,
+// every statement and operator, user functions with recursion and arrays
+// passed by reference, associative arrays, fields and records under FS,
+// RS (a character, a regular expression, or paragraphs), OFS and ORS,
+// getline in all its forms, print and printf to files and commands,
+// system, ENVIRON, ARGC and ARGV, and the built-in functions. Where the
+// one-true-awk goes its own way, kawk follows it: a number that is whole
+// prints in full; -0 is 0; substr truncates its numbers; `x % y` is
+// x - y * int(x / y); a comparison is not allowed in a print list outside
+// parentheses; every comparison, ~ and `in` bind alike; not-a-number
+// equals everything; a string in a variable that has once been read as a
+// number, and looks like one, compares as a number from then on; `for (k
+// in a)` visits the keys in the order of its hash table; rand() is BSD's
+// random(), so srand(n) gives the same numbers.
+//
+// How it is built, in the module lang beside this file:
+//   - lex.kern and parse.kern: a lexer the parser drives (only the
+//     parser knows whether a slash divides or begins a regular
+//     expression) and a recursive descent parser. The tree is a Vec of
+//     nodes, each a union whose payloads are numbers, so the interpreter
+//     reads a node by copying it and is free to change itself meanwhile.
+//   - regex.kern: POSIX extended regular expressions compiled to a small
+//     machine and run with all alternatives at once, so no pattern takes
+//     more than the text's length times its own size; the leftmost match
+//     and of those the longest, as sub, gsub, match and a regular
+//     expression FS need.
+//   - value.kern: a value is a number, a string, or a string from input
+//     that is a number if it looks like one. fmt.kern: printf, with %e,
+//     %f and %g written from the exact decimal expansion of a double,
+//     which the library does not offer. math.kern: sqrt, exp, log, sin,
+//     cos, atan2 and powers, which the library does not have at all.
+//   - interp.kern: the tree walker. Variables are cells in one Vec,
+//     globals first and each call's parameters above them; an array is a
+//     std/map.Map from its keys to its elements, named by number from
+//     the cells, so that it is passed by reference and a function's
+//     local array is freed when the function returns.
+//   - io.kern: records read through a buffer from a file, the standard
+//     input or a child's output; print's files and pipes; getline.
+//     builtin.kern: the built-in functions. run.kern: the command line.
+//
+// Nothing an AWK program does traps: its numbers are doubles, and every
+// conversion to a whole number here is bounded first.
+//
+// This directory is a project: kern.mod names this file and gives the
+// program a stack large enough for an AWK function to call itself 5,000
+// deep. With no arguments the program runs AWK programs of its own over
+// input of its own and prints what they print, which is how it runs as
+// a fixture; each of them agrees with the system awk.
+module main
+import "lang"
+import "std/io"
+import "std/str"
+
+// The demonstration's programs and their input.
+const title_1: view[]u8 = "fields, NF and assigning to a field"
+const prog_1: view[]u8 = "{ print NR \": \" NF \" fields, first [\" $1 \"] last [\" $NF \"]\" }\nNR == 2 { $2 = \"CHANGED\"; print; print NF }\nNR == 3 { $6 = \"sixth\"; print; NF = 2; print; print NF }\nNR == 4 { print \"empty record: NF is \" NF \" and $1 is [\" $1 \"]\" }\nEND { OFS = \"-\"; $0 = \"a b c\"; $1 = $1; print; print $(NF - 1) $NF; print NR \" records\" }\n"
+const input_1: view[]u8 = "alpha beta gamma\n  leading   and   trailing  \none two three\n\nlast-one\n"
+
+const title_2: view[]u8 = "separators: one character, a tab, a regular expression, none, and paragraphs"
+const prog_2: view[]u8 = "BEGIN {\n    FS = \":\"; $0 = \"root:x:0:0::/root:/bin/sh\"; print NF, $1, $6, \"[\" $5 \"]\"\n    FS = \"\\t\"; $0 = \"a b\\tc d\\t\\te\"; print NF, $2, \"[\" $3 \"]\"\n    FS = \", *|;\"; $0 = \"p, q,r;s\"; print NF, $1 $2 $3 $4\n    FS = \"|\"; $0 = \"x|y|z\"; print NF, $2\n    FS = \"\"; $0 = \"kern\"; print NF, $4 $3 $2 $1\n    FS = \" \"; RS = \"\"\n}\n{ print \"paragraph \" NR \": \" NF \" words, from \" $1 \" to \" $NF }\nEND { RS = \";\"; print NR \" paragraphs\" }\n"
+const input_2: view[]u8 = "\n\nthe first paragraph\nhas two lines\n\n\nthe second\n\n  the third   is\nindented\nand long  \n"
+
+const title_3: view[]u8 = "patterns: regular expressions, comparisons, ranges, next"
+const prog_3: view[]u8 = "/^#/ { comments++; next }\n/start/, /stop/ { print \"in range:  \" $0; next }\n$2 >= 10 && $1 ~ /^[a-c]/ { print \"big a-c:   \" $1, $2 }\n$2 < 10\nNR == 2, NR == 4 { early++ }\nEND { print comments \" comments, \" early \" early, \" NR \" lines\" }\n"
+const input_3: view[]u8 = "# readings\nalpha 12\nbeta 7\nstart here\ngamma 99\nstop here\ncarol 31\ndelta 44\n# end\nzeta 3\n"
+
+const title_4: view[]u8 = "arrays: counting, in, delete, several subscripts, for in"
+const prog_4: view[]u8 = "function sorted(arr, keys,   n, i, j, t, k) {\n    for (k in arr) keys[++n] = k\n    for (i = 2; i <= n; i++) {\n        t = keys[i]\n        for (j = i - 1; j >= 1 && keys[j] > t; j--) keys[j + 1] = keys[j]\n        keys[j + 1] = t\n    }\n    return n\n}\n{ for (i = 1; i <= NF; i++) count[tolower($i)]++ }\nEND {\n    n = sorted(count, words)\n    for (i = 1; i <= n; i++) if (count[words[i]] > 1) printf \"%-6s %d\\n\", words[i], count[words[i]]\n    print n \" different words;\", (\"fox\" in count) ? \"a fox,\" : \"no fox,\", (\"cat\" in count) ? \"a cat\" : \"no cat\"\n    delete count[\"the\"]; print length(count) \" after delete\"\n    for (r = 1; r <= 3; r++) for (c = 1; c <= 3; c++) grid[r, c] = r * c\n    print grid[2, 3], ((3, 3) in grid), ((4, 1) in grid), length(grid)\n    for (k in grid) { split(k, rc, SUBSEP); total += rc[1] * 10 + rc[2] }\n    print total\n    delete grid; print length(grid)\n}\n"
+const input_4: view[]u8 = "The quick brown fox jumps over the lazy dog\nthe dog barks and the fox runs\nA fox is quick\n"
+
+const title_5: view[]u8 = "functions: recursion, locals, arrays by reference"
+const prog_5: view[]u8 = "function fact(n) { return n <= 1 ? 1 : n * fact(n - 1) }\nfunction fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2) }\nfunction gcd(a, b) { return b == 0 ? a : gcd(b, a % b) }\nfunction hanoi(n, from, to, via) {\n    if (n == 0) return 0\n    return hanoi(n - 1, from, via, to) + 1 + hanoi(n - 1, via, to, from)\n}\nfunction fill(arr, n,   i) { for (i = 1; i <= n; i++) arr[i] = i * i }\nfunction sum(arr,   k, s) { for (k in arr) s += arr[k]; return s }\nfunction reverse(s,   i, r) { for (i = length(s); i > 0; i--) r = r substr(s, i, 1); return r }\nfunction twice(x) { x = x x; return x }\nBEGIN {\n    print fact(10), fact(20), fib(12), gcd(1071, 462), hanoi(6, \"a\", \"c\", \"b\")\n    fill(squares, 10); print sum(squares), length(squares)\n    i = \"kept\"; s = \"abc\"; print reverse(\"kern awk\"), twice(s), s, i\n}\n"
+const input_5: view[]u8 = ""
+
+const title_6: view[]u8 = "regular expressions: match, sub, gsub, split"
+const prog_6: view[]u8 = "BEGIN {\n    s = \"The year 1999 and the year 2024\"\n    print match(s, /[0-9]+/), RSTART, RLENGTH, substr(s, RSTART, RLENGTH)\n    print match(s, /x+/), RSTART, RLENGTH\n    print match(\"xabcabcabcy\", /(abc)+/), RLENGTH, match(\"foobar\", /foo|foobar/), RLENGTH\n    t = s; n = gsub(/[0-9]+/, \"<&>\", t); print n, t\n    t = s; sub(/year/, \"month\", t); print t\n    t = s; gsub(/the|The/, \"\", t); gsub(/  +/, \" \", t); sub(/^ /, \"\", t); print t\n    t = \"a.b.c\"; gsub(/\\./, \"\\\\&\", t); print t\n    t = \"banana\"; print gsub(/a/, \"&&\", t), t, gsub(/x*/, \"-\", t), t\n    n = split(\"2024-11-12T08:30:00\", p, /[-T:]/); print n, p[1], p[3], p[6]\n    n = split(\"a1b22c333d\", q, /[0-9]+/); print n, q[1] q[2] q[3] q[4]\n    pat = \"^[A-Z][a-z]+$\"; print (\"Kern\" ~ pat), (\"kern\" ~ pat), (\"KERN\" !~ pat)\n    print (\"aaa\" ~ /^a{2,3}$/), (\"aaaa\" ~ /^a{2,3}$/), (\"x9\" ~ /^[[:alpha:]][[:digit:]]$/)\n}\n/[aeiou][aeiou]/ { print \"two vowels together: \" $0 }\n$0 ~ \"^.[^ ]* [a-z]\" && !/q/ { gsub(/[^a-z]/, \"\"); print \"letters: \" $0 }\n"
+const input_6: view[]u8 = "Read the book\nA quiet room\nsky dry fly\n"
+
+const title_7: view[]u8 = "printf: every conversion, flags, width and precision"
+const prog_7: view[]u8 = "BEGIN {\n    printf \"%d|%5d|%-5d|%05d|%+d|% d|%.3d|%i\\n\", 42, 42, 42, 42, 42, 42, 7, -7.9\n    printf \"%o|%x|%X|%#o|%#x|%u|%c|%c|%c\\n\", 64, 255, 255, 8, 255, 3000000000, 65, \"kern\", 256 + 66\n    printf \"%f|%.2f|%8.3f|%-8.1f|%+.0f|%e|%.2E\\n\", 3.14159, 2.675, 3.14159, 2.5, 0.5, 12345.678, 0.000123\n    printf \"%g|%g|%g|%g|%G|%.3g|%#.3g|%.10g\\n\", 100000, 1000000, 0.0001, 0.00001, 1e-10, 1234567, 1.5, 0.1\n    printf \"%s|%10s|%-10s|%.2s|%5.1s|%%|%5s|\\n\", \"kern\", \"right\", \"left\", \"truncate\", \"x\", 3.0\n    printf \"%*d|%-*d|%.*f|%*.*f\\n\", 6, 42, 6, 42, 2, 3.14159, 9, 4, 3.14159\n    printf \"%s %s %s %d %d\\n\", 1e6, 0.1 + 0.2, 1e300 * 10, \"12abc\", 2 ^ 31\n    OFMT = \"%.2f\"; CONVFMT = \"%.3g\"; x = 3.14159; print x, x \"\", 17, 1e3\n}\n"
+const input_7: view[]u8 = ""
+
+const title_8: view[]u8 = "getline from a file, and print to one"
+const prog_8: view[]u8 = "BEGIN {\n    for (i = 1; i <= 4; i++) print \"row\", i, i * i > tmp\n    printf \"%s %d %d\\n\", \"row\", 5, 25 >> tmp\n    close(tmp)\n    while ((getline line < tmp) > 0) { n++; split(line, f, \" \"); squares += f[3] }\n    print n \" lines read back, squares sum to \" squares\n    close(tmp); getline < tmp; print \"getline < file sets $0: \" $0 \", NF \" NF \", NR \" NR\n    getline first < tmp; getline second < tmp; print \"then: \" first \" / \" second\n    print \"appended\" >> tmp; close(tmp); n = 0; while ((getline line < tmp) > 0) n++; print n \" lines now\"\n    print \"a missing file gives \" (getline line < \"/no/such/file/kawk\")\n    close(tmp); printf \"\" > tmp; close(tmp)\n}\nNR == 1 { print \"record 1: \" $0; getline; print \"after getline: \" $0 \", NR \" NR }\nNR == 3 { getline held; print \"getline var: \" held \", $0 still \" $0 \", NR \" NR }\nEND { print \"at the end getline gives \" (getline) \", NR \" NR }\n"
+const input_8: view[]u8 = "one\ntwo\nthree\nfour\nfive\n"
+
+const title_9: view[]u8 = "strings and numbers: which comparison is made"
+const prog_9: view[]u8 = "{\n    printf \"%-6s %-6s \", $1, $2\n    if ($1 < $2) printf \"less    \"; else if ($1 == $2) printf \"equal   \"; else printf \"greater \"\n    printf \"%s %s\\n\", ($1 \"\" < $2 \"\") ? \"less as strings,\" : \"not less as strings,\", ($1 + 0 == $2 + 0) ? \"equal as numbers\" : \"unequal as numbers\"\n}\nEND {\n    print (10 < 9), (\"10\" < \"9\"), (10 < \"9\"), (\"abc\" < 1), (2 < \"abc\")\n    print (x == 0), (x == \"\"), length(x), x + 1, x \"|\"\n    $0 = \"0 00 0.0 abc\"; print !$1, !$2, !$3, !$4, !\"0\", !0, !\"\"\n    n = split(\"10 9 1e1 0x1A\", a, \" \"); print (a[1] > a[2]), (a[1] == a[3]), (a[4] == 26)\n    y = \"3.0\"; z = 3; print (y == z), (y + 0 == z), (\"3\" == z), 1 \" \" 2 + 3, 1 2 + 3\n}\n"
+const input_9: view[]u8 = "10 9\nabc abd\n1e2 100\n0x10 16\n3.0 3\n+5 5.0\nten 10\n"
+
+const title_10: view[]u8 = "the mathematical functions, to six digits"
+const prog_10: view[]u8 = "BEGIN {\n    pi = atan2(0, -1)\n    printf \"pi %.6f  e %.6f  sqrt(2) %.6f  log(10) %.6f\\n\", pi, exp(1), sqrt(2), log(10)\n    for (d = 0; d <= 180; d += 30) printf \"%3d degrees: sin %9.6f cos %9.6f\\n\", d, sin(d * pi / 180), cos(d * pi / 180)\n    printf \"atan2 %.6f %.6f %.6f %.6f\\n\", atan2(1, 1), atan2(1, -1), atan2(-1, -1), atan2(-1, 1)\n    printf \"exp %.6g %.6g %.6g  log %.6g %.6g %.6g\\n\", exp(-1), exp(10), exp(0.5), log(2), log(0.001), log(1e10)\n    printf \"sqrt %.6g %.6g %.6g  int %d %d %d\\n\", sqrt(1e-6), sqrt(12345), sqrt(2e10), int(3.99), int(-3.99), int(\"42nd\")\n    print 2 ^ 10, 2 ^ 0.5, 2 ^ -2, 10 ^ 15, 2 ^ 3 ^ 2, -2 ^ 2, 7 % 3, -7 % 3, 7.5 % 2\n    print sin(1e6), cos(1e6), exp(log(8) / 3), sqrt(1e300), log(exp(1)), 1e300 * 1e300, log(-1)\n    print 1 / 3, 100 / 3, 1e6, 1e-6, 123456789, 0.1 + 0.2, 2 ^ 53 + 1, 1e30\n}\n"
+const input_10: view[]u8 = ""
+
+// show runs one program of the demonstration: its title, its text, what
+// it prints.
+func show(title: view[]u8, src: view[]u8, input: view[]u8, tmp: view[]u8) -> i32 {
+    print_str("== ")
+    print_str(title)
+    print_str(" ==\n")
+    var start: usize = 0usize
+    for i in 0usize..len(src) {
+        if src[i] == 10u8 {
+            print_str("    | ")
+            print_str(src[start : i + 1usize])
+            start = i + 1usize
+        }
+    }
+    status := lang.Demo(src, input, tmp)
+    println()
+    return status
+}
+
+// demo runs every program. One of them writes a file and reads it back:
+// it is given the path of a temporary file, which is removed afterwards.
+func demo() -> i32 {
+    var failed: i32 = 0i32
+    tmp := str.String.new()
+    match io.make_temp_file("kawk") {
+        Ok(path) => { tmp.push_str(path.as_view()) }
+        Err(e) => {
+            eprint_str("kawk: cannot make a temporary file\n")
+            return 1i32
+        }
+    }
+    failed = failed + show(title_1, prog_1, input_1, "")
+    failed = failed + show(title_2, prog_2, input_2, "")
+    failed = failed + show(title_3, prog_3, input_3, "")
+    failed = failed + show(title_4, prog_4, input_4, "")
+    failed = failed + show(title_5, prog_5, input_5, "")
+    failed = failed + show(title_6, prog_6, input_6, "")
+    failed = failed + show(title_7, prog_7, input_7, "")
+    failed = failed + show(title_8, prog_8, input_8, tmp.as_view())
+    failed = failed + show(title_9, prog_9, input_9, "")
+    failed = failed + show(title_10, prog_10, input_10, "")
+    match io.remove_file(tmp.as_view()) {
+        Ok(u) => { }
+        Err(e) => { failed = failed + 1i32 }
+    }
+    return failed
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize { return demo() }
+    return lang.Main(args.as_view())
+}

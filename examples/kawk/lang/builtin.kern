@@ -1,0 +1,305 @@
+// The built-in functions.
+module lang
+import "std/str"
+import "std/time"
+
+// ReRef names a compiled regular expression: one of the program's own, or
+// one made from a string while the program runs.
+struct ReRef { dynamic: bool; idx: usize }
+
+// expand appends a replacement text of sub or gsub: & stands for the
+// matched text, \& for an ampersand, and the backslashes before them are
+// read the way the one-true-awk reads them.
+func expand(dst: edit[str.String], repl: view[]u8, matched: view[]u8) {
+    n := len(repl)
+    var i: usize = 0usize
+    while i < n {
+        c := repl[i]
+        if c == 92u8 {
+            if i + 1usize < n && repl[i + 1usize] == 92u8 {
+                if i + 3usize < n && repl[i + 2usize] == 92u8 && repl[i + 3usize] == 38u8 {
+                    dst.push(92u8)
+                    dst.push(38u8)
+                    i = i + 4usize
+                } else if i + 2usize < n && repl[i + 2usize] == 38u8 {
+                    dst.push(92u8)
+                    i = i + 2usize
+                } else {
+                    dst.push(92u8)
+                    dst.push(92u8)
+                    i = i + 2usize
+                }
+            } else if i + 1usize < n && repl[i + 1usize] == 38u8 {
+                dst.push(38u8)
+                i = i + 2usize
+            } else {
+                dst.push(92u8)
+                i = i + 1usize
+            }
+        } else if c == 38u8 {
+            dst.push_str(matched)
+            i = i + 1usize
+        } else {
+            dst.push(c)
+            i = i + 1usize
+        }
+    }
+}
+
+impl Interp {
+    func regex_of(edit self, p: view[Prog], e: u32) -> ReRef {
+        nd := p.nodes.get(usize(e))
+        match nd {
+            Regex(r) => { return ReRef { dynamic: false, idx: usize(r) } }
+            _ => { }
+        }
+        pat := str.String.new()
+        self.eval_text(p, e, pat)
+        return ReRef { dynamic: true, idx: self.dynamic(pat.as_view()) }
+    }
+    func search(edit self, p: view[Prog], r: ReRef, text: view[]u8, from: usize, mode: u8) -> Hit {
+        if r.dynamic { return re_search(self.dregs.get(r.idx), self.scratch, text, from, mode) }
+        return re_search(p.regs.get(r.idx), self.scratch, text, from, mode)
+    }
+
+    // substitute is sub (all false) and gsub: it returns how many
+    // replacements it made in the target, which is $0 unless a third
+    // argument names a variable, an element or a field.
+    func substitute(edit self, p: view[Prog], first: u32, count: u32, all: bool) -> f64 {
+        r := self.regex_of(p, p.kids.get(usize(first)))
+        repl := str.String.new()
+        self.eval_text(p, p.kids.get(usize(first + 1u32)), repl)
+        target := str.String.new()
+        if count == 3u32 { self.eval_text(p, p.kids.get(usize(first + 2u32)), target) } else { target.push_str(self.rec.as_view()) }
+        if self.halt != 0u8 { return 0.0 }
+        res := str.String.new()
+        var made: f64 = 0.0
+        n := target.len()
+        with t := target.as_view() {
+            var h: Hit = self.search(p, r, t, 0usize, 0u8)
+            if !h.found { return 0.0 }
+            if !all {
+                res.push_str(t[0usize : h.start])
+                expand(res, repl.as_view(), t[h.start : h.end])
+                res.push_str(t[h.end : n])
+                made = 1.0
+            } else {
+                var pos: usize = 0usize
+                // after a match that was not empty, an empty one right
+                // behind it is not replaced
+                var just_matched: bool = false
+                var tail: bool = true
+                while true {
+                    if h.end == h.start && h.start < n {
+                        if !just_matched {
+                            made = made + 1.0
+                            expand(res, repl.as_view(), t[h.start : h.start])
+                        }
+                        res.push(t[pos])
+                        pos = pos + 1usize
+                        just_matched = false
+                    } else {
+                        made = made + 1.0
+                        res.push_str(t[pos : h.start])
+                        expand(res, repl.as_view(), t[h.start : h.end])
+                        pos = h.end
+                        if h.end == h.start || pos >= n {
+                            tail = false
+                            break
+                        }
+                        just_matched = true
+                    }
+                    h = self.search(p, r, t, pos, re_notbol)
+                    if !h.found { break }
+                }
+                if tail { res.push_str(t[pos : n]) }
+            }
+        }
+        if count == 3u32 { self.store(p, p.kids.get(usize(first + 2u32)), text_own(res)) } else { self.set_record(res) }
+        return made
+    }
+
+    // split_into is split(s, array, separator): the array is emptied and
+    // filled with the pieces of s, numbered from 1.
+    func split_into(edit self, p: view[Prog], first: u32, count: u32) -> f64 {
+        s := str.String.new()
+        self.eval_text(p, p.kids.get(usize(first)), s)
+        var vr: u32 = 0u32
+        and := p.nodes.get(usize(p.kids.get(usize(first + 1u32))))
+        match and {
+            Var(v) => { vr = v }
+            _ => { }
+        }
+        spans := Vec[Span].new()
+        if count < 3u32 {
+            split_text(s.as_view(), self.fs, self.fs_re, self.scratch, self.fs.kind == 1u8, spans)
+        } else {
+            sep := p.kids.get(usize(first + 2u32))
+            snd := p.nodes.get(usize(sep))
+            var literal: bool = false
+            var lit: u32 = 0u32
+            match snd {
+                Regex(r) => {
+                    literal = true
+                    lit = r
+                }
+                _ => { }
+            }
+            if literal {
+                // a regular expression between slashes is one even when
+                // it is a single byte; an empty one splits into bytes
+                if p.regs.get(usize(lit)).prog.len() == 1usize {
+                    split_text(s.as_view(), FsMode { kind: 3u8, ch: 0u8 }, p.regs.get(usize(lit)), self.scratch, false, spans)
+                } else {
+                    split_text(s.as_view(), FsMode { kind: 2u8, ch: 0u8 }, p.regs.get(usize(lit)), self.scratch, false, spans)
+                }
+            } else {
+                fs := str.String.new()
+                self.eval_text(p, sep, fs)
+                if fs.len() == 0usize {
+                    split_text(s.as_view(), FsMode { kind: 3u8, ch: 0u8 }, self.fs_re, self.scratch, false, spans)
+                } else if fs.len() == 1usize {
+                    if fs.byte(0usize) == 32u8 {
+                        split_text(s.as_view(), FsMode { kind: 0u8, ch: 32u8 }, self.fs_re, self.scratch, false, spans)
+                    } else {
+                        // a newline separates too, as the one-true-awk has it
+                        split_text(s.as_view(), FsMode { kind: 1u8, ch: fs.byte(0usize) }, self.fs_re, self.scratch, true, spans)
+                    }
+                } else {
+                    r := self.dynamic(fs.as_view())
+                    split_text(s.as_view(), FsMode { kind: 2u8, ch: 0u8 }, self.dregs.get(r), self.scratch, false, spans)
+                }
+            }
+        }
+        if self.halt != 0u8 { return 0.0 }
+        id := self.array_of(vr)
+        self.clear_array(id)
+        key := Key { s: str.String.new() }
+        for i in 0usize..spans.len() {
+            sp := spans.get(i)
+            key.s.clear()
+            key.s.push_u64(u64(i) + 1u64)
+            with t := s.as_view() { self.elem_set(id, key, input(t[sp.lo : sp.hi])) }
+        }
+        return f64(spans.len())
+    }
+
+    func builtin(edit self, p: view[Prog], b: u8, first: u32, count: u32) -> Value {
+        if b == BLength {
+            if count == 0u32 { return num(f64(self.rec.len())) }
+            a := p.kids.get(usize(first))
+            nd := p.nodes.get(usize(a))
+            match nd {
+                Var(vr) => {
+                    at := self.addr(vr)
+                    var kind: u8 = CScalar
+                    var arr: u32 = 0u32
+                    with c := self.cells.get(at) {
+                        kind = c.kind
+                        arr = c.arr
+                    }
+                    if kind == CArr || kind == COwnArr { return num(f64(self.arrays.get(usize(arr)).m.len())) }
+                }
+                _ => { }
+            }
+            s := str.String.new()
+            self.eval_text(p, a, s)
+            return num(f64(s.len()))
+        }
+        if b == BSubstr {
+            s := str.String.new()
+            self.eval_text(p, p.kids.get(usize(first)), s)
+            k := i64(s.len()) + 1i64
+            var m: i64 = sat_i32(self.eval_num(p, p.kids.get(usize(first + 1u32))))
+            if m <= 0i64 { m = 1i64 } else if m > k { m = k }
+            var n: i64 = k - 1i64
+            if count == 3u32 { n = sat_i32(self.eval_num(p, p.kids.get(usize(first + 2u32)))) }
+            if n < 0i64 { n = 0i64 } else if n > k - m { n = k - m }
+            with t := s.as_view() { return text(t[usize(m - 1i64) : usize(m - 1i64 + n)]) }
+        }
+        if b == BIndex {
+            s := str.String.new()
+            self.eval_text(p, p.kids.get(usize(first)), s)
+            t := str.String.new()
+            self.eval_text(p, p.kids.get(usize(first + 1u32)), t)
+            if s.len() == 0usize { return num(0.0) }
+            match str.find(s.as_view(), t.as_view()) {
+                Some(k) => { return num(f64(k) + 1.0) }
+                None => { return num(0.0) }
+            }
+        }
+        if b == BSplit { return num(self.split_into(p, first, count)) }
+        if b == BSub { return num(self.substitute(p, first, count, false)) }
+        if b == BGsub { return num(self.substitute(p, first, count, true)) }
+        if b == BMatch {
+            s := str.String.new()
+            self.eval_text(p, p.kids.get(usize(first)), s)
+            r := self.regex_of(p, p.kids.get(usize(first + 1u32)))
+            h := self.search(p, r, s.as_view(), 0usize, 0u8)
+            var start: f64 = 0.0
+            var length: f64 = -1.0
+            if h.found {
+                start = f64(h.start) + 1.0
+                length = f64(h.end - h.start)
+            }
+            self.set_cell(usize(VRSTART), num(start))
+            self.set_cell(usize(VRLENGTH), num(length))
+            return num(start)
+        }
+        if b == BSprintf { return text_own(self.sprintf(p, first, count)) }
+        if b == BTolower || b == BToupper {
+            s := str.String.new()
+            self.eval_text(p, p.kids.get(usize(first)), s)
+            r := str.String.new()
+            for i in 0usize..s.len() {
+                c := s.byte(i)
+                if b == BTolower && c >= 65u8 && c <= 90u8 {
+                    r.push(c + 32u8)
+                } else if b == BToupper && c >= 97u8 && c <= 122u8 {
+                    r.push(c - 32u8)
+                } else {
+                    r.push(c)
+                }
+            }
+            return text_own(r)
+        }
+        if b == BRand { return num(self.rng.uniform()) }
+        if b == BSrand {
+            var seed: f64 = 0.0
+            if count == 0u32 { seed = f64(time.wall_nanos() / 1000000000u64) } else { seed = self.eval_num(p, p.kids.get(usize(first))) }
+            self.rng.reseed(truncate[u32](sat_u64(seed) & 4294967295u64))
+            before := self.seed
+            self.seed = seed
+            return num(before)
+        }
+        if b == BClose {
+            name := str.String.new()
+            self.eval_text(p, p.kids.get(usize(first)), name)
+            return num(self.close_name(name.as_view()))
+        }
+        if b == BFflush {
+            if count == 1u32 { unused := self.eval(p, p.kids.get(usize(first))) }
+            self.flush_all()
+            self.sync_stdout()
+            return num(0.0)
+        }
+        if b == BSystem {
+            cmd := str.String.new()
+            self.eval_text(p, p.kids.get(usize(first)), cmd)
+            if self.halt != 0u8 { return num(0.0) }
+            return num(self.system(cmd.as_view()))
+        }
+        x := self.eval_num(p, p.kids.get(usize(first)))
+        if b == BInt { return num(trunc(x)) }
+        if b == BSqrt { return num(m_sqrt(x)) }
+        if b == BExp { return num(m_exp(x)) }
+        if b == BLog { return num(m_log(x)) }
+        if b == BSin { return num(m_sin(x)) }
+        if b == BCos { return num(m_cos(x)) }
+        if b == BAtan2 {
+            y := self.eval_num(p, p.kids.get(usize(first + 1u32)))
+            return num(m_atan2(x, y))
+        }
+        return uninit()
+    }
+}

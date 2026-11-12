@@ -1,0 +1,361 @@
+// The mathematical functions. The library has none, so they are written
+// here after the methods of the freely distributable fdlibm (reduce the
+// argument, then a polynomial on a small interval), which is what the C
+// library the system awk calls descends from.
+module lang
+
+const ln2_hi: f64 = 0.693147180369123816490
+const ln2_lo: f64 = 0.000000000190821492927058770002
+const inv_ln2: f64 = 1.44269504088896338700
+
+// split2 is x as a whole number of powers of two and a part in [1, 2).
+struct Split2 { m: f64; e: i64 }
+func split2(x: f64) -> Split2 {
+    var y: f64 = x
+    var e: i64 = 0i64
+    while y >= 18446744073709551616.0 {
+        y = y / 18446744073709551616.0
+        e = e + 64i64
+    }
+    while y >= 2.0 {
+        y = y / 2.0
+        e = e + 1i64
+    }
+    while y < 0.0000000000000000000542101086242752217003726400434970855712890625 {
+        y = y * 18446744073709551616.0
+        e = e - 64i64
+    }
+    while y < 1.0 {
+        y = y * 2.0
+        e = e - 1i64
+    }
+    return Split2 { m: y, e: e }
+}
+
+func m_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// m_sqrt: Newton's method from a guess good to a few digits, on a part
+// in [1, 4) so that nothing overflows, then one step whose remainder is
+// computed exactly, which settles the last bit.
+func m_sqrt(x: f64) -> f64 {
+    if x != x || x < 0.0 { return infinity() - infinity() }
+    if x == 0.0 || x - x != 0.0 { return x }
+    s := split2(x)
+    var m: f64 = s.m
+    var e: i64 = s.e
+    if e % 2i64 != 0i64 {
+        m = m * 2.0
+        e = e - 1i64
+    }
+    var y: f64 = 0.5 + 0.5 * m
+    for i in 0usize..6usize { y = 0.5 * (y + m / y) }
+    // m - y*y exactly: split y into halves of 26 bits
+    c := 134217729.0 * y
+    hi := c - (c - y)
+    lo := y - hi
+    r := ((m - hi * hi) - 2.0 * hi * lo) - lo * lo
+    y = y + r / (2.0 * y)
+    return scale2(y, e / 2i64)
+}
+
+func m_exp(x: f64) -> f64 {
+    if x != x { return x }
+    if x > 709.782712893383973096 { return infinity() }
+    if x < -745.13321910194110842 { return 0.0 }
+    var k: i64 = 0i64
+    var hi: f64 = x
+    var lo: f64 = 0.0
+    if m_abs(x) > 0.34657359027997264 {
+        if x < 0.0 { k = i64(inv_ln2 * x - 0.5) } else { k = i64(inv_ln2 * x + 0.5) }
+        t := f64(k)
+        hi = x - t * ln2_hi
+        lo = t * ln2_lo
+    }
+    r := hi - lo
+    t := r * r
+    c := r - t * (0.166666666666666019037 + t * (-0.00277777777770155933842 + t * (0.0000661375632143793436117 + t * (-0.00000165339022054652515390 + t * 0.0000000413813679705723846039))))
+    y := 1.0 - ((lo - (r * c) / (2.0 - c)) - hi)
+    return scale2(y, k)
+}
+
+func m_log(x: f64) -> f64 {
+    if x != x || x < 0.0 { return infinity() - infinity() }
+    if x == 0.0 { return 0.0 - infinity() }
+    if x - x != 0.0 { return x }
+    s := split2(x)
+    var m: f64 = s.m
+    var k: i64 = s.e
+    if m > 1.4142135623730951 {
+        m = m / 2.0
+        k = k + 1i64
+    }
+    f := m - 1.0
+    dk := f64(k)
+    ss := f / (2.0 + f)
+    z := ss * ss
+    w := z * z
+    t1 := w * (0.3999999999940941908 + w * (0.2222219843214978396 + w * 0.1531383769920937332))
+    t2 := z * (0.6666666666666735130 + w * (0.2857142874366239149 + w * (0.1818357216161805012 + w * 0.1479819860511658591)))
+    r := t2 + t1
+    hfsq := 0.5 * f * f
+    return dk * ln2_hi - ((hfsq - (ss * (hfsq + r) + dk * ln2_lo)) - f)
+}
+
+// kernel_sin and kernel_cos are sin and cos on [-pi/4, pi/4].
+func kernel_sin(x: f64) -> f64 {
+    z := x * x
+    v := z * x
+    r := 0.00833333333332248946124 + z * (-0.000198412698298579493134 + z * (0.00000275573137070700676789 + z * (-0.0000000250507602534068634195 + z * 0.000000000158969099521155010221)))
+    return x + v * (-0.166666666666666324348 + z * r)
+}
+func kernel_cos(x: f64) -> f64 {
+    z := x * x
+    r := z * (0.0416666666666666019037 + z * (-0.00138888888888741095749 + z * (0.0000248015872894767294178 + z * (-0.000000275573143513906633035 + z * (0.00000000208757232129817482790 + z * -0.0000000000113596475577881948265)))))
+    ax := m_abs(x)
+    if ax < 0.3 { return 1.0 - (0.5 * z - z * r) }
+    var qx: f64 = 0.28125
+    if ax <= 0.78125 { qx = ax / 4.0 }
+    hz := 0.5 * z - qx
+    a := 1.0 - qx
+    return a - (hz - z * r)
+}
+
+// Reduced is x less a whole number of quarter turns: n is that number's
+// last two bits, r what is left, in [-pi/4, pi/4] or just outside.
+struct Reduced { n: i64; r: f64 }
+
+// reduce subtracts n * pi/2 with pi/2 in three pieces of 33 bits, and n
+// in three pieces of 18 bits, so that every product is exact and the
+// subtractions that cancel lose nothing. It holds while n itself is
+// exact, to about 10^15; past that the result is not to be relied on.
+func reduce(x: f64) -> Reduced {
+    ax := m_abs(x)
+    if ax <= 0.78539816339744830962 { return Reduced { n: 0i64, r: x } }
+    if ax > 9007199254740992.0 { return Reduced { n: 0i64, r: 0.0 } }
+    fn := trunc(ax * 0.636619772367581382433 + 0.5)
+    n1 := trunc(fn / 68719476736.0) * 68719476736.0
+    n2 := trunc((fn - n1) / 262144.0) * 262144.0
+    n3 := fn - n1 - n2
+    var r: f64 = ax
+    r = r - n1 * 1.57079632673412561417
+    r = r - n2 * 1.57079632673412561417
+    r = r - n3 * 1.57079632673412561417
+    r = r - n1 * 0.0000000000607710050630396597660
+    r = r - n2 * 0.0000000000607710050630396597660
+    r = r - n3 * 0.0000000000607710050630396597660
+    r = r - n1 * 0.00000000000000000000202226624871116645580
+    r = r - n2 * 0.00000000000000000000202226624871116645580
+    r = r - n3 * 0.00000000000000000000202226624871116645580
+    r = r - fn * 0.0000000000000000000000000000000847842766036889956997
+    q := i64(fn - trunc(fn / 4.0) * 4.0)
+    if x < 0.0 { return Reduced { n: (4i64 - q) % 4i64, r: 0.0 - r } }
+    return Reduced { n: q, r: r }
+}
+
+func m_sin(x: f64) -> f64 {
+    if x - x != 0.0 { return infinity() - infinity() }
+    q := reduce(x)
+    if q.n == 0i64 { return kernel_sin(q.r) }
+    if q.n == 1i64 { return kernel_cos(q.r) }
+    if q.n == 2i64 { return 0.0 - kernel_sin(q.r) }
+    return 0.0 - kernel_cos(q.r)
+}
+
+func m_cos(x: f64) -> f64 {
+    if x - x != 0.0 { return infinity() - infinity() }
+    q := reduce(x)
+    if q.n == 0i64 { return kernel_cos(q.r) }
+    if q.n == 1i64 { return 0.0 - kernel_sin(q.r) }
+    if q.n == 2i64 { return 0.0 - kernel_cos(q.r) }
+    return kernel_sin(q.r)
+}
+
+const pi: f64 = 3.14159265358979311600
+const pi_lo: f64 = 0.000000000000000122464679914735317723
+const atan_hi: [4]f64 = [0.463647609000806093515, 0.785398163397448278999, 0.982793723247329054082, 1.57079632679489655800]
+const atan_lo: [4]f64 = [0.0000000000000000226987774529616870924, 0.0000000000000000306161699786838301793, 0.0000000000000000139033110312309984516, 0.0000000000000000612323399573676603587]
+
+// m_atan is the arc tangent of x >= 0.
+func m_atan(x0: f64) -> f64 {
+    if x0 != x0 { return x0 }
+    if x0 > 100000000000000000000.0 { return atan_hi[3usize] + atan_lo[3usize] }
+    var x: f64 = x0
+    var id: usize = 4usize
+    if x >= 0.4375 {
+        if x < 0.6875 {
+            id = 0usize
+            x = (2.0 * x - 1.0) / (2.0 + x)
+        } else if x < 1.1875 {
+            id = 1usize
+            x = (x - 1.0) / (x + 1.0)
+        } else if x < 2.4375 {
+            id = 2usize
+            x = (x - 1.5) / (1.0 + 1.5 * x)
+        } else {
+            id = 3usize
+            x = -1.0 / x
+        }
+    }
+    z := x * x
+    w := z * z
+    s1 := z * (0.333333333333329318027 + w * (0.142857142725034663711 + w * (0.0909088713343650656196 + w * (0.0666107313738753120669 + w * (0.0497687799461593236017 + w * 0.0162858201153657823623)))))
+    s2 := w * (-0.199999999998764832476 + w * (-0.111111104054623557880 + w * (-0.0769187620504482999495 + w * (-0.0583357013379057348645 + w * -0.0365315727442169155270))))
+    if id == 4usize { return x - x * (s1 + s2) }
+    return atan_hi[id] - ((x * (s1 + s2) - atan_lo[id]) - x)
+}
+
+func m_atan2(y: f64, x: f64) -> f64 {
+    if x != x || y != y { return x + y }
+    y_neg := y < 0.0 || (y == 0.0 && 1.0 / y < 0.0)
+    x_neg := x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
+    var r: f64 = 0.0
+    if y == 0.0 {
+        if x_neg { r = pi } else { r = 0.0 }
+    } else if x == 0.0 {
+        r = atan_hi[3usize] + atan_lo[3usize]
+    } else if x - x != 0.0 {
+        if y - y != 0.0 {
+            if x_neg { r = 3.0 * atan_hi[1usize] } else { r = atan_hi[1usize] }
+        } else if x_neg {
+            r = pi
+        } else {
+            r = 0.0
+        }
+    } else if y - y != 0.0 {
+        r = atan_hi[3usize] + atan_lo[3usize]
+    } else {
+        z := m_atan(m_abs(y / x))
+        if x_neg { r = pi - (z - pi_lo) } else { r = z }
+    }
+    if y_neg { return 0.0 - r }
+    return r
+}
+
+// m_fmod is the remainder of x by y with the sign of x, exactly: the
+// largest y * 2^k not above what is left is taken away until less than y
+// is left, and each of those subtractions is exact.
+func m_fmod(x: f64, y: f64) -> f64 {
+    if x != x || y != y || x - x != 0.0 || y == 0.0 { return infinity() - infinity() }
+    if y - y != 0.0 { return x }
+    var r: f64 = m_abs(x)
+    d := m_abs(y)
+    if r < d { return x }
+    var t: f64 = d
+    half := r / 2.0
+    while t <= half && t < 8988465674311579538646525953945123668089884894711532863671504057886633790275048156635423866120376801056005693993569667882939488440720831124642371531973706218888394671243274263815110980136662447696974653846093763136.0 { t = t * 2.0 }
+    while t >= d {
+        if r >= t { r = r - t }
+        t = t / 2.0
+        if r == 0.0 { break }
+    }
+    if x < 0.0 { return 0.0 - r }
+    return r
+}
+
+// awk_mod is the % of the one-true-awk: x less y times the whole part of
+// x / y, with the product and the difference rounded once, as the machine
+// instruction the system awk is compiled to rounds them. The product is
+// had exactly, as a double and what it lacks, by splitting each factor
+// into halves of 26 bits.
+func awk_mod(x: f64, y: f64) -> f64 {
+    q := x / y
+    v := trunc(q)
+    if v - v != 0.0 || m_abs(v) > 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0 || m_abs(y) > 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0 {
+        return x - y * v
+    }
+    p := y * v
+    c1 := 134217729.0 * y
+    yh := c1 - (c1 - y)
+    yl := y - yh
+    c2 := 134217729.0 * v
+    vh := c2 - (c2 - v)
+    vl := v - vh
+    low := ((yh * vh - p) + yh * vl + yl * vh) + yl * vl
+    return (x - p) - low
+}
+
+// int_power is x to a whole power n >= 0 by squaring, in the order the
+// one-true-awk multiplies, so that the result is the same to the bit.
+func int_power(x: f64, n: i64) -> f64 {
+    if n <= 0i64 { return 1.0 }
+    v := int_power(x, n / 2i64)
+    if n % 2i64 == 0i64 { return v * v }
+    return x * v * v
+}
+
+// m_pow is x to the power y for a y that is not a whole number >= 0.
+func m_pow(x: f64, y: f64) -> f64 {
+    if y == 0.0 { return 1.0 }
+    if x != x || y != y { return infinity() - infinity() }
+    whole := y - y == 0.0 && trunc(y) == y
+    if whole && m_abs(y) < 2147483648.0 {
+        // a negative whole power, unless the positive one is out of range
+        r := int_power(x, i64(0.0 - y))
+        if r != 0.0 && r - r == 0.0 { return 1.0 / r }
+        if x == 0.0 { return infinity() }
+        v := m_exp(y * m_log(m_abs(x)))
+        if x < 0.0 && m_fmod(y, 2.0) != 0.0 { return 0.0 - v }
+        return v
+    }
+    if x == 0.0 {
+        if y > 0.0 { return 0.0 }
+        return infinity()
+    }
+    if x < 0.0 {
+        if !whole { return infinity() - infinity() }
+        // a whole power too large to count: even but for a few
+        return m_exp(y * m_log(0.0 - x))
+    }
+    if x == 1.0 { return 1.0 }
+    if y - y != 0.0 {
+        if (x > 1.0) == (y > 0.0) { return infinity() }
+        return 0.0
+    }
+    return m_exp(y * m_log(x))
+}
+
+// Random is the generator behind rand and srand: the additive feedback
+// generator of BSD's random(3), which is what the one-true-awk calls, so
+// the same seed gives the same numbers.
+struct Random { r: [34]u32; f: usize; b: usize; seed: f64 }
+
+func new_random() -> Random {
+    g := Random { r: zero(), f: 0usize, b: 0usize, seed: 1.0 }
+    g.reseed(1u32)
+    return g
+}
+
+impl Random {
+    func reseed(edit self, seed: u32) {
+        self.r[0usize] = seed
+        for i in 1usize..31usize {
+            // 16807 * r mod (2^31 - 1), by Schrage's method; zero cannot
+            // be multiplied on, so another number stands in for it
+            // (the state is a signed word there, so a seed above 2^31
+            // goes in negative)
+            var prev: i64 = i64(self.r[i - 1usize])
+            if prev >= 2147483648i64 { prev = prev - 4294967296i64 }
+            if prev == 0i64 { prev = 123459876i64 }
+            hi := prev / 127773i64
+            lo := prev % 127773i64
+            var word: i64 = 16807i64 * lo - 2836i64 * hi
+            if word < 0i64 { word = word + 2147483647i64 }
+            self.r[i] = truncate[u32](truncate[u64](word))
+        }
+        self.f = 3usize
+        self.b = 0usize
+        for i in 0usize..310usize { skipped := self.next() }
+    }
+    func next(edit self) -> u32 {
+        v := wrapping_add(self.r[self.f], self.r[self.b])
+        self.r[self.f] = v
+        self.f = (self.f + 1usize) % 31usize
+        self.b = (self.b + 1usize) % 31usize
+        return v >> 1u32
+    }
+    // uniform is a number in [0, 1).
+    func uniform(edit self) -> f64 { return f64(self.next()) / 2147483648.0 }
+}

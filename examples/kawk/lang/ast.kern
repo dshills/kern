@@ -1,0 +1,281 @@
+// The syntax tree and the program the parser builds from an AWK text.
+module lang
+import "std/map"
+import "std/str"
+
+// The kinds of token. The lexer gives the parser one at a time.
+const TEof: u8 = 0u8
+const TNewline: u8 = 1u8
+const TLbrace: u8 = 2u8
+const TRbrace: u8 = 3u8
+const TLparen: u8 = 4u8
+const TRparen: u8 = 5u8
+const TLbracket: u8 = 6u8
+const TRbracket: u8 = 7u8
+const TSemi: u8 = 8u8
+const TComma: u8 = 9u8
+const TPlus: u8 = 10u8
+const TMinus: u8 = 11u8
+const TStar: u8 = 12u8
+const TSlash: u8 = 13u8
+const TPercent: u8 = 14u8
+const TCaret: u8 = 15u8
+const TNot: u8 = 16u8
+const TGt: u8 = 17u8
+const TGe: u8 = 18u8
+const TLt: u8 = 19u8
+const TLe: u8 = 20u8
+const TEq: u8 = 21u8
+const TNe: u8 = 22u8
+const TMatch: u8 = 23u8
+const TNoMatch: u8 = 24u8
+const TAnd: u8 = 25u8
+const TOr: u8 = 26u8
+const TQuestion: u8 = 27u8
+const TColon: u8 = 28u8
+const TAssign: u8 = 29u8
+const TAddAssign: u8 = 30u8
+const TSubAssign: u8 = 31u8
+const TMulAssign: u8 = 32u8
+const TDivAssign: u8 = 33u8
+const TModAssign: u8 = 34u8
+const TPowAssign: u8 = 35u8
+const TIncr: u8 = 36u8
+const TDecr: u8 = 37u8
+const TDollar: u8 = 38u8
+const TAppend: u8 = 39u8
+const TPipe: u8 = 40u8
+const TNumber: u8 = 41u8
+const TString: u8 = 42u8
+const TName: u8 = 44u8
+const TFuncName: u8 = 45u8
+const TBuiltin: u8 = 46u8
+const TBegin: u8 = 47u8
+const TEnd: u8 = 48u8
+const TFunction: u8 = 49u8
+const TIf: u8 = 50u8
+const TElse: u8 = 51u8
+const TWhile: u8 = 52u8
+const TFor: u8 = 53u8
+const TDo: u8 = 54u8
+const TBreak: u8 = 55u8
+const TContinue: u8 = 56u8
+const TNext: u8 = 57u8
+const TExit: u8 = 58u8
+const TReturn: u8 = 59u8
+const TDelete: u8 = 60u8
+const TIn: u8 = 61u8
+const TGetline: u8 = 62u8
+const TPrint: u8 = 63u8
+const TPrintf: u8 = 64u8
+const TBad: u8 = 65u8
+
+// The built-in functions, in the order of builtin_names.
+const BLength: u8 = 0u8
+const BSubstr: u8 = 1u8
+const BIndex: u8 = 2u8
+const BSplit: u8 = 3u8
+const BSub: u8 = 4u8
+const BGsub: u8 = 5u8
+const BMatch: u8 = 6u8
+const BSprintf: u8 = 7u8
+const BTolower: u8 = 8u8
+const BToupper: u8 = 9u8
+const BInt: u8 = 10u8
+const BSqrt: u8 = 11u8
+const BExp: u8 = 12u8
+const BLog: u8 = 13u8
+const BSin: u8 = 14u8
+const BCos: u8 = 15u8
+const BAtan2: u8 = 16u8
+const BRand: u8 = 17u8
+const BSrand: u8 = 18u8
+const BClose: u8 = 19u8
+const BFflush: u8 = 20u8
+const BSystem: u8 = 21u8
+
+// The arithmetic operators of Binary and of an op-assignment.
+const OpAdd: u8 = 1u8
+const OpSub: u8 = 2u8
+const OpMul: u8 = 3u8
+const OpDiv: u8 = 4u8
+const OpMod: u8 = 5u8
+const OpPow: u8 = 6u8
+
+// The comparisons of Cmp.
+const CLt: u8 = 0u8
+const CLe: u8 = 1u8
+const CEq: u8 = 2u8
+const CNe: u8 = 3u8
+const CGt: u8 = 4u8
+const CGe: u8 = 5u8
+
+// Where print, printf and getline go to or come from.
+const RNone: u8 = 0u8
+const RFile: u8 = 1u8
+const RAppend: u8 = 2u8
+const RPipe: u8 = 3u8
+
+// A node that is not there: the absent else, the absent action.
+const NoNode: u32 = 4294967295u32
+// A variable reference is a global's slot, or a local's with this bit set.
+const LocalBit: u32 = 2147483648u32
+
+// Node is a node of the tree: an expression or a statement. Nodes name
+// each other by index in Prog.nodes, and a list (arguments, subscripts,
+// the statements of a block) is `count` indexes in Prog.kids from `first`.
+// Every payload is Copy, so the interpreter reads a node by copying it.
+union Node {
+    Num(v: f64)
+    Str(k: u32)
+    Regex(r: u32)
+    Var(vr: u32)
+    Field(e: u32)
+    Index(vr: u32, first: u32, count: u32)
+    Assign(op: u8, lhs: u32, rhs: u32)
+    Cond(c: u32, a: u32, b: u32)
+    And(a: u32, b: u32)
+    Or(a: u32, b: u32)
+    Not(a: u32)
+    Neg(a: u32)
+    Plus(a: u32)
+    Binary(op: u8, a: u32, b: u32)
+    Cmp(op: u8, a: u32, b: u32)
+    Match(neg: bool, a: u32, b: u32)
+    Concat(a: u32, b: u32)
+    IncDec(lhs: u32, delta: i8, post: bool)
+    In(first: u32, count: u32, vr: u32)
+    Call(f: u32, first: u32, count: u32)
+    Builtin(b: u8, first: u32, count: u32)
+    Getline(kind: u8, lhs: u32, src: u32)
+    Block(first: u32, count: u32)
+    ExprStmt(e: u32)
+    Print(first: u32, count: u32, redir: u8, dest: u32)
+    Printf(first: u32, count: u32, redir: u8, dest: u32)
+    If(c: u32, a: u32, b: u32)
+    While(c: u32, body: u32)
+    Do(body: u32, c: u32)
+    For(init: u32, c: u32, step: u32, body: u32)
+    ForIn(lhs: u32, vr: u32, body: u32)
+    Next
+    Exit(e: u32)
+    Return(e: u32)
+    Break
+    Continue
+    Delete(vr: u32, first: u32, count: u32)
+    DeleteAll(vr: u32)
+    Nop
+}
+
+// Rule is a pattern and its action. kind 0 has no pattern, 1 has one, 2 is
+// a range p1, p2; body is NoNode for the missing action, which prints.
+struct Rule { kind: u8; p1: u32; p2: u32; body: u32 }
+
+// Func is a user function: params is how many names its parameter list
+// has, locals included.
+struct Func { name: str.String; params: u32; body: u32; defined: bool }
+
+// Prog is a parsed program.
+struct Prog {
+    nodes: Vec[Node]
+    kids: Vec[u32]
+    strs: Vec[str.String]
+    regs: Vec[Regex]
+    begins: Vec[u32]
+    ends: Vec[u32]
+    rules: Vec[Rule]
+    funcs: Vec[Func]
+    globals: Vec[str.String]
+    gmap: map.Map[str.String, u32]
+    fmap: map.Map[str.String, u32]
+}
+
+// The special variables have the first global slots, in this order.
+const VNF: u32 = 0u32
+const VNR: u32 = 1u32
+const VFNR: u32 = 2u32
+const VFS: u32 = 3u32
+const VOFS: u32 = 4u32
+const VORS: u32 = 5u32
+const VRS: u32 = 6u32
+const VSUBSEP: u32 = 7u32
+const VCONVFMT: u32 = 8u32
+const VOFMT: u32 = 9u32
+const VRSTART: u32 = 10u32
+const VRLENGTH: u32 = 11u32
+const VFILENAME: u32 = 12u32
+const VENVIRON: u32 = 13u32
+const VARGC: u32 = 14u32
+const VARGV: u32 = 15u32
+const special_count: u32 = 16u32
+
+func new_prog() -> Prog {
+    p := Prog {
+        nodes: Vec[Node].new(), kids: Vec[u32].new(), strs: Vec[str.String].new(), regs: Vec[Regex].new(),
+        begins: Vec[u32].new(), ends: Vec[u32].new(), rules: Vec[Rule].new(), funcs: Vec[Func].new(),
+        globals: Vec[str.String].new(), gmap: map.Map[str.String, u32].new(), fmap: map.Map[str.String, u32].new()
+    }
+    p.global("NF"); p.global("NR"); p.global("FNR"); p.global("FS"); p.global("OFS"); p.global("ORS"); p.global("RS")
+    p.global("SUBSEP"); p.global("CONVFMT"); p.global("OFMT"); p.global("RSTART"); p.global("RLENGTH"); p.global("FILENAME")
+    p.global("ENVIRON"); p.global("ARGC"); p.global("ARGV")
+    return p
+}
+
+impl Prog {
+    // global is the slot of a global variable, given out the first time
+    // the name is seen.
+    func global(edit self, name: view[]u8) -> u32 {
+        match map.find_text(self.gmap, name) {
+            Some(slot) => {
+                n := self.gmap.value_at(slot)
+                return n
+            }
+            None => { }
+        }
+        id := truncate[u32](self.globals.len())
+        self.globals.push(str.String.from(name))
+        self.gmap.insert(str.String.from(name), id)
+        return id
+    }
+    // find_global is the slot of a global the program mentions, if it does.
+    func find_global(view self, name: view[]u8) -> Option[u32] {
+        match map.find_text(self.gmap, name) {
+            Some(slot) => {
+                n := self.gmap.value_at(slot)
+                return Some(n)
+            }
+            None => { }
+        }
+        return None
+    }
+    // function is the number of a function, given out at its first call
+    // or at its definition, whichever the parser meets first.
+    func function(edit self, name: view[]u8) -> u32 {
+        match map.find_text(self.fmap, name) {
+            Some(slot) => {
+                n := self.fmap.value_at(slot)
+                return n
+            }
+            None => { }
+        }
+        id := truncate[u32](self.funcs.len())
+        self.funcs.push(Func { name: str.String.from(name), params: 0u32, body: NoNode, defined: false })
+        self.fmap.insert(str.String.from(name), id)
+        return id
+    }
+    func add(edit self, n: Node) -> u32 {
+        id := truncate[u32](self.nodes.len())
+        self.nodes.push(n)
+        return id
+    }
+    func keep(edit self, list: view[]u32) -> u32 {
+        first := truncate[u32](self.kids.len())
+        self.kids.extend(list)
+        return first
+    }
+    func text(edit self, s: view[]u8) -> u32 {
+        id := truncate[u32](self.strs.len())
+        self.strs.push(str.String.from(s))
+        return id
+    }
+}

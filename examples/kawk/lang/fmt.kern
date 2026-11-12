@@ -1,0 +1,533 @@
+// Formatting: printf's conversions. The library formats a float only as
+// the shortest text that reads back, so %e, %f and %g are written here,
+// from the exact decimal expansion of the double (every double has one:
+// it is a whole number times a power of two), rounded half to even at the
+// digit asked for, which is what C's printf gives.
+module lang
+import "std/str"
+
+// Dec is a decimal number 0.d1d2d3... times ten to the e; d holds digit
+// values, the first one not zero. No digits is zero.
+struct Dec { d: Vec[u8]; e: i64 }
+
+const limb: u64 = 1000000000u64
+
+// big_mul multiplies a number held in limbs of nine decimal digits, least
+// significant first, by k.
+func big_mul(b: edit[Vec[u32]], k: u32) {
+    var carry: u64 = 0u64
+    n := b.len()
+    for i in 0usize..n {
+        with x := b.at(i) {
+            t := u64(x) * u64(k) + carry
+            x = truncate[u32](t % limb)
+            carry = t / limb
+        }
+    }
+    while carry > 0u64 {
+        b.push(truncate[u32](carry % limb))
+        carry = carry / limb
+    }
+}
+
+// dec_exact is the exact decimal expansion of a finite x > 0.
+func dec_exact(x: f64) -> Dec {
+    // x = m * 2^e with m a whole number below 2^53
+    var y: f64 = x
+    var e: i64 = 0i64
+    while y >= 166153499473114484112975882535043072.0 {
+        y = y / 18446744073709551616.0
+        e = e + 64i64
+    }
+    while y >= 9007199254740992.0 {
+        y = y / 2.0
+        e = e + 1i64
+    }
+    while y < 0.000244140625 {
+        y = y * 18446744073709551616.0
+        e = e - 64i64
+    }
+    while y < 4503599627370496.0 {
+        y = y * 2.0
+        e = e - 1i64
+    }
+    var m: u64 = u64(y)
+    while e < 0i64 && m & 1u64 == 0u64 {
+        m = m >> 1u32
+        e = e + 1i64
+    }
+    b := Vec[u32].new()
+    b.push(truncate[u32](m % limb))
+    if m >= limb { b.push(truncate[u32](m / limb)) }
+    var shift: i64 = 0i64
+    if e >= 0i64 {
+        var k: i64 = e
+        while k >= 29i64 {
+            big_mul(b, 536870912u32)
+            k = k - 29i64
+        }
+        if k > 0i64 { big_mul(b, wrapping_shl(1u32, truncate[u32](k))) }
+    } else {
+        // m / 2^k = m * 5^k / 10^k
+        var k: i64 = 0i64 - e
+        shift = k
+        while k >= 13i64 {
+            big_mul(b, 1220703125u32)
+            k = k - 13i64
+        }
+        var f: u32 = 1u32
+        while k > 0i64 {
+            f = f * 5u32
+            k = k - 1i64
+        }
+        if f > 1u32 { big_mul(b, f) }
+    }
+    r := Dec { d: Vec[u8].new(), e: 0i64 }
+    var i: usize = b.len()
+    var top: bool = true
+    while i > 0usize {
+        i = i - 1usize
+        v := b.get(i)
+        var div: u32 = 100000000u32
+        while div > 0u32 {
+            digit := truncate[u8]((v / div) % 10u32)
+            if !top || digit != 0u8 {
+                r.d.push(digit)
+                top = false
+            }
+            div = div / 10u32
+        }
+    }
+    r.e = i64(r.d.len()) - shift
+    dec_trim(r)
+    return r
+}
+
+func dec_trim(x: edit[Dec]) {
+    while x.d.len() > 0usize && x.d.get(x.d.len() - 1usize) == 0u8 { gone := x.d.pop() }
+}
+
+// dec_round keeps the first `keep` digits of x, rounding half to even on
+// what is cut off. A carry out of the first digit makes the number 0.1
+// times the next power of ten.
+func dec_round(x: edit[Dec], keep: i64) {
+    n := i64(x.d.len())
+    if keep >= n { return }
+    if keep < 0i64 {
+        x.d.clear()
+        return
+    }
+    k := usize(keep)
+    cut := x.d.get(k)
+    var up: bool = cut > 5u8
+    if cut == 5u8 {
+        // exactly half only when nothing follows the 5
+        if k + 1usize < x.d.len() {
+            up = true
+        } else if k > 0usize {
+            up = x.d.get(k - 1usize) & 1u8 == 1u8
+        }
+    }
+    x.d.resize(k, 0u8)
+    if !up {
+        dec_trim(x)
+        return
+    }
+    var i: usize = k
+    var carried: bool = true
+    while i > 0usize && carried {
+        i = i - 1usize
+        with digit := x.d.at(i) {
+            if digit == 9u8 {
+                digit = 0u8
+            } else {
+                digit = digit + 1u8
+                carried = false
+            }
+        }
+    }
+    if carried {
+        x.d.clear()
+        x.d.push(1u8)
+        x.e = x.e + 1i64
+    }
+    dec_trim(x)
+}
+
+// digit_at is digit i of x, zero past its end.
+func digit_at(x: view[Dec], i: i64) -> u8 {
+    if i < 0i64 || i >= i64(x.d.len()) { return 48u8 }
+    d := x.d.get(usize(i))
+    return d + 48u8
+}
+
+// Flags are a conversion's flags: - + space # 0.
+struct Flags { left: bool; plus: bool; space: bool; alt: bool; zero: bool }
+func no_flags() -> Flags { return Flags { left: false, plus: false, space: false, alt: false, zero: false } }
+
+// pad appends body to dst in a field of width: sign first, then zeros when
+// the 0 flag asks for them, else blanks on the side the - flag says.
+func pad(dst: edit[str.String], sign: u8, body: view[]u8, f: Flags, width: i64, zeros: bool) { pad_prefixed(dst, sign, "", body, f, width, zeros) }
+
+// pad_prefixed is pad with a prefix (0x) that goes after the sign and
+// before the zeros.
+func pad_prefixed(dst: edit[str.String], sign: u8, prefix: view[]u8, body: view[]u8, f: Flags, width: i64, zeros: bool) {
+    var used: i64 = i64(len(body) + len(prefix))
+    if sign != 0u8 { used = used + 1i64 }
+    var fill: i64 = 0i64
+    if width > used { fill = width - used }
+    if fill > 100000000i64 { fill = 100000000i64 }
+    if f.left {
+        if sign != 0u8 { dst.push(sign) }
+        dst.push_str(prefix)
+        dst.push_str(body)
+        while fill > 0i64 {
+            dst.push(32u8)
+            fill = fill - 1i64
+        }
+    } else if zeros {
+        if sign != 0u8 { dst.push(sign) }
+        dst.push_str(prefix)
+        while fill > 0i64 {
+            dst.push(48u8)
+            fill = fill - 1i64
+        }
+        dst.push_str(body)
+    } else {
+        while fill > 0i64 {
+            dst.push(32u8)
+            fill = fill - 1i64
+        }
+        if sign != 0u8 { dst.push(sign) }
+        dst.push_str(prefix)
+        dst.push_str(body)
+    }
+}
+
+func sign_of(neg: bool, f: Flags) -> u8 {
+    if neg { return 45u8 }
+    if f.plus { return 43u8 }
+    if f.space { return 32u8 }
+    return 0u8
+}
+
+// put_exp appends e+XX, with at least two digits of exponent.
+func put_exp(body: edit[str.String], letter: u8, x: i64) {
+    body.push(letter)
+    var a: i64 = x
+    if x < 0i64 {
+        body.push(45u8)
+        a = 0i64 - x
+    } else {
+        body.push(43u8)
+    }
+    if a < 10i64 { body.push(48u8) }
+    body.push_u64(u64(a))
+}
+
+// fmt_float appends x by the conversion conv (e f g E F G) with precision
+// prec (below zero for the default, 6).
+func fmt_float(dst: edit[str.String], x: f64, conv: u8, prec: i64, f: Flags, width: i64) {
+    upper := conv < 97u8
+    var kind: u8 = conv
+    if upper { kind = conv + 32u8 }
+    neg := x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
+    if x - x != 0.0 {
+        // inf and nan take no zeros and no precision
+        if x != x {
+            // not-a-number has no sign, whatever the flags ask
+            if upper { pad(dst, 0u8, "NAN", f, width, false) } else { pad(dst, 0u8, "nan", f, width, false) }
+        } else if upper {
+            pad(dst, sign_of(neg, f), "INF", f, width, false)
+        } else {
+            pad(dst, sign_of(neg, f), "inf", f, width, false)
+        }
+        return
+    }
+    var p: i64 = prec
+    if p < 0i64 { p = 6i64 }
+    if p > 100000i64 { p = 100000i64 }
+    var d: Dec = Dec { d: Vec[u8].new(), e: 1i64 }
+    if x != 0.0 {
+        if neg { d = dec_exact(0.0 - x) } else { d = dec_exact(x) }
+    }
+    body := str.String.new()
+    var exp_letter: u8 = 101u8
+    if upper { exp_letter = 69u8 }
+    if kind == 103u8 {
+        if p == 0i64 { p = 1i64 }
+        dec_round(d, p)
+        var ex: i64 = d.e - 1i64
+        if d.d.len() == 0usize { ex = 0i64 }
+        if ex < -4i64 || ex >= p {
+            // as %e with p-1 digits after the point, less trailing zeros
+            var last: i64 = p - 1i64
+            if !f.alt {
+                last = i64(d.d.len()) - 1i64
+                if last < 0i64 { last = 0i64 }
+            }
+            body.push(digit_at(d, 0i64))
+            if last > 0i64 || f.alt { body.push(46u8) }
+            var i: i64 = 1i64
+            while i <= last {
+                body.push(digit_at(d, i))
+                i = i + 1i64
+            }
+            put_exp(body, exp_letter, ex)
+        } else {
+            // as %f with p-1-ex digits after the point, less trailing zeros
+            var frac: i64 = p - 1i64 - ex
+            if !f.alt {
+                frac = i64(d.d.len()) - d.e
+                if frac < 0i64 { frac = 0i64 }
+            }
+            put_fixed(body, d, frac, f.alt)
+        }
+    } else if kind == 101u8 {
+        dec_round(d, p + 1i64)
+        var ex: i64 = d.e - 1i64
+        if d.d.len() == 0usize { ex = 0i64 }
+        body.push(digit_at(d, 0i64))
+        if p > 0i64 || f.alt { body.push(46u8) }
+        var i: i64 = 1i64
+        while i <= p {
+            body.push(digit_at(d, i))
+            i = i + 1i64
+        }
+        put_exp(body, exp_letter, ex)
+    } else {
+        dec_round(d, d.e + p)
+        put_fixed(body, d, p, f.alt)
+    }
+    pad(dst, sign_of(neg, f), body.as_view(), f, width, f.zero)
+}
+
+// put_fixed appends x with frac digits after the point.
+func put_fixed(body: edit[str.String], x: view[Dec], frac: i64, point: bool) {
+    if x.d.len() == 0usize || x.e <= 0i64 {
+        body.push(48u8)
+    } else {
+        var i: i64 = 0i64
+        while i < x.e {
+            body.push(digit_at(x, i))
+            i = i + 1i64
+        }
+    }
+    if frac > 0i64 || point { body.push(46u8) }
+    var j: i64 = 0i64
+    while j < frac {
+        if x.d.len() == 0usize { body.push(48u8) } else { body.push(digit_at(x, x.e + j)) }
+        j = j + 1i64
+    }
+}
+
+// fmt_int appends a whole number in a base, with at least prec digits.
+func fmt_int(dst: edit[str.String], mag: u64, neg: bool, base: u64, upper: bool, prec: i64, f: Flags, width: i64, signed: bool) {
+    var digits: [64]u8 = zero()
+    var n: usize = 0usize
+    var v: u64 = mag
+    while v > 0u64 {
+        d := truncate[u8](v % base)
+        if d < 10u8 { digits[n] = d + 48u8 } else if upper { digits[n] = d + 55u8 } else { digits[n] = d + 87u8 }
+        v = v / base
+        n = n + 1usize
+    }
+    body := str.String.new()
+    prefix := str.String.new()
+    if f.alt && base == 16u64 && mag != 0u64 {
+        if upper { prefix.push_str("0X") } else { prefix.push_str("0x") }
+    }
+    var want: i64 = prec
+    if prec < 0i64 { want = 1i64 }
+    if want > 100000i64 { want = 100000i64 }
+    if f.alt && base == 8u64 && want <= i64(n) { want = i64(n) + 1i64 }
+    var z: i64 = want - i64(n)
+    while z > 0i64 {
+        body.push(48u8)
+        z = z - 1i64
+    }
+    while n > 0usize {
+        n = n - 1usize
+        body.push(digits[n])
+    }
+    if signed {
+        pad_prefixed(dst, sign_of(neg, f), prefix.as_view(), body.as_view(), f, width, f.zero && prec < 0i64)
+    } else {
+        pad_prefixed(dst, 0u8, prefix.as_view(), body.as_view(), f, width, f.zero && prec < 0i64)
+    }
+}
+
+// format appends fmt with its conversions filled from args, as printf and
+// sprintf do. It returns false when fmt asks for more arguments than
+// there are. A number given to %s is converted through convfmt.
+func format(dst: edit[str.String], fmt: view[]u8, args: view[]Value, convfmt: view[]u8) -> bool {
+    n := len(fmt)
+    var i: usize = 0usize
+    var next: usize = 0usize
+    while i < n {
+        c := fmt[i]
+        if c != 37u8 {
+            // literal text up to the next %
+            var j: usize = i
+            while j < n && fmt[j] != 37u8 { j = j + 1usize }
+            dst.push_str(fmt[i:j])
+            i = j
+            continue
+        }
+        if i + 1usize < n && fmt[i + 1usize] == 37u8 {
+            dst.push(37u8)
+            i = i + 2usize
+            continue
+        }
+        start := i
+        i = i + 1usize
+        f := no_flags()
+        while i < n {
+            b := fmt[i]
+            if b == 45u8 { f.left = true } else if b == 43u8 { f.plus = true } else if b == 32u8 { f.space = true } else if b == 35u8 { f.alt = true } else if b == 48u8 { f.zero = true } else { break }
+            i = i + 1usize
+        }
+        var width: i64 = 0i64
+        if i < n && fmt[i] == 42u8 {
+            if next >= len(args) { return false }
+            width = sat_i32(to_num(args[next]))
+            next = next + 1usize
+            if width < 0i64 {
+                f.left = true
+                width = 0i64 - width
+            }
+            i = i + 1usize
+        } else {
+            while i < n && is_digit(fmt[i]) {
+                if width < 100000000i64 { width = width * 10i64 + i64(fmt[i] - 48u8) }
+                i = i + 1usize
+            }
+        }
+        var prec: i64 = -1i64
+        if i < n && fmt[i] == 46u8 {
+            i = i + 1usize
+            prec = 0i64
+            if i < n && fmt[i] == 42u8 {
+                if next >= len(args) { return false }
+                prec = sat_i32(to_num(args[next]))
+                next = next + 1usize
+                i = i + 1usize
+            } else {
+                while i < n && is_digit(fmt[i]) {
+                    if prec < 100000000i64 { prec = prec * 10i64 + i64(fmt[i] - 48u8) }
+                    i = i + 1usize
+                }
+            }
+        }
+        // the length letters of C mean nothing here
+        while i < n && (fmt[i] == 104u8 || fmt[i] == 108u8 || fmt[i] == 76u8 || fmt[i] == 113u8 || fmt[i] == 106u8 || fmt[i] == 122u8 || fmt[i] == 116u8) { i = i + 1usize }
+        if i >= n {
+            dst.push_str(fmt[start:n])
+            break
+        }
+        conv := fmt[i]
+        i = i + 1usize
+        if !is_conversion(conv) {
+            dst.push_str(fmt[start:i])
+            continue
+        }
+        if next >= len(args) { return false }
+        fmt_arg(dst, args[next], conv, prec, f, width, convfmt)
+        next = next + 1usize
+    }
+    return true
+}
+
+func is_conversion(c: u8) -> bool {
+    return c == 100u8 || c == 105u8 || c == 111u8 || c == 120u8 || c == 88u8 || c == 117u8 || c == 99u8 || c == 115u8 || c == 101u8 || c == 69u8 || c == 102u8 || c == 70u8 || c == 103u8 || c == 71u8
+}
+
+// format_kinds lists, for each argument fmt will take, whether it is read
+// as a number (a width or a precision given by *, and every conversion
+// but %s and %c).
+func format_kinds(fmt: view[]u8, kinds: edit[Vec[bool]]) {
+    n := len(fmt)
+    var i: usize = 0usize
+    while i < n {
+        if fmt[i] != 37u8 {
+            i = i + 1usize
+            continue
+        }
+        if i + 1usize < n && fmt[i + 1usize] == 37u8 {
+            i = i + 2usize
+            continue
+        }
+        i = i + 1usize
+        while i < n && !is_alpha(fmt[i]) {
+            if fmt[i] == 42u8 { kinds.push(true) }
+            i = i + 1usize
+        }
+        while i < n && (fmt[i] == 104u8 || fmt[i] == 108u8 || fmt[i] == 76u8 || fmt[i] == 113u8 || fmt[i] == 106u8 || fmt[i] == 122u8 || fmt[i] == 116u8) { i = i + 1usize }
+        if i < n {
+            if is_conversion(fmt[i]) { kinds.push(fmt[i] != 115u8 && fmt[i] != 99u8) }
+            i = i + 1usize
+        }
+    }
+}
+
+// fmt_arg appends one argument by one conversion.
+func fmt_arg(dst: edit[str.String], a: view[Value], conv: u8, prec: i64, f: Flags, width: i64, convfmt: view[]u8) {
+    if conv == 100u8 || conv == 105u8 {
+        v := sat_i64(to_num(a))
+        if v < 0i64 {
+            fmt_int(dst, u64(0i64 - (v + 1i64)) + 1u64, true, 10u64, false, prec, f, width, true)
+        } else {
+            fmt_int(dst, u64(v), false, 10u64, false, prec, f, width, true)
+        }
+    } else if conv == 111u8 {
+        fmt_int(dst, sat_u64(to_num(a)), false, 8u64, false, prec, f, width, false)
+    } else if conv == 120u8 || conv == 88u8 {
+        fmt_int(dst, sat_u64(to_num(a)), false, 16u64, conv == 88u8, prec, f, width, false)
+    } else if conv == 117u8 {
+        fmt_int(dst, sat_u64(to_num(a)), false, 10u64, false, prec, f, width, false)
+    } else if conv == 99u8 {
+        fmt_char(dst, a, f, width)
+    } else if conv == 115u8 {
+        if a.tag == VNum {
+            t := str.String.new()
+            push_num(t, a.n, convfmt)
+            fmt_str(dst, t.as_view(), prec, f, width)
+        } else {
+            fmt_str(dst, a.s.as_view(), prec, f, width)
+        }
+    } else {
+        fmt_float(dst, to_num(a), conv, prec, f, width)
+    }
+}
+
+func fmt_str(dst: edit[str.String], s: view[]u8, prec: i64, f: Flags, width: i64) {
+    var m: usize = len(s)
+    if prec >= 0i64 && usize(prec) < m { m = usize(prec) }
+    pad(dst, 0u8, s[0usize:m], f, width, f.zero)
+}
+
+// fmt_char is %c: the byte a number names, or a string's first byte. The
+// number zero is a zero byte; any other value whose byte is zero writes
+// nothing but its padding, as C's snprintf leaves it.
+func fmt_char(dst: edit[str.String], a: view[Value], f: Flags, width: i64) {
+    v := num_view(a)
+    var b: u8 = 0u8
+    if v.is_num {
+        code := sat_i32(v.n)
+        if code == 0i64 {
+            dst.push(0u8)
+            return
+        }
+        b = truncate[u8](truncate[u64](code) & 255u64)
+    } else if a.s.len() > 0usize {
+        b = a.s.byte(0usize)
+    }
+    if b == 0u8 {
+        // the zero byte ends what C's snprintf wrote: padding before it
+        // is kept, padding after it is lost
+        if !f.left { pad(dst, 0u8, "", f, width - 1i64, f.zero) }
+        return
+    }
+    var one: [1]u8 = [b]
+    pad(dst, 0u8, one, f, width, f.zero)
+}

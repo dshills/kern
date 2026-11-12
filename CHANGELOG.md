@@ -176,6 +176,9 @@ Five more examples, written to find flaws, and what they found.
   the self-hosted parser's diagnostics test runs its inputs through a
   pool: the package takes 245 s where it took 350 to 385 s on the same
   loaded host, with the same subtests and results.
+- `kern show-layout` listed `u64`, `usize`, `u8`, `i64` and `u32` as
+  types of size 0 in any program that imports `std/map` (what its
+  `impl Hashable for u64` and the others declare); they are left out.
 - The language server converts positions through a table of line starts
   made once for a document's text: it decoded the whole file at every
   conversion, four times a symbol in an outline (`kvm.kern`'s outline,
@@ -197,6 +200,22 @@ Five more examples, written to find flaws, and what they found.
   the type).
 - The README said `kern run` runs a program natively; it runs the
   interpreter.
+- `spec/types.md` said the library modules export every declaration;
+  it now also says what the compiler does for fields: every field of a
+  `nocopy` library struct is private to its module.
+
+### Examples
+
+- `examples/kawk` is the AWK language in 6,200 lines of kern: patterns
+  and ranges, every statement and operator, user functions, associative
+  arrays, fields and records under `FS` and `RS`, `getline`, `printf`,
+  pipes and `system`, with POSIX extended regular expressions matched
+  leftmost-longest, `%e %f %g` from the exact expansion of a double, and
+  `sqrt`, `exp`, `log`, `sin`, `cos` and `atan2` of its own (the library
+  has none of these). It was checked against the system's awk (the
+  one-true-awk, version 20200816) on 548 programs, byte for byte in
+  output and exit status, natively and in the interpreter; on a file of
+  200,000 lines it retires 0.08 to 0.49 of that awk's instructions.
 
 ## [v0.2.3] - 2026-11-11
 

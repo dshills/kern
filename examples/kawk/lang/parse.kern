@@ -1,0 +1,816 @@
+// The parser: recursive descent over the tokens, building Prog. The
+// grammar is the one-true-awk's, so the things it settles in its own way
+// are settled that way here: every comparison, ~ and `in` bind alike and
+// more loosely than concatenation; a print list outside parentheses holds
+// no comparison (a > there is the redirection); `x -1` subtracts.
+module lang
+import "std/str"
+
+struct Parser {
+    src: Vec[u8]
+    pos: usize
+    line: u32
+    tok: Token
+    p: Prog
+    params: Vec[str.String]
+    in_func: bool
+    no_cmp: bool
+    pending: u32
+    depth: u32
+    failed: bool
+    err_line: u32
+    err_msg: str.String
+}
+
+const max_depth: u32 = 400u32
+
+// parse compiles a program text; the parser's failed, err_line and err_msg
+// say what was wrong with it.
+func parse(src: view[]u8) -> Parser {
+    ps := Parser {
+        src: Vec[u8].new(), pos: 0usize, line: 1u32,
+        tok: Token { kind: TEof, num: 0.0, id: 0u32, b: 0u8, line: 1u32, start: 0usize, end: 0usize },
+        p: new_prog(), params: Vec[str.String].new(), in_func: false, no_cmp: false, pending: NoNode, depth: 0u32,
+        failed: false, err_line: 0u32, err_msg: str.String.new()
+    }
+    ps.src.extend(src)
+    ps.advance()
+    ps.skip_terms()
+    while ps.tok.kind != TEof && !ps.failed {
+        ps.item()
+        ps.skip_terms()
+    }
+    return ps
+}
+
+func is_assign_op(k: u8) -> bool { return k >= TAssign && k <= TPowAssign }
+func is_terminator(k: u8) -> bool { return k == TSemi || k == TNewline || k == TRbrace || k == TEof }
+
+impl Parser {
+    func fail(edit self, msg: view[]u8) {
+        if self.failed { return }
+        self.failed = true
+        self.err_line = self.line
+        if self.tok.kind == TNewline && self.line > 1u32 { self.err_line = self.tok.line }
+        self.err_msg = str.String.from(msg)
+        self.set_tok(TEof, self.pos)
+    }
+    func expect(edit self, kind: u8, what: view[]u8) {
+        if self.tok.kind == kind {
+            self.advance()
+            return
+        }
+        m := str.String.from("syntax error: expected ")
+        m.push_str(what)
+        self.fail(m.as_view())
+    }
+    func skip_nl(edit self) {
+        while self.tok.kind == TNewline { self.advance() }
+    }
+    func skip_terms(edit self) {
+        while self.tok.kind == TNewline || self.tok.kind == TSemi { self.advance() }
+    }
+    func save(view self) -> LexState { return LexState { pos: self.pos, line: self.line, tok: self.tok } }
+    func restore(edit self, s: LexState) {
+        self.pos = s.pos
+        self.line = s.line
+        self.tok = s.tok
+    }
+    func add(edit self, n: Node) -> u32 { return self.p.add(n) }
+    func name(view self) -> str.String {
+        with text := self.src.as_view() { return str.String.from(text[self.tok.start : self.tok.end]) }
+    }
+    // resolve is the variable a name means here: a parameter of the
+    // function being parsed, or a global.
+    func resolve(edit self, name: view[]u8) -> u32 {
+        if self.in_func {
+            for i in 0usize..self.params.len() {
+                if self.params.get(i).equals(name) { return LocalBit | truncate[u32](i) }
+            }
+        }
+        return self.p.global(name)
+    }
+    func is_lvalue(view self, e: u32) -> bool {
+        nd := self.p.nodes.get(usize(e))
+        match nd {
+            Var(vr) => { return true }
+            Field(x) => { return true }
+            Index(vr, first, count) => { return true }
+            _ => { return false }
+        }
+    }
+
+    // ---- rules and functions ----
+
+    func item(edit self) {
+        k := self.tok.kind
+        if k == TBegin {
+            self.advance()
+            body := self.action()
+            self.p.begins.push(body)
+            return
+        }
+        if k == TEnd {
+            self.advance()
+            body := self.action()
+            self.p.ends.push(body)
+            return
+        }
+        if k == TFunction {
+            self.function()
+            return
+        }
+        if k == TLbrace {
+            body := self.action()
+            self.p.rules.push(Rule { kind: 0u8, p1: NoNode, p2: NoNode, body: body })
+            return
+        }
+        p1 := self.expr()
+        var p2: u32 = NoNode
+        var kind: u8 = 1u8
+        if self.tok.kind == TComma {
+            self.advance()
+            self.skip_nl()
+            p2 = self.expr()
+            kind = 2u8
+        }
+        var body: u32 = NoNode
+        if self.tok.kind == TLbrace {
+            body = self.action()
+        } else if !is_terminator(self.tok.kind) {
+            self.fail("syntax error")
+        }
+        self.p.rules.push(Rule { kind: kind, p1: p1, p2: p2, body: body })
+    }
+
+    func function(edit self) {
+        self.advance()
+        if self.tok.kind != TName && self.tok.kind != TFuncName {
+            self.fail("syntax error: expected a function name")
+            return
+        }
+        fname := self.name()
+        f := self.p.function(fname.as_view())
+        if self.p.funcs.get(usize(f)).defined {
+            self.fail("function defined twice")
+            return
+        }
+        self.advance()
+        self.expect(TLparen, "( after the function name")
+        self.params.clear()
+        while self.tok.kind == TName {
+            pname := self.name()
+            self.params.push(pname)
+            self.advance()
+            if self.tok.kind == TComma {
+                self.advance()
+                self.skip_nl()
+            } else {
+                break
+            }
+        }
+        self.expect(TRparen, ") after the parameters")
+        self.skip_nl()
+        self.in_func = true
+        body := self.action()
+        self.in_func = false
+        with fn := self.p.funcs.at(usize(f)) {
+            fn.params = truncate[u32](self.params.len())
+            fn.body = body
+            fn.defined = true
+        }
+        self.params.clear()
+    }
+
+    // action parses { statements }.
+    func action(edit self) -> u32 {
+        if self.depth > max_depth {
+            self.fail("program nested too deeply")
+            return self.add(Node.Nop)
+        }
+        self.depth = self.depth + 1u32
+        self.expect(TLbrace, "{")
+        list := Vec[u32].new()
+        self.skip_terms()
+        while self.tok.kind != TRbrace && self.tok.kind != TEof && !self.failed {
+            list.push(self.stmt())
+            self.skip_terms()
+        }
+        self.expect(TRbrace, "}")
+        self.depth = self.depth - 1u32
+        first := self.p.keep(list.as_view())
+        return self.add(Node.Block(first, truncate[u32](list.len())))
+    }
+
+    // end_simple takes the ; or newline that ends a simple statement; a }
+    // ends one too, and stays.
+    func end_simple(edit self) {
+        k := self.tok.kind
+        if k == TSemi || k == TNewline {
+            self.advance()
+        } else if k != TRbrace && k != TEof {
+            self.fail("syntax error")
+        }
+    }
+
+    func condition(edit self) -> u32 {
+        self.expect(TLparen, "(")
+        saved := self.no_cmp
+        self.no_cmp = false
+        c := self.expr()
+        self.no_cmp = saved
+        self.expect(TRparen, ")")
+        return c
+    }
+
+    func stmt(edit self) -> u32 {
+        if self.depth > max_depth {
+            self.fail("program nested too deeply")
+            return self.add(Node.Nop)
+        }
+        self.depth = self.depth + 1u32
+        s := self.stmt_inner()
+        self.depth = self.depth - 1u32
+        return s
+    }
+
+    func stmt_inner(edit self) -> u32 {
+        k := self.tok.kind
+        if k == TLbrace { return self.action() }
+        if k == TSemi {
+            self.advance()
+            return self.add(Node.Nop)
+        }
+        if k == TIf {
+            self.advance()
+            c := self.condition()
+            self.skip_nl()
+            a := self.stmt()
+            self.skip_nl()
+            var b: u32 = NoNode
+            if self.tok.kind == TElse {
+                self.advance()
+                self.skip_nl()
+                b = self.stmt()
+            }
+            return self.add(Node.If(c, a, b))
+        }
+        if k == TWhile {
+            self.advance()
+            c := self.condition()
+            if self.tok.kind == TSemi {
+                self.advance()
+                empty := self.add(Node.Nop)
+                return self.add(Node.While(c, empty))
+            }
+            self.skip_nl()
+            body := self.stmt()
+            return self.add(Node.While(c, body))
+        }
+        if k == TDo {
+            self.advance()
+            self.skip_nl()
+            body := self.stmt()
+            self.skip_terms()
+            self.expect(TWhile, "while after the body of do")
+            c := self.condition()
+            self.end_simple()
+            return self.add(Node.Do(body, c))
+        }
+        if k == TFor { return self.for_stmt() }
+        s := self.simple()
+        self.end_simple()
+        return s
+    }
+
+    func for_stmt(edit self) -> u32 {
+        self.advance()
+        self.expect(TLparen, "( after for")
+        if self.tok.kind == TName {
+            // for (name in array)
+            back := self.save()
+            vname := self.name()
+            self.advance()
+            if self.tok.kind == TIn {
+                self.advance()
+                if self.tok.kind == TName {
+                    aname := self.name()
+                    self.advance()
+                    if self.tok.kind == TRparen {
+                        self.advance()
+                        self.skip_nl()
+                        target := self.resolve(vname.as_view())
+                        lhs := self.add(Node.Var(target))
+                        arr := self.resolve(aname.as_view())
+                        body := self.stmt()
+                        return self.add(Node.ForIn(lhs, arr, body))
+                    }
+                }
+            }
+            self.restore(back)
+        }
+        var init: u32 = NoNode
+        var c: u32 = NoNode
+        var step: u32 = NoNode
+        if self.tok.kind != TSemi { init = self.simple() }
+        self.expect(TSemi, "; in for")
+        self.skip_nl()
+        if self.tok.kind != TSemi { c = self.expr() }
+        self.expect(TSemi, "; in for")
+        self.skip_nl()
+        if self.tok.kind != TRparen { step = self.simple() }
+        self.expect(TRparen, ") in for")
+        if self.tok.kind == TSemi {
+            self.advance()
+            empty := self.add(Node.Nop)
+            return self.add(Node.For(init, c, step, empty))
+        }
+        self.skip_nl()
+        body := self.stmt()
+        return self.add(Node.For(init, c, step, body))
+    }
+
+    // simple parses a statement that a ; or a newline ends.
+    func simple(edit self) -> u32 {
+        k := self.tok.kind
+        if k == TPrint || k == TPrintf { return self.print_stmt() }
+        if k == TNext {
+            self.advance()
+            if self.in_func { self.fail("next used in function") }
+            return self.add(Node.Next)
+        }
+        if k == TBreak {
+            self.advance()
+            return self.add(Node.Break)
+        }
+        if k == TContinue {
+            self.advance()
+            return self.add(Node.Continue)
+        }
+        if k == TExit || k == TReturn {
+            self.advance()
+            var e: u32 = NoNode
+            if !is_terminator(self.tok.kind) { e = self.expr() }
+            if k == TExit { return self.add(Node.Exit(e)) }
+            if !self.in_func { self.fail("return not in function") }
+            return self.add(Node.Return(e))
+        }
+        if k == TDelete {
+            self.advance()
+            if self.tok.kind != TName {
+                self.fail("syntax error: expected an array name after delete")
+                return self.add(Node.Nop)
+            }
+            aname := self.name()
+            arr := self.resolve(aname.as_view())
+            self.advance()
+            if self.tok.kind != TLbracket { return self.add(Node.DeleteAll(arr)) }
+            self.advance()
+            list := self.expr_list(TRbracket)
+            self.expect(TRbracket, "]")
+            first := self.p.keep(list.as_view())
+            return self.add(Node.Delete(arr, first, truncate[u32](list.len())))
+        }
+        e := self.expr()
+        return self.add(Node.ExprStmt(e))
+    }
+
+    // expr_list parses expressions separated by commas, up to `close`,
+    // which it leaves. Inside it a comparison is a comparison again.
+    func expr_list(edit self, close: u8) -> Vec[u32] {
+        list := Vec[u32].new()
+        saved := self.no_cmp
+        self.no_cmp = false
+        while self.tok.kind != close && !self.failed {
+            list.push(self.expr())
+            if self.tok.kind != TComma { break }
+            self.advance()
+            self.skip_nl()
+        }
+        self.no_cmp = saved
+        return list
+    }
+
+    func print_stmt(edit self) -> u32 {
+        is_printf := self.tok.kind == TPrintf
+        self.advance()
+        var items: Vec[u32] = Vec[u32].new()
+        saved := self.no_cmp
+        self.no_cmp = true
+        k := self.tok.kind
+        if is_terminator(k) || k == TGt || k == TAppend || k == TPipe {
+            // print with nothing prints the record
+        } else {
+            var whole: bool = false
+            if k == TLparen {
+                // ( list ) is the whole list when it holds two or more
+                // expressions and `in` does not follow; otherwise it is
+                // the beginning of the first expression
+                self.advance()
+                list := self.expr_list(TRparen)
+                self.expect(TRparen, ")")
+                if list.len() >= 2usize && self.tok.kind != TIn {
+                    items = list
+                    whole = true
+                } else if list.len() == 1usize {
+                    self.pending = list.get(0usize)
+                    drop(list)
+                } else if list.len() >= 2usize {
+                    self.advance()
+                    self.pending = self.in_array(list.as_view())
+                    drop(list)
+                } else {
+                    self.fail("syntax error: empty parentheses")
+                    drop(list)
+                }
+            }
+            if !whole {
+                items.push(self.expr())
+                while self.tok.kind == TComma {
+                    self.advance()
+                    self.skip_nl()
+                    items.push(self.expr())
+                }
+            }
+        }
+        var redir: u8 = RNone
+        var dest: u32 = NoNode
+        k2 := self.tok.kind
+        if k2 == TGt || k2 == TAppend || k2 == TPipe {
+            if k2 == TGt { redir = RFile } else if k2 == TAppend { redir = RAppend } else { redir = RPipe }
+            self.advance()
+            self.no_cmp = true
+            dest = self.target()
+        }
+        self.no_cmp = saved
+        if is_printf && items.len() == 0usize { self.fail("syntax error: printf needs a format") }
+        first := self.p.keep(items.as_view())
+        count := truncate[u32](items.len())
+        if is_printf { return self.add(Node.Printf(first, count, redir, dest)) }
+        return self.add(Node.Print(first, count, redir, dest))
+    }
+
+    // target parses the file or command a print or a getline names: an
+    // operand, with no concatenation, except that string constants
+    // written one after another are joined, as the one-true-awk joins
+    // them.
+    func target(edit self) -> u32 {
+        var e: u32 = self.additive()
+        while self.tok.kind == TString && !self.failed {
+            id := self.tok.id
+            self.advance()
+            right := self.add(Node.Str(id))
+            e = self.add(Node.Concat(e, right))
+        }
+        return e
+    }
+
+    // in_array parses the array name after `in` and builds the test of
+    // the subscripts in list.
+    func in_array(edit self, list: view[]u32) -> u32 {
+        if self.tok.kind != TName {
+            self.fail("syntax error: expected an array name after in")
+            return self.add(Node.Nop)
+        }
+        aname := self.name()
+        arr := self.resolve(aname.as_view())
+        self.advance()
+        first := self.p.keep(list)
+        return self.add(Node.In(first, truncate[u32](len(list)), arr))
+    }
+
+    // ---- expressions, loosest first ----
+
+    func expr(edit self) -> u32 {
+        if self.depth > max_depth {
+            self.fail("expression nested too deeply")
+            return self.add(Node.Nop)
+        }
+        self.depth = self.depth + 1u32
+        e := self.ternary()
+        self.depth = self.depth - 1u32
+        return e
+    }
+
+    func ternary(edit self) -> u32 {
+        c := self.or_expr()
+        if self.tok.kind != TQuestion { return c }
+        self.advance()
+        self.skip_nl()
+        a := self.expr()
+        self.skip_nl()
+        self.expect(TColon, ": of the conditional")
+        self.skip_nl()
+        b := self.expr()
+        return self.add(Node.Cond(c, a, b))
+    }
+
+    func or_expr(edit self) -> u32 {
+        var left: u32 = self.and_expr()
+        while self.tok.kind == TOr {
+            self.advance()
+            self.skip_nl()
+            right := self.and_expr()
+            left = self.add(Node.Or(left, right))
+        }
+        return left
+    }
+
+    func and_expr(edit self) -> u32 {
+        var left: u32 = self.cmp_expr()
+        while self.tok.kind == TAnd {
+            self.advance()
+            self.skip_nl()
+            right := self.cmp_expr()
+            left = self.add(Node.And(left, right))
+        }
+        return left
+    }
+
+    func cmp_expr(edit self) -> u32 {
+        var left: u32 = self.concat()
+        while !self.failed {
+            k := self.tok.kind
+            if k >= TGt && k <= TNe && !self.no_cmp {
+                var op: u8 = CGt
+                if k == TGe { op = CGe } else if k == TLt { op = CLt } else if k == TLe { op = CLe } else if k == TEq { op = CEq } else if k == TNe { op = CNe }
+                self.advance()
+                right := self.concat()
+                left = self.add(Node.Cmp(op, left, right))
+            } else if k == TMatch || k == TNoMatch {
+                self.advance()
+                right := self.concat()
+                left = self.add(Node.Match(k == TNoMatch, left, right))
+            } else if k == TIn {
+                self.advance()
+                var one: [1]u32 = [left]
+                left = self.in_array(one)
+            } else if k == TPipe && !self.no_cmp {
+                // command | getline [var]
+                back := self.save()
+                self.advance()
+                if self.tok.kind != TGetline {
+                    self.restore(back)
+                    break
+                }
+                self.advance()
+                var lhs: u32 = NoNode
+                if self.tok.kind == TName || self.tok.kind == TDollar { lhs = self.lvalue() }
+                left = self.add(Node.Getline(RPipe, lhs, left))
+            } else {
+                break
+            }
+        }
+        return left
+    }
+
+    func starts_operand(view self) -> bool {
+        k := self.tok.kind
+        return k == TNumber || k == TString || k == TName || k == TFuncName || k == TBuiltin || k == TDollar || k == TNot || k == TLparen || k == TIncr || k == TDecr
+    }
+
+    func concat(edit self) -> u32 {
+        var left: u32 = self.additive()
+        while self.starts_operand() && !self.failed {
+            right := self.additive()
+            left = self.add(Node.Concat(left, right))
+        }
+        return left
+    }
+
+    func additive(edit self) -> u32 {
+        var left: u32 = self.term()
+        while self.tok.kind == TPlus || self.tok.kind == TMinus {
+            var op: u8 = OpAdd
+            if self.tok.kind == TMinus { op = OpSub }
+            self.advance()
+            right := self.term()
+            left = self.add(Node.Binary(op, left, right))
+        }
+        return left
+    }
+
+    func term(edit self) -> u32 {
+        var left: u32 = self.unary()
+        while self.tok.kind == TStar || self.tok.kind == TSlash || self.tok.kind == TPercent {
+            var op: u8 = OpMul
+            if self.tok.kind == TSlash { op = OpDiv } else if self.tok.kind == TPercent { op = OpMod }
+            self.advance()
+            right := self.unary()
+            left = self.add(Node.Binary(op, left, right))
+        }
+        return left
+    }
+
+    func unary(edit self) -> u32 {
+        if self.pending == NoNode {
+            k := self.tok.kind
+            if k == TNot || k == TMinus || k == TPlus {
+                if self.depth > max_depth {
+                    self.fail("expression nested too deeply")
+                    return self.add(Node.Nop)
+                }
+                self.advance()
+                self.depth = self.depth + 1u32
+                e := self.unary()
+                self.depth = self.depth - 1u32
+                if k == TNot { return self.add(Node.Not(e)) }
+                if k == TMinus { return self.add(Node.Neg(e)) }
+                return self.add(Node.Plus(e))
+            }
+        }
+        return self.power()
+    }
+
+    func power(edit self) -> u32 {
+        base := self.postfix()
+        if self.tok.kind != TCaret { return base }
+        self.advance()
+        e := self.unary()
+        return self.add(Node.Binary(OpPow, base, e))
+    }
+
+    // postfix parses an operand and, when it is something that can be
+    // assigned to, a ++ or -- after it or the assignment it begins.
+    func postfix(edit self) -> u32 {
+        e := self.primary()
+        if !self.is_lvalue(e) { return e }
+        k := self.tok.kind
+        if k == TIncr {
+            self.advance()
+            return self.add(Node.IncDec(e, 1i8, true))
+        }
+        if k == TDecr {
+            self.advance()
+            return self.add(Node.IncDec(e, -1i8, true))
+        }
+        if is_assign_op(k) {
+            self.advance()
+            r := self.expr()
+            return self.add(Node.Assign(k - TAssign, e, r))
+        }
+        return e
+    }
+
+    // variable parses a name, with its subscripts when [ follows.
+    func variable(edit self) -> u32 {
+        vname := self.name()
+        vr := self.resolve(vname.as_view())
+        self.advance()
+        if self.tok.kind != TLbracket { return self.add(Node.Var(vr)) }
+        self.advance()
+        list := self.expr_list(TRbracket)
+        self.expect(TRbracket, "]")
+        if list.len() == 0usize { self.fail("syntax error: empty subscript") }
+        first := self.p.keep(list.as_view())
+        return self.add(Node.Index(vr, first, truncate[u32](list.len())))
+    }
+
+    // lvalue parses something that can be assigned to: a variable, an
+    // element, a field.
+    func lvalue(edit self) -> u32 {
+        if self.tok.kind == TName { return self.variable() }
+        if self.tok.kind == TDollar {
+            self.advance()
+            e := self.dollar_operand()
+            return self.add(Node.Field(e))
+        }
+        self.fail("syntax error: expected a variable")
+        return self.add(Node.Nop)
+    }
+
+    // dollar_operand parses what $ applies to: an operand, with no ++
+    // after it ($i++ increments the field).
+    func dollar_operand(edit self) -> u32 {
+        k := self.tok.kind
+        if k == TIncr || k == TDecr {
+            self.advance()
+            lv := self.lvalue()
+            if k == TIncr { return self.add(Node.IncDec(lv, 1i8, false)) }
+            return self.add(Node.IncDec(lv, -1i8, false))
+        }
+        if k == TMinus {
+            self.advance()
+            e := self.dollar_operand()
+            return self.add(Node.Neg(e))
+        }
+        if k == TPlus || k == TNot {
+            self.advance()
+            e := self.dollar_operand()
+            if k == TNot { return self.add(Node.Not(e)) }
+            return self.add(Node.Plus(e))
+        }
+        return self.primary()
+    }
+
+    func primary(edit self) -> u32 {
+        if self.pending != NoNode {
+            e := self.pending
+            self.pending = NoNode
+            return e
+        }
+        k := self.tok.kind
+        if k == TNumber {
+            v := self.tok.num
+            self.advance()
+            return self.add(Node.Num(v))
+        }
+        if k == TString {
+            id := self.tok.id
+            self.advance()
+            return self.add(Node.Str(id))
+        }
+        if k == TSlash || k == TDivAssign {
+            r := self.regex()
+            return self.add(Node.Regex(r))
+        }
+        if k == TLparen {
+            self.advance()
+            list := self.expr_list(TRparen)
+            self.expect(TRparen, ")")
+            if list.len() == 1usize {
+                e := list.get(0usize)
+                return e
+            }
+            if list.len() == 0usize || self.tok.kind != TIn {
+                self.fail("syntax error")
+                return self.add(Node.Nop)
+            }
+            self.advance()
+            return self.in_array(list.as_view())
+        }
+        if k == TDollar {
+            self.advance()
+            e := self.dollar_operand()
+            return self.add(Node.Field(e))
+        }
+        if k == TIncr || k == TDecr {
+            self.advance()
+            lv := self.lvalue()
+            if k == TIncr { return self.add(Node.IncDec(lv, 1i8, false)) }
+            return self.add(Node.IncDec(lv, -1i8, false))
+        }
+        if k == TName { return self.variable() }
+        if k == TFuncName {
+            fname := self.name()
+            f := self.p.function(fname.as_view())
+            self.advance()
+            self.advance()
+            list := self.expr_list(TRparen)
+            self.expect(TRparen, ") after the arguments")
+            first := self.p.keep(list.as_view())
+            return self.add(Node.Call(f, first, truncate[u32](list.len())))
+        }
+        if k == TBuiltin { return self.builtin_call() }
+        if k == TGetline {
+            self.advance()
+            var lhs: u32 = NoNode
+            if self.tok.kind == TName || self.tok.kind == TDollar { lhs = self.lvalue() }
+            if self.tok.kind == TLt {
+                self.advance()
+                src := self.target()
+                return self.add(Node.Getline(RFile, lhs, src))
+            }
+            return self.add(Node.Getline(RNone, lhs, NoNode))
+        }
+        if k == TMinus || k == TPlus || k == TNot { return self.unary() }
+        self.fail("syntax error")
+        return self.add(Node.Nop)
+    }
+
+    func builtin_call(edit self) -> u32 {
+        b := self.tok.b
+        self.advance()
+        var list: Vec[u32] = Vec[u32].new()
+        if self.tok.kind == TLparen {
+            self.advance()
+            list = self.expr_list(TRparen)
+            self.expect(TRparen, ") after the arguments")
+        } else if b != BLength {
+            self.fail("syntax error: expected ( after the name of a built-in function")
+        }
+        n := list.len()
+        var lo: usize = 1usize
+        var hi: usize = 1usize
+        if b == BLength || b == BSrand || b == BFflush { lo = 0usize }
+        if b == BRand { lo = 0usize; hi = 0usize }
+        if b == BSubstr || b == BSplit || b == BSub || b == BGsub { lo = 2usize; hi = 3usize }
+        if b == BIndex || b == BMatch || b == BAtan2 { lo = 2usize; hi = 2usize }
+        if b == BSprintf { hi = 1000000usize }
+        if n < lo || n > hi { self.fail("wrong number of arguments to a built-in function") }
+        if (b == BSub || b == BGsub) && n == 3usize && !self.is_lvalue(list.get(2usize)) {
+            self.fail("the third argument of sub and gsub must be a variable, a field or an element")
+        }
+        if b == BSplit && n >= 2usize {
+            arr := self.p.nodes.get(usize(list.get(1usize)))
+            var ok: bool = false
+            match arr {
+                Var(vr) => { ok = true }
+                _ => { }
+            }
+            if !ok { self.fail("the second argument of split must be an array") }
+        }
+        first := self.p.keep(list.as_view())
+        return self.add(Node.Builtin(b, first, truncate[u32](n)))
+    }
+}

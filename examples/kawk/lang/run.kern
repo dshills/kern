@@ -1,0 +1,179 @@
+// The command: its options, the program text, the arguments, and the run.
+module lang
+import "std/io"
+import "std/process"
+import "std/str"
+
+// Job is everything one run of a program is given.
+struct Job {
+    text: str.String
+    fs: str.String
+    has_fs: bool
+    assigns: Vec[str.String]
+    operands: Vec[str.String]
+    name: str.String
+    stdin_text: Vec[u8]
+    stdin_given: bool
+}
+
+func new_job() -> Job {
+    return Job {
+        text: str.String.new(), fs: str.String.new(), has_fs: false, assigns: Vec[str.String].new(), operands: Vec[str.String].new(),
+        name: str.String.from("kawk"), stdin_text: Vec[u8].new(), stdin_given: false
+    }
+}
+
+// run_job parses the job's program and runs it; the result is the exit
+// status: 2 for a program that is not well formed or that fails.
+func run_job(job: edit[Job]) -> i32 {
+    ps := parse(job.text.as_view())
+    if ps.failed {
+        m := str.String.from(job.name.as_view())
+        m.push_str(": ")
+        m.push_str(ps.err_msg.as_view())
+        m.push_str(" at source line ")
+        m.push_u64(u64(ps.err_line))
+        m.push(10u8)
+        eprint_str(m.as_view())
+        return 2i32
+    }
+    it := new_interp(ps.p)
+    it.name = job.name.clone()
+    it.tty = io.is_terminal(io.Stream.Stdout)
+    if job.stdin_given {
+        it.stdin_given = true
+        it.stdin_text = replace(job.stdin_text, Vec[u8].new())
+        it.tty = false
+    }
+    argv := it.array_at(usize(VARGV))
+    zero := key_of("0")
+    it.elem_set(argv, zero, text(job.name.as_view()))
+    key := Key { s: str.String.new() }
+    for i in 0usize..job.operands.len() {
+        key.s.clear()
+        key.s.push_u64(u64(i) + 1u64)
+        it.elem_set(argv, key, input(job.operands.get(i).as_view()))
+    }
+    it.set_cell(usize(VARGC), num(f64(job.operands.len()) + 1.0))
+    env := it.array_at(usize(VENVIRON))
+    for i in 0usize..process.proc_env_count() {
+        entry := process.env_entry(i)
+        match str.find_byte(entry.as_view(), 61u8) {
+            Some(eq) => {
+                with e := entry.as_view() {
+                    name := key_of(e[0usize:eq])
+                    it.elem_set(env, name, input(e[eq + 1usize : len(e)]))
+                }
+            }
+            None => { }
+        }
+    }
+    if job.has_fs {
+        if job.fs.equals("t") { it.var_set(VFS, text("\t")) } else { it.var_set(VFS, text_own(unescape_all(job.fs.as_view()))) }
+    }
+    for i in 0usize..job.assigns.len() {
+        eq := is_assignment(job.assigns.get(i).as_view())
+        if eq == 0usize {
+            it.fatal2("invalid -v assignment: ", job.assigns.get(i).as_view())
+        } else {
+            it.assign_operand(ps.p, job.assigns.get(i).as_view(), eq)
+        }
+    }
+    if it.halt != 0u8 { return it.exit_code }
+    return it.run(ps.p)
+}
+
+// Demo runs a program over input held in memory, in place of the standard
+// input; a tmp that is not empty is given to the program as the variable
+// tmp. It is how the demonstration runs its programs.
+func Demo(src: view[]u8, input: view[]u8, tmp: view[]u8) -> i32 {
+    job := new_job()
+    job.text.push_str(src)
+    job.stdin_text.extend(input)
+    job.stdin_given = true
+    if len(tmp) > 0usize {
+        a := str.String.from("tmp=")
+        a.push_str(tmp)
+        job.assigns.push(a)
+    }
+    return run_job(job)
+}
+
+func usage() {
+    eprint_str("usage: kawk [-F fs] [-v var=value]... 'program' [file | var=value]...\n")
+    eprint_str("       kawk [-F fs] [-v var=value]... -f progfile [file | var=value]...\n")
+}
+
+// Main is the command line.
+func Main(args: view[]Vec[u8]) -> i32 {
+    job := new_job()
+    n := len(args)
+    var i: usize = 1usize
+    var have_text: bool = false
+    while i < n {
+        if args[i].len() < 2usize || args[i].get(0usize) != 45u8 { break }
+        letter := args[i].get(1usize)
+        if letter == 45u8 && args[i].len() == 2usize {
+            i = i + 1usize
+            break
+        }
+        if str.equal(args[i].as_view(), "-version") || str.equal(args[i].as_view(), "--version") {
+            print_str("kawk: the AWK language in kern\n")
+            return 0i32
+        }
+        if letter != 70u8 && letter != 118u8 && letter != 102u8 {
+            eprint_str("kawk: unknown option ")
+            eprint_str(args[i].as_view())
+            eprint_str("\n")
+            usage()
+            return 2i32
+        }
+        // the option's value is the rest of the argument or the next one
+        value := str.String.new()
+        if args[i].len() > 2usize {
+            with a := args[i].as_view() { value.push_str(a[2usize : len(a)]) }
+        } else {
+            i = i + 1usize
+            if i >= n {
+                usage()
+                return 2i32
+            }
+            value.push_str(args[i].as_view())
+        }
+        i = i + 1usize
+        if letter == 70u8 {
+            job.fs = value
+            job.has_fs = true
+        } else if letter == 118u8 {
+            job.assigns.push(value)
+        } else {
+            match io.read_file(value.as_view()) {
+                Ok(src) => {
+                    job.text.push_str(src.as_view())
+                    job.text.push(10u8)
+                    have_text = true
+                }
+                Err(e) => {
+                    eprint_str("kawk: can't open file ")
+                    eprint_str(value.as_view())
+                    eprint_str("\n")
+                    return 2i32
+                }
+            }
+            drop(value)
+        }
+    }
+    if !have_text {
+        if i >= n {
+            usage()
+            return 2i32
+        }
+        job.text.push_str(args[i].as_view())
+        i = i + 1usize
+    }
+    while i < n {
+        job.operands.push(str.String.from(args[i].as_view()))
+        i = i + 1usize
+    }
+    return run_job(job)
+}

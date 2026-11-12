@@ -1,0 +1,371 @@
+// The lexer: it hands the parser one token at a time. Whether a slash
+// begins a regular expression or divides depends on where the parser is,
+// so the parser asks for a regular expression when it expects an operand
+// and finds a slash (Parser.regex).
+module lang
+import "std/str"
+
+// Token is one token: its kind, a number's value, the index of a string's
+// text in Prog.strs, a built-in's number, and where it is in the source
+// (a name's text is src[start:end]).
+struct Token { kind: u8; num: f64; id: u32; b: u8; line: u32; start: usize; end: usize }
+
+// LexState is everything the lexer needs to go back to where it was.
+struct LexState { pos: usize; line: u32; tok: Token }
+
+func is_digit(c: u8) -> bool { return c >= 48u8 && c <= 57u8 }
+func is_alpha(c: u8) -> bool { return (c >= 97u8 && c <= 122u8) || (c >= 65u8 && c <= 90u8) || c == 95u8 }
+func is_blank(c: u8) -> bool { return c == 32u8 || c == 9u8 }
+
+// keyword is the token kind of a reserved word, or TName.
+func keyword(w: view[]u8) -> u8 {
+    n := len(w)
+    if n < 2usize || n > 8usize { return TName }
+    if str.equal(w, "BEGIN") { return TBegin }
+    if str.equal(w, "END") { return TEnd }
+    if str.equal(w, "function") || str.equal(w, "func") { return TFunction }
+    if str.equal(w, "if") { return TIf }
+    if str.equal(w, "else") { return TElse }
+    if str.equal(w, "while") { return TWhile }
+    if str.equal(w, "for") { return TFor }
+    if str.equal(w, "do") { return TDo }
+    if str.equal(w, "break") { return TBreak }
+    if str.equal(w, "continue") { return TContinue }
+    if str.equal(w, "next") { return TNext }
+    if str.equal(w, "exit") { return TExit }
+    if str.equal(w, "return") { return TReturn }
+    if str.equal(w, "delete") { return TDelete }
+    if str.equal(w, "in") { return TIn }
+    if str.equal(w, "getline") { return TGetline }
+    if str.equal(w, "print") { return TPrint }
+    if str.equal(w, "printf") { return TPrintf }
+    return TName
+}
+
+// builtin is the number of a built-in function, or 255.
+func builtin(w: view[]u8) -> u8 {
+    n := len(w)
+    if n < 3usize || n > 7usize { return 255u8 }
+    if str.equal(w, "length") { return BLength }
+    if str.equal(w, "substr") { return BSubstr }
+    if str.equal(w, "index") { return BIndex }
+    if str.equal(w, "split") { return BSplit }
+    if str.equal(w, "sub") { return BSub }
+    if str.equal(w, "gsub") { return BGsub }
+    if str.equal(w, "match") { return BMatch }
+    if str.equal(w, "sprintf") { return BSprintf }
+    if str.equal(w, "tolower") { return BTolower }
+    if str.equal(w, "toupper") { return BToupper }
+    if str.equal(w, "int") { return BInt }
+    if str.equal(w, "sqrt") { return BSqrt }
+    if str.equal(w, "exp") { return BExp }
+    if str.equal(w, "log") { return BLog }
+    if str.equal(w, "sin") { return BSin }
+    if str.equal(w, "cos") { return BCos }
+    if str.equal(w, "atan2") { return BAtan2 }
+    if str.equal(w, "rand") { return BRand }
+    if str.equal(w, "srand") { return BSrand }
+    if str.equal(w, "close") { return BClose }
+    if str.equal(w, "fflush") { return BFflush }
+    if str.equal(w, "system") { return BSystem }
+    return 255u8
+}
+
+// unescape appends to dst the byte an escape in a string means and returns
+// how many bytes of s (which begins after the backslash) it used. An
+// escape AWK does not know loses its backslash, as in the one-true-awk.
+func unescape(s: view[]u8, dst: edit[str.String]) -> usize {
+    if len(s) == 0usize {
+        dst.push(92u8)
+        return 0usize
+    }
+    c := s[0usize]
+    if c == 110u8 { dst.push(10u8); return 1usize }
+    if c == 116u8 { dst.push(9u8); return 1usize }
+    if c == 114u8 { dst.push(13u8); return 1usize }
+    if c == 92u8 { dst.push(92u8); return 1usize }
+    if c == 34u8 { dst.push(34u8); return 1usize }
+    if c == 47u8 { dst.push(47u8); return 1usize }
+    if c == 97u8 { dst.push(7u8); return 1usize }
+    if c == 98u8 { dst.push(8u8); return 1usize }
+    if c == 102u8 { dst.push(12u8); return 1usize }
+    if c == 118u8 { dst.push(11u8); return 1usize }
+    if is_octal(c) {
+        var v: u32 = 0u32
+        var k: usize = 0usize
+        while k < 3usize && k < len(s) && is_octal(s[k]) {
+            v = v * 8u32 + u32(s[k] - 48u8)
+            k = k + 1usize
+        }
+        dst.push(truncate[u8](v))
+        return k
+    }
+    if c == 120u8 && len(s) > 1usize && hex_value(s[1usize]) < 16u32 {
+        var v: u32 = 0u32
+        var k: usize = 1usize
+        while k < 3usize && k < len(s) && hex_value(s[k]) < 16u32 {
+            v = v * 16u32 + hex_value(s[k])
+            k = k + 1usize
+        }
+        dst.push(truncate[u8](v))
+        return k
+    }
+    dst.push(c)
+    return 1usize
+}
+
+impl Parser {
+    func at(view self, i: usize) -> u8 {
+        if i >= self.src.len() { return 0u8 }
+        c := self.src.get(i)
+        return c
+    }
+
+    func set_tok(edit self, kind: u8, start: usize) {
+        self.tok = Token { kind: kind, num: 0.0, id: 0u32, b: 0u8, line: self.line, start: start, end: self.pos }
+    }
+
+    // two makes the token `with` when the next byte is c, else `without`.
+    func two(edit self, c: u8, with_c: u8, without: u8, start: usize) {
+        if self.at(self.pos) == c {
+            self.pos = self.pos + 1usize
+            self.set_tok(with_c, start)
+        } else {
+            self.set_tok(without, start)
+        }
+    }
+
+    // advance reads the next token into self.tok.
+    func advance(edit self) {
+        if self.failed {
+            self.set_tok(TEof, self.pos)
+            return
+        }
+        n := self.src.len()
+        // blanks, a comment, and a backslash that joins two lines
+        while self.pos < n {
+            c := self.at(self.pos)
+            if is_blank(c) || c == 13u8 {
+                self.pos = self.pos + 1usize
+            } else if c == 92u8 && self.at(self.pos + 1usize) == 10u8 {
+                self.pos = self.pos + 2usize
+                self.line = self.line + 1u32
+            } else if c == 92u8 && self.at(self.pos + 1usize) == 13u8 && self.at(self.pos + 2usize) == 10u8 {
+                self.pos = self.pos + 3usize
+                self.line = self.line + 1u32
+            } else if c == 35u8 {
+                while self.pos < n && self.at(self.pos) != 10u8 { self.pos = self.pos + 1usize }
+            } else {
+                break
+            }
+        }
+        start := self.pos
+        if self.pos >= n {
+            self.set_tok(TEof, start)
+            return
+        }
+        c := self.at(self.pos)
+        self.pos = self.pos + 1usize
+        if c == 10u8 {
+            self.set_tok(TNewline, start)
+            self.line = self.line + 1u32
+            return
+        }
+        if is_alpha(c) {
+            while self.pos < n && (is_alpha(self.at(self.pos)) || is_digit(self.at(self.pos))) { self.pos = self.pos + 1usize }
+            var kind: u8 = TName
+            var b: u8 = 255u8
+            with text := self.src.as_view() {
+                kind = keyword(text[start : self.pos])
+                if kind == TName { b = builtin(text[start : self.pos]) }
+            }
+            if b != 255u8 {
+                kind = TBuiltin
+            } else if kind == TName && self.at(self.pos) == 40u8 {
+                kind = TFuncName
+            }
+            self.set_tok(kind, start)
+            self.tok.b = b
+            return
+        }
+        if is_digit(c) || (c == 46u8 && is_digit(self.at(self.pos))) {
+            self.pos = start
+            self.number()
+            return
+        }
+        if c == 34u8 {
+            self.string(start)
+            return
+        }
+        if c == 123u8 { self.set_tok(TLbrace, start); return }
+        if c == 125u8 { self.set_tok(TRbrace, start); return }
+        if c == 40u8 { self.set_tok(TLparen, start); return }
+        if c == 41u8 { self.set_tok(TRparen, start); return }
+        if c == 91u8 { self.set_tok(TLbracket, start); return }
+        if c == 93u8 { self.set_tok(TRbracket, start); return }
+        if c == 59u8 { self.set_tok(TSemi, start); return }
+        if c == 44u8 { self.set_tok(TComma, start); return }
+        if c == 63u8 { self.set_tok(TQuestion, start); return }
+        if c == 58u8 { self.set_tok(TColon, start); return }
+        if c == 36u8 { self.set_tok(TDollar, start); return }
+        if c == 126u8 { self.set_tok(TMatch, start); return }
+        if c == 43u8 {
+            if self.at(self.pos) == 43u8 {
+                self.pos = self.pos + 1usize
+                self.set_tok(TIncr, start)
+            } else {
+                self.two(61u8, TAddAssign, TPlus, start)
+            }
+            return
+        }
+        if c == 45u8 {
+            if self.at(self.pos) == 45u8 {
+                self.pos = self.pos + 1usize
+                self.set_tok(TDecr, start)
+            } else {
+                self.two(61u8, TSubAssign, TMinus, start)
+            }
+            return
+        }
+        if c == 42u8 {
+            if self.at(self.pos) == 42u8 {
+                self.pos = self.pos + 1usize
+                self.two(61u8, TPowAssign, TCaret, start)
+            } else {
+                self.two(61u8, TMulAssign, TStar, start)
+            }
+            return
+        }
+        if c == 47u8 { self.two(61u8, TDivAssign, TSlash, start); return }
+        if c == 37u8 { self.two(61u8, TModAssign, TPercent, start); return }
+        if c == 94u8 { self.two(61u8, TPowAssign, TCaret, start); return }
+        if c == 61u8 { self.two(61u8, TEq, TAssign, start); return }
+        if c == 60u8 { self.two(61u8, TLe, TLt, start); return }
+        if c == 33u8 {
+            if self.at(self.pos) == 126u8 {
+                self.pos = self.pos + 1usize
+                self.set_tok(TNoMatch, start)
+            } else {
+                self.two(61u8, TNe, TNot, start)
+            }
+            return
+        }
+        if c == 62u8 {
+            if self.at(self.pos) == 62u8 {
+                self.pos = self.pos + 1usize
+                self.set_tok(TAppend, start)
+            } else {
+                self.two(61u8, TGe, TGt, start)
+            }
+            return
+        }
+        if c == 38u8 && self.at(self.pos) == 38u8 {
+            self.pos = self.pos + 1usize
+            self.set_tok(TAnd, start)
+            return
+        }
+        if c == 124u8 { self.two(124u8, TOr, TPipe, start); return }
+        self.set_tok(TBad, start)
+    }
+
+    // number reads digits, a fraction and an exponent; an e that no digit
+    // follows is not part of the number.
+    func number(edit self) {
+        start := self.pos
+        n := self.src.len()
+        while is_digit(self.at(self.pos)) { self.pos = self.pos + 1usize }
+        if self.at(self.pos) == 46u8 {
+            self.pos = self.pos + 1usize
+            while is_digit(self.at(self.pos)) { self.pos = self.pos + 1usize }
+        }
+        c := self.at(self.pos)
+        if c == 101u8 || c == 69u8 {
+            var j: usize = self.pos + 1usize
+            if self.at(j) == 43u8 || self.at(j) == 45u8 { j = j + 1usize }
+            if is_digit(self.at(j)) {
+                while is_digit(self.at(j)) { j = j + 1usize }
+                self.pos = j
+            }
+        }
+        var v: f64 = 0.0
+        with text := self.src.as_view() { v = parse_number(text[start : self.pos]).value }
+        self.set_tok(TNumber, start)
+        self.tok.num = v
+    }
+
+    // string reads a string up to its closing quote, taking the escapes.
+    func string(edit self, start: usize) {
+        text := str.String.new()
+        n := self.src.len()
+        var closed: bool = false
+        while self.pos < n {
+            c := self.at(self.pos)
+            self.pos = self.pos + 1usize
+            if c == 34u8 {
+                closed = true
+                break
+            }
+            if c == 10u8 { break }
+            if c == 92u8 {
+                if self.at(self.pos) == 10u8 {
+                    // a backslash at the end of the line joins the next one
+                    self.pos = self.pos + 1usize
+                    self.line = self.line + 1u32
+                } else {
+                    var used: usize = 0usize
+                    with rest := self.src.as_view() { used = unescape(rest[self.pos : n], text) }
+                    self.pos = self.pos + used
+                }
+            } else {
+                text.push(c)
+            }
+        }
+        if !closed {
+            self.fail("non-terminated string")
+            return
+        }
+        id := self.p.text(text.as_view())
+        self.set_tok(TString, start)
+        self.tok.id = id
+    }
+
+    // regex reads a regular expression whose opening slash is the current
+    // token (a / or a /=), compiles it, and returns its number. The text
+    // goes to the regular expression's own parser as written, but for \/.
+    func regex(edit self) -> u32 {
+        self.pos = self.tok.start + 1usize
+        n := self.src.len()
+        text := str.String.new()
+        var closed: bool = false
+        while self.pos < n {
+            c := self.at(self.pos)
+            self.pos = self.pos + 1usize
+            if c == 47u8 {
+                closed = true
+                break
+            }
+            if c == 10u8 { break }
+            if c == 92u8 && self.pos < n {
+                d := self.at(self.pos)
+                self.pos = self.pos + 1usize
+                if d != 47u8 { text.push(92u8) }
+                text.push(d)
+            } else {
+                text.push(c)
+            }
+        }
+        if !closed {
+            self.fail("non-terminated regular expression")
+            return 0u32
+        }
+        re := regex_compile(text.as_view())
+        if re.bad {
+            self.fail("this regular expression is not well formed")
+            return 0u32
+        }
+        r := truncate[u32](self.p.regs.len())
+        self.p.regs.push(re)
+        self.advance()
+        return r
+    }
+}
