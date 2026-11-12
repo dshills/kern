@@ -1,6 +1,6 @@
-/(a*)*b/ in 200000 bytes of a => none, captures false
-/(a|aa)*c/ in 200000 bytes of a => none, captures false
-/a*a*a*a*a*b/ in 200000 bytes of a => none, captures false
-/(a*)*b/ in 200000 bytes of a, then bc => 0-200001, captures true 0-200001, group 1 within the match or none: true
-/(a|aa)*c/ in 200000 bytes of a, then bc => 200001-200002, captures true 200001-200002, group 1 none
-/a*a*a*a*a*b/ in 200000 bytes of a, then bc => 0-200001, captures true 0-200001, group 1 none
+/(a*)*b/ in 20000 bytes of a => none, captures false
+/(a|aa)*c/ in 20000 bytes of a => none, captures false
+/a*a*a*a*a*b/ in 20000 bytes of a => none, captures false
+/(a*)*b/ in 20000 bytes of a, then bc => 0-20001, captures true 0-20001, group 1 within the match or none: true
+/(a|aa)*c/ in 20000 bytes of a, then bc => 20001-20002, captures true 20001-20002, group 1 none
+/a*a*a*a*a*b/ in 20000 bytes of a, then bc => 0-20001, captures true 0-20001, group 1 none

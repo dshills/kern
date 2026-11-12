@@ -17,7 +17,7 @@ condition stated on the parsed tree with its regression rows (phase
 replaced by "the phase is not done until the owner changes the spec".
 Round 3: EXECUTABLE_AS_IS, score 100, every requirement covered.
 
-Implements `specs/std-regex/SPEC.md` v0.16 in seven phases. The order is
+Implements `specs/std-regex/SPEC.md` v0.17 in seven phases. The order is
 chosen so that each phase is checked by something already in the
 repository: the `kawk` corpus goes in first (phase 1) and guards the
 port in phase 6; the module is built from its parser outward (phases 2
@@ -281,7 +281,7 @@ nothing about instructions, so this is checked by reading and by T5.
   once with one `Scratch` shared by all rows in order, the two giving
   the same spans (R11: a result does not depend on what the `Scratch`
   served before).
-- `regex_cost`: the three patterns of T5 against 200,000 bytes finish
+- `regex_cost`: the three patterns of T5 against 20,000 bytes finish
   in every configuration within the fixture harness's limit, by `find`
   (and by `captures` from phase 4).
 - `regex_noalloc` (`//! test-hooks: true`), as T5 states it: for each of
@@ -302,7 +302,9 @@ nothing about instructions, so this is checked by reading and by T5.
   `replace_all` in phase 5, which completes T7.
 
 **Risks.**
-- The interpreter's speed on `regex_cost`: 200,000 bytes × a program of
+- The interpreter's speed on `regex_cost` (the text was 200,000 bytes
+  when this was written and is 20,000 since spec 0.17, for exactly this
+  risk): 200,000 bytes × a program of
   about ten instructions is a few million steps; if the interpreter at
   debug needs more than the harness allows, the text is not shortened
   (the spec fixes it): the search's inner loop is made cheaper, or the

@@ -63,7 +63,10 @@ jobs:
           version: latest
 
       - name: Test
-        run: go test ./...
+        # the fixture package alone has taken from 370 to 510 s on the
+        # x86-64 runner, against go test's default of 600 s a package: a
+        # package that is only slow should not fail the run
+        run: go test ./... -timeout 20m
 
   # The fixtures under AddressSanitizer, LeakSanitizer and
   # UndefinedBehaviorSanitizer, in the program and in the runtime

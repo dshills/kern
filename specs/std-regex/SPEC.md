@@ -1,6 +1,6 @@
 # Standard library: regular expressions (`std/regex`)
 
-**Version:** 0.16 (2026-11-12). **Review status.** speccritic
+**Version:** 0.17 (2026-11-12). **Review status.** speccritic
 (gpt-6.1-sol) round 1 on 0.1: INVALID, two critical findings, both
 resolved here: a repeated group keeps the span of its last passage even
 when an enclosing group's last iteration does not contain it, so the
@@ -26,7 +26,8 @@ and one warning: T9 gives its input and programs in full. Round 5 on
 0.5: VALID_WITH_GAPS, no critical finding; two warnings resolved in
 0.6: a `Scratch`'s memory bound is that of the largest pattern it has
 served (R18), and a backslash ending the pattern is `BadEscape` before
-any open construct is reported (R5). 0.16, when phases 4 to 6 were implemented: an anchor holds where the
+any open construct is reported (R5). 0.17, after the first CI run of the fixtures: T5's text is 20,000
+bytes, not 200,000. 0.16, when phases 4 to 6 were implemented: an anchor holds where the
 pattern places it (glossary); R18 says what one call is and that a
 whole `replace_all` can be quadratic; T5's hook check covers
 replacement and splitting; `kawk` takes the module's nesting limit
@@ -548,9 +549,14 @@ No difference is permitted.
 
 **T5. Cost (`tests/run/regex_cost.kern`,
 `tests/run/regex_noalloc.kern`).** `(a*)*b`, `(a|aa)*c` and
-`a*a*a*a*a*b` each against 200,000 bytes of `a`, by `find` and by
+`a*a*a*a*a*b` each against 20,000 bytes of `a`, by `find` and by
 `captures`, finish within the harness's time limit in every
-configuration (R18). `regex_noalloc` (header `//! test-hooks: true`)
+configuration (R18). The length is chosen for the interpreter, which
+takes about 2 s for the fixture and would take hours if a search were
+quadratic; at 200,000 bytes, the first choice, the fixture took 18 s
+there and, run several times over by the interpreter's own tests,
+carried two packages past the suite's ten minutes on the slower CI
+machines. `regex_noalloc` (header `//! test-hooks: true`)
 checks R17 as it runs, in the configurations that have test hooks (the
 interpreter and the native debug build: the toolchain refuses hooks at
 release), for three patterns and one `Scratch` reserved

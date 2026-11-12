@@ -38,7 +38,7 @@ corpus into the repository.
 | `tests/run/regex_match`: `find` and `is_match`, each row with a new and with a shared `Scratch` | 246 + 17 rows | passes |
 | `tests/run/regex_groups`: captures, cursors, templates, replacement, splitting. Its expected output was derived by hand from the spec by someone who had not seen the implementation, before the functions existed | 298 cases | 297 agreed on the first run; the one that did not is a case the spec leaves open (below) |
 | `TestRegexOracle`: every match, every group span and `replace_all`, against Go's `regexp.CompilePOSIX` on generated pairs | 20,000 pairs in the suite; 200,000 once by hand (662,490 lines natively, 20,000 pairs in the interpreter) | no difference |
-| `tests/run/regex_cost`: `(a*)*b`, `(a|aa)*c`, `a*a*a*a*a*b` against 200,000 bytes, by `find` and by `captures` | | 18 to 22 s in the interpreter, 0.05 s natively |
+| `tests/run/regex_cost`: `(a*)*b`, `(a|aa)*c`, `a*a*a*a*a*b` against 20,000 bytes, by `find` and by `captures` | | about 2 s in the interpreter, a few milliseconds natively |
 | `tests/run/regex_noalloc`: the allocation-failure hook stays armed across `is_match`, `find`, `captures`, both cursor runs, `replace_all` and `split`; its control in `tests/trap` shows the hook does fire | 3 patterns | passes where hooks exist (the interpreter and native debug) |
 | `tests/concurrency/regex_shared`: four threads on one `Regex` | 1,000 searches each | passes, clean under ThreadSanitizer |
 | `tests/freestanding/regex` | | passes on both QEMU targets; `kern check --env=freestanding` reports nothing |
@@ -129,6 +129,13 @@ pass in its non-empty mode.
   its marks at the wrap.
 - Test hooks exist only at debug, so a hook-based check covers two of the
   four configurations.
+- **The cost fixture was ten times too long for CI.** At 200,000 bytes
+  it took 18 s in the interpreter here, the interpreter's own tests run
+  every fixture four times, and on the CI machines that carried
+  `compiler/interp` and `tests` past Go's ten minutes a package (the
+  commit of phase 4 failed there on two of three systems). It is 20,000
+  bytes now (spec 0.17): a quadratic search would still take hours in
+  the interpreter, so the fixture still tells.
 - The review of the port found one defect the differential had not: a
   bracket expression that negates every byte (reachable only with a zero
   byte in a dynamic pattern) was rewritten as `[]`, which the module
