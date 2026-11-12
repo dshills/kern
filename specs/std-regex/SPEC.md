@@ -1,6 +1,6 @@
 # Standard library: regular expressions (`std/regex`)
 
-**Version:** 0.12 (2026-11-12). **Review status.** speccritic
+**Version:** 0.13 (2026-11-12). **Review status.** speccritic
 (gpt-6.1-sol) round 1 on 0.1: INVALID, two critical findings, both
 resolved here: a repeated group keeps the span of its last passage even
 when an enclosing group's last iteration does not contain it, so the
@@ -26,7 +26,12 @@ and one warning: T9 gives its input and programs in full. Round 5 on
 0.5: VALID_WITH_GAPS, no critical finding; two warnings resolved in
 0.6: a `Scratch`'s memory bound is that of the largest pattern it has
 served (R18), and a backslash ending the pattern is `BadEscape` before
-any open construct is reported (R5). 0.7 to 0.11 were made while the plan was written. 0.11: the common
+any open construct is reported (R5). 0.13 was made when phase 2 was implemented and settles what the
+reader found open: a `-` after a range begins a range, a class as
+either end of a range is `BadRange`, an unfinished `[:` is `BadClass`,
+an interval with nothing to repeat is `NothingToRepeat`, and sizes and
+lengths stop at 32 bits (R3, R5, R8). 0.7 to 0.11 were made while the
+plan was written. 0.11: the common
 syntax is, by definition, within what the oracle compiles (clause h),
 which settles every finding of the form "the oracle refuses a pattern
 the module accepts". The last round, on 0.11: VALID_WITH_GAPS, no
@@ -240,7 +245,9 @@ size of `x` plus 2; `x{n}` is *n* times the size of `x`, `x{n,}` is
 When the size exceeds `max_insts`, `compile_with` returns `TooLarge`
 with `at` equal to the pattern's length; the comparison is made on the
 whole number, which does not wrap however large nested intervals make
-it. A `max_insts` of 0 refuses every pattern.
+it. A `max_insts` of 0 refuses every pattern. Whatever `max_insts` is,
+a pattern of 2^32 − 1 bytes or more, or of that size or more, is
+`TooLarge`.
 
 **R4. Nesting.** Groups nested more than 200 deep are refused: `TooDeep`,
 with `at` the index of the `(` that is the 201st open at once.
@@ -259,12 +266,12 @@ inside an open group or bracket expression (`[\` is `BadEscape` at 1).
 | `UnclosedGroup` | the pattern ends inside a group | the group's `(` |
 | `UnmatchedClose` | a `)` with no group open | the `)` |
 | `UnclosedBracket` | the pattern ends inside a bracket expression | its `[` |
-| `BadRange` | a range whose first byte is greater than its last, or with a named class as an end (R8) | the range's first byte |
-| `BadClass` | `[:name:]` with a name R8 does not list | the `[` of `[:` |
+| `BadRange` | a range whose first byte is greater than its last, or with a named class as either end (`[a-[:alpha:]]`, `[[:alpha:]-z]`), whether or not the class's name is one R8 lists | the range's first byte, or the `[` of the class that is its first end |
+| `BadClass` | `[:` inside a bracket expression that is not the start of `[:name:]` with a name R8 lists (an unknown name, or no closing `:]`), where it is not a range's end | the `[` of `[:` |
 | `BadEscape` | a backslash that R7 gives no meaning and that is not `Unsupported`: at the end of the pattern; before an ASCII letter R7 does not list; before `0`; before a byte below 33 or above 126; or `\x` not followed by a hexadecimal digit | the backslash |
 | `Unsupported` | a backslash before a digit `1`-`9`; `[.` or `[=` inside a bracket expression | the backslash, or the inner `[` |
 | `BadInterval` | an `interval` with *n* > *m*, or with *n* or *m* above 1000 | its `{` |
-| `NothingToRepeat` | a `repeat` with no atom before it in its branch | the operator |
+| `NothingToRepeat` | a `repeat` with no atom before it in its branch; an `interval` there is `NothingToRepeat` whatever its counts (`{2,1}` at the start of a pattern) | the operator |
 | `TooDeep`, `TooLarge` | R4, R3 | as stated there |
 
 ### What a pattern matches
@@ -291,8 +298,12 @@ ordinary byte there, and agrees with awk and with the oracle.
 `]` directly after the `[` or the `[^` is a member, not the end. Members
 are: a single byte (or escape); a range `a-b`, every byte from `a` to
 `b` inclusive by value, `a` and `b` each a single byte or escape; and a
-named class. A `-` that is first, last, or directly after a range is a
-member. The named classes are those of the C locale: `[:alpha:]`
+named class. A `-` that is last is a member. A `-` that is first, or
+directly after a range, is a member too, and like any member byte it is
+a range's first byte when a `-` and another byte follow it (`[--a]` is
+the range from 45 to 97; `[a-c--e]` is `a` to `c` and `-` to `e`). A
+`-` directly after a named class and not last makes a range with the
+class as its first end, which is `BadRange` (R5). The named classes are those of the C locale: `[:alpha:]`
 (ASCII letters), `[:digit:]`, `[:alnum:]`, `[:upper:]`, `[:lower:]`,
 `[:space:]` (9 to 13 and 32), `[:blank:]` (9 and 32), `[:punct:]`
 (punctuation as the glossary has it), `[:print:]` (32 to 126),

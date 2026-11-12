@@ -1,0 +1,544 @@
+//! phase: 6
+//! expect: output regex_syntax
+// std/regex, what compile alone shows (specs/std-regex/SPEC.md, T1): every
+// form of the pattern language accepted, with the number of its groups;
+// each row of the error table with the kind and the index it reports, and
+// the first error of several; the escapes, a backslash before each of the
+// 256 bytes outside a bracket expression and inside one; a pattern's size,
+// compiled with max_insts at that size and one below; groups nested 200
+// and 201 deep; a pattern whose bytes are overwritten and destroyed after
+// the call; and the three plain structs copied by assignment. The last
+// section holds patterns the specification does not settle, with the
+// reading the module takes.
+module t
+import "std/regex"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+// show prints a pattern between slashes, a byte outside 32 to 126 as its
+// value in angle brackets.
+func show(p: view[]u8) {
+    print_str("/")
+    var i: usize = 0usize
+    while i < len(p) {
+        if p[i] >= 32u8 && p[i] <= 126u8 {
+            print_str(p[i:i + 1usize])
+        } else {
+            print_str("<")
+            print_u64(u64(p[i]))
+            print_str(">")
+        }
+        i = i + 1usize
+    }
+    print_str("/")
+}
+
+func kind(k: regex.ErrKind) {
+    match k {
+        UnclosedGroup => print_str("UnclosedGroup")
+        UnmatchedClose => print_str("UnmatchedClose")
+        UnclosedBracket => print_str("UnclosedBracket")
+        BadRange => print_str("BadRange")
+        BadClass => print_str("BadClass")
+        BadEscape => print_str("BadEscape")
+        BadInterval => print_str("BadInterval")
+        NothingToRepeat => print_str("NothingToRepeat")
+        Unsupported => print_str("Unsupported")
+        TooDeep => print_str("TooDeep")
+        TooLarge => print_str("TooLarge")
+    }
+}
+
+// outcome prints what a compilation gave: ok and the number of groups, or
+// the error's kind and index.
+func outcome(r: view[Result[regex.Regex, regex.CompileErr]]) {
+    match r {
+        Ok(re) => {
+            print_str("ok ")
+            print_u64(u64(re.groups()))
+        }
+        Err(e) => {
+            kind(e.kind)
+            print_str(" at ")
+            print_u64(u64(e.at))
+        }
+    }
+}
+
+func pat(p: view[]u8) {
+    show(p)
+    print_str(" => ")
+    with r := regex.compile(p) { outcome(r) }
+    println()
+}
+
+func pat_with(p: view[]u8, o: regex.Options) {
+    show(p)
+    if o.ignore_case { print_str(" ignore_case") }
+    if o.newline { print_str(" newline") }
+    print_str(" => ")
+    with r := regex.compile_with(p, o) { outcome(r) }
+    println()
+}
+
+// sized_tail compiles p with max_insts at size and at one below.
+func sized_tail(p: view[]u8, size: usize, o: regex.Options) {
+    print_str(" size ")
+    print_u64(u64(size))
+    print_str(": ")
+    at := o
+    at.max_insts = size
+    with r := regex.compile_with(p, at) { outcome(r) }
+    print_str(", one below: ")
+    at.max_insts = size - 1usize
+    with r := regex.compile_with(p, at) { outcome(r) }
+    println()
+}
+func sized(p: view[]u8, size: usize) {
+    show(p)
+    sized_tail(p, size, regex.options())
+}
+
+// deep compiles lead, opens `(`, inner, closes `)` and tail in a row.
+func deep(label: view[]u8, lead: view[]u8, opens: usize, inner: view[]u8, closes: usize, tail: view[]u8) {
+    p := Vec[u8].new()
+    p.extend(lead)
+    var i: usize = 0usize
+    while i < opens {
+        p.push(40u8)
+        i = i + 1usize
+    }
+    p.extend(inner)
+    i = 0usize
+    while i < closes {
+        p.push(41u8)
+        i = i + 1usize
+    }
+    p.extend(tail)
+    print_str(label)
+    print_str(" => ")
+    with r := regex.compile(p.as_view()) { outcome(r) }
+    println()
+}
+
+// sweep compiles a backslash before each of the 256 bytes, alone or
+// between brackets, and prints the bytes accepted, those refused as
+// Unsupported, how many are refused as BadEscape or otherwise, and
+// whether every error is at the backslash.
+func sweep(inside: bool) {
+    accepted := Vec[u8].new()
+    unsupported := Vec[u8].new()
+    var bad: u64 = 0u64
+    var other: u64 = 0u64
+    var want: usize = 0usize
+    if inside { want = 1usize }
+    var there: bool = true
+    var b: u32 = 0u32
+    while b < 256u32 {
+        p := Vec[u8].new()
+        if inside { p.push(91u8) }
+        p.push(92u8)
+        p.push(truncate[u8](b))
+        if inside { p.push(93u8) }
+        with r := regex.compile(p.as_view()) {
+            match r {
+                Ok(re) => { accepted.push(truncate[u8](b)) }
+                Err(e) => {
+                    if e.at != want { there = false }
+                    match e.kind {
+                        Unsupported => { unsupported.push(truncate[u8](b)) }
+                        BadEscape => { bad = bad + 1u64 }
+                        _ => { other = other + 1u64 }
+                    }
+                }
+            }
+        }
+        b = b + 1u32
+    }
+    print_str("accepted ")
+    show(accepted.as_view())
+    println()
+    print_str("Unsupported ")
+    show(unsupported.as_view())
+    println()
+    print_str("BadEscape ")
+    print_u64(bad)
+    print_str(", other errors ")
+    print_u64(other)
+    print_str(", every error at the backslash ")
+    print_bool(there)
+    println()
+}
+
+// kept compiles a pattern held in a vector, overwrites the vector and
+// destroys it, and returns what the compilation gave.
+func kept() -> Result[regex.Regex, regex.CompileErr] {
+    v := Vec[u8].new()
+    v.extend("(a)(b(c))")
+    r := regex.compile(v.as_view())
+    var i: usize = 0usize
+    while i < v.len() {
+        with b := v.at(i) { b = 41u8 }
+        i = i + 1usize
+    }
+    drop(v)
+    return r
+}
+
+func main() -> i32 {
+    say("-- accepted: ordinary bytes, alternation, groups")
+    pat("")
+    pat("a")
+    pat("abc")
+    pat("a|b")
+    pat("a|")
+    pat("|a")
+    pat("|")
+    pat("a||b")
+    pat("()")
+    pat("(a)")
+    pat("(a)(b)")
+    pat("((a)(b))")
+    pat("(a|b)|(c)")
+    pat("(|)")
+    pat("(()())")
+    pat("a\0b")
+    pat("\xc8\xff")
+
+    say("-- accepted: repetition")
+    pat("a*")
+    pat("a+")
+    pat("a?")
+    pat("a*+?")
+    pat("(a)*")
+    pat("(a|b)+c?")
+    pat("a{2}")
+    pat("a{2,}")
+    pat("a{2,5}")
+    pat("a{0}")
+    pat("a{0,0}")
+    pat("a{0,}")
+    pat("a{1000}")
+    pat("a{0001}")
+    pat("a{1,1000}")
+    pat("a{2}{3}")
+    pat("(a){0}")
+    pat("(a){2,3}*")
+
+    say("-- accepted: any byte and anchors")
+    pat(".")
+    pat("^")
+    pat("$")
+    pat("^a$")
+    pat("a^b")
+    pat("a$b")
+    pat("^*")
+    pat("$+")
+    pat("(^a|b$)")
+
+    say("-- accepted: bracket expressions")
+    pat("[a]")
+    pat("[abc]")
+    pat("[a-z]")
+    pat("[^a]")
+    pat("[]]")
+    pat("[^]]")
+    pat("[]a]")
+    pat("[a-]")
+    pat("[-a]")
+    pat("[a-c-e]")
+    pat("[[]")
+    pat("[a[]")
+    pat("[.]")
+    pat("[=]")
+    pat("[:a:]")
+    pat("[^^]")
+    pat("[a^]")
+    pat("[*+?(){}|^$.]")
+    pat("[\0-\xff]")
+    pat("[[:alpha:]]")
+    pat("[[:alpha:][:digit:]_]")
+    pat("[^[:space:]]")
+    pat("[[:alpha:]-]")
+    pat("[[:alpha:][:digit:][:alnum:][:upper:][:lower:][:space:][:blank:][:punct:][:print:][:graph:][:cntrl:][:xdigit:]]")
+    pat("([)]a)")
+
+    say("-- accepted: escapes")
+    pat("\\.")
+    pat("\\\\")
+    pat("\\(\\)")
+    pat("\\[a\\]")
+    pat("\\{2\\}")
+    pat("\\n\\t\\r\\f\\v\\a")
+    pat("\\x41")
+    pat("\\x4")
+    pat("\\x414")
+    pat("\\xAf")
+    pat("\\x0")
+    pat("\\x4g")
+    pat("\\*\\+\\?\\|\\^\\$")
+    pat("[\\]]")
+    pat("[\\\\]")
+    pat("[a\\]b]")
+    pat("[\\n\\t\\x41-\\x5a]")
+    pat("[\\x5d]")
+    pat("[\\--\\/]")
+    pat("[\\^a]")
+
+    say("-- accepted: braces and brackets as ordinary bytes")
+    pat("{")
+    pat("}")
+    pat("]")
+    pat("a]")
+    pat("a{")
+    pat("a}")
+    pat("a{}")
+    pat("a{,2}")
+    pat("a{,}")
+    pat("a{1")
+    pat("a{1,2")
+    pat("a{x}")
+    pat("a{ 1}")
+    pat("a{-1}")
+    pat("a{1,2,3}")
+    pat("a{12345}")
+    pat("a{1,23456}")
+    pat("{a}")
+    pat("{*")
+    pat("{}")
+    pat("(a{)")
+
+    say("-- accepted: options")
+    var o: regex.Options = regex.options()
+    o.ignore_case = true
+    pat_with("[a-z]B\\x41", o)
+    o.newline = true
+    pat_with("^(a.[^b])$", o)
+    o.ignore_case = false
+    pat_with("^.$|[^\\n]", o)
+
+    say("-- UnclosedGroup")
+    pat("(")
+    pat("(a")
+    pat("a(b")
+    pat("((")
+    pat("(a)(b")
+    pat("(a|b")
+    pat("((a)")
+    pat("a(b(c)d")
+
+    say("-- UnmatchedClose")
+    pat(")")
+    pat("a)")
+    pat("(a))")
+    pat("a|)")
+    pat("()b)c(")
+
+    say("-- UnclosedBracket")
+    pat("[")
+    pat("[a")
+    pat("a[^")
+    pat("[]")
+    pat("[^]")
+    pat("([")
+    pat("[a-")
+    pat("[[:alpha:]")
+    pat("x[a-z")
+    pat("[a\\]")
+
+    say("-- BadRange")
+    pat("[b-a]")
+    pat("x[z-a]")
+    pat("[a-c9-0]")
+    pat("[^9-0]")
+    pat("[\\x62-\\x61]")
+    pat("[a-[:alpha:]]")
+    pat("[[:alpha:]-z]")
+
+    say("-- BadClass")
+    pat("[[:foo:]]")
+    pat("[a[:Alpha:]]")
+    pat("[[:alpha:][:nope:]]")
+    pat("[^[:word:]]")
+
+    say("-- BadEscape")
+    pat("\\")
+    pat("a\\")
+    pat("ab\\")
+    pat("[\\")
+    pat("(\\")
+    pat("\\d")
+    pat("\\w")
+    pat("\\b")
+    pat("\\0")
+    pat("\\x")
+    pat("\\xg")
+    pat("\\x-")
+    pat("a\\xZ")
+    pat("[\\x]")
+    pat("\\ ")
+    pat("\\\xc8")
+    pat("\\\n")
+    pat("[a\\q]")
+    pat("[a-\\q]")
+
+    say("-- Unsupported")
+    pat("\\1")
+    pat("\\10")
+    pat("(a)\\1")
+    pat("a\\9")
+    pat("[\\1]")
+    pat("[[.a.]]")
+    pat("[a[=b=]]")
+    pat("[[.")
+    pat("[[=")
+    pat("[a-[.z.]]")
+    pat("[^[.x.]]")
+
+    say("-- BadInterval")
+    pat("a{2,1}")
+    pat("a{1001}")
+    pat("a{0,1001}")
+    pat("a{1001,}")
+    pat("ab{3,2}c")
+    pat("(a){9999}")
+    pat("a{1000}{2,1}")
+    pat("a{1,2}{1001}")
+
+    say("-- NothingToRepeat")
+    pat("*")
+    pat("+a")
+    pat("?")
+    pat("a|*b")
+    pat("(*a)")
+    pat("(a|+)")
+    pat("|*")
+    pat("()|?")
+    pat("{2}")
+    pat("a|{1,2}")
+    pat("({3,})")
+
+    say("-- the first error is the one reported")
+    pat("a)(")
+    pat("(a{2,1}")
+    pat("[b-a")
+    pat("*)")
+    pat("(\\1")
+    pat("a{2,1}\\")
+    pat("\\q(")
+    pat("([[:foo:]")
+    pat("a{1000}{1000})")
+    pat("a{1000}{1000}(")
+    pat("a{1000}{1000}\\")
+
+    say("-- a backslash before each byte")
+    sweep(false)
+    say("-- a backslash before each byte, in a bracket expression")
+    sweep(true)
+
+    say("-- size")
+    sized("", 1usize)
+    sized("abc", 4usize)
+    sized("^$.", 4usize)
+    sized("()", 3usize)
+    sized("(|a)", 6usize)
+    sized("a||b", 7usize)
+    sized("a?b+c*", 10usize)
+    sized("(a|b)*c", 10usize)
+    sized("a{0}", 1usize)
+    sized("a{3}{4}", 13usize)
+    sized("x{2,}", 6usize)
+    sized("a{2,5}", 12usize)
+    sized("(ab){3,}x?", 22usize)
+    sized("[a-c]+|\\.$|^x{3}", 14usize)
+    sized("(a{1000}){0}b", 2usize)
+    sized("(a{100}){100}", 10201usize)
+    stars := Vec[u8].new()
+    stars.push(97u8)
+    var i: usize = 0usize
+    while i < 2000usize {
+        stars.push(42u8)
+        i = i + 1usize
+    }
+    print_str("a and 2000 stars")
+    sized_tail(stars.as_view(), 4002usize, regex.options())
+    o = regex.options()
+    o.ignore_case = true
+    o.newline = true
+    print_str("ignore_case newline ")
+    show("a.[^b]")
+    sized_tail("a.[^b]", 4usize, o)
+
+    say("-- TooLarge")
+    pat("a{1000}{99}x{999}")
+    pat("a{1000}{100}")
+    pat("(a{1000}){1000}")
+    o = regex.options()
+    o.max_insts = 0usize
+    print_str("max_insts 0 ")
+    pat_with("a", o)
+    o.max_insts = 18446744073709551615usize
+    print_str("max_insts 18446744073709551615 ")
+    pat_with("((((((a{1000}){1000}){1000}){1000}){1000}){1000}){1000}", o)
+
+    say("-- nesting")
+    deep("200 nested groups", "", 200usize, "a", 200usize, "")
+    deep("201 nested groups", "", 201usize, "a", 201usize, "")
+    deep("x and 201 open parentheses", "x", 201usize, "", 0usize, "")
+    deep("200 open parentheses", "", 200usize, "", 0usize, "")
+    deep("200 nested groups and one beside them", "", 200usize, "a", 200usize, "(b)")
+    deep("200 nested groups around [(]", "", 200usize, "[(]", 200usize, "")
+
+    say("-- the pattern is not kept")
+    with r := kept() { outcome(r) }
+    println()
+
+    say("-- copies")
+    a := regex.options()
+    b := a
+    b.max_insts = 5usize
+    b.ignore_case = true
+    print_bool(a.ignore_case)
+    print_str(" ")
+    print_bool(a.newline)
+    print_str(" ")
+    print_u64(u64(a.max_insts))
+    println()
+    print_bool(b.ignore_case)
+    print_str(" ")
+    print_bool(b.newline)
+    print_str(" ")
+    print_u64(u64(b.max_insts))
+    println()
+    e := regex.CompileErr { kind: regex.ErrKind.BadClass, at: 3usize }
+    f := e
+    f.kind = regex.ErrKind.TooDeep
+    f.at = 9usize
+    kind(e.kind)
+    print_str(" at ")
+    print_u64(u64(e.at))
+    println()
+    kind(f.kind)
+    print_str(" at ")
+    print_u64(u64(f.at))
+    println()
+    s := regex.Span { start: 1usize, end: 4usize }
+    t := s
+    t.end = 7usize
+    print_u64(u64(s.start))
+    print_str(" ")
+    print_u64(u64(s.end))
+    println()
+    print_u64(u64(t.start))
+    print_str(" ")
+    print_u64(u64(t.end))
+    println()
+
+    say("-- readings the specification leaves open")
+    pat("{2,1}")
+    pat("[[:alpha]")
+    pat("[[:alpha")
+    pat("[a-[:foo:]]")
+    pat("[--a]")
+    return 0i32
+}

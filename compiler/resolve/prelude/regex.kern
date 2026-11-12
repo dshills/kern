@@ -1,0 +1,989 @@
+// std/regex: regular expressions over bytes, in POSIX extended syntax
+// (specs/std-regex/SPEC.md). Imported with `import "std/regex"`.
+//
+// A pattern is compiled once into a program for a small machine that
+// follows every alternative at once, so a search takes time proportional
+// to the text's length times the pattern's size whatever the pattern. A
+// pattern and a text are bytes: `.` is one byte, the named classes are
+// those of the C locale, and case is folded for ASCII letters only.
+module regex
+import "std/str"
+
+// Options are what compile_with takes besides the pattern. ignore_case
+// makes an ASCII letter match both of its cases. newline keeps `.` and a
+// negated bracket expression from matching the byte 10 and lets `^` and
+// `$` match after and before one. max_insts is the largest size (as
+// size_of_node counts it, plus one) a pattern may have.
+struct Options { ignore_case: bool; newline: bool; max_insts: usize }
+
+// options is what compile uses: neither flag set, a size of 100000.
+func options() -> Options { return Options { ignore_case: false, newline: false, max_insts: 100000usize } }
+
+// ErrKind is why a pattern was refused; CompileErr adds where, as an index
+// into the pattern. The first error met reading left to right is the one
+// reported, an error at a byte before one that only the pattern's end
+// shows, and TooLarge only when there is no other.
+union ErrKind {
+    UnclosedGroup
+    UnmatchedClose
+    UnclosedBracket
+    BadRange
+    BadClass
+    BadEscape
+    BadInterval
+    NothingToRepeat
+    Unsupported
+    TooDeep
+    TooLarge
+}
+struct CompileErr { kind: ErrKind; at: usize }
+
+// Span is the stretch text[start:end].
+struct Span { start: usize; end: usize }
+
+func fail(kind: ErrKind, at: usize) -> CompileErr { return CompileErr { kind: kind, at: at } }
+
+// ByteSet is a set of bytes, one bit each.
+struct ByteSet { w: [4]u64 }
+
+impl ByteSet {
+    func has(view self, b: u8) -> bool { return (self.w[usize(b >> 6u32)] >> u32(b & 63u8)) & 1u64 == 1u64 }
+    func add(edit self, b: u8) {
+        i := usize(b >> 6u32)
+        self.w[i] = self.w[i] | (1u64 << u32(b & 63u8))
+    }
+    func remove(edit self, b: u8) {
+        i := usize(b >> 6u32)
+        self.w[i] = self.w[i] & ((1u64 << u32(b & 63u8)) ^ 18446744073709551615u64)
+    }
+    // add_range adds every byte from lo to hi.
+    func add_range(edit self, lo: u8, hi: u8) {
+        var c: u32 = u32(lo)
+        while c <= u32(hi) {
+            self.add(truncate[u8](c))
+            c = c + 1u32
+        }
+    }
+    func invert(edit self) {
+        for i in 0usize..4usize { self.w[i] = self.w[i] ^ 18446744073709551615u64 }
+    }
+    func union_with(edit self, o: ByteSet) {
+        for i in 0usize..4usize { self.w[i] = self.w[i] | o.w[i] }
+    }
+    // fold_case adds the other case of every ASCII letter in the set.
+    func fold_case(edit self) {
+        var c: u8 = 97u8
+        while c <= 122u8 {
+            if self.has(c) { self.add(c - 32u8) }
+            if self.has(c - 32u8) { self.add(c) }
+            c = c + 1u8
+        }
+    }
+}
+
+func is_digit(c: u8) -> bool { return c >= 48u8 && c <= 57u8 }
+func is_letter(c: u8) -> bool { return (c >= 65u8 && c <= 90u8) || (c >= 97u8 && c <= 122u8) }
+// is_punct: a byte from 33 to 126 that is neither a letter nor a digit.
+func is_punct(c: u8) -> bool { return c >= 33u8 && c <= 126u8 && !is_letter(c) && !is_digit(c) }
+// hex_value is the value of a hexadecimal digit, 16 for any other byte.
+func hex_value(c: u8) -> u32 {
+    if c >= 48u8 && c <= 57u8 { return u32(c - 48u8) }
+    if c >= 97u8 && c <= 102u8 { return u32(c - 87u8) }
+    if c >= 65u8 && c <= 70u8 { return u32(c - 55u8) }
+    return 16u32
+}
+
+// class_at adds to s the named class whose name and closing `:]` begin at
+// src[from], and returns the offset after them; None when none of the
+// twelve names is there.
+func class_at(src: view[]u8, from: usize, s: edit[ByteSet]) -> Option[usize] {
+    n := len(src)
+    if from > n { return None }
+    if str.starts_with(src[from:n], "alpha:]") {
+        s.add_range(65u8, 90u8)
+        s.add_range(97u8, 122u8)
+        return Some(from + 7usize)
+    }
+    if str.starts_with(src[from:n], "digit:]") {
+        s.add_range(48u8, 57u8)
+        return Some(from + 7usize)
+    }
+    if str.starts_with(src[from:n], "alnum:]") {
+        s.add_range(48u8, 57u8)
+        s.add_range(65u8, 90u8)
+        s.add_range(97u8, 122u8)
+        return Some(from + 7usize)
+    }
+    if str.starts_with(src[from:n], "upper:]") {
+        s.add_range(65u8, 90u8)
+        return Some(from + 7usize)
+    }
+    if str.starts_with(src[from:n], "lower:]") {
+        s.add_range(97u8, 122u8)
+        return Some(from + 7usize)
+    }
+    if str.starts_with(src[from:n], "space:]") {
+        s.add_range(9u8, 13u8)
+        s.add(32u8)
+        return Some(from + 7usize)
+    }
+    if str.starts_with(src[from:n], "blank:]") {
+        s.add(9u8)
+        s.add(32u8)
+        return Some(from + 7usize)
+    }
+    if str.starts_with(src[from:n], "punct:]") {
+        s.add_range(33u8, 47u8)
+        s.add_range(58u8, 64u8)
+        s.add_range(91u8, 96u8)
+        s.add_range(123u8, 126u8)
+        return Some(from + 7usize)
+    }
+    if str.starts_with(src[from:n], "print:]") {
+        s.add_range(32u8, 126u8)
+        return Some(from + 7usize)
+    }
+    if str.starts_with(src[from:n], "graph:]") {
+        s.add_range(33u8, 126u8)
+        return Some(from + 7usize)
+    }
+    if str.starts_with(src[from:n], "cntrl:]") {
+        s.add_range(0u8, 31u8)
+        s.add(127u8)
+        return Some(from + 7usize)
+    }
+    if str.starts_with(src[from:n], "xdigit:]") {
+        s.add_range(48u8, 57u8)
+        s.add_range(65u8, 70u8)
+        s.add_range(97u8, 102u8)
+        return Some(from + 8usize)
+    }
+    return None
+}
+
+// Interval is what interval_at found at a `{`: found is whether the bytes
+// there are {n}, {n,} or {n,m} with counts of one to four digits, lo and
+// hi are the counts (hi is no_limit for {n,}), end is the offset after
+// the `}`.
+struct Interval { found: bool; lo: u32; hi: u32; end: usize }
+
+const no_limit: u32 = 4294967295u32
+// max_count is the greatest count an interval may have, max_depth how
+// deep groups may nest.
+const max_count: u32 = 1000u32
+const max_depth: u32 = 200u32
+// index_limit: a program's instructions and a pattern's nodes are numbered
+// in 32 bits, so a pattern as long as this, or of this size, is too large
+// whatever max_insts says.
+const index_limit: u64 = 4294967295u64
+
+// interval_at reads the interval that begins with the `{` at src[at]. A
+// brace that begins none is an ordinary byte.
+func interval_at(src: view[]u8, at: usize) -> Interval {
+    none := Interval { found: false, lo: 0u32, hi: 0u32, end: at }
+    n := len(src)
+    var i: usize = at + 1usize
+    var lo: u32 = 0u32
+    var digits: u32 = 0u32
+    while i < n && is_digit(src[i]) && digits < 4u32 {
+        lo = lo * 10u32 + u32(src[i] - 48u8)
+        i = i + 1usize
+        digits = digits + 1u32
+    }
+    if digits == 0u32 || i >= n { return none }
+    if src[i] == 125u8 { return Interval { found: true, lo: lo, hi: lo, end: i + 1usize } }
+    if src[i] != 44u8 { return none }
+    i = i + 1usize
+    if i >= n { return none }
+    if src[i] == 125u8 { return Interval { found: true, lo: lo, hi: no_limit, end: i + 1usize } }
+    var hi: u32 = 0u32
+    digits = 0u32
+    while i < n && is_digit(src[i]) && digits < 4u32 {
+        hi = hi * 10u32 + u32(src[i] - 48u8)
+        i = i + 1usize
+        digits = digits + 1u32
+    }
+    if digits == 0u32 || i >= n || src[i] != 125u8 { return none }
+    return Interval { found: true, lo: lo, hi: hi, end: i + 1usize }
+}
+
+// Node is a node of a pattern's tree. A Piece is an atom with the
+// repetition operators written after it, reps[first : first + count], the
+// one applied first coming first. A Cat is the pieces of a branch and an
+// Alt the branches of an alternation, kids[first : first + count] (two or
+// more: one alone stands for itself, and a branch with no piece is Empty).
+// A Group is the k-th parenthesis pair. Set names a set of the pattern.
+// Neither a long branch nor a long run of operators nests: only a group
+// does, so a walk of the tree goes no deeper than groups are nested.
+union Node {
+    Empty
+    Byte(b: u8)
+    Any
+    Set(k: u32)
+    Bol
+    Eol
+    Group(a: u32, k: u32)
+    Piece(a: u32, first: u32, count: u32)
+    Cat(first: u32, count: u32)
+    Alt(first: u32, count: u32)
+}
+
+// Rep is a repetition operator; hi of a Range is no_limit for {n,}.
+union Rep { Star; Plus; Quest; Range(lo: u32, hi: u32) }
+
+// Inst is an instruction of the machine. Byte, Any and Set take one byte
+// of the text; the others are followed without taking one. Split goes on
+// at x and at y, x being the way a search that tried one alternative at a
+// time would try first. Bol and Eol hold at the ends of the text and, when
+// line is set, also after and before a byte 10. Save marks the offset
+// where a group begins (slot 2k) or ends (slot 2k + 1). Match is the end
+// of the pattern.
+union Inst {
+    Byte(b: u8)
+    Any
+    Set(k: u32)
+    Split(x: u32, y: u32)
+    Jmp(x: u32)
+    Bol(line: bool)
+    Eol(line: bool)
+    Save(slot: u32)
+    Match
+}
+
+// Regex is a compiled pattern: the program and the sets it names. The
+// rest is what a search may use to do less: lit holds the bytes of a
+// pattern that is nothing but ordinary bytes (is_lit), which is then
+// searched for as a string; anchored says that every match begins with a
+// `^` that holds at offset 0 only; first is the set of bytes a match of
+// one byte or more can begin with, of use when the pattern cannot match
+// the empty string (nullable).
+struct Regex nocopy {
+    prog: Vec[Inst]
+    sets: Vec[ByteSet]
+    lit: Vec[u8]
+    is_lit: bool
+    anchored: bool
+    nullable: bool
+    first: ByteSet
+    ngroups: usize
+}
+
+// Compiler reads a pattern into a tree and turns the tree into a program.
+// work holds the nodes of the branch or alternation being read, and while
+// the program is written the instructions still to be completed; dot and
+// fold remember the sets made for `.` under newline and for each letter
+// under ignore_case, as the set's number plus one.
+struct Compiler nocopy {
+    pos: usize
+    depth: u32
+    ngroups: usize
+    ignore_case: bool
+    newline: bool
+    nodes: Vec[Node]
+    kids: Vec[u32]
+    reps: Vec[Rep]
+    sets: Vec[ByteSet]
+    work: Vec[u32]
+    dot: u32
+    fold: [26]u32
+    prog: Vec[Inst]
+}
+
+func sat_add(a: u64, b: u64) -> u64 {
+    match checked_add(a, b) {
+        Some(v) => { return v }
+        None => { return 18446744073709551615u64 }
+    }
+}
+func sat_mul(a: u64, b: u64) -> u64 {
+    match checked_mul(a, b) {
+        Some(v) => { return v }
+        None => { return 18446744073709551615u64 }
+    }
+}
+
+// is_void: an operator that admits no passage, {0} or {0,0}.
+func is_void(op: Rep) -> bool {
+    match op {
+        Range(lo, hi) => { return hi == 0u32 }
+        _ => { return false }
+    }
+}
+// has_prefix: an operator whose code begins with an instruction of its
+// own, before its operand's: a split that can pass the operand by.
+func has_prefix(op: Rep) -> bool {
+    match op {
+        Plus => { return false }
+        Range(lo, hi) => { return lo == 0u32 && hi != 0u32 }
+        _ => { return true }
+    }
+}
+
+impl Compiler {
+    func add(edit self, n: Node) -> u32 {
+        id := truncate[u32](self.nodes.len())
+        self.nodes.push(n)
+        return id
+    }
+    func add_set(edit self, s: ByteSet) -> u32 {
+        k := truncate[u32](self.sets.len())
+        self.sets.push(s)
+        return k
+    }
+
+    // gather makes one node of those put on work since it held base: the
+    // node itself when there is one, a Cat or an Alt of them otherwise.
+    func gather(edit self, base: usize, branches: bool) -> u32 {
+        end := self.work.len()
+        if end == base { return self.add(Node.Empty) }
+        if end == base + 1usize {
+            only := self.work.get(base)
+            self.work.resize(base, 0u32)
+            return only
+        }
+        first := truncate[u32](self.kids.len())
+        for i in base..end {
+            k := self.work.get(i)
+            self.kids.push(k)
+        }
+        self.work.resize(base, 0u32)
+        count := truncate[u32](end - base)
+        if branches { return self.add(Node.Alt(first, count)) }
+        return self.add(Node.Cat(first, count))
+    }
+
+    // alt reads branches separated by `|`, up to the end of the pattern or
+    // the `)` that closes the group being read.
+    func alt(edit self, src: view[]u8) -> Result[u32, CompileErr] {
+        base := self.work.len()
+        while true {
+            b := self.branch(src)?
+            self.work.push(b)
+            if self.pos >= len(src) || src[self.pos] != 124u8 { break }
+            self.pos = self.pos + 1usize
+        }
+        return Ok(self.gather(base, true))
+    }
+
+    // branch reads pieces up to a `|`, the `)` of the group being read, or
+    // the end. A `)` with no group open is an error.
+    func branch(edit self, src: view[]u8) -> Result[u32, CompileErr] {
+        base := self.work.len()
+        while self.pos < len(src) {
+            c := src[self.pos]
+            if c == 124u8 { break }
+            if c == 41u8 {
+                if self.depth == 0u32 { return Err(fail(ErrKind.UnmatchedClose, self.pos)) }
+                break
+            }
+            p := self.piece(src)?
+            self.work.push(p)
+        }
+        return Ok(self.gather(base, false))
+    }
+
+    // piece reads an atom and the repetition operators after it. An
+    // operator where an atom should begin has nothing to repeat; whether
+    // its counts are in order is not looked at then.
+    func piece(edit self, src: view[]u8) -> Result[u32, CompileErr] {
+        c := src[self.pos]
+        if c == 42u8 || c == 43u8 || c == 63u8 { return Err(fail(ErrKind.NothingToRepeat, self.pos)) }
+        if c == 123u8 && interval_at(src, self.pos).found { return Err(fail(ErrKind.NothingToRepeat, self.pos)) }
+        a := self.atom(src)?
+        first := self.reps.len()
+        while self.pos < len(src) {
+            r := src[self.pos]
+            if r == 42u8 {
+                self.reps.push(Rep.Star)
+                self.pos = self.pos + 1usize
+            } else if r == 43u8 {
+                self.reps.push(Rep.Plus)
+                self.pos = self.pos + 1usize
+            } else if r == 63u8 {
+                self.reps.push(Rep.Quest)
+                self.pos = self.pos + 1usize
+            } else if r == 123u8 {
+                iv := interval_at(src, self.pos)
+                if !iv.found { break }
+                if iv.lo > max_count { return Err(fail(ErrKind.BadInterval, self.pos)) }
+                if iv.hi != no_limit && (iv.hi > max_count || iv.lo > iv.hi) { return Err(fail(ErrKind.BadInterval, self.pos)) }
+                self.reps.push(Rep.Range(iv.lo, iv.hi))
+                self.pos = iv.end
+            } else {
+                break
+            }
+        }
+        count := self.reps.len() - first
+        if count == 0usize { return Ok(a) }
+        return Ok(self.add(Node.Piece(a, truncate[u32](first), truncate[u32](count))))
+    }
+
+    func atom(edit self, src: view[]u8) -> Result[u32, CompileErr] {
+        at := self.pos
+        c := src[at]
+        self.pos = at + 1usize
+        if c == 40u8 {
+            if self.depth == max_depth { return Err(fail(ErrKind.TooDeep, at)) }
+            self.depth = self.depth + 1u32
+            self.ngroups = self.ngroups + 1usize
+            k := truncate[u32](self.ngroups)
+            inner := self.alt(src)?
+            // alt stops inside a group at its `)` or at the end
+            if self.pos >= len(src) { return Err(fail(ErrKind.UnclosedGroup, at)) }
+            self.pos = self.pos + 1usize
+            self.depth = self.depth - 1u32
+            return Ok(self.add(Node.Group(inner, k)))
+        }
+        if c == 91u8 { return self.bracket(src, at) }
+        if c == 46u8 { return Ok(self.any()) }
+        if c == 94u8 { return Ok(self.add(Node.Bol)) }
+        if c == 36u8 { return Ok(self.add(Node.Eol)) }
+        if c == 92u8 {
+            b := self.escape(src, at)?
+            return Ok(self.byte(b))
+        }
+        return Ok(self.byte(c))
+    }
+
+    // any is the node of `.`: every byte, and under newline every byte
+    // but 10.
+    func any(edit self) -> u32 {
+        if !self.newline { return self.add(Node.Any) }
+        if self.dot == 0u32 {
+            s := ByteSet { w: zero() }
+            s.add_range(0u8, 255u8)
+            s.remove(10u8)
+            k := self.add_set(s)
+            self.dot = k + 1u32
+        }
+        k := self.dot - 1u32
+        return self.add(Node.Set(k))
+    }
+
+    // byte is the node of an ordinary byte or an escape: under ignore_case
+    // a letter is the set of its two cases.
+    func byte(edit self, b: u8) -> u32 {
+        if !self.ignore_case || !is_letter(b) { return self.add(Node.Byte(b)) }
+        lower := b | 32u8
+        i := usize(lower - 97u8)
+        if self.fold[i] == 0u32 {
+            s := ByteSet { w: zero() }
+            s.add(lower)
+            s.add(lower - 32u8)
+            k := self.add_set(s)
+            self.fold[i] = k + 1u32
+        }
+        k := self.fold[i] - 1u32
+        return self.add(Node.Set(k))
+    }
+
+    // escape reads what follows the backslash at src[at] and returns the
+    // byte it means. The same escapes are read inside a bracket expression
+    // and outside.
+    func escape(edit self, src: view[]u8, at: usize) -> Result[u8, CompileErr] {
+        if self.pos >= len(src) { return Err(fail(ErrKind.BadEscape, at)) }
+        c := src[self.pos]
+        self.pos = self.pos + 1usize
+        if c == 110u8 { return Ok(10u8) }
+        if c == 116u8 { return Ok(9u8) }
+        if c == 114u8 { return Ok(13u8) }
+        if c == 102u8 { return Ok(12u8) }
+        if c == 118u8 { return Ok(11u8) }
+        if c == 97u8 { return Ok(7u8) }
+        if c == 120u8 {
+            // one or two hexadecimal digits, as many as there are
+            var v: u32 = 0u32
+            var k: u32 = 0u32
+            while k < 2u32 && self.pos < len(src) && hex_value(src[self.pos]) < 16u32 {
+                v = v * 16u32 + hex_value(src[self.pos])
+                self.pos = self.pos + 1usize
+                k = k + 1u32
+            }
+            if k == 0u32 { return Err(fail(ErrKind.BadEscape, at)) }
+            return Ok(truncate[u8](v))
+        }
+        // a digit from 1 to 9 would be a backreference
+        if c >= 49u8 && c <= 57u8 { return Err(fail(ErrKind.Unsupported, at)) }
+        if is_punct(c) { return Ok(c) }
+        return Err(fail(ErrKind.BadEscape, at))
+    }
+
+    // bracket reads a bracket expression whose `[` is at src[open], from
+    // the byte after it. At each member's place: a `]` that is not the
+    // first member ends the expression; `[:` begins a named class, `[.`
+    // and `[=` the two forms that are not supported; any other byte or an
+    // escape is a member, and the first byte of a range when a `-` follows
+    // that is not the last byte before the `]`. A `-` met where a member
+    // begins (first, or after a range) is a byte like any other.
+    func bracket(edit self, src: view[]u8, open: usize) -> Result[u32, CompileErr] {
+        n := len(src)
+        s := ByteSet { w: zero() }
+        var negate: bool = false
+        if self.pos < n && src[self.pos] == 94u8 {
+            negate = true
+            self.pos = self.pos + 1usize
+        }
+        var first: bool = true
+        while true {
+            if self.pos >= n { return Err(fail(ErrKind.UnclosedBracket, open)) }
+            at := self.pos
+            c := src[at]
+            if c == 93u8 && !first {
+                self.pos = at + 1usize
+                break
+            }
+            first = false
+            if c == 91u8 && at + 1usize < n {
+                d := src[at + 1usize]
+                if d == 46u8 || d == 61u8 { return Err(fail(ErrKind.Unsupported, at)) }
+                if d == 58u8 {
+                    match class_at(src, at + 2usize, s) {
+                        Some(after) => { self.pos = after }
+                        None => { return Err(fail(ErrKind.BadClass, at)) }
+                    }
+                    // a class cannot begin a range
+                    if self.pos + 1usize < n && src[self.pos] == 45u8 && src[self.pos + 1usize] != 93u8 {
+                        return Err(fail(ErrKind.BadRange, at))
+                    }
+                    continue
+                }
+            }
+            self.pos = at + 1usize
+            var lo: u8 = c
+            if c == 92u8 { lo = self.escape(src, at)? }
+            if self.pos + 1usize < n && src[self.pos] == 45u8 && src[self.pos + 1usize] != 93u8 {
+                // a range: lo, the -, and its last byte
+                last := self.pos + 1usize
+                e := src[last]
+                if e == 91u8 && last + 1usize < n {
+                    f := src[last + 1usize]
+                    if f == 46u8 || f == 61u8 { return Err(fail(ErrKind.Unsupported, last)) }
+                    // a class cannot end a range
+                    if f == 58u8 { return Err(fail(ErrKind.BadRange, at)) }
+                }
+                self.pos = last + 1usize
+                var hi: u8 = e
+                if e == 92u8 { hi = self.escape(src, last)? }
+                if lo > hi { return Err(fail(ErrKind.BadRange, at)) }
+                s.add_range(lo, hi)
+            } else {
+                s.add(lo)
+            }
+        }
+        if self.ignore_case { s.fold_case() }
+        if negate {
+            s.invert()
+            if self.newline { s.remove(10u8) }
+        }
+        k := self.add_set(s)
+        return Ok(self.add(Node.Set(k)))
+    }
+
+    // size_of_node is the size of node n: 1 for what takes a byte and for
+    // an anchor; 2 more than its pattern for a group; the sum of its
+    // pieces for a branch; 2 for each `|` more than the branches for an
+    // alternation; 2 more than its operand for `*`, `+` and `?`; n times
+    // the operand for {n}, n + 1 times and 2 for {n,}, m times and
+    // 2 × (m − n) for {n,m}. It is counted in a u64 that stops at its
+    // greatest value instead of wrapping, which is above every max_insts
+    // compile_with accepts.
+    func size_of_node(view self, n: u32) -> u64 {
+        nd := self.nodes.get(usize(n))
+        match nd {
+            Empty => { return 0u64 }
+            Group(a, k) => { return sat_add(self.size_of_node(a), 2u64) }
+            Piece(a, first, count) => {
+                var s: u64 = self.size_of_node(a)
+                var i: u32 = 0u32
+                while i < count {
+                    op := self.reps.get(usize(first + i))
+                    match op {
+                        Range(lo, hi) => {
+                            if hi == no_limit {
+                                s = sat_add(sat_mul(s, u64(lo) + 1u64), 2u64)
+                            } else {
+                                s = sat_add(sat_mul(s, u64(hi)), 2u64 * u64(hi - lo))
+                            }
+                        }
+                        _ => { s = sat_add(s, 2u64) }
+                    }
+                    i = i + 1u32
+                }
+                return s
+            }
+            Cat(first, count) => {
+                var s: u64 = 0u64
+                var i: u32 = 0u32
+                while i < count {
+                    kid := self.kids.get(usize(first + i))
+                    s = sat_add(s, self.size_of_node(kid))
+                    i = i + 1u32
+                }
+                return s
+            }
+            Alt(first, count) => {
+                var s: u64 = 2u64 * u64(count - 1u32)
+                var i: u32 = 0u32
+                while i < count {
+                    kid := self.kids.get(usize(first + i))
+                    s = sat_add(s, self.size_of_node(kid))
+                    i = i + 1u32
+                }
+                return s
+            }
+            _ => { return 1u64 }
+        }
+    }
+
+    func here(view self) -> u32 { return truncate[u32](self.prog.len()) }
+    func patch(edit self, at: u32, ins: Inst) {
+        with slot := self.prog.at(usize(at)) { slot = ins }
+    }
+
+    // emit appends the code of node n. A node's code is entered at its
+    // first instruction and left by running off its end, and every jump in
+    // it stays within it or goes to its end; that is what lets again copy
+    // it. The program is never longer than the pattern's size.
+    func emit(edit self, n: u32) {
+        nd := self.nodes.get(usize(n))
+        match nd {
+            Empty => { }
+            Byte(b) => { self.prog.push(Inst.Byte(b)) }
+            Any => { self.prog.push(Inst.Any) }
+            Set(k) => { self.prog.push(Inst.Set(k)) }
+            Bol => {
+                line := self.newline
+                self.prog.push(Inst.Bol(line))
+            }
+            Eol => {
+                line := self.newline
+                self.prog.push(Inst.Eol(line))
+            }
+            Group(a, k) => {
+                self.prog.push(Inst.Save(2u32 * k))
+                self.emit(a)
+                self.prog.push(Inst.Save(2u32 * k + 1u32))
+            }
+            Cat(first, count) => {
+                var i: u32 = 0u32
+                while i < count {
+                    kid := self.kids.get(usize(first + i))
+                    self.emit(kid)
+                    i = i + 1u32
+                }
+            }
+            Alt(first, count) => { self.emit_alt(first, count) }
+            Piece(a, first, count) => { self.emit_piece(a, first, count) }
+        }
+    }
+
+    // emit_alt: each branch but the last is entered by a split whose
+    // other way is the next branch, and ends with a jump past the last.
+    func emit_alt(edit self, first: u32, count: u32) {
+        base := self.work.len()
+        var i: u32 = 0u32
+        while i < count {
+            kid := self.kids.get(usize(first + i))
+            if i + 1u32 < count {
+                split := self.here()
+                self.prog.push(Inst.Jmp(0u32))
+                self.emit(kid)
+                jump := self.here()
+                self.work.push(jump)
+                self.prog.push(Inst.Jmp(0u32))
+                next := self.here()
+                self.patch(split, Inst.Split(split + 1u32, next))
+            } else {
+                self.emit(kid)
+            }
+            i = i + 1u32
+        }
+        end := self.here()
+        while self.work.len() > base {
+            match self.work.pop() {
+                Some(jump) => { self.patch(jump, Inst.Jmp(end)) }
+                None => { }
+            }
+        }
+    }
+
+    // emit_piece writes an atom under its operators without nesting a
+    // call for each: the splits that begin the operators' code are put
+    // down first, the outermost operator's first, then the atom, then
+    // each operator in turn completes the code that begins where its
+    // split is, or where it would be. An operator that admits no passage
+    // leaves nothing of its operand, so the atom and the operators up to
+    // the last such one are not written at all.
+    func emit_piece(edit self, a: u32, first: u32, count: u32) {
+        var live: u32 = 0u32
+        var i: u32 = count
+        while i > 0u32 {
+            i = i - 1u32
+            op := self.reps.get(usize(first + i))
+            if is_void(op) {
+                live = i + 1u32
+                break
+            }
+        }
+        i = count
+        while i > live {
+            i = i - 1u32
+            op := self.reps.get(usize(first + i))
+            begin := self.here()
+            self.work.push(begin)
+            if has_prefix(op) { self.prog.push(Inst.Jmp(0u32)) }
+        }
+        if live == 0u32 { self.emit(a) }
+        i = live
+        while i < count {
+            op := self.reps.get(usize(first + i))
+            var begin: u32 = 0u32
+            match self.work.pop() {
+                Some(q) => { begin = q }
+                None => { }
+            }
+            self.apply(op, begin)
+            i = i + 1u32
+        }
+    }
+
+    // apply completes the code of one operator: its operand's code is what
+    // the program holds from begin on, after the operator's split when it
+    // has one. Each prefers one more passage to stopping.
+    func apply(edit self, op: Rep, begin: u32) {
+        end := self.here()
+        match op {
+            Star => { self.loop_back(begin) }
+            Quest => { self.patch(begin, Inst.Split(begin + 1u32, end)) }
+            Plus => { self.prog.push(Inst.Split(begin, end + 1u32)) }
+            Range(lo, hi) => { self.repeat(begin, lo, hi) }
+        }
+    }
+    func loop_back(edit self, begin: u32) {
+        self.prog.push(Inst.Jmp(begin))
+        end := self.here()
+        self.patch(begin, Inst.Split(begin + 1u32, end))
+    }
+
+    // repeat writes {lo,hi} (hi at least 1): lo copies of the operand in a
+    // row; then for {n,} a split back to the last of them, and for {n,m}
+    // m − n more copies, each entered by a split whose other way is the
+    // end of them all, so that each is tried only after the one before it.
+    func repeat(edit self, begin: u32, lo: u32, hi: u32) {
+        if lo == 0u32 && hi == no_limit {
+            self.loop_back(begin)
+            return
+        }
+        var from: u32 = begin
+        if lo == 0u32 { from = begin + 1u32 }
+        size := self.here() - from
+        var i: u32 = 1u32
+        while i < lo {
+            self.again(from, size)
+            i = i + 1u32
+        }
+        if hi == no_limit {
+            end := self.here()
+            self.prog.push(Inst.Split(end - size, end + 1u32))
+            return
+        }
+        // with no copy required the operand written first is the first
+        // optional one, and its split is the one at begin
+        var more: u32 = hi - lo
+        if lo == 0u32 { more = hi - 1u32 }
+        splits := self.here()
+        i = 0u32
+        while i < more {
+            self.prog.push(Inst.Jmp(0u32))
+            self.again(from, size)
+            i = i + 1u32
+        }
+        end := self.here()
+        if lo == 0u32 { self.patch(begin, Inst.Split(begin + 1u32, end)) }
+        i = 0u32
+        while i < more {
+            at := splits + i * (size + 1u32)
+            self.patch(at, Inst.Split(at + 1u32, end))
+            i = i + 1u32
+        }
+    }
+
+    // again appends a copy of the size instructions from from on, its
+    // jumps moved by as much as the copy is.
+    func again(edit self, from: u32, size: u32) {
+        by := self.here() - from
+        var i: u32 = 0u32
+        while i < size {
+            ins := self.prog.get(usize(from + i))
+            same := ins
+            match ins {
+                Split(x, y) => { self.prog.push(Inst.Split(x + by, y + by)) }
+                Jmp(x) => { self.prog.push(Inst.Jmp(x + by)) }
+                _ => { self.prog.push(same) }
+            }
+            i = i + 1u32
+        }
+    }
+
+    // first_bytes adds to s every byte a match of node n can begin with
+    // (and for an operator {0} some it cannot, which costs a search only
+    // time), and returns whether n can match the empty string.
+    func first_bytes(view self, n: u32, s: edit[ByteSet]) -> bool {
+        nd := self.nodes.get(usize(n))
+        match nd {
+            Byte(b) => {
+                s.add(b)
+                return false
+            }
+            Any => {
+                s.add_range(0u8, 255u8)
+                return false
+            }
+            Set(k) => {
+                o := self.sets.get(usize(k))
+                s.union_with(o)
+                return false
+            }
+            Group(a, k) => { return self.first_bytes(a, s) }
+            Piece(a, first, count) => {
+                var empty: bool = self.first_bytes(a, s)
+                var i: u32 = 0u32
+                while i < count {
+                    op := self.reps.get(usize(first + i))
+                    match op {
+                        Plus => { }
+                        Range(lo, hi) => { if lo == 0u32 { empty = true } }
+                        _ => { empty = true }
+                    }
+                    i = i + 1u32
+                }
+                return empty
+            }
+            Cat(first, count) => {
+                var i: u32 = 0u32
+                while i < count {
+                    kid := self.kids.get(usize(first + i))
+                    if !self.first_bytes(kid, s) { return false }
+                    i = i + 1u32
+                }
+                return true
+            }
+            Alt(first, count) => {
+                var empty: bool = false
+                var i: u32 = 0u32
+                while i < count {
+                    kid := self.kids.get(usize(first + i))
+                    if self.first_bytes(kid, s) { empty = true }
+                    i = i + 1u32
+                }
+                return empty
+            }
+            _ => { return true }
+        }
+    }
+
+    // begins_anchored: every way through node n begins with `^`. A
+    // repeated atom is not looked into.
+    func begins_anchored(view self, n: u32) -> bool {
+        nd := self.nodes.get(usize(n))
+        match nd {
+            Bol => { return true }
+            Group(a, k) => { return self.begins_anchored(a) }
+            Cat(first, count) => {
+                kid := self.kids.get(usize(first))
+                return self.begins_anchored(kid)
+            }
+            Alt(first, count) => {
+                var i: u32 = 0u32
+                while i < count {
+                    kid := self.kids.get(usize(first + i))
+                    if !self.begins_anchored(kid) { return false }
+                    i = i + 1u32
+                }
+                return true
+            }
+            _ => { return false }
+        }
+    }
+
+    // literal appends the bytes of node n when it is one ordinary byte or
+    // a branch of them and nothing else, and says whether it is.
+    func literal(view self, n: u32, dst: edit[Vec[u8]]) -> bool {
+        nd := self.nodes.get(usize(n))
+        match nd {
+            Byte(b) => {
+                dst.push(b)
+                return true
+            }
+            Cat(first, count) => {
+                var i: u32 = 0u32
+                while i < count {
+                    kid := self.kids.get(usize(first + i))
+                    kd := self.nodes.get(usize(kid))
+                    match kd {
+                        Byte(b) => { dst.push(b) }
+                        _ => { return false }
+                    }
+                    i = i + 1u32
+                }
+                return true
+            }
+            _ => { return false }
+        }
+    }
+}
+
+// compile compiles a pattern with options().
+func compile(pattern: view[]u8) -> Result[Regex, CompileErr] { return compile_with(pattern, options()) }
+
+// compile_with compiles a pattern, or says why it is refused. The pattern
+// is not kept. Its size is worked out on the tree and compared with
+// max_insts before any instruction is written, so a pattern that is
+// refused as too large costs no more than reading it.
+func compile_with(pattern: view[]u8, o: Options) -> Result[Regex, CompileErr] {
+    c := Compiler {
+        pos: 0usize,
+        depth: 0u32,
+        ngroups: 0usize,
+        ignore_case: o.ignore_case,
+        newline: o.newline,
+        nodes: Vec[Node].new(),
+        kids: Vec[u32].new(),
+        reps: Vec[Rep].new(),
+        sets: Vec[ByteSet].new(),
+        work: Vec[u32].new(),
+        dot: 0u32,
+        fold: zero(),
+        prog: Vec[Inst].new(),
+    }
+    root := c.alt(pattern)?
+    // a pattern too long for its nodes to be numbered has no tree to walk
+    if u64(len(pattern)) >= index_limit { return Err(fail(ErrKind.TooLarge, len(pattern))) }
+    size := sat_add(c.size_of_node(root), 1u64)
+    if size > u64(o.max_insts) || size >= index_limit { return Err(fail(ErrKind.TooLarge, len(pattern))) }
+    c.emit(root)
+    c.prog.push(Inst.Match)
+    first := ByteSet { w: zero() }
+    nullable := c.first_bytes(root, first)
+    // with newline a `^` holds at more offsets than 0
+    anchored := !o.newline && c.begins_anchored(root)
+    lit := Vec[u8].new()
+    is_lit := c.literal(root, lit)
+    if !is_lit { lit.clear() }
+    return Ok(Regex {
+        prog: replace(c.prog, Vec[Inst].new()),
+        sets: replace(c.sets, Vec[ByteSet].new()),
+        lit: lit,
+        is_lit: is_lit,
+        anchored: anchored,
+        nullable: nullable,
+        first: first,
+        ngroups: c.ngroups,
+    })
+}
+
+impl Regex {
+    // groups is the number of groups in the pattern, the whole match not
+    // counted.
+    func groups(view self) -> usize { return self.ngroups }
+}

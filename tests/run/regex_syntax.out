@@ -1,0 +1,279 @@
+-- accepted: ordinary bytes, alternation, groups
+// => ok 0
+/a/ => ok 0
+/abc/ => ok 0
+/a|b/ => ok 0
+/a|/ => ok 0
+/|a/ => ok 0
+/|/ => ok 0
+/a||b/ => ok 0
+/()/ => ok 1
+/(a)/ => ok 1
+/(a)(b)/ => ok 2
+/((a)(b))/ => ok 3
+/(a|b)|(c)/ => ok 2
+/(|)/ => ok 1
+/(()())/ => ok 3
+/a<0>b/ => ok 0
+/<200><255>/ => ok 0
+-- accepted: repetition
+/a*/ => ok 0
+/a+/ => ok 0
+/a?/ => ok 0
+/a*+?/ => ok 0
+/(a)*/ => ok 1
+/(a|b)+c?/ => ok 1
+/a{2}/ => ok 0
+/a{2,}/ => ok 0
+/a{2,5}/ => ok 0
+/a{0}/ => ok 0
+/a{0,0}/ => ok 0
+/a{0,}/ => ok 0
+/a{1000}/ => ok 0
+/a{0001}/ => ok 0
+/a{1,1000}/ => ok 0
+/a{2}{3}/ => ok 0
+/(a){0}/ => ok 1
+/(a){2,3}*/ => ok 1
+-- accepted: any byte and anchors
+/./ => ok 0
+/^/ => ok 0
+/$/ => ok 0
+/^a$/ => ok 0
+/a^b/ => ok 0
+/a$b/ => ok 0
+/^*/ => ok 0
+/$+/ => ok 0
+/(^a|b$)/ => ok 1
+-- accepted: bracket expressions
+/[a]/ => ok 0
+/[abc]/ => ok 0
+/[a-z]/ => ok 0
+/[^a]/ => ok 0
+/[]]/ => ok 0
+/[^]]/ => ok 0
+/[]a]/ => ok 0
+/[a-]/ => ok 0
+/[-a]/ => ok 0
+/[a-c-e]/ => ok 0
+/[[]/ => ok 0
+/[a[]/ => ok 0
+/[.]/ => ok 0
+/[=]/ => ok 0
+/[:a:]/ => ok 0
+/[^^]/ => ok 0
+/[a^]/ => ok 0
+/[*+?(){}|^$.]/ => ok 0
+/[<0>-<255>]/ => ok 0
+/[[:alpha:]]/ => ok 0
+/[[:alpha:][:digit:]_]/ => ok 0
+/[^[:space:]]/ => ok 0
+/[[:alpha:]-]/ => ok 0
+/[[:alpha:][:digit:][:alnum:][:upper:][:lower:][:space:][:blank:][:punct:][:print:][:graph:][:cntrl:][:xdigit:]]/ => ok 0
+/([)]a)/ => ok 1
+-- accepted: escapes
+/\./ => ok 0
+/\\/ => ok 0
+/\(\)/ => ok 0
+/\[a\]/ => ok 0
+/\{2\}/ => ok 0
+/\n\t\r\f\v\a/ => ok 0
+/\x41/ => ok 0
+/\x4/ => ok 0
+/\x414/ => ok 0
+/\xAf/ => ok 0
+/\x0/ => ok 0
+/\x4g/ => ok 0
+/\*\+\?\|\^\$/ => ok 0
+/[\]]/ => ok 0
+/[\\]/ => ok 0
+/[a\]b]/ => ok 0
+/[\n\t\x41-\x5a]/ => ok 0
+/[\x5d]/ => ok 0
+/[\--\/]/ => ok 0
+/[\^a]/ => ok 0
+-- accepted: braces and brackets as ordinary bytes
+/{/ => ok 0
+/}/ => ok 0
+/]/ => ok 0
+/a]/ => ok 0
+/a{/ => ok 0
+/a}/ => ok 0
+/a{}/ => ok 0
+/a{,2}/ => ok 0
+/a{,}/ => ok 0
+/a{1/ => ok 0
+/a{1,2/ => ok 0
+/a{x}/ => ok 0
+/a{ 1}/ => ok 0
+/a{-1}/ => ok 0
+/a{1,2,3}/ => ok 0
+/a{12345}/ => ok 0
+/a{1,23456}/ => ok 0
+/{a}/ => ok 0
+/{*/ => ok 0
+/{}/ => ok 0
+/(a{)/ => ok 1
+-- accepted: options
+/[a-z]B\x41/ ignore_case => ok 0
+/^(a.[^b])$/ ignore_case newline => ok 1
+/^.$|[^\n]/ newline => ok 0
+-- UnclosedGroup
+/(/ => UnclosedGroup at 0
+/(a/ => UnclosedGroup at 0
+/a(b/ => UnclosedGroup at 1
+/((/ => UnclosedGroup at 1
+/(a)(b/ => UnclosedGroup at 3
+/(a|b/ => UnclosedGroup at 0
+/((a)/ => UnclosedGroup at 0
+/a(b(c)d/ => UnclosedGroup at 1
+-- UnmatchedClose
+/)/ => UnmatchedClose at 0
+/a)/ => UnmatchedClose at 1
+/(a))/ => UnmatchedClose at 3
+/a|)/ => UnmatchedClose at 2
+/()b)c(/ => UnmatchedClose at 3
+-- UnclosedBracket
+/[/ => UnclosedBracket at 0
+/[a/ => UnclosedBracket at 0
+/a[^/ => UnclosedBracket at 1
+/[]/ => UnclosedBracket at 0
+/[^]/ => UnclosedBracket at 0
+/([/ => UnclosedBracket at 1
+/[a-/ => UnclosedBracket at 0
+/[[:alpha:]/ => UnclosedBracket at 0
+/x[a-z/ => UnclosedBracket at 1
+/[a\]/ => UnclosedBracket at 0
+-- BadRange
+/[b-a]/ => BadRange at 1
+/x[z-a]/ => BadRange at 2
+/[a-c9-0]/ => BadRange at 4
+/[^9-0]/ => BadRange at 2
+/[\x62-\x61]/ => BadRange at 1
+/[a-[:alpha:]]/ => BadRange at 1
+/[[:alpha:]-z]/ => BadRange at 1
+-- BadClass
+/[[:foo:]]/ => BadClass at 1
+/[a[:Alpha:]]/ => BadClass at 2
+/[[:alpha:][:nope:]]/ => BadClass at 10
+/[^[:word:]]/ => BadClass at 2
+-- BadEscape
+/\/ => BadEscape at 0
+/a\/ => BadEscape at 1
+/ab\/ => BadEscape at 2
+/[\/ => BadEscape at 1
+/(\/ => BadEscape at 1
+/\d/ => BadEscape at 0
+/\w/ => BadEscape at 0
+/\b/ => BadEscape at 0
+/\0/ => BadEscape at 0
+/\x/ => BadEscape at 0
+/\xg/ => BadEscape at 0
+/\x-/ => BadEscape at 0
+/a\xZ/ => BadEscape at 1
+/[\x]/ => BadEscape at 1
+/\ / => BadEscape at 0
+/\<200>/ => BadEscape at 0
+/\<10>/ => BadEscape at 0
+/[a\q]/ => BadEscape at 2
+/[a-\q]/ => BadEscape at 3
+-- Unsupported
+/\1/ => Unsupported at 0
+/\10/ => Unsupported at 0
+/(a)\1/ => Unsupported at 3
+/a\9/ => Unsupported at 1
+/[\1]/ => Unsupported at 1
+/[[.a.]]/ => Unsupported at 1
+/[a[=b=]]/ => Unsupported at 2
+/[[./ => Unsupported at 1
+/[[=/ => Unsupported at 1
+/[a-[.z.]]/ => Unsupported at 3
+/[^[.x.]]/ => Unsupported at 2
+-- BadInterval
+/a{2,1}/ => BadInterval at 1
+/a{1001}/ => BadInterval at 1
+/a{0,1001}/ => BadInterval at 1
+/a{1001,}/ => BadInterval at 1
+/ab{3,2}c/ => BadInterval at 2
+/(a){9999}/ => BadInterval at 3
+/a{1000}{2,1}/ => BadInterval at 7
+/a{1,2}{1001}/ => BadInterval at 6
+-- NothingToRepeat
+/*/ => NothingToRepeat at 0
+/+a/ => NothingToRepeat at 0
+/?/ => NothingToRepeat at 0
+/a|*b/ => NothingToRepeat at 2
+/(*a)/ => NothingToRepeat at 1
+/(a|+)/ => NothingToRepeat at 3
+/|*/ => NothingToRepeat at 1
+/()|?/ => NothingToRepeat at 3
+/{2}/ => NothingToRepeat at 0
+/a|{1,2}/ => NothingToRepeat at 2
+/({3,})/ => NothingToRepeat at 1
+-- the first error is the one reported
+/a)(/ => UnmatchedClose at 1
+/(a{2,1}/ => BadInterval at 2
+/[b-a/ => BadRange at 1
+/*)/ => NothingToRepeat at 0
+/(\1/ => Unsupported at 1
+/a{2,1}\/ => BadInterval at 1
+/\q(/ => BadEscape at 0
+/([[:foo:]/ => BadClass at 2
+/a{1000}{1000})/ => UnmatchedClose at 13
+/a{1000}{1000}(/ => UnclosedGroup at 13
+/a{1000}{1000}\/ => BadEscape at 13
+-- a backslash before each byte
+accepted /!"#$%&'()*+,-./:;<=>?@[\]^_`afnrtv{|}~/
+Unsupported /123456789/
+BadEscape 209, other errors 0, every error at the backslash true
+-- a backslash before each byte, in a bracket expression
+accepted /!"#$%&'()*+,-./:;<=>?@[\]^_`afnrtv{|}~/
+Unsupported /123456789/
+BadEscape 209, other errors 0, every error at the backslash true
+-- size
+// size 1: ok 0, one below: TooLarge at 0
+/abc/ size 4: ok 0, one below: TooLarge at 3
+/^$./ size 4: ok 0, one below: TooLarge at 3
+/()/ size 3: ok 1, one below: TooLarge at 2
+/(|a)/ size 6: ok 1, one below: TooLarge at 4
+/a||b/ size 7: ok 0, one below: TooLarge at 4
+/a?b+c*/ size 10: ok 0, one below: TooLarge at 6
+/(a|b)*c/ size 10: ok 1, one below: TooLarge at 7
+/a{0}/ size 1: ok 0, one below: TooLarge at 4
+/a{3}{4}/ size 13: ok 0, one below: TooLarge at 7
+/x{2,}/ size 6: ok 0, one below: TooLarge at 5
+/a{2,5}/ size 12: ok 0, one below: TooLarge at 6
+/(ab){3,}x?/ size 22: ok 1, one below: TooLarge at 10
+/[a-c]+|\.$|^x{3}/ size 14: ok 0, one below: TooLarge at 16
+/(a{1000}){0}b/ size 2: ok 1, one below: TooLarge at 13
+/(a{100}){100}/ size 10201: ok 1, one below: TooLarge at 13
+a and 2000 stars size 4002: ok 0, one below: TooLarge at 2001
+ignore_case newline /a.[^b]/ size 4: ok 0, one below: TooLarge at 6
+-- TooLarge
+/a{1000}{99}x{999}/ => ok 0
+/a{1000}{100}/ => TooLarge at 12
+/(a{1000}){1000}/ => TooLarge at 15
+max_insts 0 /a/ => TooLarge at 1
+max_insts 18446744073709551615 /((((((a{1000}){1000}){1000}){1000}){1000}){1000}){1000}/ => TooLarge at 55
+-- nesting
+200 nested groups => ok 200
+201 nested groups => TooDeep at 200
+x and 201 open parentheses => TooDeep at 201
+200 open parentheses => UnclosedGroup at 199
+200 nested groups and one beside them => ok 201
+200 nested groups around [(] => ok 200
+-- the pattern is not kept
+ok 3
+-- copies
+false false 100000
+true false 5
+BadClass at 3
+TooDeep at 9
+1 4
+1 7
+-- readings the specification leaves open
+/{2,1}/ => NothingToRepeat at 0
+/[[:alpha]/ => BadClass at 1
+/[[:alpha/ => BadClass at 1
+/[a-[:foo:]]/ => BadRange at 1
+/[--a]/ => ok 0

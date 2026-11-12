@@ -19,7 +19,7 @@ var preludeFS embed.FS
 
 // StdModules are the embedded standard-library modules beyond the prelude,
 // loaded when a file imports "std/<name>" (spec/types.md §1).
-var StdModules = []string{"str", "map", "io", "json", "process", "time", "sync", "mem", "net", "signal", "rand"}
+var StdModules = []string{"str", "map", "io", "json", "process", "time", "sync", "mem", "net", "signal", "rand", "regex"}
 
 // StdSource returns the text of an embedded std module (std/<name>.kern).
 func StdSource(name string) ([]byte, bool) {
