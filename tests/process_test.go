@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dshills/kern/compiler/backend/native"
+	"github.com/dshills/kern/compiler/heapfloor"
 	"github.com/dshills/kern/compiler/source"
 )
 
@@ -74,8 +75,11 @@ func main() -> u64 {
 // the expected output from both (specs/std-process PLAN.md Phase 2,
 // step 8).
 
-// TestMain removes the kern binary the TestProcess* tests share.
+// TestMain removes the kern binary the TestProcess* tests share. The
+// interpreter runs inside this process, so the heap floor the kern command
+// sets for itself is set here too.
 func TestMain(m *testing.M) {
+	heapfloor.Set(heapfloor.Default)
 	code := m.Run()
 	if kernBin != "" {
 		_ = os.RemoveAll(filepath.Dir(kernBin))

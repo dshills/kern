@@ -81,10 +81,27 @@ type Interp struct {
 // New creates an interpreter for a module. out receives program output,
 // errOut the trap record.
 func New(mod *ir.Module, file string, out, errOut io.Writer) *Interp {
+	hostPoller.Do(startHostPoller)
 	mu := &sync.Mutex{}
 	// the program's arguments default to its name alone, as a native run
 	// without arguments reports them (SetArgs replaces them)
 	return &Interp{mod: mod, file: file, out: &lockedWriter{mu: mu, w: out}, errOut: &lockedWriter{mu: mu, w: errOut}, stackBytes: 8 << 20, spawnStack: 8 << 20, heap: newRawHeap(), sh: &sharedState{nextIdent: 1, fatalCh: make(chan struct{}), parkGen: make(chan struct{}), args: []string{file}}}
+}
+
+// hostPoller makes Go's network poller exist before a program runs. The
+// poller is the host's, made on first use and kept, and on macOS it is a
+// descriptor (a kqueue): a program that counted its open descriptors
+// before its first socket and after its last then found one more than it
+// opened. (It used to exist by the time a program started only because a
+// collection during start-up had made it, which a heap floor ended.)
+var hostPoller sync.Once
+
+func startHostPoller() {
+	// a pipe is a pollable file: making one starts the poller
+	if r, w, err := os.Pipe(); err == nil {
+		_ = r.Close()
+		_ = w.Close()
+	}
 }
 
 // sharedState is the process-wide interpreter state shared by every thread
@@ -993,8 +1010,28 @@ func (it *Interp) resolve(fr *frame, p ir.Place) (ref, *seqRef) {
 	return cur, seq
 }
 
-func (it *Interp) length(fr *frame, p ir.Place) int {
-	cur, seq := it.resolve(fr, p)
+// tagOf is the variant a union place holds. One in raw memory (an element
+// of a container, a boxed value) has its tag read where it lies: reading
+// the place decodes every payload field of the variant, which a match on
+// a container's element then did once for the tag and again for what the
+// arm bound.
+func (it *Interp) tagOf(r ref) int {
+	if rr, ok := r.(rawRef); ok {
+		if n, ok := rr.t.(*resolve.Named); ok && n.Decl.Kind == resolve.KindUnion && !layout.Opaque(n) {
+			li := layout.Of(n)
+			tag := int(getInt(it.rawAt(rr.addr, n, ast.Pos{}), li.TagSize))
+			if tag >= len(n.Decl.Variants) {
+				tag = 0 // as decode reads it
+			}
+			return tag
+		}
+	}
+	return r.get().(*Union).Tag
+}
+
+// seqLen is the length of the sequence a resolved place is: a window's, an
+// array's in raw memory from its type, an array's in a slot.
+func seqLen(cur ref, seq *seqRef) int {
 	if seq != nil {
 		return seq.length()
 	}
@@ -1009,6 +1046,45 @@ func (it *Interp) length(fr *frame, p ir.Place) int {
 		return len(arr.Elems)
 	}
 	panic("interp: len of non-sequence")
+}
+
+// elemGet reads element k of the sequence a resolved place is, as
+// resolve's index step followed by get does, without making the window
+// and the element's ref on the way; elemSet stores to it.
+func (it *Interp) elemGet(r ref, seq *seqRef, k int) Value {
+	if seq != nil {
+		if seq.raw != nil {
+			return seq.raw.elemAt(seq.lo + k).get()
+		}
+		return seq.elems()[seq.lo+k]
+	}
+	if rr, ok := r.(rawRef); ok {
+		e := rr.t.(*resolve.Array).Elem
+		return rawRef{it: it, addr: rr.addr + uint64(k)*uint64(layout.Of(e).Size), t: e}.get()
+	}
+	return r.get().(*Array).Elems[k]
+}
+
+func (it *Interp) elemSet(r ref, seq *seqRef, k int, v Value) {
+	if seq != nil {
+		if seq.raw != nil {
+			seq.raw.elemAt(seq.lo + k).set(v)
+			return
+		}
+		seq.elems()[seq.lo+k] = v
+		return
+	}
+	if rr, ok := r.(rawRef); ok {
+		e := rr.t.(*resolve.Array).Elem
+		rawRef{it: it, addr: rr.addr + uint64(k)*uint64(layout.Of(e).Size), t: e}.set(v)
+		return
+	}
+	r.get().(*Array).Elems[k] = v
+}
+
+func (it *Interp) length(fr *frame, p ir.Place) int {
+	cur, seq := it.resolve(fr, p)
+	return seqLen(cur, seq)
 }
 
 // ---- instructions ----
@@ -1119,7 +1195,7 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 	case *ir.CheckConv:
 		it.checkConv(fr.vals[i.X.ID], i.To, fr.at(i.Pos))
 	case *ir.Len:
-		fr.vals[i.Dst.ID] = mkInt(tyUsize, uint64(it.length(fr, i.Place)))
+		fr.vals[i.Dst.ID] = intVal(tyUsize, uint64(it.length(fr, i.Place)))
 	case *ir.MakeStruct:
 		s := newStruct(len(i.Fields))
 		for k, f := range i.Fields {
@@ -1142,7 +1218,7 @@ func (it *Interp) exec(fr *frame, in ir.Instr) {
 		fr.vals[i.Dst.ID] = zeroOf(i.Dst.Type)
 	case *ir.Tag:
 		r, _ := it.resolve(fr, i.Place)
-		fr.vals[i.Dst.ID] = mkInt(tyU32, uint64(r.get().(*Union).Tag))
+		fr.vals[i.Dst.ID] = intVal(tyU32, uint64(it.tagOf(r)))
 	case *ir.FuncRef:
 		fr.vals[i.Dst.ID] = FuncVal{Name: i.Name}
 	case *ir.MakeClosure:

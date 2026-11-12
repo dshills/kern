@@ -174,6 +174,25 @@ func compilePlace(p ir.Place) placeFn {
 	return nil
 }
 
+// indexPlace splits a place whose path is field and variant steps and then
+// one index: the compiled place of the steps and the ID of the index's
+// value; nil for any other place. An indexed load or store then reads or
+// writes the element directly (Interp.elemGet, elemSet), where resolve
+// makes a window, a closure and a ref for each one.
+func indexPlace(p ir.Place) (placeFn, int) {
+	n := len(p.Path)
+	if n == 0 || p.Path[n-1].Kind != ir.PathIndex {
+		return nil, 0
+	}
+	prefix := p
+	prefix.Path = p.Path[:n-1]
+	base := compilePlace(prefix)
+	if base == nil {
+		return nil, 0
+	}
+	return base, p.Path[n-1].Index.ID
+}
+
 // staticInt is the integer type of a value's static type, if it is one.
 func staticInt(v *ir.Value) (IntTy, bool) {
 	p, ok := v.Type.(*resolve.Prim)
@@ -210,6 +229,27 @@ func compileInstr(fi *funcInfo, in ir.Instr) op {
 				fr.vals[d] = copyValue(r.get())
 			}
 		}
+		if base, idx := indexPlace(i.Place); base != nil {
+			return func(it *Interp, fr *frame) {
+				r, seq := base(it, fr)
+				fr.vals[d] = copyValue(it.elemGet(r, seq, int(fr.vals[idx].(Int).Bits)))
+			}
+		}
+	case *ir.Len:
+		if pl := compilePlace(i.Place); pl != nil {
+			d := i.Dst.ID
+			return func(it *Interp, fr *frame) {
+				fr.vals[d] = intVal(tyUsize, uint64(seqLen(pl(it, fr))))
+			}
+		}
+	case *ir.Tag:
+		if pl := compilePlace(i.Place); pl != nil {
+			d := i.Dst.ID
+			return func(it *Interp, fr *frame) {
+				r, _ := pl(it, fr)
+				fr.vals[d] = intVal(tyU32, uint64(it.tagOf(r)))
+			}
+		}
 	case *ir.Store:
 		src := i.Src.ID
 		if id, ok := plainLocal(i.Place); ok {
@@ -219,6 +259,12 @@ func compileInstr(fi *funcInfo, in ir.Instr) op {
 			return func(it *Interp, fr *frame) {
 				r, _ := pl(it, fr)
 				r.set(fr.vals[src])
+			}
+		}
+		if base, idx := indexPlace(i.Place); base != nil {
+			return func(it *Interp, fr *frame) {
+				r, seq := base(it, fr)
+				it.elemSet(r, seq, int(fr.vals[idx].(Int).Bits), fr.vals[src])
 			}
 		}
 	case *ir.AccessBegin:

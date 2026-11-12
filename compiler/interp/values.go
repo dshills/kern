@@ -240,7 +240,10 @@ type rawSeq struct {
 	elem resolve.Type
 }
 
-func (r *rawSeq) at(i int) ref {
+func (r *rawSeq) at(i int) ref { return r.elemAt(i) }
+
+// elemAt is at without the ref around its result.
+func (r *rawSeq) elemAt(i int) rawRef {
 	return rawRef{it: r.it, addr: r.base + uint64(i)*uint64(layout.Of(r.elem).Size), t: r.elem}
 }
 

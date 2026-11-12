@@ -35,17 +35,21 @@ func Validate(m *Module) []error {
 	return errs
 }
 
-type ownState int
+type ownState uint8
 
 const (
-	owUninit ownState = iota
+	// owAbsent is a local the state says nothing about: one the function
+	// does not list and no instruction on the way here has stored to or
+	// moved from. It reads as uninitialized, and a join leaves it alone.
+	owAbsent ownState = iota
+	owUninit
 	owOwned
 	owMoved
 )
 
 // vstate is the abstract state at a program point.
 type vstate struct {
-	own    map[*Local]ownState
+	own    []ownState            // by the validator's index of the local
 	open   map[*Value]openAccess // open accesses by value
 	unsafe int
 }
@@ -63,10 +67,8 @@ type openAccess struct {
 }
 
 func (s *vstate) clone() *vstate {
-	n := &vstate{own: make(map[*Local]ownState, len(s.own)), open: make(map[*Value]openAccess, len(s.open)), unsafe: s.unsafe}
-	for k, v := range s.own {
-		n.own[k] = v
-	}
+	n := &vstate{own: make([]ownState, len(s.own)), open: make(map[*Value]openAccess, len(s.open)), unsafe: s.unsafe}
+	copy(n.own, s.own)
 	for k, v := range s.open {
 		n.open[k] = v
 	}
@@ -79,6 +81,35 @@ type validator struct {
 	consts map[*Value]bool
 	defs   map[*Value]Instr
 	in     map[*Block]*vstate
+	idx    map[*Local]int // a local's index in every state's own
+	locals []*Local       // by index
+}
+
+// index is l's index in a state's own, assigned on first use to a local
+// the function does not list.
+func (v *validator) index(l *Local) int {
+	i, ok := v.idx[l]
+	if !ok {
+		i = len(v.locals)
+		v.idx[l] = i
+		v.locals = append(v.locals, l)
+	}
+	return i
+}
+
+func (v *validator) own(st *vstate, l *Local) ownState {
+	if i := v.index(l); i < len(st.own) && st.own[i] != owAbsent {
+		return st.own[i]
+	}
+	return owUninit
+}
+
+func (v *validator) setOwn(st *vstate, l *Local, s ownState) {
+	i := v.index(l)
+	for len(st.own) <= i {
+		st.own = append(st.own, owAbsent)
+	}
+	st.own[i] = s
 }
 
 func (v *validator) errorf(format string, args ...any) {
@@ -105,13 +136,14 @@ func (v *validator) run() []error {
 			v.errorf("%s has no terminator", blockName(b))
 		}
 	}
-	entry := &vstate{own: map[*Local]ownState{}, open: map[*Value]openAccess{}}
+	v.idx = make(map[*Local]int, len(v.f.Locals))
+	entry := &vstate{own: make([]ownState, 0, len(v.f.Locals)), open: map[*Value]openAccess{}}
 	for _, l := range v.f.Locals {
-		entry.own[l] = owUninit
+		v.setOwn(entry, l, owUninit)
 	}
 	for _, p := range v.f.Params {
 		if p.Conv == 3 || p.Conv == 0 { // own / by-value
-			entry.own[p] = owOwned
+			v.setOwn(entry, p, owOwned)
 		}
 	}
 	v.in = map[*Block]*vstate{v.f.Entry: entry}
@@ -174,11 +206,15 @@ func successors(b *Block) []*Block {
 // disagreement (invariant 1: static moves) and returning whether it changed.
 func (v *validator) join(b *Block, cur, in *vstate) bool {
 	changed := false
-	for l, st := range in.own {
-		cs, ok := cur.own[l]
-		if !ok || cs == st {
+	for i, st := range in.own {
+		if i >= len(cur.own) {
+			break
+		}
+		cs := cur.own[i]
+		if st == owAbsent || cs == owAbsent || cs == st {
 			continue
 		}
+		l := v.locals[i]
 		// uninitialized and moved both carry no obligation; only owned
 		// versus not-owned is a static-move disagreement (invariant 1)
 		if st != owOwned && cs != owOwned {
@@ -187,7 +223,7 @@ func (v *validator) join(b *Block, cur, in *vstate) bool {
 		if !l.Temp && !trivial(l.Type) {
 			v.errorf("%s: local %s is %s on one path and %s on another", blockName(b), localName(l), stName(st), stName(cs))
 		}
-		cur.own[l] = owMoved
+		cur.own[i] = owMoved
 		changed = true
 	}
 	for val, oa := range in.open {
@@ -259,10 +295,10 @@ func (v *validator) transfer(b *Block, st *vstate) *vstate {
 				v.errorf("%s: closure %s stored into a place", blockName(b), v2(i.Src))
 			}
 			if i.Place.Local != nil && len(i.Place.Path) == 0 {
-				if st.own[i.Place.Local] == owOwned && !trivial(i.Place.Local.Type) {
+				if v.own(st, i.Place.Local) == owOwned && !trivial(i.Place.Local.Type) {
 					v.errorf("%s: store over owned local %s without a drop", blockName(b), localName(i.Place.Local))
 				}
-				st.own[i.Place.Local] = owOwned
+				v.setOwn(st, i.Place.Local, owOwned)
 			}
 		case *MakeClosure:
 			for _, c := range i.Captures {
@@ -272,22 +308,22 @@ func (v *validator) transfer(b *Block, st *vstate) *vstate {
 			}
 		case *Init:
 			if i.Place.Local != nil && len(i.Place.Path) == 0 {
-				st.own[i.Place.Local] = owOwned
+				v.setOwn(st, i.Place.Local, owOwned)
 			}
 		case *Move:
 			if i.Src.Local != nil && len(i.Src.Path) == 0 {
-				if st.own[i.Src.Local] != owOwned {
-					v.errorf("%s: move of %s which is %s", blockName(b), localName(i.Src.Local), stName(st.own[i.Src.Local]))
+				if v.own(st, i.Src.Local) != owOwned {
+					v.errorf("%s: move of %s which is %s", blockName(b), localName(i.Src.Local), stName(v.own(st, i.Src.Local)))
 				}
-				st.own[i.Src.Local] = owMoved
+				v.setOwn(st, i.Src.Local, owMoved)
 			}
 			v.checkNoConflict(b, st, i.Src, true, nil)
 		case *Drop:
 			if i.Place.Local != nil && len(i.Place.Path) == 0 {
-				if st.own[i.Place.Local] != owOwned && !i.Place.Local.Temp {
-					v.errorf("%s: drop of %s which is %s", blockName(b), localName(i.Place.Local), stName(st.own[i.Place.Local]))
+				if v.own(st, i.Place.Local) != owOwned && !i.Place.Local.Temp {
+					v.errorf("%s: drop of %s which is %s", blockName(b), localName(i.Place.Local), stName(v.own(st, i.Place.Local)))
 				}
-				st.own[i.Place.Local] = owMoved
+				v.setOwn(st, i.Place.Local, owMoved)
 			}
 			v.checkNoConflict(b, st, i.Place, true, nil)
 		case *AccessBegin:
@@ -396,8 +432,11 @@ func (v *validator) transfer(b *Block, st *vstate) *vstate {
 	}
 	switch t := b.Term.(type) {
 	case *Ret:
-		for l, s := range st.own {
-			if s == owOwned && !trivial(l.Type) && !l.Temp && l.Conv != 4 {
+		for i, s := range st.own {
+			if s != owOwned {
+				continue
+			}
+			if l := v.locals[i]; !trivial(l.Type) && !l.Temp && l.Conv != 4 {
 				v.errorf("%s: local %s is still owned at return", blockName(b), localName(l))
 			}
 		}

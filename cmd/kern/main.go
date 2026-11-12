@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/dshills/kern/compiler/backend/native"
+	"github.com/dshills/kern/compiler/heapfloor"
 
 	"github.com/dshills/kern/compiler/check"
 	"github.com/dshills/kern/compiler/diag"
@@ -38,6 +39,11 @@ var ownsProcess bool
 
 func main() {
 	ownsProcess = true
+	// the language server is a long-lived process in an editor and keeps
+	// the collector's default; every other command is one run
+	if len(os.Args) < 2 || os.Args[1] != "lsp" {
+		heapfloor.Set(heapfloor.Default)
+	}
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
