@@ -51,8 +51,9 @@ type Interp struct {
 	// ownsProcess: see SetOwnsProcess
 	ownsProcess bool
 	frames      []*frame
-	globals     []Value  // this thread's instances of the module's thread_locals
-	heap        *rawHeap // byte-addressed memory for raw pointers
+	globals     []Value   // this thread's instances of the module's thread_locals
+	heap        *rawHeap  // byte-addressed memory for raw pointers
+	rc          *rawCache // this thread's remembered chunk of it; a child thread starts its own
 	sh          *sharedState
 	tid         uint64 // this thread's identifier (0 is the main thread)
 	inTrap      bool   // a trap inside the handler terminates
@@ -85,7 +86,7 @@ func New(mod *ir.Module, file string, out, errOut io.Writer) *Interp {
 	mu := &sync.Mutex{}
 	// the program's arguments default to its name alone, as a native run
 	// without arguments reports them (SetArgs replaces them)
-	return &Interp{mod: mod, file: file, out: &lockedWriter{mu: mu, w: out}, errOut: &lockedWriter{mu: mu, w: errOut}, stackBytes: 8 << 20, spawnStack: 8 << 20, heap: newRawHeap(), sh: &sharedState{nextIdent: 1, fatalCh: make(chan struct{}), parkGen: make(chan struct{}), args: []string{file}}}
+	return &Interp{mod: mod, file: file, out: &lockedWriter{mu: mu, w: out}, errOut: &lockedWriter{mu: mu, w: errOut}, stackBytes: 8 << 20, spawnStack: 8 << 20, heap: newRawHeap(), rc: &rawCache{}, sh: &sharedState{nextIdent: 1, fatalCh: make(chan struct{}), parkGen: make(chan struct{}), args: []string{file}}}
 }
 
 // hostPoller makes Go's network poller exist before a program runs. The
@@ -218,6 +219,7 @@ func (it *Interp) child() *Interp {
 	c.frames = nil
 	c.argBuf = nil
 	c.intrBuf = nil
+	c.rc = &rawCache{}
 	it.sh.mu.Lock()
 	it.sh.nextTid++
 	c.tid = it.sh.nextTid
@@ -1691,6 +1693,11 @@ func (it *Interp) destroy(v Value, t resolve.Type) {
 }
 
 func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
+	// the object is gone and its handle with it; a Shared only with its
+	// last reference
+	if _, counted := v.(*Shared); !counted {
+		it.heap.dropHandle(v)
+	}
 	elem := func(i int) resolve.Type {
 		if i < len(n.Args) {
 			return n.Args[i]
@@ -1707,6 +1714,7 @@ func (it *Interp) destroyLibrary(v Value, n *resolve.Named) {
 		last := x.Count == 0
 		atomicMu.Unlock()
 		if last {
+			it.heap.dropHandle(x)
 			it.destroy(x.Val, elem(0))
 		}
 	case *Mutex:

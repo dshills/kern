@@ -648,6 +648,7 @@ func init() {
 		},
 		"Thread.join": func(it *Interp, a []Value, _ callCtx) []Value {
 			t := a[0].(*Thread)
+			it.heap.dropHandle(t) // the handle is consumed
 			it.await(t.done)
 			return []Value{t.Result}
 		},
@@ -655,6 +656,7 @@ func init() {
 			// get waits for the thread, never for the scope, which may
 			// have ended already
 			j := a[0].(*Join)
+			it.heap.dropHandle(j) // the handle is consumed
 			it.await(j.done)
 			j.mu.Lock()
 			j.handle = joinTaken
@@ -747,8 +749,8 @@ func init() {
 		},
 		"ptr_copy": func(it *Interp, a []Value, c callCtx) []Value {
 			n := u64(a[2]) * uint64(layout.Of(c.targ(0)).Size)
-			dst, ro := it.heap.span(u64(a[0]), n)
-			src := it.heap.bytes(u64(a[1]), n)
+			dst, ro := it.rawSpan(u64(a[0]), n)
+			src, _ := it.rawSpan(u64(a[1]), n)
 			if (dst == nil || src == nil) && n > 0 {
 				it.trap("explicit", c.pos)
 			}

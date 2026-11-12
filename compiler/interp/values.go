@@ -9,6 +9,7 @@ package interp
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/dshills/kern/compiler/ast"
 	"github.com/dshills/kern/compiler/layout"
@@ -293,11 +294,15 @@ func (r rawRef) elems() *seqRef {
 }
 
 // ---- library objects (runtime-provided) ----
+//
+// Each but the allocator has hid, its handle in the raw heap while it is
+// alive and has been stored into raw memory, 0 otherwise (rawHeap.handle).
 
 // Shared is an atomically reference-counted immutable value.
 type Shared struct {
 	Val   Value
 	Count uint64
+	hid   atomic.Uint64
 }
 
 // Mutex guards a value.
@@ -307,6 +312,7 @@ type Mutex struct {
 	owner  uint64        // thread holding the lock (recursive acquisition traps)
 	state  sync.Mutex    // guards Locked and owner
 	lock   chan struct{} // the lock itself: one slot, full while held (acquire, release)
+	hid    atomic.Uint64
 }
 
 // mutexRef is the slot of a Mutex's value: the ref behind the edit that
@@ -325,10 +331,14 @@ type Condvar struct {
 	state sync.Mutex
 	gen   chan struct{}
 	mutex *Mutex
+	hid   atomic.Uint64
 }
 
 // Scope is a thread scope.
-type Scope struct{ Joins []*Join }
+type Scope struct {
+	Joins []*Join
+	hid   atomic.Uint64
+}
 
 // Thread is a spawned thread (Phase 1: run eagerly).
 type Thread struct {
@@ -342,6 +352,7 @@ type Thread struct {
 	mu       sync.Mutex
 	detached bool
 	elem     resolve.Type // the result's type, set when the handle is destroyed first
+	hid      atomic.Uint64
 }
 
 // Join is a scoped thread handle. Its result is taken by get, destroyed
@@ -360,6 +371,7 @@ type Join struct {
 	handle   int
 	released bool         // the scope has ended, and the thread with it
 	elem     resolve.Type // the result's type, set when the handle is destroyed first
+	hid      atomic.Uint64
 }
 
 const (
