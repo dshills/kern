@@ -57,9 +57,11 @@ impl Interp {
         self.eval_text(p, e, pat)
         return ReRef { dynamic: true, idx: self.dynamic(pat.as_view()) }
     }
-    func search(edit self, p: view[Prog], r: ReRef, text: view[]u8, from: usize, mode: u8) -> Hit {
-        if r.dynamic { return re_search(self.dregs.get(r.idx), self.scratch, text, from, mode) }
-        return re_search(p.regs.get(r.idx), self.scratch, text, from, mode)
+    // search is the leftmost longest match in text at or after from; ^
+    // means the beginning of text wherever the search begins.
+    func search(edit self, p: view[Prog], r: ReRef, text: view[]u8, from: usize) -> Hit {
+        if r.dynamic { return awk_find(self.dregs.get(r.idx), self.scratch, text, from) }
+        return awk_find(p.regs.get(r.idx), self.scratch, text, from)
     }
 
     // substitute is sub (all false) and gsub: it returns how many
@@ -76,7 +78,7 @@ impl Interp {
         var made: f64 = 0.0
         n := target.len()
         with t := target.as_view() {
-            var h: Hit = self.search(p, r, t, 0usize, 0u8)
+            var h: Hit = self.search(p, r, t, 0usize)
             if !h.found { return 0.0 }
             if !all {
                 res.push_str(t[0usize : h.start])
@@ -109,7 +111,8 @@ impl Interp {
                         }
                         just_matched = true
                     }
-                    h = self.search(p, r, t, pos, re_notbol)
+                    // pos is past the beginning here, so ^ matches no more
+                    h = self.search(p, r, t, pos)
                     if !h.found { break }
                 }
                 if tail { res.push_str(t[pos : n]) }
@@ -148,7 +151,7 @@ impl Interp {
             if literal {
                 // a regular expression between slashes is one even when
                 // it is a single byte; an empty one splits into bytes
-                if p.regs.get(usize(lit)).prog.len() == 1usize {
+                if p.void.get(usize(lit)) {
                     split_text(s.as_view(), FsMode { kind: 3u8, ch: 0u8 }, p.regs.get(usize(lit)), self.scratch, false, spans)
                 } else {
                     split_text(s.as_view(), FsMode { kind: 2u8, ch: 0u8 }, p.regs.get(usize(lit)), self.scratch, false, spans)
@@ -235,7 +238,7 @@ impl Interp {
             s := str.String.new()
             self.eval_text(p, p.kids.get(usize(first)), s)
             r := self.regex_of(p, p.kids.get(usize(first + 1u32)))
-            h := self.search(p, r, s.as_view(), 0usize, 0u8)
+            h := self.search(p, r, s.as_view(), 0usize)
             var start: f64 = 0.0
             var length: f64 = -1.0
             if h.found {

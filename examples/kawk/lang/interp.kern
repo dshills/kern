@@ -3,6 +3,7 @@
 // wanted only as a number, as a condition or as text to append.
 module lang
 import "std/map"
+import "std/regex"
 import "std/str"
 
 // How a statement ended.
@@ -70,7 +71,7 @@ struct Interp {
     fields: Vec[Span]
     split_done: bool
     fs: FsMode
-    fs_re: Regex
+    fs_re: regex.Regex
     nr: f64
     fnr: f64
     ofs: str.String
@@ -80,13 +81,13 @@ struct Interp {
     ofmt: str.String
     rs_mode: u8
     rs_ch: u8
-    rs_re: Regex
+    rs_re: regex.Regex
     halt: u8
     exit_code: i32
     retval: Value
     range_on: Vec[bool]
-    scratch: Scratch
-    dregs: Vec[Regex]
+    scratch: regex.Scratch
+    dregs: Vec[regex.Regex]
     dmap: map.Map[str.String, u32]
     rng: Random
     seed: f64
@@ -109,10 +110,10 @@ struct Interp {
 func new_interp(p: view[Prog]) -> Interp {
     it := Interp {
         cells: Vec[Cell].new(), nglobals: p.globals.len(), base: 0usize, depth: 0u32, arrays: Vec[Arr].new(), free_arrays: Vec[u32].new(),
-        rec: str.String.new(), fields: Vec[Span].new(), split_done: true, fs: FsMode { kind: 0u8, ch: 32u8 }, fs_re: regex_compile(""),
+        rec: str.String.new(), fields: Vec[Span].new(), split_done: true, fs: FsMode { kind: 0u8, ch: 32u8 }, fs_re: awk_empty(),
         nr: 0.0, fnr: 0.0, ofs: str.String.from(" "), ors: str.String.from("\n"), subsep: str.String.from("\x1c"),
-        convfmt: str.String.from("%.6g"), ofmt: str.String.from("%.6g"), rs_mode: 0u8, rs_ch: 10u8, rs_re: regex_compile(""),
-        halt: 0u8, exit_code: 0i32, retval: uninit(), range_on: Vec[bool].new(), scratch: new_scratch(), dregs: Vec[Regex].new(),
+        convfmt: str.String.from("%.6g"), ofmt: str.String.from("%.6g"), rs_mode: 0u8, rs_ch: 10u8, rs_re: awk_empty(),
+        halt: 0u8, exit_code: 0i32, retval: uninit(), range_on: Vec[bool].new(), scratch: regex.Scratch.new(), dregs: Vec[regex.Regex].new(),
         dmap: map.Map[str.String, u32].new(), rng: new_random(), seed: 1.0, obuf: str.String.new(), tty: false, outs: Vec[Output].new(),
         ins: Vec[Input].new(), main: new_input("", false), main_open: false, argi: 1.0, any_file: false, stdin_text: Vec[u8].new(),
         stdin_given: false, name: str.String.from("kawk"), reading: false, late_fs: str.String.new(), has_late_fs: false
@@ -477,13 +478,12 @@ impl Interp {
             if s.len() == 0usize {
                 self.fs = FsMode { kind: 3u8, ch: 0u8 }
             } else if s.len() > 1usize {
-                re := regex_compile(s.as_view())
-                if re.bad {
-                    self.fatal2("FS is not a well-formed regular expression: ", s.as_view())
-                    drop(re)
-                } else {
-                    self.fs_re = re
-                    self.fs = FsMode { kind: 2u8, ch: 0u8 }
+                match awk_compile(s.as_view()) {
+                    Ok(re) => {
+                        self.fs_re = re
+                        self.fs = FsMode { kind: 2u8, ch: 0u8 }
+                    }
+                    Err(e) => { self.fatal2("FS is not a well-formed regular expression: ", s.as_view()) }
                 }
             } else if s.byte(0usize) == 32u8 {
                 self.fs = FsMode { kind: 0u8, ch: 32u8 }
@@ -498,13 +498,12 @@ impl Interp {
                 self.rs_mode = 0u8
                 self.rs_ch = s.byte(0usize)
             } else {
-                re := regex_compile(s.as_view())
-                if re.bad {
-                    self.fatal2("RS is not a well-formed regular expression: ", s.as_view())
-                    drop(re)
-                } else {
-                    self.rs_re = re
-                    self.rs_mode = 2u8
+                match awk_compile(s.as_view()) {
+                    Ok(re) => {
+                        self.rs_re = re
+                        self.rs_mode = 2u8
+                    }
+                    Err(e) => { self.fatal2("RS is not a well-formed regular expression: ", s.as_view()) }
                 }
             }
             drop(s)
@@ -667,26 +666,32 @@ impl Interp {
             self.dregs.clear()
             self.dmap = map.Map[str.String, u32].new()
         }
-        re := regex_compile(pat)
-        if re.bad { self.fatal2("this is not a well-formed regular expression: ", pat) }
         r := self.dregs.len()
-        self.dregs.push(re)
+        match awk_compile(pat) {
+            Ok(re) => { self.dregs.push(re) }
+            Err(e) => {
+                // the program stops; the empty pattern stands in until it has
+                self.fatal2("this is not a well-formed regular expression: ", pat)
+                self.dregs.push(awk_empty())
+            }
+        }
         self.dmap.insert(str.String.from(pat), truncate[u32](r))
         return r
     }
 
-    // find searches text for the regular expression an expression means:
-    // the one written between slashes, or the one a string spells.
-    func find(edit self, p: view[Prog], e: u32, text: view[]u8, from: usize, mode: u8) -> Hit {
+    // matches reports whether text holds a match of the regular expression
+    // an expression means: the one written between slashes, or the one a
+    // string spells.
+    func matches(edit self, p: view[Prog], e: u32, text: view[]u8) -> bool {
         nd := p.nodes.get(usize(e))
         match nd {
-            Regex(r) => { return re_search(p.regs.get(usize(r)), self.scratch, text, from, mode) }
+            Regex(r) => { return p.regs.get(usize(r)).is_match(self.scratch, text) }
             _ => { }
         }
         pat := str.String.new()
         self.eval_text(p, e, pat)
         r := self.dynamic(pat.as_view())
-        return re_search(self.dregs.get(r), self.scratch, text, from, mode)
+        return self.dregs.get(r).is_match(self.scratch, text)
     }
 
     // ---- expressions ----
@@ -727,7 +732,7 @@ impl Interp {
         match nd {
             Num(v) => { return num(v) }
             Str(k) => { return text(p.strs.get(usize(k)).as_view()) }
-            Regex(r) => { return flag(re_search(p.regs.get(usize(r)), self.scratch, self.rec.as_view(), 0usize, re_any).found) }
+            Regex(r) => { return flag(p.regs.get(usize(r)).is_match(self.scratch, self.rec.as_view())) }
             Var(vr) => { return self.var_get(vr) }
             Field(x) => {
                 i := self.eval_num(p, x)
@@ -850,12 +855,12 @@ impl Interp {
             Match(neg, a, b) => {
                 s := str.String.new()
                 self.eval_text(p, a, s)
-                return self.find(p, b, s.as_view(), 0usize, re_any).found != neg
+                return self.matches(p, b, s.as_view()) != neg
             }
             And(a, b) => { return self.eval_bool(p, a) && self.eval_bool(p, b) }
             Or(a, b) => { return self.eval_bool(p, a) || self.eval_bool(p, b) }
             Not(a) => { return !self.eval_bool(p, a) }
-            Regex(r) => { return re_search(p.regs.get(usize(r)), self.scratch, self.rec.as_view(), 0usize, re_any).found }
+            Regex(r) => { return p.regs.get(usize(r)).is_match(self.scratch, self.rec.as_view()) }
             Num(v) => { return v < 0.0 || v > 0.0 }
             Nop => { return false }
             _ => {

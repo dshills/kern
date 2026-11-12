@@ -34,11 +34,13 @@
 //     expression) and a recursive descent parser. The tree is a Vec of
 //     nodes, each a union whose payloads are numbers, so the interpreter
 //     reads a node by copying it and is free to change itself meanwhile.
-//   - regex.kern: POSIX extended regular expressions compiled to a small
-//     machine and run with all alternatives at once, so no pattern takes
-//     more than the text's length times its own size; the leftmost match
-//     and of those the longest, as sub, gsub, match and a regular
-//     expression FS need.
+//   - awkre.kern: regular expressions, which are the library's
+//     (std/regex: every alternative at once, so no pattern takes more
+//     than the text's length times its own size; the leftmost match and
+//     of those the longest, as sub, gsub, match and a regular expression
+//     FS need). What the system awk reads its own way stays here: an AWK
+//     pattern is rewritten into one the library reads to the same effect
+//     before it is compiled.
 //   - value.kern: a value is a number, a string, or a string from input
 //     that is a number if it looks like one. fmt.kern: printf, with %e,
 //     %f and %g written from the exact decimal expansion of a double,

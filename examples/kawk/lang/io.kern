@@ -3,6 +3,7 @@
 module lang
 import "std/io"
 import "std/process"
+import "std/regex"
 import "std/str"
 
 // Source is where an input's bytes come from.
@@ -124,7 +125,7 @@ impl Input {
     // was one. mode 0 ends a record at the byte ch; mode 1 is paragraph
     // mode, where blank lines separate records; mode 2 ends it at a match
     // of re, for which the rest of the input is read first.
-    func record(edit self, mode: u8, ch: u8, re: view[Regex], sc: edit[Scratch], rec: edit[str.String]) -> bool {
+    func record(edit self, mode: u8, ch: u8, re: view[regex.Regex], sc: edit[regex.Scratch], rec: edit[str.String]) -> bool {
         if mode == 0u8 { return self.read_to(ch, rec) >= 0i32 }
         if mode == 1u8 {
             while self.peek() == 10i32 { self.pos = self.pos + 1usize }
@@ -148,7 +149,9 @@ impl Input {
         if self.pos >= self.end { return false }
         var hit: Hit = Hit { found: false, start: 0usize, end: 0usize }
         with b := self.buf.as_view() {
-            hit = re_search(re, sc, b[self.pos : self.end], 0usize, re_nonempty)
+            // the text searched is what is left of the input, so ^ means
+            // the beginning of this record and $ the end of the input
+            hit = awk_find_nonempty(re, sc, b[self.pos : self.end], 0usize)
             if hit.found { rec.push_str(b[self.pos : self.pos + hit.start]) } else { rec.push_str(b[self.pos : self.end]) }
         }
         if hit.found { self.pos = self.pos + hit.end } else { self.pos = self.end }
@@ -214,7 +217,7 @@ impl Output {
 
 // split_text splits text into fields as mode says and appends their
 // bounds to spans. In paragraph mode a newline separates fields too.
-func split_text(text: view[]u8, mode: FsMode, re: view[Regex], sc: edit[Scratch], para: bool, spans: edit[Vec[Span]]) {
+func split_text(text: view[]u8, mode: FsMode, re: view[regex.Regex], sc: edit[regex.Scratch], para: bool, spans: edit[Vec[Span]]) {
     n := len(text)
     if mode.kind == 0u8 {
         var i: usize = 0usize
@@ -260,19 +263,18 @@ func split_text(text: view[]u8, mode: FsMode, re: view[Regex], sc: edit[Scratch]
         for i in 0usize..n { spans.push(Span { lo: i, hi: i + 1usize, ty: 0u8, n: 0.0 }) }
         return
     }
-    // a regular expression: each match that is not empty separates; after
-    // the first, ^ no longer matches
+    // a regular expression: each match that is not empty separates. ^
+    // means the beginning of the text, so after the first separator it
+    // matches no more
     var lo: usize = 0usize
-    var m: u8 = re_nonempty
     while true {
-        h := re_search(re, sc, text, lo, m)
+        h := awk_find_nonempty(re, sc, text, lo)
         if !h.found {
             spans.push(Span { lo: lo, hi: n, ty: 0u8, n: 0.0 })
             break
         }
         spans.push(Span { lo: lo, hi: h.start, ty: 0u8, n: 0.0 })
         lo = h.end
-        m = re_nonempty | re_notbol
     }
 }
 

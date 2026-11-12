@@ -331,7 +331,7 @@ impl Parser {
 
     // regex reads a regular expression whose opening slash is the current
     // token (a / or a /=), compiles it, and returns its number. The text
-    // goes to the regular expression's own parser as written, but for \/.
+    // goes to awk_compile as written, but for \/.
     func regex(edit self) -> u32 {
         self.pos = self.tok.start + 1usize
         n := self.src.len()
@@ -358,13 +358,15 @@ impl Parser {
             self.fail("non-terminated regular expression")
             return 0u32
         }
-        re := regex_compile(text.as_view())
-        if re.bad {
-            self.fail("this regular expression is not well formed")
-            return 0u32
-        }
         r := truncate[u32](self.p.regs.len())
-        self.p.regs.push(re)
+        match awk_compile(text.as_view()) {
+            Ok(re) => { self.p.regs.push(re) }
+            Err(e) => {
+                self.fail("this regular expression is not well formed")
+                return 0u32
+            }
+        }
+        self.p.void.push(awk_void(text.as_view()))
         self.advance()
         return r
     }

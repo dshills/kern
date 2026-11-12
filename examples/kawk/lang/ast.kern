@@ -1,6 +1,7 @@
 // The syntax tree and the program the parser builds from an AWK text.
 module lang
 import "std/map"
+import "std/regex"
 import "std/str"
 
 // The kinds of token. The lexer gives the parser one at a time.
@@ -180,7 +181,8 @@ struct Prog {
     nodes: Vec[Node]
     kids: Vec[u32]
     strs: Vec[str.String]
-    regs: Vec[Regex]
+    regs: Vec[regex.Regex]
+    void: Vec[bool]
     begins: Vec[u32]
     ends: Vec[u32]
     rules: Vec[Rule]
@@ -211,7 +213,7 @@ const special_count: u32 = 16u32
 
 func new_prog() -> Prog {
     p := Prog {
-        nodes: Vec[Node].new(), kids: Vec[u32].new(), strs: Vec[str.String].new(), regs: Vec[Regex].new(),
+        nodes: Vec[Node].new(), kids: Vec[u32].new(), strs: Vec[str.String].new(), regs: Vec[regex.Regex].new(), void: Vec[bool].new(),
         begins: Vec[u32].new(), ends: Vec[u32].new(), rules: Vec[Rule].new(), funcs: Vec[Func].new(),
         globals: Vec[str.String].new(), gmap: map.Map[str.String, u32].new(), fmap: map.Map[str.String, u32].new()
     }

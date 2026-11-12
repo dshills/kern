@@ -1,0 +1,623 @@
+// Regular expressions as AWK writes them, on the library's std/regex.
+//
+// The library reads POSIX extended syntax and refuses what it gives no
+// meaning; the system awk reads more, and reads some of it its own way,
+// and kawk follows the system awk. So an AWK pattern is not given to the
+// library as written: awk_compile reads it the way the system awk does
+// and writes, as it goes, a pattern the library reads to the same effect,
+// and compiles that one. Every search is then the library's. What is
+// rewritten:
+//   - an escape is read here and written as the byte it means: octal
+//     escapes (\101, and \0 for the zero byte), \b for a backspace, \x
+//     with no hexadecimal digit after it for the zero byte, a backslash
+//     before any other byte for that byte (\d is a d, \8 an 8), and a
+//     backslash that ends the pattern for itself;
+//   - a `)` that closes nothing, and a `*`, `+`, `?` or `{` with nothing
+//     before it to repeat, are ordinary bytes;
+//   - a `{` begins an interval when the system awk says so ({n}, {n,} or
+//     {n,m} with counts of up to six digits and n no greater than m) and
+//     is an ordinary byte otherwise; a count above the library's 1000 is
+//     written as several intervals that come to the same;
+//   - a bracket expression is read here into the set of bytes the system
+//     awk makes of it, and written again from that set, in full: a range
+//     written backwards adds nothing, a zero byte from an escape ends the
+//     members (what is written after it, named classes apart, is left
+//     out), `[:` that names no class and `[.` and `[=` are ordinary
+//     bytes, and so is a `-` after a class. A set with no member matches
+//     the empty string and is written `a{0}`, which does too; its
+//     negation is written `.`;
+//   - a group is written without its parentheses where they change
+//     nothing (the library numbers groups, kawk has no use for them), so
+//     that a pattern of ordinary bytes in parentheses is still searched
+//     for as a string.
+//
+// What the rewriting does not reach, because the library has no way to
+// say it: groups may be written 201 deep here, and the library takes 200.
+// So a pattern whose groups nest 201 deep is refused when every one of
+// them has to keep its parentheses (the system awk takes it).
+//
+// The searches kawk makes that are not the library's own are here too: a
+// match that is not empty (awk_find_nonempty), which fields and records
+// are separated by.
+module lang
+import "std/regex"
+import "std/str"
+
+func is_octal(c: u8) -> bool { return c >= 48u8 && c <= 55u8 }
+func hex_value(c: u8) -> u32 {
+    if c >= 48u8 && c <= 57u8 { return u32(c - 48u8) }
+    if c >= 97u8 && c <= 102u8 { return u32(c - 87u8) }
+    if c >= 65u8 && c <= 70u8 { return u32(c - 55u8) }
+    return 16u32
+}
+func hex_digit(v: u8) -> u8 {
+    if v < 10u8 { return 48u8 + v }
+    return 87u8 + v
+}
+func is_alnum(c: u8) -> bool { return (c >= 48u8 && c <= 57u8) || (c >= 97u8 && c <= 122u8) || (c >= 65u8 && c <= 90u8) }
+
+// Set256 is a set of bytes: the members of a bracket expression.
+struct Set256 { w: [4]u64 }
+
+func set_has(s: view[Set256], b: u8) -> bool { return (s.w[usize(b >> 6u32)] >> u32(b & 63u8)) & 1u64 == 1u64 }
+func set_add(s: edit[Set256], b: u8) {
+    i := usize(b >> 6u32)
+    s.w[i] = s.w[i] | wrapping_shl(1u64, u32(b & 63u8))
+}
+func set_range(s: edit[Set256], lo: u8, hi: u8) {
+    var c: u32 = u32(lo)
+    while c <= u32(hi) {
+        set_add(s, truncate[u8](c))
+        c = c + 1u32
+    }
+}
+func set_invert(s: edit[Set256]) {
+    for i in 0usize..4usize { s.w[i] = s.w[i] ^ 18446744073709551615u64 }
+}
+
+// class_set adds a named class of a bracket expression; false for a name
+// that is none.
+func class_set(s: edit[Set256], name: view[]u8) -> bool {
+    if str.equal(name, "alpha") { set_range(s, 65u8, 90u8); set_range(s, 97u8, 122u8); return true }
+    if str.equal(name, "digit") { set_range(s, 48u8, 57u8); return true }
+    if str.equal(name, "alnum") { set_range(s, 48u8, 57u8); set_range(s, 65u8, 90u8); set_range(s, 97u8, 122u8); return true }
+    if str.equal(name, "upper") { set_range(s, 65u8, 90u8); return true }
+    if str.equal(name, "lower") { set_range(s, 97u8, 122u8); return true }
+    if str.equal(name, "space") { set_range(s, 9u8, 13u8); set_add(s, 32u8); return true }
+    if str.equal(name, "blank") { set_add(s, 9u8); set_add(s, 32u8); return true }
+    if str.equal(name, "punct") { set_range(s, 33u8, 47u8); set_range(s, 58u8, 64u8); set_range(s, 91u8, 96u8); set_range(s, 123u8, 126u8); return true }
+    if str.equal(name, "print") { set_range(s, 32u8, 126u8); return true }
+    if str.equal(name, "graph") { set_range(s, 33u8, 126u8); return true }
+    if str.equal(name, "cntrl") { set_range(s, 0u8, 31u8); set_add(s, 127u8); return true }
+    if str.equal(name, "xdigit") { set_range(s, 48u8, 57u8); set_range(s, 65u8, 70u8); set_range(s, 97u8, 102u8); return true }
+    return false
+}
+
+const no_limit: u32 = 4294967295u32
+// max_program is the largest pattern kawk takes, counted as its own
+// compiler counted the instructions of one (Part.weight below); size_cap
+// is where that count stops growing, far above the limit and far below
+// what a u64 holds. max_nesting is how deep groups may nest as written.
+const max_program: u64 = 200000u64
+const size_cap: u64 = 1099511627776u64
+const max_nesting: u32 = 200u32
+// lib_count is the library's greatest interval count, and lib_insts the
+// size the library is allowed for a rewritten pattern. The library counts
+// a pattern differently (a group that stays is 2 more, `+` and `?` are 2
+// where kawk counted 1) and comes to little more than three times kawk's
+// count at the most, so a pattern within max_program is never refused
+// for its size.
+const lib_count: u32 = 1000u32
+const lib_insts: usize = 4000000usize
+
+func capped(x: u64) -> u64 {
+    if x > size_cap { return size_cap }
+    return x
+}
+
+// Count is what awk_interval found at a `{`: found is whether an interval
+// begins there, lo and hi are its counts (hi is no_limit for {n,}), end
+// is the offset after its `}`.
+struct Count { found: bool; lo: u32; hi: u32; end: usize }
+
+// awk_interval reads the interval whose `{` is at src[at], as the system
+// awk has it: {n}, {n,} or {n,m}, each count of one to six digits, m not
+// below n. A brace that begins none of these is an ordinary byte.
+func awk_interval(src: view[]u8, at: usize) -> Count {
+    none := Count { found: false, lo: 0u32, hi: 0u32, end: at }
+    n := len(src)
+    var i: usize = at + 1usize
+    var a: u32 = 0u32
+    var digits: u32 = 0u32
+    while i < n && is_digit(src[i]) && digits < 6u32 {
+        a = a * 10u32 + u32(src[i] - 48u8)
+        i = i + 1usize
+        digits = digits + 1u32
+    }
+    if digits == 0u32 { return none }
+    var b: u32 = a
+    if i < n && src[i] == 44u8 {
+        i = i + 1usize
+        if i < n && src[i] == 125u8 {
+            b = no_limit
+        } else {
+            b = 0u32
+            digits = 0u32
+            while i < n && is_digit(src[i]) && digits < 6u32 {
+                b = b * 10u32 + u32(src[i] - 48u8)
+                i = i + 1usize
+                digits = digits + 1u32
+            }
+            if digits == 0u32 { return none }
+        }
+    }
+    if i >= n || src[i] != 125u8 { return none }
+    if b < a { return none }
+    return Count { found: true, lo: a, hi: b, end: i + 1usize }
+}
+
+// Part is what the rewriter knows of a stretch of the pattern it has
+// read and written. weight is the number of instructions kawk's own
+// compiler made of it, which decides two things that must stay as they
+// were: a pattern too large is refused, and a pattern of weight 0 (the
+// empty one, `()`, `a{0}`) is the one split takes for "between every two
+// bytes". That compiler looked at its program's length before it wrote
+// each node of the pattern's tree, and refused the pattern when the
+// length was above max_program: tail is how many of the instructions
+// were written after the last such look, so that weight - tail is the
+// length it last saw. shape is what the written text is to the library:
+// one piece (an atom with its repetition operators), to which a further
+// operator applies as a whole; a branch that is not one piece; or
+// several branches.
+struct Part { weight: u64; tail: u64; shape: u8 }
+
+const one_piece: u8 = 0u8
+const a_branch: u8 = 1u8
+const branches: u8 = 2u8
+
+func re_error(kind: regex.ErrKind, at: usize) -> regex.CompileErr { return regex.CompileErr { kind: kind, at: at } }
+
+// Rewriter reads an AWK pattern and writes the library's. buf is what is
+// written so far; gone marks the bytes of it taken back (the `(` of a
+// group written without parentheses), which are left out at the end.
+struct Rewriter { pos: usize; depth: u32; buf: Vec[u8]; gone: Vec[bool] }
+
+impl Rewriter {
+    func put(edit self, b: u8) {
+        self.buf.push(b)
+        self.gone.push(false)
+    }
+    func put_number(edit self, v: u32) {
+        if v >= 10u32 { self.put_number(v / 10u32) }
+        self.put(48u8 + truncate[u8](v % 10u32))
+    }
+    // byte writes b so that the library reads the one byte b, inside a
+    // bracket expression and outside: a letter or a digit as it is, other
+    // printing bytes after a backslash, the rest as \xHH.
+    func byte(edit self, b: u8) {
+        if is_alnum(b) {
+            self.put(b)
+        } else if b >= 33u8 && b <= 126u8 {
+            self.put(92u8)
+            self.put(b)
+        } else {
+            self.put(92u8)
+            self.put(120u8)
+            self.put(hex_digit(b >> 4u32))
+            self.put(hex_digit(b & 15u8))
+        }
+    }
+
+    // escape reads what follows a backslash and returns the byte the
+    // system awk means by it.
+    func escape(edit self, src: view[]u8) -> u8 {
+        n := len(src)
+        if self.pos >= n { return 92u8 }
+        c := src[self.pos]
+        self.pos = self.pos + 1usize
+        if c == 110u8 { return 10u8 }
+        if c == 116u8 { return 9u8 }
+        if c == 114u8 { return 13u8 }
+        if c == 102u8 { return 12u8 }
+        if c == 98u8 { return 8u8 }
+        if c == 118u8 { return 11u8 }
+        if c == 97u8 { return 7u8 }
+        if is_octal(c) {
+            var v: u32 = u32(c - 48u8)
+            var k: u32 = 1u32
+            while k < 3u32 && self.pos < n && is_octal(src[self.pos]) {
+                v = v * 8u32 + u32(src[self.pos] - 48u8)
+                self.pos = self.pos + 1usize
+                k = k + 1u32
+            }
+            return truncate[u8](v)
+        }
+        if c == 120u8 {
+            // one or two hexadecimal digits; with none it is the zero
+            // byte, as the system awk reads it
+            var v: u32 = 0u32
+            var k: u32 = 0u32
+            while k < 2u32 && self.pos < n && hex_value(src[self.pos]) < 16u32 {
+                v = v * 16u32 + hex_value(src[self.pos])
+                self.pos = self.pos + 1usize
+                k = k + 1u32
+            }
+            return truncate[u8](v)
+        }
+        return c
+    }
+
+    // repeat_follows: the next byte of the pattern begins a repetition
+    // operator.
+    func repeat_follows(view self, src: view[]u8) -> bool {
+        if self.pos >= len(src) { return false }
+        c := src[self.pos]
+        if c == 42u8 || c == 43u8 || c == 63u8 { return true }
+        if c == 123u8 { return awk_interval(src, self.pos).found }
+        return false
+    }
+
+    func alt(edit self, src: view[]u8) -> Result[Part, regex.CompileErr] {
+        n := len(src)
+        first := self.cat(src)?
+        if self.pos >= n || src[self.pos] != 124u8 { return Ok(first) }
+        var weight: u64 = first.weight
+        var tail: u64 = 0u64
+        while self.pos < n && src[self.pos] == 124u8 {
+            self.pos = self.pos + 1usize
+            self.put(124u8)
+            right := self.cat(src)?
+            weight = capped(weight + right.weight + 2u64)
+            tail = right.tail
+        }
+        return Ok(Part { weight: weight, tail: tail, shape: branches })
+    }
+
+    func cat(edit self, src: view[]u8) -> Result[Part, regex.CompileErr] {
+        n := len(src)
+        var weight: u64 = 0u64
+        var tail: u64 = 0u64
+        var count: u32 = 0u32
+        var shape: u8 = a_branch
+        while self.pos < n {
+            c := src[self.pos]
+            if c == 124u8 { break }
+            // a `)` that closes nothing is an ordinary byte: atom takes it
+            if c == 41u8 && self.depth > 0u32 { break }
+            r := self.rep(src)?
+            weight = capped(weight + r.weight)
+            tail = r.tail
+            shape = r.shape
+            if count < 2u32 { count = count + 1u32 }
+        }
+        if count != 1u32 { shape = a_branch }
+        return Ok(Part { weight: weight, tail: tail, shape: shape })
+    }
+
+    func rep(edit self, src: view[]u8) -> Result[Part, regex.CompileErr] {
+        n := len(src)
+        start := self.buf.len()
+        a := self.atom(src)?
+        var e: Part = a
+        // an atom that is not one piece is a group written without its
+        // parentheses, which is done only when no operator follows
+        while self.pos < n {
+            c := src[self.pos]
+            if c == 42u8 {
+                self.pos = self.pos + 1usize
+                self.put(c)
+                e.weight = capped(e.weight + 2u64)
+                e.tail = e.tail + 1u64
+            } else if c == 43u8 || c == 63u8 {
+                self.pos = self.pos + 1usize
+                self.put(c)
+                e.weight = capped(e.weight + 1u64)
+                if c == 43u8 { e.tail = e.tail + 1u64 }
+            } else if c == 123u8 {
+                iv := awk_interval(src, self.pos)
+                if !iv.found { break }
+                self.pos = iv.end
+                e = self.times(src, start, e, iv.lo, iv.hi)
+            } else {
+                break
+            }
+        }
+        return Ok(e)
+    }
+
+    // times writes the interval {lo,hi} after the piece written from
+    // buf[start] on, whose Part is e.
+    func times(edit self, src: view[]u8, start: usize, e: Part, lo: u32, hi: u32) -> Part {
+        var weight: u64 = u64(lo) * e.weight
+        var tail: u64 = e.tail
+        if hi == no_limit {
+            weight = weight + e.weight + 2u64
+            tail = tail + 1u64
+        } else {
+            weight = weight + u64(hi - lo) * (e.weight + 1u64)
+            if hi == 0u32 { tail = 0u64 }
+        }
+        weight = capped(weight)
+        // a piece of weight 0 matches the empty string and nothing else,
+        // and so does any number of it: nothing is written
+        if e.weight == 0u64 { return Part { weight: weight, tail: tail, shape: one_piece } }
+        if lo <= lib_count && (hi == no_limit || hi <= lib_count) {
+            self.put(123u8)
+            self.put_number(lo)
+            if hi != lo {
+                self.put(44u8)
+                if hi != no_limit { self.put_number(hi) }
+            }
+            self.put(125u8)
+            return Part { weight: weight, tail: tail, shape: one_piece }
+        }
+        // a count above the library's: the piece is taken back and written
+        // several times, each with a count the library takes. With an
+        // operator still to come the whole is put in a group.
+        t := Vec[u8].new()
+        for i in start..self.buf.len() {
+            dead := self.gone.get(i)
+            b := self.buf.get(i)
+            if !dead { t.push(b) }
+        }
+        self.buf.resize(start, 0u8)
+        self.gone.resize(start, false)
+        wrap := self.repeat_follows(src)
+        if wrap { self.put(40u8) }
+        self.counted(t.as_view(), lo, false)
+        if hi == no_limit {
+            for i in 0usize..t.len() { self.put(t.get(i)) }
+            self.put(42u8)
+        } else {
+            self.counted(t.as_view(), hi - lo, true)
+        }
+        if wrap {
+            self.put(41u8)
+            return Part { weight: weight, tail: tail, shape: one_piece }
+        }
+        return Part { weight: weight, tail: tail, shape: a_branch }
+    }
+
+    // counted writes the piece t exactly k times in a row, or with
+    // optional set from 0 to k times, k being any count: t{1000}{q}
+    // is t 1000 × q times, and t{r} the rest.
+    func counted(edit self, t: view[]u8, k: u32, optional: bool) {
+        if k == 0u32 { return }
+        q := k / lib_count
+        r := k % lib_count
+        if k <= lib_count {
+            self.piece_times(t, k, optional)
+            return
+        }
+        self.piece_times(t, lib_count, optional)
+        self.put(123u8)
+        self.put_number(q)
+        self.put(125u8)
+        if r > 0u32 { self.piece_times(t, r, optional) }
+    }
+    func piece_times(edit self, t: view[]u8, k: u32, optional: bool) {
+        for i in 0usize..len(t) { self.put(t[i]) }
+        self.put(123u8)
+        if optional {
+            self.put(48u8)
+            self.put(44u8)
+        }
+        self.put_number(k)
+        self.put(125u8)
+    }
+
+    func atom(edit self, src: view[]u8) -> Result[Part, regex.CompileErr] {
+        at := self.pos
+        c := src[at]
+        self.pos = at + 1usize
+        if c == 40u8 { return self.group(src, at) }
+        if c == 91u8 { return self.bracket(src, at) }
+        if c == 46u8 || c == 94u8 || c == 36u8 {
+            self.put(c)
+            return Ok(Part { weight: 1u64, tail: 1u64, shape: one_piece })
+        }
+        // every other byte is itself, the operators with nothing to
+        // repeat and the `)` that closes nothing among them
+        var b: u8 = c
+        if c == 92u8 { b = self.escape(src) }
+        self.byte(b)
+        return Ok(Part { weight: 1u64, tail: 1u64, shape: one_piece })
+    }
+
+    // group reads a group whose `(` is at src[at]. Its parentheses are
+    // written only where they are needed: around several branches, and
+    // around a branch that is not one piece when an operator follows.
+    func group(edit self, src: view[]u8, at: usize) -> Result[Part, regex.CompileErr] {
+        if self.depth > max_nesting { return Err(re_error(regex.ErrKind.TooDeep, at)) }
+        self.depth = self.depth + 1u32
+        open := self.buf.len()
+        self.put(40u8)
+        inner := self.alt(src)?
+        self.depth = self.depth - 1u32
+        if self.pos >= len(src) || src[self.pos] != 41u8 { return Err(re_error(regex.ErrKind.UnclosedGroup, at)) }
+        self.pos = self.pos + 1usize
+        if inner.shape == branches || (inner.shape == a_branch && self.repeat_follows(src)) {
+            self.put(41u8)
+            return Ok(Part { weight: inner.weight, tail: inner.tail, shape: one_piece })
+        }
+        with g := self.gone.at(open) { g = true }
+        return Ok(inner)
+    }
+
+    // bracket reads a bracket expression whose `[` is at src[open] into
+    // the set of bytes the system awk makes of it, and writes that set.
+    func bracket(edit self, src: view[]u8, open: usize) -> Result[Part, regex.CompileErr] {
+        n := len(src)
+        s := Set256 { w: zero() }
+        var negate: bool = false
+        if self.pos < n && src[self.pos] == 94u8 {
+            negate = true
+            self.pos = self.pos + 1usize
+        }
+        var first: bool = true
+        var closed: bool = false
+        // cut: an escape gave the zero byte, which ends the members for
+        // the system awk (its set is a C string): the rest is read and
+        // left out
+        var cut: bool = false
+        while self.pos < n {
+            var c: u8 = src[self.pos]
+            if c == 93u8 && !first {
+                self.pos = self.pos + 1usize
+                closed = true
+                break
+            }
+            first = false
+            if c == 91u8 && self.pos + 1usize < n && src[self.pos + 1usize] == 58u8 {
+                // [:name:]; when the name is none, the `[` is a member
+                var j: usize = self.pos + 2usize
+                while j < n && src[j] != 58u8 { j = j + 1usize }
+                if j + 1usize < n && src[j + 1usize] == 93u8 {
+                    if class_set(s, src[self.pos + 2usize : j]) {
+                        self.pos = j + 2usize
+                        continue
+                    }
+                }
+            }
+            self.pos = self.pos + 1usize
+            if c == 92u8 {
+                c = self.escape(src)
+                if c == 0u8 { cut = true }
+            }
+            // a range, unless the - is the last thing in the brackets
+            if self.pos + 1usize < n && src[self.pos] == 45u8 && src[self.pos + 1usize] != 93u8 {
+                self.pos = self.pos + 1usize
+                var d: u8 = src[self.pos]
+                self.pos = self.pos + 1usize
+                if d == 92u8 { d = self.escape(src) }
+                if c <= d && !cut { set_range(s, c, d) }
+            } else if !cut {
+                set_add(s, c)
+            }
+        }
+        if !closed { return Err(re_error(regex.ErrKind.UnclosedBracket, open)) }
+        if negate { set_invert(s) }
+        var members: u32 = 0u32
+        for i in 0usize..4usize { members = members + count_ones(s.w[i]) }
+        if members == 0u32 && !negate {
+            // no member: the empty string, as the system awk has it. kawk
+            // made two instructions of it, so it is not the empty pattern
+            self.put(97u8)
+            self.put(123u8)
+            self.put(48u8)
+            self.put(125u8)
+            return Ok(Part { weight: 2u64, tail: 1u64, shape: one_piece })
+        }
+        if members == 256u32 {
+            self.put(46u8)
+            return Ok(Part { weight: 1u64, tail: 1u64, shape: one_piece })
+        }
+        if members == 0u32 {
+            // the negation of every byte: a set that matches no byte. With
+            // no member to write it would come out as `[]`, which the
+            // library reads as an expression left open; it takes the same
+            // set written as the negation of the whole range
+            self.put(91u8)
+            self.put(94u8)
+            self.byte(0u8)
+            self.put(45u8)
+            self.byte(255u8)
+            self.put(93u8)
+            return Ok(Part { weight: 1u64, tail: 1u64, shape: one_piece })
+        }
+        // each run of members as a range; no `^`, no class, and no byte
+        // written that the library could read as anything but itself
+        self.put(91u8)
+        var b: u32 = 0u32
+        while b < 256u32 {
+            if !set_has(s, truncate[u8](b)) {
+                b = b + 1u32
+                continue
+            }
+            var e: u32 = b
+            while e + 1u32 < 256u32 && set_has(s, truncate[u8](e + 1u32)) { e = e + 1u32 }
+            self.byte(truncate[u8](b))
+            if e > b {
+                if e > b + 1u32 { self.put(45u8) }
+                self.byte(truncate[u8](e))
+            }
+            b = e + 1u32
+        }
+        self.put(93u8)
+        return Ok(Part { weight: 1u64, tail: 1u64, shape: one_piece })
+    }
+}
+
+// awk_rewrite appends to dst the pattern the library reads as the system
+// awk reads `text`, and returns the weight of `text` (see Part), or why
+// the system awk's reading refuses it: a bracket expression or a group
+// left open, groups nested too deep, or a pattern too large.
+func awk_rewrite(text: view[]u8, dst: edit[Vec[u8]]) -> Result[u64, regex.CompileErr] {
+    rw := Rewriter { pos: 0usize, depth: 0u32, buf: Vec[u8].new(), gone: Vec[bool].new() }
+    whole := rw.alt(text)?
+    if whole.weight > max_program + whole.tail { return Err(re_error(regex.ErrKind.TooLarge, len(text))) }
+    for i in 0usize..rw.buf.len() {
+        dead := rw.gone.get(i)
+        b := rw.buf.get(i)
+        if !dead { dst.push(b) }
+    }
+    return Ok(whole.weight)
+}
+
+// awk_compile compiles an AWK regular expression. An error's `at` is an
+// offset into `text` when the pattern is refused here, and into the
+// rewritten pattern in the one case the library refuses it (TooDeep).
+func awk_compile(text: view[]u8) -> Result[regex.Regex, regex.CompileErr] {
+    pat := Vec[u8].new()
+    awk_rewrite(text, pat)?
+    var o: regex.Options = regex.options()
+    o.max_insts = lib_insts
+    return regex.compile_with(pat.as_view(), o)
+}
+
+// awk_void reports whether a pattern asks for nothing at all: the empty
+// pattern, or one made only of empty groups and of things repeated zero
+// times. split takes such a pattern between slashes for "every byte is a
+// field".
+func awk_void(text: view[]u8) -> bool {
+    pat := Vec[u8].new()
+    match awk_rewrite(text, pat) {
+        Ok(weight) => { return weight == 0u64 }
+        Err(e) => { return false }
+    }
+}
+
+// awk_empty is the compiled empty pattern, which stands where no pattern
+// has been given yet.
+func awk_empty() -> regex.Regex {
+    match regex.compile("") {
+        Ok(re) => { return re }
+        Err(e) => { }
+    }
+    trap()
+}
+
+// Hit is the result of a search: the match is text[start:end].
+struct Hit { found: bool; start: usize; end: usize }
+
+// awk_find is the leftmost match of re in text that begins at or after
+// from, and of those the longest. ^ and $ mean the ends of text.
+func awk_find(re: view[regex.Regex], sc: edit[regex.Scratch], text: view[]u8, from: usize) -> Hit {
+    match re.find(sc, text, from) {
+        Some(m) => { return Hit { found: true, start: m.start, end: m.end } }
+        None => { return Hit { found: false, start: 0usize, end: 0usize } }
+    }
+}
+
+// awk_find_nonempty is the same for the matches that are not empty. The
+// leftmost match being the longest at its place, an empty one says that
+// no other begins there or before, so the search goes on one byte later.
+func awk_find_nonempty(re: view[regex.Regex], sc: edit[regex.Scratch], text: view[]u8, from: usize) -> Hit {
+    var at: usize = from
+    while true {
+        h := awk_find(re, sc, text, at)
+        if !h.found || h.end > h.start { return h }
+        at = h.start + 1usize
+    }
+    return Hit { found: false, start: 0usize, end: 0usize }
+}
