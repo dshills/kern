@@ -1,0 +1,180 @@
+//! phase: 6
+//! expect: output map_order_kept
+// What a Map does that no other fixture printed, written down before Map
+// became a MapIn over the system allocator (docs/reports/perf-review.md
+// §2.1) so that the change could be seen to keep it: the slot order after
+// a long pseudo-random sequence of inserts, replacements and removes, from
+// a table of two slots, with u64 and with String keys; the slots find and
+// find_text report; the order in which a map destroys its entries (every
+// value from the last slot to the first, then every key from the last
+// slot to the first) and in which insert, remove and a lookup destroy a
+// key or a value; a map of a key type that is not Hashable, which exists
+// and is empty; values of no bytes; and a map moved to another thread.
+module t
+import "std/map"
+import "std/str"
+struct K nocopy { id: u64 }
+impl K {
+    destructor(edit self) { print_str(" k"); print_u64(self.id) }
+}
+impl map.Hashable for K {
+    // three keys share a hash, so entries sit in each other's probe paths
+    func hash(view self) -> u64 { return map.mix(self.id / 3u64) }
+    func eq(view self, other: view[K]) -> bool { return self.id == other.id }
+}
+struct V nocopy { id: u64 }
+impl V {
+    destructor(edit self) { print_str(" v"); print_u64(self.id) }
+}
+// Plain has no hash: a map of it can be made, measured and visited.
+struct Plain { n: u64 }
+struct Nil { }
+func next(x: u64) -> u64 {
+    y := x ^ wrapping_shl(x, 13u32)
+    y = y ^ (y >> 7u32)
+    return y ^ wrapping_shl(y, 17u32)
+}
+func order(m: view[map.Map[u64, u64]]) -> u64 {
+    h := 0u64
+    for k, v in m { h = wrapping_add(wrapping_mul(h, 1000003u64), k * 7u64 + v) }
+    return h
+}
+func numbers() {
+    var m: map.Map[u64, u64] = map.with_bits(1u32)
+    x := 88172645463325252u64
+    step := 0u64
+    while step < 6000u64 {
+        x = next(x)
+        k := (x >> 8u32) % 400u64
+        if (x >> 40u32) % 3u64 == 0u64 { r := m.remove(k) } else { r := m.insert(k, step) }
+        if step == 5u64 || step == 60u64 || step == 700u64 {
+            print_str("  after "); print_u64(step + 1u64); print_str(" steps: len "); print_u64(u64(m.len()))
+            print_str(" slots "); print_u64(u64(m.cursor_end())); print_str(" order "); print_u64(order(m)); println()
+        }
+        step = step + 1u64
+    }
+    print_str("  len "); print_u64(u64(m.len())); print_str(" slots "); print_u64(u64(m.cursor_end()))
+    print_str(" order "); print_u64(order(m)); println()
+    print_str("  first entries:")
+    shown := 0u64
+    i := m.cursor_first()
+    while i != m.cursor_end() && shown < 6u64 {
+        print_str(" "); print_u64(u64(i)); print_str(":"); print_u64(m.key_at(i)); print_str("="); print_u64(m.value_at(i))
+        shown = shown + 1u64
+        i = m.cursor_next(i)
+    }
+    println()
+    m.reserve(1000usize)
+    print_str("  after reserve 1000: slots "); print_u64(u64(m.cursor_end())); print_str(" order "); print_u64(order(m)); println()
+    for probe in 0u64..4u64 {
+        k := probe * 97u64
+        print_str("  find "); print_u64(k); print_str(": ")
+        match m.find(k) {
+            Some(s) => { print_str("slot "); print_u64(u64(s)) }
+            None => print_str("absent")
+        }
+        println()
+    }
+}
+func texts() {
+    var m: map.Map[str.String, u64] = map.with_bits(1u32)
+    x := 424242424242u64
+    step := 0u64
+    while step < 3000u64 {
+        x = next(x)
+        k := str.String.from("name-")
+        k.push_u64((x >> 8u32) % 150u64)
+        if (x >> 40u32) % 3u64 == 0u64 { r := m.remove(k) } else { r := m.insert(k, step) }
+        step = step + 1u64
+    }
+    h := 0u64
+    for k, v in m { h = wrapping_add(wrapping_mul(h, 1000003u64), str.hash(k.as_view()) ^ v) }
+    print_str("  len "); print_u64(u64(m.len())); print_str(" slots "); print_u64(u64(m.cursor_end()))
+    print_str(" order "); print_u64(h); println()
+    text := str.String.new()
+    for n in 0u64..5u64 {
+        text.clear()
+        text.push_str("name-")
+        text.push_u64(n * 31u64)
+        print_str("  find_text "); print_str(text.as_view()); print_str(": ")
+        match map.find_text(m, text.as_view()) {
+            Some(s) => { print_str("slot "); print_u64(u64(s)); print_str(" value "); print_u64(m.value_at(s)) }
+            None => print_str("absent")
+        }
+        println()
+    }
+}
+func destroyed() {
+    m := map.Map[K, V].new()
+    print_str("  seven inserts:")
+    for i in 0u64..7u64 { r := m.insert(K { id: i }, V { id: i }) }
+    println()
+    print_str("  slots:")
+    for k, v in m { print_str(" "); print_u64(k.id) }
+    println()
+    print_str("  insert over 2:")
+    old := m.insert(K { id: 2u64 }, V { id: 20u64 })
+    drop(old)
+    println()
+    print_str("  remove 4:")
+    gone := m.remove(K { id: 4u64 })
+    drop(gone)
+    println()
+    print_str("  remove 9, absent:")
+    none := m.remove(K { id: 9u64 })
+    println()
+    print_str("  contains 5:")
+    has := m.contains(K { id: 5u64 })
+    println()
+    print_str("  get 6:")
+    with v := m.get(K { id: 6u64 }) { print_str(" ("); print_u64(v.id); print_str(")") }
+    println()
+    print_str("  ten more inserts, the table doubling:")
+    for i in 10u64..20u64 { r := m.insert(K { id: i }, V { id: i }) }
+    println()
+    print_str("  slots:")
+    for k, v in m { print_str(" "); print_u64(k.id) }
+    println()
+    print_str("  the map destroyed:")
+    drop(m)
+    println()
+}
+func total(m: own map.Map[u64, u64]) -> u64 {
+    t := 0u64
+    for k, v in m { t = t + k + v }
+    return t
+}
+func in_thread(m: own map.Map[u64, u64]) -> Result[u64, SpawnErr] {
+    t := thread.spawn(total, m)?
+    return Ok(t.join())
+}
+func main() -> i32 {
+    print_str("u64 keys from two slots"); println()
+    numbers()
+    print_str("String keys from two slots"); println()
+    texts()
+    print_str("what is destroyed, and when"); println()
+    destroyed()
+    print_str("a key type with no hash"); println()
+    p := map.Map[Plain, u64].new()
+    seen := 0u64
+    for k, v in p { seen = seen + 1u64 }
+    print_str("  len "); print_u64(u64(p.len())); print_str(" slots "); print_u64(u64(p.cursor_end()))
+    print_str(" visited "); print_u64(seen); println()
+    print_str("values of no bytes"); println()
+    s := map.Map[u64, Nil].new()
+    for i in 0u64..100u64 { r := s.insert(i * 3u64, Nil { }) }
+    r := s.remove(6u64)
+    sum := 0u64
+    for k, v in s { sum = sum + k }
+    print_str("  len "); print_u64(u64(s.len())); print_str(" keys sum "); print_u64(sum)
+    print_str(" has 9 "); print_bool(s.contains(9u64)); print_str(" has 6 "); print_bool(s.contains(6u64)); println()
+    print_str("a map moved to a thread"); println()
+    m := map.Map[u64, u64].new()
+    for i in 0u64..50u64 { r := m.insert(i, i * i) }
+    match in_thread(m) {
+        Ok(t) => { print_str("  sum "); print_u64(t); println() }
+        Err(e) => { print_str("  spawn failed"); println() }
+    }
+    return 0i32
+}

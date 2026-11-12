@@ -1,8 +1,9 @@
 // std/map: an open-addressing hash map with linear probing (the
 // bench/kern/hash_table design), keyed by any Hashable type. Imported with
-// `import "std/map"`. A Map[K, V] keeps its slots in three vectors (state,
+// `import "std/map"`. A table keeps its slots in three buffers (state,
 // key, value); removal leaves a tombstone, and the table doubles when
-// three quarters of its slots are in use.
+// three quarters of its slots are in use. MapIn[K, V, A] is the table over
+// a caller's allocator, and Map[K, V] a MapIn over the system allocator.
 module map
 import "std/str"
 
@@ -40,45 +41,35 @@ impl Hashable for str.String {
     func eq(view self, other: view[str.String]) -> bool { return self.equals(other.as_view()) }
 }
 
-// Map is the table: states (0 empty, 1 deleted, 2 full), keys and values
-// by slot; count is the number of live entries, used the number of slots
-// that are not empty.
-struct Map[K, V] nocopy { states: Vec[u8]; keys: Vec[Option[K]]; vals: Vec[Option[V]]; cap: usize; count: usize; used: usize; bits: u32 }
+// Map is a MapIn over the system allocator: the same table (a state byte,
+// 0 empty, 1 deleted, 2 full, a key and a value by slot, in three buffers),
+// probe, growth rule and slot order. It differs in what it promises: it
+// always has a table (with_bits makes it), its convenience forms trap oom
+// where MapIn returns Err, and it destroys its entries in an order of its
+// own (MapIn.release_map_order).
+struct Map[K, V] nocopy { t: MapIn[K, V, SystemAllocator] }
 
 // with_bits builds an empty map of 2^bits slots, 1 <= bits <= 58 (the hash
 // is shifted by 64 - bits to pick a slot; a map traps explicitly outside
 // that range).
 func with_bits[K, V](bits: u32) -> Map[K, V] {
     if bits == 0u32 || bits > 58u32 { trap() }
-    cap := 1usize << bits
-    m := Map[K, V] { states: Vec[u8].new(), keys: Vec[Option[K]].new(), vals: Vec[Option[V]].new(), cap: cap, count: 0usize, used: 0usize, bits: bits }
-    m.states.resize(cap, 0u8)
-    i := 0usize
-    while i < cap {
-        m.keys.push(None)
-        m.vals.push(None)
-        i = i + 1usize
+    m := Map[K, V] { t: MapIn[K, V, SystemAllocator].new_in(SystemAllocator.new()) }
+    match m.t.try_table(bits) {
+        Ok(tab) => m.t.adopt(move tab, bits)
+        Err(e) => trap_kind(oom)
     }
     return m
 }
 
 // try_with_bits is with_bits returning Err(OutOfMemory) where with_bits
-// traps oom (specs/effect-trap-kinds §2). The key and value vectors are
-// reserved to the table size first, so filling them with None makes no
-// allocation call; on Err the partly built map is destroyed on return.
+// traps oom (specs/effect-trap-kinds §2): the table is three allocation
+// calls (states, keys, values), and one refused frees the granted ones.
 func try_with_bits[K, V](bits: u32) -> Result[Map[K, V], AllocErr] {
     if bits == 0u32 || bits > 58u32 { trap() }
-    cap := 1usize << bits
-    m := Map[K, V] { states: Vec[u8].new(), keys: Vec[Option[K]].new(), vals: Vec[Option[V]].new(), cap: cap, count: 0usize, used: 0usize, bits: bits }
-    m.states.try_resize(cap, 0u8)?
-    m.keys.try_reserve(cap)?
-    m.vals.try_reserve(cap)?
-    i := 0usize
-    while i < cap {
-        m.keys.try_push(None)?
-        m.vals.try_push(None)?
-        i = i + 1usize
-    }
+    m := Map[K, V] { t: MapIn[K, V, SystemAllocator].new_in(SystemAllocator.new()) }
+    tab := m.t.try_table(bits)?
+    m.t.adopt(move tab, bits)
     return Ok(m)
 }
 
@@ -87,218 +78,83 @@ func try_with_bits[K, V](bits: u32) -> Result[Map[K, V], AllocErr] {
 impl Map[K, V] {
     func new() -> Map[K, V] { return with_bits[K, V](4u32) }
     func try_new() -> Result[Map[K, V], AllocErr] { return try_with_bits[K, V](4u32) }
-    func len(view self) -> usize { return self.count }
+    func len(view self) -> usize { return self.t.count }
 
     // slot finds the slot holding key, or, when key is absent, the first
     // slot (deleted or empty) an insert of it would use.
-    func slot(view self, key: view[K]) -> usize where K: Hashable {
-        mask := self.cap - 1usize
-        i := usize(key.hash() >> (64u32 - self.bits))
-        free := self.cap
-        while true {
-            st := self.states.get(i)
-            if st == 0u8 {
-                if free == self.cap { return i }
-                return free
-            }
-            if st == 1u8 {
-                if free == self.cap { free = i }
-            } else {
-                match self.keys.get(i) {
-                    Some(k) => { if k.eq(key) { return i } }
-                    None => { }
-                }
-            }
-            i = (i + 1usize) & mask
-        }
-        return self.cap
-    }
+    func slot(view self, key: view[K]) -> usize where K: Hashable { return self.t.slot(key) }
 
     // Lookups take the key by value (a Copy key is copied, an owned key such
     // as a String is given up and destroyed after the lookup), so a literal
     // or a temporary may be passed.
-    func contains(view self, key: own K) -> bool where K: Hashable {
-        i := self.slot(key)
-        return self.states.get(i) == 2u8
-    }
+    func contains(view self, key: own K) -> bool where K: Hashable { return self.t.contains(key) }
 
     // get views the value stored under key; it traps (explicit) when the
     // key is absent, so callers test with contains first when unsure.
-    func get(view self, key: own K) -> view[V] where K: Hashable {
-        i := self.slot(key)
-        if self.states.get(i) != 2u8 { trap() }
-        match self.vals.get(i) {
-            Some(v) => return v
-            None => trap()
-        }
-    }
+    func get(view self, key: own K) -> view[V] where K: Hashable { return self.t.get(key) }
 
     // at edits the value stored under key; it traps when the key is absent.
-    func at(edit self, key: own K) -> edit[V] where K: Hashable {
-        i := self.slot(key)
-        if self.states.get(i) != 2u8 { trap() }
-        match self.vals.at(i) {
-            Some(v) => return v
-            None => trap()
-        }
-    }
+    func at(edit self, key: own K) -> edit[V] where K: Hashable { return self.t.at(key) }
 
     // find is a lookup that borrows its key: the slot holding key, or
     // None. The caller keeps an owned key such as a String. A slot stays
     // valid until the next insert, remove, reserve or try_reserve: each may
     // rebuild the table and move every entry to another slot.
-    func find(view self, key: view[K]) -> Option[usize] where K: Hashable {
-        i := self.slot(key)
-        if self.states.get(i) == 2u8 { return Some(i) }
-        return None
-    }
+    func find(view self, key: view[K]) -> Option[usize] where K: Hashable { return self.t.find(key) }
 
     // key_at, value_at and value_at_mut view or edit the entry in a live
     // slot (one find returned); a slot past the table traps bounds, a slot
     // that holds no entry traps explicit.
-    func key_at(view self, slot: usize) -> view[K] {
-        if self.states.get(slot) != 2u8 { trap() }
-        match self.keys.get(slot) {
-            Some(k) => return k
-            None => trap()
-        }
-    }
-    func value_at(view self, slot: usize) -> view[V] {
-        if self.states.get(slot) != 2u8 { trap() }
-        match self.vals.get(slot) {
-            Some(v) => return v
-            None => trap()
-        }
-    }
-    func value_at_mut(edit self, slot: usize) -> edit[V] {
-        if self.states.get(slot) != 2u8 { trap() }
-        match self.vals.at(slot) {
-            Some(v) => return v
-            None => trap()
-        }
-    }
+    func key_at(view self, slot: usize) -> view[K] { return self.t.key_at(slot) }
+    func value_at(view self, slot: usize) -> view[V] { return self.t.value_at(slot) }
+    func value_at_mut(edit self, slot: usize) -> edit[V] { return self.t.value_at_mut(slot) }
 
     // The cursor protocol (spec/types.md §7): `for k, v in m` visits every
     // entry in slot order, the order of each; a position is a slot.
-    func cursor_first(view self) -> usize { return self.live_from(0usize) }
-    func cursor_next(view self, at: usize) -> usize { return self.live_from(at + 1usize) }
-    func cursor_end(view self) -> usize { return self.cap }
+    func cursor_first(view self) -> usize { return self.t.live_from(0usize) }
+    func cursor_next(view self, at: usize) -> usize { return self.t.live_from(at + 1usize) }
+    func cursor_end(view self) -> usize { return self.t.cap }
     // cursor_entry and cursor_entry_mut open the key and the value of the
-    // entry at a live position at once: elements of two distinct vectors,
-    // so disjoint, at the payload offset of their Some (some_offset).
-    contract { invariant "the position is checked live, so both slots hold Some; keys and vals are distinct vectors, so the accesses are disjoint" }
+    // entry at a live position at once: the two accesses MapIn's return,
+    // handed on (a function returning several accesses is written inside
+    // unsafe, Rule 5.3.4).
+    contract { invariant "the accesses are MapIn.cursor_entry's: the position is checked live, and the key and the value are in distinct buffers, so they are disjoint" }
     func cursor_entry(view self, at: usize) -> (view[K], view[V]) {
-        if self.states.get(at) != 2u8 { trap() }
-        unsafe {
-            k := ptr_cast[K, u8](ptr_offset(ptr_cast[u8, Option[K]](self.keys.ptr_at(at)), truncate[isize](self.some_offset(align_of[K]()))))
-            v := ptr_cast[V, u8](ptr_offset(ptr_cast[u8, Option[V]](self.vals.ptr_at(at)), truncate[isize](self.some_offset(align_of[V]()))))
-            return ptr_view2(k, v)
-        }
+        unsafe { return self.t.cursor_entry(at) }
     }
-    contract { invariant "the position is checked live, so both slots hold Some; keys and vals are distinct vectors, so the accesses are disjoint" }
+    contract { invariant "the accesses are MapIn.cursor_entry_mut's: the position is checked live, and the key and the value are in distinct buffers, so they are disjoint" }
     func cursor_entry_mut(edit self, at: usize) -> (view[K], edit[V]) {
-        if self.states.get(at) != 2u8 { trap() }
-        unsafe {
-            k := ptr_cast[K, u8](ptr_offset(ptr_cast[u8, Option[K]](self.keys.ptr_at(at)), truncate[isize](self.some_offset(align_of[K]()))))
-            v := ptr_cast[V, u8](ptr_offset(ptr_cast[u8, Option[V]](self.vals.ptr_at(at)), truncate[isize](self.some_offset(align_of[V]()))))
-            return ptr_view_edit(k, v)
-        }
+        unsafe { return self.t.cursor_entry_mut(at) }
     }
-    // some_offset is where Some's payload sits in an Option whose payload
-    // has alignment a (spec §4.1): after the one-byte tag (two variants),
-    // rounded up to a.
-    func some_offset(view self, a: usize) -> usize { return (1usize + a - 1usize) / a * a }
     // live_from is the first live slot at or after from, or the capacity.
-    func live_from(view self, from: usize) -> usize {
-        i := from
-        while i < self.cap && self.states.get(i) != 2u8 { i = i + 1usize }
-        return i
-    }
+    func live_from(view self, from: usize) -> usize { return self.t.live_from(from) }
 
     // each calls f with every entry's key and value, in slot order: the
     // same for two maps built by the same inserts and removals. f cannot
     // reach the map itself (its access would conflict with this call's).
-    func each(view self, f: closure(view[K], view[V])) {
-        i := 0usize
-        while i < self.cap {
-            if self.states.get(i) == 2u8 {
-                match self.keys.get(i) {
-                    Some(k) => {
-                        match self.vals.get(i) {
-                            Some(v) => f(k, v)
-                            None => { }
-                        }
-                    }
-                    None => { }
-                }
-            }
-            i = i + 1usize
-        }
-    }
+    func each(view self, f: closure(view[K], view[V])) { self.t.each(f) }
 
     // each_mut is each with an edit of every value.
-    func each_mut(edit self, f: closure(view[K], edit[V])) {
-        i := 0usize
-        while i < self.cap {
-            if self.states.get(i) == 2u8 {
-                with k := self.keys.get(i) {
-                    with v := self.vals.at(i) {
-                        match k {
-                            Some(kk) => {
-                                match v {
-                                    Some(vv) => f(kk, vv)
-                                    None => { }
-                                }
-                            }
-                            None => { }
-                        }
-                    }
-                }
-            }
-            i = i + 1usize
-        }
-    }
+    func each_mut(edit self, f: closure(view[K], edit[V])) { self.t.each_mut(f) }
 
-    // insert stores val under key and returns the value it replaced, if any.
+    // insert stores val under key and returns the value it replaced, if
+    // any. When slots are running out the table is rebuilt first, doubled
+    // when the live entries need it and otherwise at the same size to drop
+    // the tombstones (MapIn.grow_bits); a table that cannot be allocated
+    // traps oom with key and val still alive.
     func insert(edit self, key: own K, val: own V) -> Option[V] where K: Hashable {
-        if (self.used + 1usize) * 4usize >= self.cap * 3usize {
-            // slots are running out: double when the live entries need it,
-            // otherwise rebuild at the same size to drop the tombstones
-            bits := self.bits
-            if (self.count + 1usize) * 2usize > self.cap { self.rebuild(bits + 1u32) } else { self.rebuild(bits) }
-        }
-        i := self.slot(key)
-        if self.states.get(i) == 2u8 {
-            with slot := self.vals.at(i) { return replace(slot, Some(val)) }
-        }
-        fresh := self.states.get(i) == 0u8
-        if fresh { self.used = self.used + 1usize }
-        with st := self.states.at(i) { st = 2u8 }
-        with ks := self.keys.at(i) { ks = Some(key) }
-        with vs := self.vals.at(i) { vs = Some(val) }
-        self.count = self.count + 1usize
-        return None
+        bits := self.t.grow_bits()
+        if bits != 0u32 { self.rebuild(bits) }
+        return self.t.place(key, val)
     }
 
     // try_insert is insert returning Err(OutOfMemory) where insert traps
     // oom: when the table must grow and the larger table cannot be
     // allocated, key and then val are destroyed and the map is unchanged.
     // Once the larger table exists, moving the entries into it makes no
-    // allocation call (try_rebuild).
+    // allocation call.
     func try_insert(edit self, key: own K, val: own V) -> Result[Option[V], AllocErr] where K: Hashable {
-        if (self.used + 1usize) * 4usize >= self.cap * 3usize {
-            bits := self.bits
-            if (self.count + 1usize) * 2usize > self.cap { bits = bits + 1u32 }
-            match self.try_rebuild(bits) {
-                Ok(u) => { }
-                Err(e) => {
-                    drop(key)
-                    drop(val)
-                    return Err(e)
-                }
-            }
-        }
-        return Ok(self.place(key, val))
+        return self.t.try_insert(key, val)
     }
 
     // reserve makes room for n absent inserts (specs/map-in §1): when the
@@ -307,95 +163,56 @@ impl Map[K, V] {
     // allocation call and never rebuild. A request past usize or past 2^58
     // slots, or a failed allocation, traps oom and leaves the map as it was.
     func reserve(edit self, n: usize) where K: Hashable {
-        if reserve_room(self.cap, self.used, n) { return }
-        match reserve_bits(self.bits, self.count, n) {
-            Some(b) => self.rebuild(b)
-            None => trap_kind(oom)
+        match self.t.try_reserve(n) {
+            Ok(u) => { }
+            Err(e) => trap_kind(oom)
         }
     }
 
     // try_reserve is reserve returning Err(OutOfMemory) where reserve
     // traps oom; on Err the map is unchanged.
-    func try_reserve(edit self, n: usize) -> Result[(), AllocErr] where K: Hashable {
-        if reserve_room(self.cap, self.used, n) { return Ok(()) }
-        match reserve_bits(self.bits, self.count, n) {
-            Some(b) => return self.try_rebuild(b)
+    func try_reserve(edit self, n: usize) -> Result[(), AllocErr] where K: Hashable { return self.t.try_reserve(n) }
+
+    // place is insert's slot write without its growth check: the table
+    // must have room (a free slot within its 3/4 load), which insert,
+    // try_insert and the rebuilds ensure.
+    func place(edit self, key: own K, val: own V) -> Option[V] where K: Hashable { return self.t.place(key, val) }
+
+    // try_rebuild makes a table of 2^bits slots, dropping tombstones, and
+    // moves the live entries into it in slot order; a table too small for
+    // them is made the smallest size that holds them, as rebuild makes it.
+    // On Err nothing has changed.
+    func try_rebuild(edit self, bits: u32) -> Result[(), AllocErr] where K: Hashable {
+        if bits == 0u32 || bits > 58u32 { trap() }
+        match reserve_bits(bits, self.t.count, 0usize) {
+            Some(b) => return self.t.try_rebuild(b)
             None => return Err(OutOfMemory)
         }
     }
 
-    // place is insert's slot write without its growth check: the table
-    // must have room (a free slot within its 3/4 load), which try_insert
-    // and try_rebuild ensure.
-    func place(edit self, key: own K, val: own V) -> Option[V] where K: Hashable {
-        i := self.slot(key)
-        if self.states.get(i) == 2u8 {
-            with slot := self.vals.at(i) { return replace(slot, Some(val)) }
-        }
-        fresh := self.states.get(i) == 0u8
-        if fresh { self.used = self.used + 1usize }
-        with st := self.states.at(i) { st = 2u8 }
-        with ks := self.keys.at(i) { ks = Some(key) }
-        with vs := self.vals.at(i) { vs = Some(val) }
-        self.count = self.count + 1usize
-        return None
-    }
-
-    // try_rebuild is rebuild over try_with_bits; the new table always has
-    // room for the live entries (a same-size rebuild happens only when
-    // count + 1 <= cap / 2, and a doubled table holds fewer than 3/8 of its
-    // slots), so they are moved with place. On Err nothing has changed.
-    func try_rebuild(edit self, bits: u32) -> Result[(), AllocErr] where K: Hashable {
-        bigger := try_with_bits[K, V](bits)?
-        i := 0usize
-        while i < self.cap {
-            if self.states.get(i) == 2u8 {
-                var k: Option[K] = None
-                var v: Option[V] = None
-                with ks := self.keys.at(i) { k = replace(ks, None) }
-                with vs := self.vals.at(i) { v = replace(vs, None) }
-                match move k {
-                    Some(kk) => { place_opt(bigger, kk, v) }
-                    None => { drop(v) }
-                }
-            }
-            i = i + 1usize
-        }
-        self = bigger
-        return Ok(())
-    }
-
     // remove takes the value stored under key out of the map, if any.
-    func remove(edit self, key: own K) -> Option[V] where K: Hashable {
-        i := self.slot(key)
-        if self.states.get(i) != 2u8 { return None }
-        with st := self.states.at(i) { st = 1u8 }
-        with ks := self.keys.at(i) { ks = None }
-        self.count = self.count - 1usize
-        with vs := self.vals.at(i) { return replace(vs, None) }
-    }
+    func remove(edit self, key: own K) -> Option[V] where K: Hashable { return self.t.remove(key) }
 
-    // rebuild makes a table of 2^bits slots, dropping tombstones: each live
-    // entry is taken out of its slots and inserted into the new map, which
-    // then replaces this one.
+    // rebuild makes a table of 2^bits slots, dropping tombstones, and
+    // moves the live entries into it in slot order; a table too small for
+    // them is made the smallest size that holds them. A table that cannot
+    // be allocated traps oom.
     func rebuild(edit self, bits: u32) where K: Hashable {
-        bigger := with_bits[K, V](bits)
-        i := 0usize
-        while i < self.cap {
-            if self.states.get(i) == 2u8 {
-                var k: Option[K] = None
-                var v: Option[V] = None
-                with ks := self.keys.at(i) { k = replace(ks, None) }
-                with vs := self.vals.at(i) { v = replace(vs, None) }
-                match move k {
-                    Some(kk) => { insert_opt(bigger, kk, v) }
-                    None => { drop(v) }
+        if bits == 0u32 || bits > 58u32 { trap() }
+        match reserve_bits(bits, self.t.count, 0usize) {
+            Some(b) => {
+                match self.t.try_rebuild(b) {
+                    Ok(u) => { }
+                    Err(e) => trap_kind(oom)
                 }
             }
-            i = i + 1usize
+            None => trap_kind(oom)
         }
-        self = bigger
     }
+
+    // A map destroys every value, from the last slot to the first, then
+    // every key, from the last slot to the first, and frees its table.
+    destructor(edit self) { self.t.release_map_order() }
 }
 
 // reserve_room reports whether a table of cap slots, used of them not
@@ -435,17 +252,23 @@ func reserve_bits(from: u32, count: usize, n: usize) -> Option[u32] {
     return None
 }
 
-// MapIn is Map over a caller's allocator (specs/map-in §2): the same
-// probe, growth rule and slot order, with its table in three allocations
-// from a (the states, cap bytes at alignment 1; the keys; the values),
-// a slot's key and value initialized exactly when its state is full
-// (2). It is fallible throughout: no method traps oom. A new map has no
-// table; the first insert or reserve makes one of 2^4 slots or more.
+// MapIn is the table over a caller's allocator (specs/map-in §2): three
+// allocations from a (the states, cap bytes at alignment 1; the keys; the
+// values), a slot's key and value initialized exactly when its state is
+// full (2); count is the number of live entries, used the number of slots
+// that are not empty. It is fallible throughout: no method traps oom. A
+// new map has no table; the first insert or reserve makes one of 2^4
+// slots or more.
 struct MapIn[K, V, A: Allocator] nocopy { states: RawPtr[u8]; keys: RawPtr[K]; vals: RawPtr[V]; cap: usize; count: usize; used: usize; bits: u32; a: A }
 
-// probe_in is Map.slot over raw buffers: in a table of 2^bits slots, the
-// slot holding key, or the first slot (deleted or empty) an insert of it
-// would use.
+// Table is the three buffers of a table that no map holds yet
+// (MapIn.try_table makes it, MapIn.adopt takes it). It is nocopy so that
+// only try_table makes one and adopt takes it once: its fields are this
+// module's own.
+struct Table[K, V] nocopy { states: RawPtr[u8]; keys: RawPtr[K]; vals: RawPtr[V] }
+
+// probe_in is the probe: in a table of 2^bits slots, the slot holding
+// key, or the first slot (deleted or empty) an insert of it would use.
 contract { requires "states and keys address 2^bits slots; a full slot holds an initialized key; some slot is empty" }
 func probe_in[K: Hashable](states: RawPtr[u8], keys: RawPtr[K], bits: u32, key: view[K]) -> usize {
     cap := 1usize << bits
@@ -491,20 +314,21 @@ impl[K, V, A: Allocator] MapIn[K, V, A] {
         unsafe { return ptr_offset(self.vals, truncate[isize](i)) }
     }
 
-    // slot is Map.slot; the table must exist.
+    // slot finds the slot holding key, or, when key is absent, the first
+    // slot (deleted or empty) an insert of it would use; the table must
+    // exist.
     contract { requires "cap > 0: the three buffers address cap slots and some slot is empty" }
     func slot(view self, key: view[K]) -> usize where K: Hashable {
         unsafe { return probe_in(self.states, self.keys, self.bits, key) }
     }
 
-    // try_rebuild makes a table of 2^bits slots through a and moves the
-    // live entries into it in slot order, dropping tombstones. The three
-    // allocations are requested states, keys, values; when one is refused
-    // the granted ones are freed in reverse order and the map is unchanged.
-    // Moving makes no allocation call; the old table is then freed.
-    contract { requires "the three buffers address cap slots allocated from a; full slots hold initialized entries" }
-    func try_rebuild(edit self, bits: u32) -> Result[(), AllocErr] where K: Hashable {
-        if bits > 58u32 { return Err(OutOfMemory) }
+    // try_table allocates a table of 2^bits slots through a, every slot
+    // empty. The three allocations are requested states, keys, values;
+    // when one is refused the granted ones are freed in reverse order. No
+    // key is hashed, so K need not be Hashable.
+    contract { ensures "Ok holds three buffers of 2^bits slots allocated from a, every state empty (0), which only adopt and free_table release" }
+    func try_table(edit self, bits: u32) -> Result[Table[K, V], AllocErr] {
+        if bits == 0u32 || bits > 58u32 { return Err(OutOfMemory) }
         n := 1usize << bits
         var kb: usize = 0usize
         var vb: usize = 0usize
@@ -544,28 +368,46 @@ impl[K, V, A: Allocator] MapIn[K, V, A] {
                 ptr_store(ptr_offset(ns, truncate[isize](i)), 0u8)
                 i = i + 1usize
             }
-            keys := ptr_cast[K, u8](nk)
-            vals := ptr_cast[V, u8](nv)
+            return Ok(Table[K, V] { states: ns, keys: ptr_cast[K, u8](nk), vals: ptr_cast[V, u8](nv) })
+        }
+    }
+
+    // adopt makes tab, of 2^bits slots, the map's table: the map must hold
+    // no table (a new or released map, or one whose table was just freed
+    // with its entries moved into tab).
+    contract { requires "tab is try_table(bits) of this map's allocator and holds the map's count entries, every other slot empty; the map's own buffers are freed or were never allocated" }
+    func adopt(edit self, tab: own Table[K, V], bits: u32) {
+        self.states = tab.states
+        self.keys = tab.keys
+        self.vals = tab.vals
+        self.cap = 1usize << bits
+        self.bits = bits
+        self.used = self.count
+    }
+
+    // try_rebuild makes a table of 2^bits slots through a (try_table) and
+    // moves the live entries into it in slot order, dropping tombstones;
+    // when an allocation is refused the map is unchanged. Moving makes no
+    // allocation call; the old table is then freed.
+    contract { requires "the three buffers address cap slots allocated from a; full slots hold initialized entries; 2^bits slots leave one empty beside the live entries" }
+    func try_rebuild(edit self, bits: u32) -> Result[(), AllocErr] where K: Hashable {
+        tab := self.try_table(bits)?
+        unsafe {
             j := 0usize
             while j < self.cap {
                 if self.state(j) == 2u8 {
                     k := ptr_take(self.key_ptr(j))
                     v := ptr_take(self.val_ptr(j))
-                    at := probe_in(ns, keys, bits, k)
-                    ptr_store(ptr_offset(ns, truncate[isize](at)), 2u8)
-                    ptr_store(ptr_offset(keys, truncate[isize](at)), k)
-                    ptr_store(ptr_offset(vals, truncate[isize](at)), v)
+                    at := probe_in(tab.states, tab.keys, bits, k)
+                    ptr_store(ptr_offset(tab.states, truncate[isize](at)), 2u8)
+                    ptr_store(ptr_offset(tab.keys, truncate[isize](at)), k)
+                    ptr_store(ptr_offset(tab.vals, truncate[isize](at)), v)
                 }
                 j = j + 1usize
             }
-            self.free_table()
-            self.states = ns
-            self.keys = keys
-            self.vals = vals
-            self.cap = n
-            self.bits = bits
-            self.used = self.count
         }
+        self.free_table()
+        self.adopt(move tab, bits)
         return Ok(())
     }
 
@@ -591,9 +433,13 @@ impl[K, V, A: Allocator] MapIn[K, V, A] {
         }
     }
 
-    // try_reserve is Map.try_reserve (specs/map-in §1); a map with no
-    // table gets the smallest table of 2^4 slots or more with room, and
-    // reserving nothing makes no table.
+    // try_reserve makes room for n absent inserts (specs/map-in §1): when
+    // the table lacks it, the table is rebuilt at the smallest size that
+    // has it, at least the present one, so the next n absent inserts make
+    // no allocation call and never rebuild. A map with no table gets the
+    // smallest table of 2^4 slots or more with room, and reserving nothing
+    // makes no table. A request past usize or past 2^58 slots, or a
+    // refused allocation, is Err, and the map is unchanged.
     func try_reserve(edit self, n: usize) -> Result[(), AllocErr] where K: Hashable {
         if n == 0usize { return Ok(()) }
         if self.cap > 0usize && reserve_room(self.cap, self.used, n) { return Ok(()) }
@@ -605,16 +451,26 @@ impl[K, V, A: Allocator] MapIn[K, V, A] {
         }
     }
 
-    // try_insert is Map.try_insert: when the table must grow (or does not
-    // exist yet) and the larger one cannot be allocated, key and then val
-    // are destroyed and the map is unchanged.
+    // grow_bits is the growth rule: the size, as a power of two, of the
+    // table an insert must make before it places an entry, or 0 when the
+    // table has room. A map with no table needs one of 2^4 slots; a table
+    // whose slots are running out (one more would leave a quarter or less
+    // empty) is doubled when the live entries need it, and otherwise
+    // rebuilt at the same size to drop the tombstones.
+    func grow_bits(view self) -> u32 {
+        if self.cap == 0usize { return 4u32 }
+        if (self.used + 1usize) * 4usize < self.cap * 3usize { return 0u32 }
+        if (self.count + 1usize) * 2usize > self.cap { return self.bits + 1u32 }
+        return self.bits
+    }
+
+    // try_insert stores val under key and returns the value it replaced,
+    // if any: when the table must grow (or does not exist yet) and the
+    // larger one cannot be allocated, key and then val are destroyed and
+    // the map is unchanged.
     func try_insert(edit self, key: own K, val: own V) -> Result[Option[V], AllocErr] where K: Hashable {
-        if self.cap == 0usize || (self.used + 1usize) * 4usize >= self.cap * 3usize {
-            var bits: u32 = 4u32
-            if self.cap > 0usize {
-                bits = self.bits
-                if (self.count + 1usize) * 2usize > self.cap { bits = bits + 1u32 }
-            }
+        bits := self.grow_bits()
+        if bits != 0u32 {
             match self.try_rebuild(bits) {
                 Ok(u) => { }
                 Err(e) => {
@@ -627,7 +483,8 @@ impl[K, V, A: Allocator] MapIn[K, V, A] {
         return Ok(self.place(key, val))
     }
 
-    // place is Map.place: the table must have room.
+    // place is the slot write of an insert, without its growth check: the
+    // table must have room.
     contract { requires "cap > 0 and the table has a free slot within its 3/4 load" }
     func place(edit self, key: own K, val: own V) -> Option[V] where K: Hashable {
         i := self.slot(key)
@@ -646,8 +503,8 @@ impl[K, V, A: Allocator] MapIn[K, V, A] {
         return None
     }
 
-    // The lookups are Map's: by value (the key is destroyed after the
-    // lookup), get and at trapping on an absent key.
+    // The lookups take the key by value (it is destroyed after the
+    // lookup); get and at trap explicit on an absent key.
     func contains(view self, key: own K) -> bool where K: Hashable {
         if self.cap == 0usize { return false }
         return self.state(self.slot(key)) == 2u8
@@ -666,16 +523,18 @@ impl[K, V, A: Allocator] MapIn[K, V, A] {
         if self.state(i) != 2u8 { trap() }
         unsafe { return ptr_edit(self.val_ptr(i)) }
     }
-    // find is Map.find: a slot stays valid until the next try_insert,
-    // remove, try_reserve or release.
+    // find is a lookup that borrows its key: the slot holding key, or
+    // None. A slot stays valid until the next try_insert, remove,
+    // try_reserve or release.
     func find(view self, key: view[K]) -> Option[usize] where K: Hashable {
         if self.cap == 0usize { return None }
         i := self.slot(key)
         if self.state(i) == 2u8 { return Some(i) }
         return None
     }
-    // key_at, value_at and value_at_mut are Map's: a slot past the table
-    // traps bounds, a slot that holds no entry traps explicit.
+    // key_at, value_at and value_at_mut view or edit the entry in a live
+    // slot: a slot past the table traps bounds, a slot that holds no entry
+    // traps explicit.
     func check_slot(view self, slot: usize) {
         if slot >= self.cap { trap_kind(bounds) }
         if self.state(slot) != 2u8 { trap() }
@@ -696,7 +555,8 @@ impl[K, V, A: Allocator] MapIn[K, V, A] {
         unsafe { return ptr_edit(self.val_ptr(slot)) }
     }
 
-    // remove is Map.remove: the key is destroyed, the value returned.
+    // remove takes the entry under key out of the map, leaving a
+    // tombstone: its key is destroyed, its value returned.
     contract { requires "a full slot holds an initialized entry" }
     func remove(edit self, key: own K) -> Option[V] where K: Hashable {
         if self.cap == 0usize { return None }
@@ -711,7 +571,9 @@ impl[K, V, A: Allocator] MapIn[K, V, A] {
         }
     }
 
-    // The cursor protocol and each/each_mut are Map's, in slot order.
+    // The cursor protocol (spec/types.md §7), each and each_mut visit the
+    // entries in slot order; a position is a slot. live_from is the first
+    // live slot at or after from, or the capacity.
     func live_from(view self, from: usize) -> usize {
         i := from
         while i < self.cap && self.state(i) != 2u8 { i = i + 1usize }
@@ -757,23 +619,27 @@ impl[K, V, A: Allocator] MapIn[K, V, A] {
         }
     }
 
-    // release destroys every live entry, key then value, in slot order,
-    // and frees the table, leaving an empty map with no table that still
-    // holds a.
-    contract { requires "the three buffers address cap slots allocated from a; full slots hold initialized entries" }
-    func release(edit self) {
-        i := 0usize
-        while i < self.cap {
-            if self.state(i) == 2u8 {
-                unsafe {
-                    k := ptr_take(self.key_ptr(i))
-                    drop(k)
-                    v := ptr_take(self.val_ptr(i))
-                    drop(v)
-                }
+    // destroy_slot destroys the key, the value or both (key then value)
+    // of the entry in a full slot. The slot stays marked full, so the
+    // caller destroys each part once and then frees the table.
+    contract { requires "i < cap and slot i is full; it holds the parts named, initialized, and nothing reads them again before drop_table" }
+    func destroy_slot(edit self, i: usize, key: bool, val: bool) {
+        unsafe {
+            if key {
+                k := ptr_take(self.key_ptr(i))
+                drop(k)
             }
-            i = i + 1usize
+            if val {
+                v := ptr_take(self.val_ptr(i))
+                drop(v)
+            }
         }
+    }
+
+    // drop_table frees the table, whose entries are gone, leaving an empty
+    // map with no table that still holds a.
+    contract { requires "the three buffers address cap slots allocated from a; no slot holds a live entry" }
+    func drop_table(edit self) {
         self.free_table()
         self.states = zero()
         self.keys = zero()
@@ -783,42 +649,56 @@ impl[K, V, A: Allocator] MapIn[K, V, A] {
         self.used = 0usize
         self.bits = 0u32
     }
+
+    // release destroys every live entry, key then value, in slot order,
+    // and frees the table, leaving an empty map with no table that still
+    // holds a.
+    contract { requires "the three buffers address cap slots allocated from a; full slots hold initialized entries" }
+    func release(edit self) {
+        i := 0usize
+        while i < self.cap {
+            if self.state(i) == 2u8 { self.destroy_slot(i, true, true) }
+            i = i + 1usize
+        }
+        self.drop_table()
+    }
+
+    // release_map_order is release in the order a Map destroys its
+    // entries, that of the value vector and the key vector a Map once
+    // kept: every value from the last slot to the first, then every key
+    // from the last slot to the first.
+    contract { requires "the three buffers address cap slots allocated from a; full slots hold initialized entries" }
+    func release_map_order(edit self) {
+        i := self.cap
+        while i > 0usize {
+            i = i - 1usize
+            if self.state(i) == 2u8 { self.destroy_slot(i, false, true) }
+        }
+        i = self.cap
+        while i > 0usize {
+            i = i - 1usize
+            if self.state(i) == 2u8 { self.destroy_slot(i, true, false) }
+        }
+        self.drop_table()
+    }
     destructor(edit self) { self.release() }
 }
 
 // find_text finds the slot of a String key by its bytes, without building
 // a String: the hash and the equality String's Hashable uses.
 func find_text[V](m: view[Map[str.String, V]], key: view[]u8) -> Option[usize] {
-    mask := m.cap - 1usize
-    i := usize(str.hash(key) >> (64u32 - m.bits))
+    cap := m.t.cap
+    mask := cap - 1usize
+    i := usize(str.hash(key) >> (64u32 - m.t.bits))
     probes := 0usize
-    while probes < m.cap {
-        st := m.states.get(i)
+    while probes < cap {
+        st := m.t.state(i)
         if st == 0u8 { return None }
         if st == 2u8 {
-            match m.keys.get(i) {
-                Some(k) => { if k.equals(key) { return Some(i) } }
-                None => { }
-            }
+            if m.t.key_at(i).equals(key) { return Some(i) }
         }
         i = (i + 1usize) & mask
         probes = probes + 1usize
     }
     return None
-}
-
-// place_opt places kk with the value in v, if any (try_rebuild's helper).
-func place_opt[K: Hashable, V](m: edit[Map[K, V]], kk: own K, v: own Option[V]) {
-    match move v {
-        Some(vv) => { m.place(kk, vv) }
-        None => { drop(kk) }
-    }
-}
-
-// insert_opt inserts kk with the value in v, if any (grow's helper).
-func insert_opt[K: Hashable, V](m: edit[Map[K, V]], kk: own K, v: own Option[V]) {
-    match move v {
-        Some(vv) => { m.insert(kk, vv) }
-        None => { drop(kk) }
-    }
 }

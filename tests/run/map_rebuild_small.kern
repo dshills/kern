@@ -1,0 +1,40 @@
+//! phase: 6
+//! expect: output map_rebuild_small
+// A rebuild asked for a table too small for the live entries makes the
+// smallest table that holds them, in both forms (rebuild, try_rebuild), and
+// every entry is still found afterwards; a rebuild at a size with room
+// keeps that size.
+module main
+import "std/map"
+
+func found(m: view[map.Map[u64, u64]], n: u64) -> u64 {
+    var hits: u64 = 0u64
+    for k in 0u64..n {
+        if m.contains(k) && m.get(k) == k * 3u64 { hits = hits + 1u64 }
+    }
+    return hits
+}
+func line(label: view[]u8, v: u64) { print_str(label); print_str(" "); print_u64(v); println() }
+
+func main() -> i32 {
+    m := map.Map[u64, u64].new()
+    for k in 0u64..40u64 { m.insert(k, k * 3u64) }
+    match m.try_rebuild(1u32) {
+        Ok(u) => { line("try_rebuild small", found(m, 40u64)) }
+        Err(e) => { print_str("refused"); println() }
+    }
+    line("entries", u64(m.len()))
+    m.rebuild(2u32)
+    line("rebuild small", found(m, 40u64))
+    match m.try_rebuild(10u32) {
+        Ok(u) => { line("try_rebuild large", found(m, 40u64)) }
+        Err(e) => { print_str("refused"); println() }
+    }
+    for k in 0u64..30u64 { m.remove(k) }
+    match m.try_rebuild(1u32) {
+        Ok(u) => { line("after removals", found(m, 40u64)) }
+        Err(e) => { print_str("refused"); println() }
+    }
+    line("entries", u64(m.len()))
+    return 0i32
+}

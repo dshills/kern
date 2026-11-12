@@ -1,0 +1,6 @@
+try_rebuild small 40
+entries 40
+rebuild small 40
+try_rebuild large 40
+after removals 10
+entries 10

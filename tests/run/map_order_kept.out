@@ -1,0 +1,35 @@
+u64 keys from two slots
+  after 6 steps: len 5 slots 8 order 11216294386403017906
+  after 61 steps: len 47 slots 128 order 2083496658959044508
+  after 701 steps: len 216 slots 512 order 15292585878375063644
+  len 267 slots 1024 order 357223687890982154
+  first entries: 1:233=5938 5:89=5883 7:322=5976 10:178=5474 13:34=5893 15:267=5936
+  after reserve 1000: slots 2048 order 357223687890982154
+  find 0: absent
+  find 97: slot 1944
+  find 194: absent
+  find 291: slot 1736
+String keys from two slots
+  len 97 slots 256 order 14450018962018394388
+  find_text name-0: slot 0 value 2962
+  find_text name-31: slot 204 value 2894
+  find_text name-62: slot 194 value 2933
+  find_text name-93: absent
+  find_text name-124: absent
+what is destroyed, and when
+  seven inserts:
+  slots: 0 1 2 6 3 4 5
+  insert over 2: k2 v2
+  remove 4: k4 k4 v4
+  remove 9, absent: k9
+  contains 5: k5
+  get 6: k6 (6)
+  ten more inserts, the table doubling:
+  slots: 0 1 2 15 16 17 6 12 13 14 3 5 18 19 10 11
+  the map destroyed: v11 v10 v19 v18 v5 v3 v14 v13 v12 v6 v17 v16 v15 v20 v1 v0 k11 k10 k19 k18 k5 k3 k14 k13 k12 k6 k17 k16 k15 k2 k1 k0
+a key type with no hash
+  len 0 slots 16 visited 0
+values of no bytes
+  len 99 keys sum 14844 has 9 true has 6 false
+a map moved to a thread
+  sum 41650

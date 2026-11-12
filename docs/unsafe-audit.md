@@ -154,24 +154,26 @@ are met by the C runtime (`runtime/hosted/src/kern_rt.c`) and the interpreter:
 | `unsafe assert Interior for Mutex` | `lock` is runtime-exclusive escalation (Rule 5.3.6): one holder at a time, recursive acquisition traps `explicit` (natively the runtime's own parking lock, whose owner word only the holder writes and which a thread finding its own id in traps before any wait, `docs/reports/perf-gaps.md`; the owner thread identifier in the interpreter) | `tests/concurrency/mutex_counter.kern`, `tests/concurrency/mutex_parked.kern`, `tests/trap/mutex_recursive.kern`, `tests/native_test.go` (`TestNativeStackTrapUnderMutexWithHandler`) |
 | `unsafe assert Interior for Shared` | clones and drops update the count atomically (compare-exchange loop natively); overflow traps `overflow` | `tests/trap/overflow.kern` family (`testing.seed_shared_count`), `tests/concurrency/shared_handoff.kern` |
 
-`std/map` (`std/map.kern`) has two unsafe blocks in `Map`, both for the
-cursor protocol's two-name `for` (spec/types.md §7):
+`std/map` (`std/map.kern`): `Map[K, V]` is a `MapIn` over the system
+allocator (`docs/reports/perf-review.md` §2.1) and has two unsafe blocks,
+both for the cursor protocol's two-name `for` (spec/types.md §7):
 
 | Function | Blocks | Raw operations | Contract |
 |---|---|---|---|
-| `Map.cursor_entry` | 1 | `ptr_cast`, `ptr_offset`, `ptr_view2`, `align_of` | invariant "the position is checked live, so both slots hold Some; keys and vals are distinct vectors, so the accesses are disjoint" |
-| `Map.cursor_entry_mut` | 1 | `ptr_cast`, `ptr_offset`, `ptr_view_edit`, `align_of` | the same invariant |
+| `Map.cursor_entry` | 1 | `MapIn.cursor_entry` | invariant "the accesses are MapIn.cursor_entry's: the position is checked live, and the key and the value are in distinct buffers, so they are disjoint" |
+| `Map.cursor_entry_mut` | 1 | `MapIn.cursor_entry_mut` | invariant "the accesses are MapIn.cursor_entry_mut's: the position is checked live, and the key and the value are in distinct buffers, so they are disjoint" |
 
-Each reads its slots through `Vec.ptr_at` (bounds-checked) at the payload
-offset of `Some`, which is `align_of` of the payload by the §4.1 union
-layout (the tag at offset 0, the payload at its alignment); `Option[T]`
-has no other variant with a payload, so the payload alignment is `T`'s.
+Neither performs a raw operation: each hands on the two accesses `MapIn`'s
+function of the same name returns, and is written inside `unsafe` because
+a function returning several accesses must be (Rule 5.3.4). Every other
+`Map` method is safe code over `MapIn`'s methods.
 Exercised by `tests/run/for_cursor.kern` (Copy and `String` keys and
-values, an edit of each value, tombstones, an empty map) in both engines.
+values, an edit of each value, tombstones, an empty map) and
+`tests/run/map_order_kept.kern` in both engines.
 
 `map.MapIn` (`specs/map-in`) keeps its table in three buffers from its
 allocator, so its slot accessors, rebuild and release are raw-memory code
-(21 unsafe blocks in `std/map.kern` in all, counting the two above):
+(22 unsafe blocks in `std/map.kern` in all, counting the two above):
 
 | Function | Blocks | Raw operations | Contract |
 |---|---|---|---|
@@ -180,7 +182,8 @@ allocator, so its slot accessors, rebuild and release are raw-memory code
 | `MapIn.key_ptr` | 1 | `ptr_offset` | requires "i < cap; keys addresses cap keys" |
 | `MapIn.val_ptr` | 1 | `ptr_offset` | requires "i < cap; vals addresses cap values" |
 | `MapIn.slot` | 1 | `map.probe_in` | requires "cap > 0: the three buffers address cap slots and some slot is empty" |
-| `MapIn.try_rebuild` | 1 | `ptr_cast`, `ptr_offset`, `ptr_store`, `ptr_take`, `self.a.alloc`, `self.a.free` | requires "the three buffers address cap slots allocated from a; full slots hold initialized entries" |
+| `MapIn.try_table` | 1 | `ptr_cast`, `ptr_offset`, `ptr_store`, `self.a.alloc`, `self.a.free` | ensures "Ok holds three buffers of 2^bits slots allocated from a, every state empty (0), which only adopt and free_table release" |
+| `MapIn.try_rebuild` | 1 | `ptr_offset`, `ptr_store`, `ptr_take`, `map.probe_in` | requires "the three buffers address cap slots allocated from a; full slots hold initialized entries; 2^bits slots leave one empty beside the live entries" |
 | `MapIn.free_table` | 1 | `ptr_cast`, `self.a.free` | requires "the three buffers address cap slots allocated from a; no slot holds a live entry the caller still needs" |
 | `MapIn.place` | 1 | `ptr_offset`, `ptr_store`, `ptr_take` | requires "cap > 0 and the table has a free slot within its 3/4 load" |
 | `MapIn.get` | 1 | `ptr_view` | requires "a full slot holds an initialized value" |
@@ -193,11 +196,22 @@ allocator, so its slot accessors, rebuild and release are raw-memory code
 | `MapIn.cursor_entry_mut` | 1 | `ptr_view_edit` | invariant "the position is checked live, so the key and the value are initialized; they are in distinct buffers, so the accesses are disjoint" |
 | `MapIn.each` | 1 | `ptr_view2` | requires "full slots hold initialized entries" |
 | `MapIn.each_mut` | 1 | `ptr_view_edit` | requires "full slots hold initialized entries" |
-| `MapIn.release` | 1 | `ptr_take` | requires "the three buffers address cap slots allocated from a; full slots hold initialized entries" |
+| `MapIn.destroy_slot` | 1 | `ptr_take` | requires "i < cap and slot i is full; it holds the parts named, initialized, and nothing reads them again before drop_table" |
 
+`MapIn.try_table` is the allocation half of what `try_rebuild` was, apart
+so that `Map`'s `with_bits` can make a first table for a key type that is
+not `Hashable`; `MapIn.adopt` installs its result, and has no unsafe block
+but a contract (the map holds no table). The result is a `map.Table`,
+which is nocopy: its fields are the module's own, so only `try_table`
+makes one, and `adopt` takes it by move. `MapIn.destroy_slot` is the block
+`release` had, so that `release` (key then value, first slot to last) and
+`release_map_order` (`Map`'s destructor: every value from the last slot to
+the first, then every key) share it; `drop_table` then frees the table.
 Exercised by `tests/run/{map_in,map_in_diff}.kern` and
 `tests/freestanding/map_in.kern`, over budget allocators that trap on a
-`free` naming no live allocation, in both engines.
+`free` naming no live allocation, and by every `Map` fixture
+(`tests/run/{std_map,std_map_borrow,map_try,map_try_oom,map_reserve,map_order_kept,for_cursor}.kern`),
+in both engines.
 
 ## The runtime work's additions (`specs/runtime`, 2026-11-09)
 
