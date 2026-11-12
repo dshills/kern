@@ -147,7 +147,7 @@ func TestFastIntrinsicsRegistered(t *testing.T) {
 			}
 		}
 	}
-	if len(fastIntrinsics) != 12 {
-		t.Errorf("%d fast intrinsics, want 12", len(fastIntrinsics))
+	if len(fastIntrinsics) != 14 {
+		t.Errorf("%d fast intrinsics, want 14", len(fastIntrinsics))
 	}
 }

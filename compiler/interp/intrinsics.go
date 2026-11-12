@@ -971,6 +971,8 @@ var fastIntrinsics = map[string]fastIntrinsic{
 	"ptr_edit": func(it *Interp, a []Value, c callCtx) Value {
 		return &Access{Ref: rawRef{it: it, addr: u64(a[0]), t: c.targ(0)}, Edit: true}
 	},
+	"load_le": func(it *Interp, a []Value, c callCtx) Value { return it.loadWide(a, c, false) },
+	"load_be": func(it *Interp, a []Value, c callCtx) Value { return it.loadWide(a, c, true) },
 	"size_of": func(it *Interp, a []Value, c callCtx) Value {
 		return mkInt(tyUsize, uint64(layout.Of(c.targ(0)).Size))
 	},
@@ -1232,7 +1234,26 @@ func (it *Interp) loadWide(a []Value, c callCtx, be bool) Value {
 	seq := byteSeq(a[0].(*Access))
 	at := int(u64(a[1]))
 	n := layout.Of(t).Size
-	buf := make([]byte, n)
+	var tmp [16]byte
+	buf := tmp[:]
+	if n > len(buf) {
+		buf = make([]byte, n)
+	}
+	buf = buf[:n]
+	if seq.raw != nil {
+		// bytes in raw memory are read where they lie, as one span; memory
+		// that is not there is left to the loop below, which traps as a
+		// read of each byte does
+		if b, _ := it.rawSpan(seq.raw.base+uint64(seq.lo+at), uint64(n)); b != nil {
+			if !be {
+				return it.decode(b, t)
+			}
+			for i := range n {
+				buf[n-1-i] = b[i]
+			}
+			return it.decode(buf, t)
+		}
+	}
 	for i := range n {
 		b := byte(u64(seq.at(at + i).get()))
 		if be {
