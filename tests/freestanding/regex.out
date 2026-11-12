@@ -1,14 +1,14 @@
 /(ab|c)+d/
-  in "xabcabd!" from 0 => 1-7, is_match true
-  in "xabcabd!" from 2 => 3-7, is_match true
-  in "abab" from 0 => none, is_match false
+  in "xabcabd!" from 0 => 1-7, is_match true, captures [1-7 4-6 none]
+  in "xabcabd!" from 2 => 3-7, is_match true, captures [3-7 4-6 none]
+  in "abab" from 0 => none, is_match false, captures false
 /[[:digit:]]{2,3}$/
-  in "a1 22 4567" from 0 => 7-10, is_match true
-  in "12" from 0 => 0-2, is_match true
-  in "1" from 0 => none, is_match false
+  in "a1 22 4567" from 0 => 7-10, is_match true, captures [7-10 none none]
+  in "12" from 0 => 0-2, is_match true, captures [0-2 none none]
+  in "1" from 0 => none, is_match false, captures false
 /^k.rn|bare/ ignore_case
-  in "On BARE metal" from 0 => 3-7, is_match true
-  in "Kern" from 0 => 0-4, is_match true
-  in "kern kern" from 1 => none, is_match true
+  in "On BARE metal" from 0 => 3-7, is_match true, captures [3-7 none none]
+  in "Kern" from 0 => 0-4, is_match true, captures [0-4 none none]
+  in "kern kern" from 1 => none, is_match true, captures false
 /a{2,1}/ refused at 1
 {"halt":{"code":0}}

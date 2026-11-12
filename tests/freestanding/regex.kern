@@ -4,7 +4,8 @@
 // std/regex on bare metal (specs/std-regex/SPEC.md, T7 and R20): the
 // module calls no runtime entry of its own, so compiling a pattern and
 // searching need only the allocator a Vec needs. Three patterns, each
-// compiled and searched; a hosted run of this file prints the same lines.
+// compiled and searched with find, is_match and captures; a hosted run of
+// this file prints the same lines.
 module fs
 import "std/regex"
 
@@ -24,6 +25,25 @@ func seek(re: view[regex.Regex], sc: edit[regex.Scratch], text: view[]u8, from: 
     }
     print_str(", is_match ")
     print_bool(re.is_match(sc, text))
+    print_str(", captures ")
+    var g: [3]Option[regex.Span] = zero()
+    if re.captures(sc, text, from, g) {
+        print_str("[")
+        for i in 0usize..3usize {
+            if i > 0usize { print_str(" ") }
+            match g[i] {
+                Some(m) => {
+                    print_u64(u64(m.start))
+                    print_str("-")
+                    print_u64(u64(m.end))
+                }
+                None => print_str("none")
+            }
+        }
+        print_str("]")
+    } else {
+        print_str("false")
+    }
     println()
 }
 

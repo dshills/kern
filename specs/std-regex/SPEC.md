@@ -85,7 +85,9 @@ point, and `specs/fallible-alloc/SPEC.md` (the test hook
   Both are sequences of bytes; the module knows no encoding (§0).
 - *Match*: a pair of offsets (*s*, *e*) into a text, 0 ≤ *s* ≤ *e* ≤
   `len(text)`, such that the bytes `text[s:e]` are in the language of the
-  pattern under R6 to R10, with the anchors of R9 holding at *s* and *e*.
+  pattern under R6 to R10, each anchor of the pattern holding (R9) at
+  the offset of the text where the pattern places it, which is *s*,
+  *e* or anywhere between (`(a$)\n(^b)` with `newline` matches `a\nb`).
   A match is *empty* when *s* = *e*.
 - *The match from f* (0 ≤ *f* ≤ `len(text)`): among the matches with
   *s* ≥ *f*, the one with the least *s*, and among those the one with the
@@ -99,8 +101,8 @@ point, and `specs/fallible-alloc/SPEC.md` (the test hook
 - *POSIX*: IEEE Std 1003.1, whose "extended regular expressions" §2
   follows. *ASCII*: the 128 characters of ISO 646, one byte each.
   *UTF-8*: the byte encoding of Unicode text.
-- *The oracle*: `regexp.CompilePOSIX` of the Go toolchain the repository
-  builds with (`go.mod`: Go 1.25), used through
+- *The oracle*: `regexp.CompilePOSIX` of the Go toolchain that builds
+  the repository (`go.mod` asks for Go 1.25 or later), used through
   `FindAllSubmatchIndex(text, -1)`. It reads `.`, negated bracket
   expressions, `^` and `$` as this module does with `newline` set (R6,
   R8, R9), and it enumerates matches as a cursor does (R14).
@@ -455,7 +457,11 @@ differently (among them: a bracket expression with no member matching the
 empty string; `\x` with no digit as the byte 0; octal escapes; a `{` kept
 literal where awk keeps it; `split`'s and `FS`'s own rules) stays in
 `kawk`, as a translation of the awk pattern before it is compiled or as
-code around the calls. `kawk.out` is unchanged.
+code around the calls. `kawk.out` is unchanged. One limit of the
+module's becomes `kawk`'s: groups that the rewriting cannot remove nest
+200 deep at most (R4), where `kawk`'s own reader took 201 and refused
+202; the system awk takes both, so `kawk` already differed from it
+there, and no case of the corpus nests so deep.
 
 **R22. The corpus.** The comparison programs written with `kawk` (548 at
 commit 146f4df, and the seven added on 2026-11-12 for bracket and `\x`

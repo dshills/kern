@@ -1,0 +1,579 @@
+//! phase: 6
+//! expect: output regex_groups
+// std/regex, groups and cursors
+// (specs/std-regex/SPEC.md, T3): captures with a groups sequence shorter
+// than, equal to and longer than groups() + 1, a call that returns false,
+// and from at and above the text's length (R12); which span each group has,
+// for groups that take no part, nested and repeated groups, and patterns
+// whose leftmost-longest match can be made in several ways (R13); groups
+// that hold an anchor, in the middle of a text, with and without the
+// newline option (R9); and cursors run to their end and asked again, by next
+// and by next_captures (R14). One Scratch
+// serves every call of the file. The expected output was written from the
+// specification before the functions existed, by someone who had not seen
+// them; the last section holds the cases the specification leaves open,
+// each with what the module gives.
+module t
+import "std/regex"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+func digit(digits: view[]u8, d: u8) { print_str(digits[usize(d):usize(d) + 1usize]) }
+func hex(d: u8) { digit("0123456789abcdef", d) }
+
+// bytes prints a sequence of bytes so that a text file shows each of them:
+// a backslash as two, a double quote after a backslash, the bytes 10 and 9
+// as \n and \t, any other byte from 32 to 126 as itself, and every other
+// byte as \x and two hexadecimal digits. It is the form of a string
+// literal of this file.
+func bytes(s: view[]u8) {
+    var i: usize = 0usize
+    while i < len(s) {
+        b := s[i]
+        if b == 92u8 {
+            print_str("\\\\")
+        } else if b == 34u8 {
+            print_str("\\\"")
+        } else if b == 10u8 {
+            print_str("\\n")
+        } else if b == 9u8 {
+            print_str("\\t")
+        } else if b >= 32u8 && b <= 126u8 {
+            print_str(s[i:i + 1usize])
+        } else {
+            print_str("\\x")
+            hex(b >> 4u32)
+            hex(b & 15u8)
+        }
+        i = i + 1usize
+    }
+}
+
+func quoted(s: view[]u8) {
+    print_str("\"")
+    bytes(s)
+    print_str("\"")
+}
+
+// head prints the beginning of a line: the pattern between slashes, the
+// word newline when the option is set, and the text between quotes.
+func head(p: view[]u8, o: regex.Options, text: view[]u8) {
+    print_str("/")
+    bytes(p)
+    print_str("/ ")
+    if o.newline { print_str("newline ") }
+    quoted(text)
+}
+
+func span(s: regex.Span) {
+    print_str("(")
+    print_u64(u64(s.start))
+    print_str(",")
+    print_u64(u64(s.end))
+    print_str(")")
+}
+
+// answer prints what next returned.
+func answer(o: Option[regex.Span]) {
+    match o {
+        Some(s) => { span(s) }
+        None => { print_str("None") }
+    }
+}
+
+// slot prints one element of a groups sequence: a span, or - for None.
+func slot(o: Option[regex.Span]) {
+    match o {
+        Some(s) => { span(s) }
+        None => { print_str("-") }
+    }
+}
+
+// slots prints the elements from lo up to hi, a space before each.
+func slots(g: view[]Option[regex.Span], lo: usize, hi: usize) {
+    var i: usize = lo
+    while i < hi {
+        print_str(" ")
+        slot(g[i])
+        i = i + 1usize
+    }
+}
+
+// mark empties g and gives it n elements, element i Some of the span
+// (900 + i, 900 + i), which no search of this file can produce: an
+// element still holding it after a call was not written by the call, and
+// an element that is None was.
+func mark(g: edit[Vec[Option[regex.Span]]], n: usize) {
+    g.clear()
+    var i: usize = 0usize
+    while i < n {
+        g.push(Some(regex.Span { start: 900usize + i, end: 900usize + i }))
+        i = i + 1usize
+    }
+}
+
+func with_newline() -> regex.Options {
+    var o: regex.Options = regex.options()
+    o.newline = true
+    return o
+}
+
+// cap_o calls captures with the first n of total marked elements and
+// prints the result and the n elements; when total is above n, the
+// elements beyond the sequence that was passed follow a bar.
+func cap_o(sc: edit[regex.Scratch], p: view[]u8, o: regex.Options, text: view[]u8, from: usize, n: usize, total: usize) {
+    head(p, o, text)
+    print_str(" from ")
+    print_u64(u64(from))
+    print_str(", slots ")
+    print_u64(u64(n))
+    if total > n {
+        print_str(" of ")
+        print_u64(u64(total))
+    }
+    print_str(" => ")
+    g := Vec[Option[regex.Span]].new()
+    mark(g, total)
+    with r := regex.compile_with(p, o) {
+        match r {
+            Ok(re) => {
+                var found: bool = false
+                with e := g.as_edit() { found = re.captures(sc, text, from, e[0usize:n]) }
+                print_bool(found)
+                slots(g.as_view(), 0usize, n)
+                if total > n {
+                    print_str(" |")
+                    slots(g.as_view(), n, total)
+                }
+            }
+            Err(e) => { print_str("does not compile") }
+        }
+    }
+    println()
+}
+func cap(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, from: usize, n: usize) {
+    cap_o(sc, p, regex.options(), text, from, n, n)
+}
+func cap_nl(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, from: usize, n: usize) {
+    cap_o(sc, p, with_newline(), text, from, n, n)
+}
+func cap_part(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, from: usize, n: usize, total: usize) {
+    cap_o(sc, p, regex.options(), text, from, n, total)
+}
+
+// each_o runs a new cursor to its end with next and prints every match,
+// then asks the finished cursor twice more. A cursor yields at most
+// len(text) + 1 matches; one that yields more is cut short.
+func each_o(sc: edit[regex.Scratch], p: view[]u8, o: regex.Options, text: view[]u8) {
+    head(p, o, text)
+    print_str(" next =>")
+    with r := regex.compile_with(p, o) {
+        match r {
+            Ok(re) => {
+                var cur: regex.Cursor = regex.cursor()
+                var count: usize = 0usize
+                var more: bool = true
+                while more {
+                    match re.next(sc, text, cur) {
+                        Some(s) => {
+                            print_str(" ")
+                            span(s)
+                            count = count + 1usize
+                            if count > len(text) + 1usize {
+                                print_str(" and more")
+                                more = false
+                            }
+                        }
+                        None => { more = false }
+                    }
+                }
+                print_str(" then")
+                var i: usize = 0usize
+                while i < 2usize {
+                    print_str(" ")
+                    answer(re.next(sc, text, cur))
+                    i = i + 1usize
+                }
+            }
+            Err(e) => { print_str(" does not compile") }
+        }
+    }
+    println()
+}
+func each(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8) { each_o(sc, p, regex.options(), text) }
+func each_nl(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8) { each_o(sc, p, with_newline(), text) }
+
+// each_cap_o runs a new cursor to its end with next_captures and a groups
+// sequence of n elements, marked again before every call, and prints the
+// elements after every call between brackets: after a call that returns
+// true the match and its groups, and after each of the two calls made at
+// the end and past it, which return false, the marks.
+func each_cap_o(sc: edit[regex.Scratch], p: view[]u8, o: regex.Options, text: view[]u8, n: usize) {
+    head(p, o, text)
+    print_str(" next_captures, slots ")
+    print_u64(u64(n))
+    print_str(" =>")
+    g := Vec[Option[regex.Span]].new()
+    with r := regex.compile_with(p, o) {
+        match r {
+            Ok(re) => {
+                var cur: regex.Cursor = regex.cursor()
+                var count: usize = 0usize
+                var calls: usize = 0usize
+                while calls < 2usize {
+                    mark(g, n)
+                    var found: bool = false
+                    with e := g.as_edit() { found = re.next_captures(sc, text, cur, e) }
+                    if found {
+                        count = count + 1usize
+                        if count > len(text) + 1usize {
+                            print_str(" and more")
+                            calls = 2usize
+                        }
+                    } else {
+                        if calls == 0usize { print_str(" then") }
+                        calls = calls + 1usize
+                        print_str(" false")
+                    }
+                    print_str(" [")
+                    with d := g.as_view() {
+                        var i: usize = 0usize
+                        while i < n {
+                            if i > 0usize { print_str(" ") }
+                            slot(d[i])
+                            i = i + 1usize
+                        }
+                    }
+                    print_str("]")
+                }
+            }
+            Err(e) => { print_str(" does not compile") }
+        }
+    }
+    println()
+}
+func each_cap(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, n: usize) {
+    each_cap_o(sc, p, regex.options(), text, n)
+}
+func each_cap_nl(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, n: usize) {
+    each_cap_o(sc, p, with_newline(), text, n)
+}
+
+// forked asks a new cursor twice, copies it, and asks the cursor and
+// then its copy len(text) + 2 times each: a Cursor is a plain value, and
+// the two go on to the same matches.
+func forked(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8) {
+    head(p, regex.options(), text)
+    print_str(" next twice =>")
+    with r := regex.compile(p) {
+        match r {
+            Ok(re) => {
+                var cur: regex.Cursor = regex.cursor()
+                var i: usize = 0usize
+                while i < 2usize {
+                    print_str(" ")
+                    answer(re.next(sc, text, cur))
+                    i = i + 1usize
+                }
+                var twin: regex.Cursor = cur
+                print_str(", the cursor =>")
+                i = 0usize
+                while i < len(text) + 2usize {
+                    print_str(" ")
+                    answer(re.next(sc, text, cur))
+                    i = i + 1usize
+                }
+                print_str(", its copy =>")
+                i = 0usize
+                while i < len(text) + 2usize {
+                    print_str(" ")
+                    answer(re.next(sc, text, twin))
+                    i = i + 1usize
+                }
+            }
+            Err(e) => { print_str(" does not compile") }
+        }
+    }
+    println()
+}
+
+func main() -> i32 {
+    sc := regex.Scratch.new()
+    // R12. With k the lesser of len(groups) and groups() + 1, the first k
+    // elements are written with the match and the groups and every later
+    // one with None; a sequence of length 0 is written nowhere. (a)(b) has
+    // two groups and matches xab at (1,3).
+    say("-- captures: the length of groups")
+    cap(sc, "(a)(b)", "xab", 0usize, 0usize)
+    cap(sc, "(a)(b)", "xab", 0usize, 1usize)
+    cap(sc, "(a)(b)", "xab", 0usize, 2usize)
+    cap(sc, "(a)(b)", "xab", 0usize, 3usize)
+    cap(sc, "(a)(b)", "xab", 0usize, 4usize)
+    cap(sc, "(a)(b)", "xab", 0usize, 7usize)
+    // the beginning of a longer sequence: what lies beyond it keeps its marks
+    cap_part(sc, "(a)(b)", "xab", 0usize, 0usize, 5usize)
+    cap_part(sc, "(a)(b)", "xab", 0usize, 2usize, 5usize)
+    cap_part(sc, "(a)(b)", "xab", 0usize, 4usize, 5usize)
+    // a pattern with no group
+    cap(sc, "ab", "cabd", 0usize, 0usize)
+    cap(sc, "ab", "cabd", 0usize, 1usize)
+    cap(sc, "ab", "cabd", 0usize, 3usize)
+    cap(sc, "", "ab", 0usize, 2usize)
+
+    // R12.
+    say("-- captures: a call that returns false leaves groups as it was")
+    cap(sc, "(a)(b)", "xa", 0usize, 4usize)
+    cap(sc, "(a)(b)", "xab", 2usize, 3usize)
+    cap(sc, "(a)(b)", "xa", 0usize, 0usize)
+    cap(sc, "(a)(b)", "", 0usize, 1usize)
+    cap(sc, "a", "b", 0usize, 2usize)
+    cap(sc, "(^a)", "ba", 0usize, 2usize)
+    cap_part(sc, "(a)(b)", "xa", 0usize, 2usize, 4usize)
+
+    // R11, R12, section 4. The match is the one find gives from that offset;
+    // from equal to len(text) can still find an empty match there, and from
+    // above it is false, not a trap.
+    say("-- captures: from")
+    cap(sc, "(a)", "aaa", 0usize, 2usize)
+    cap(sc, "(a)", "aaa", 1usize, 2usize)
+    cap(sc, "(a)", "aaa", 2usize, 2usize)
+    cap(sc, "(a)", "aaa", 3usize, 2usize)
+    cap(sc, "(a*)", "ba", 0usize, 2usize)
+    cap(sc, "(a*)", "ba", 1usize, 2usize)
+    cap(sc, "(a*)", "ba", 2usize, 2usize)
+    cap(sc, "(a*)", "ba", 3usize, 2usize)
+    cap(sc, "(a*)", "ba", 4usize, 2usize)
+    cap(sc, "(a*)", "ba", 18446744073709551615usize, 2usize)
+    cap(sc, "(a*)", "ba", 18446744073709551615usize, 0usize)
+    cap(sc, "()", "", 0usize, 2usize)
+    cap(sc, "()", "", 1usize, 2usize)
+    cap(sc, "(a)|(b)", "ab", 1usize, 3usize)
+    cap(sc, "(a)(b)?", "abab", 1usize, 3usize)
+    cap(sc, "(a)(b)?", "abab", 3usize, 3usize)
+
+    // R12, R13: None for a group the chosen way never passes through. A
+    // group that matches the empty string takes part.
+    say("-- captures: groups that take no part")
+    cap(sc, "(a)|(b)", "b", 0usize, 3usize)
+    cap(sc, "(a)|(b)", "a", 0usize, 3usize)
+    cap(sc, "(a)|b", "b", 0usize, 2usize)
+    cap(sc, "(a)?b", "b", 0usize, 2usize)
+    cap(sc, "(a)?b", "ab", 0usize, 2usize)
+    cap(sc, "(a)*b", "b", 0usize, 2usize)
+    cap(sc, "a(b)?c(d)?", "acd", 0usize, 3usize)
+    cap(sc, "(a(b))?c", "c", 0usize, 3usize)
+    cap(sc, "(a|(b))c", "ac", 0usize, 3usize)
+    cap(sc, "(a){0}b", "ab", 0usize, 2usize)
+    cap(sc, "(a){0,2}b", "b", 0usize, 2usize)
+    cap(sc, "(a){0,2}", "", 0usize, 2usize)
+    cap(sc, "(a)|(b)|(c)", "xc", 0usize, 4usize)
+    cap(sc, "((a)|(b))(c)?", "b", 0usize, 5usize)
+    cap(sc, "()a", "a", 0usize, 2usize)
+    cap(sc, "a()", "a", 0usize, 2usize)
+    cap(sc, "(|a)", "a", 0usize, 2usize)
+    cap(sc, "(|a)", "b", 0usize, 2usize)
+
+    // R13. Groups are numbered by their opening parentheses.
+    say("-- captures: nested groups")
+    cap(sc, "((a)(b))", "ab", 0usize, 4usize)
+    cap(sc, "(a(b(c)))", "xabc", 0usize, 4usize)
+    cap(sc, "((a)|(b))c", "bc", 0usize, 4usize)
+    cap(sc, "(a(b)?)(c)", "ac", 0usize, 4usize)
+    cap(sc, "((((a))))", "a", 0usize, 5usize)
+    cap(sc, "(a)((b)(c(d)))e", "abcde", 0usize, 6usize)
+    cap(sc, "(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)", "abcdefghij", 0usize, 12usize)
+
+    // R13. A group's span is the stretch of its last passage; a span is
+    // kept when a later iteration of an enclosing repetition does not pass
+    // through the group again, and an iteration that was tried and given up
+    // leaves nothing behind.
+    say("-- captures: repeated groups")
+    cap(sc, "(a)+", "aaa", 0usize, 2usize)
+    cap(sc, "(a)*", "aaa", 0usize, 2usize)
+    cap(sc, "(ab)*", "ababx", 0usize, 2usize)
+    cap(sc, "(a|b)*", "abba", 0usize, 2usize)
+    cap(sc, "(a|b)*c", "abc", 0usize, 2usize)
+    cap(sc, "((a)|b)+", "ab", 0usize, 3usize)
+    cap(sc, "((a)|(b))+", "ab", 0usize, 4usize)
+    cap(sc, "((a)|(b))+", "ba", 0usize, 4usize)
+    cap(sc, "(a(b)?)+", "aba", 0usize, 3usize)
+    cap(sc, "(a(b)?)+", "abab", 0usize, 3usize)
+    cap(sc, "((a)|(b)|(c))*", "abcab", 0usize, 5usize)
+    cap(sc, "((a)c|a)+", "aca", 0usize, 3usize)
+    cap(sc, "(a|ab)+c", "abac", 0usize, 2usize)
+    cap(sc, "(a+|b+)+", "aabba", 0usize, 2usize)
+    cap(sc, "(a+)(b+)", "aabbb", 0usize, 3usize)
+    // a later passage that matches the empty string is the last passage
+    cap(sc, "((a*)b)+", "aabb", 0usize, 3usize)
+    // intervals
+    cap(sc, "(a){2}", "aaa", 0usize, 2usize)
+    cap(sc, "(a){1,3}", "aaaa", 0usize, 2usize)
+    cap(sc, "(a){2,}", "aaaa", 0usize, 2usize)
+    cap(sc, "(a|b){2,3}", "abab", 0usize, 2usize)
+    cap(sc, "(a{2})+", "aaaaa", 0usize, 2usize)
+    cap(sc, "((a){2})+", "aaaaa", 0usize, 3usize)
+    // the operand matches the empty string, and every way gives the one span
+    cap(sc, "(a*)+", "b", 0usize, 2usize)
+
+    // Section 4 and the glossary: a pattern and a text are bytes, the byte 0
+    // and the bytes above 127 among them.
+    say("-- captures: any byte")
+    cap(sc, "(\x00)b", "a\x00b", 0usize, 2usize)
+    cap(sc, "(\xc3\xa9)+", "x\xc3\xa9\xc3\xa9", 0usize, 2usize)
+    cap(sc, "(.)(.)", "\x00\xff", 0usize, 3usize)
+
+    // R13. The match is fixed first (R11); the groups are those of the first
+    // way, in backtracking order, that matches exactly that stretch: the
+    // first alternative before the second, one more iteration before
+    // stopping. This is not POSIX's rule for subexpressions.
+    say("-- captures: the leftmost-longest match, then the first way through it")
+    cap(sc, "(a|ab)(c|bcd)", "abcd", 0usize, 3usize)
+    cap(sc, "(a|ab)(c|bcd)(d*)", "abcd", 0usize, 4usize)
+    cap(sc, "(a*)(a*)", "aaa", 0usize, 3usize)
+    cap(sc, "(a+)(a+)", "aaa", 0usize, 3usize)
+    cap(sc, "(a*)(ab)*(b*)", "aabb", 0usize, 4usize)
+    cap(sc, "(a*)(ab)", "aab", 0usize, 3usize)
+    cap(sc, "(a|ab)(b*)", "abb", 0usize, 3usize)
+    cap(sc, "(a|ab)(c)?", "abc", 0usize, 3usize)
+    cap(sc, "(a)?(ab)?", "ab", 0usize, 3usize)
+    cap(sc, "(a?)(ab)?", "ab", 0usize, 3usize)
+    cap(sc, "(ab|a)(b?)", "ab", 0usize, 3usize)
+    cap(sc, "(a|ab)(b?)", "ab", 0usize, 3usize)
+    cap(sc, "(a)|(ab)|(abc)", "abc", 0usize, 4usize)
+    cap(sc, "(bbb)|(ab)", "abbb", 0usize, 3usize)
+    cap(sc, "(a|b)*(abb)?", "abb", 0usize, 3usize)
+
+    // R9, R12, R13. With newline, ^ holds after a byte 10 and $ before one;
+    // without it, at the ends of the text only; neither at the ends of the
+    // match or at from. In ((^a)|a)b and a((b$)|b) the second group takes
+    // part exactly when the anchor holds in the text.
+    say("-- captures: anchors inside groups are decided by the whole text")
+    cap_nl(sc, "(^b)", "a\nb", 0usize, 2usize)
+    cap(sc, "(^b)", "a\nb", 0usize, 2usize)
+    cap_nl(sc, "(a$)", "a\nb", 0usize, 2usize)
+    cap(sc, "(a$)", "a\nb", 0usize, 2usize)
+    cap_nl(sc, "(^b)", "ab", 0usize, 2usize)
+    cap_nl(sc, "(a$)", "ab", 0usize, 2usize)
+    cap_nl(sc, "(^b)", "ab\nb", 0usize, 2usize)
+    cap_nl(sc, "(a$)", "ab\na\n", 0usize, 2usize)
+    cap(sc, "((^a)|a)b", "xab", 0usize, 3usize)
+    cap_nl(sc, "((^a)|a)b", "xab", 0usize, 3usize)
+    cap_nl(sc, "((^a)|a)b", "x\nab", 0usize, 3usize)
+    cap(sc, "((^a)|a)b", "x\nab", 0usize, 3usize)
+    cap(sc, "((^a)|a)b", "ab", 0usize, 3usize)
+    cap(sc, "a((b$)|b)", "abx", 0usize, 3usize)
+    cap_nl(sc, "a((b$)|b)", "abx", 0usize, 3usize)
+    cap_nl(sc, "a((b$)|b)", "ab\nx", 0usize, 3usize)
+    cap(sc, "a((b$)|b)", "ab\nx", 0usize, 3usize)
+    cap(sc, "a((b$)|b)", "ab", 0usize, 3usize)
+    // anchors that hold in the middle of a match (R9: an anchor is an atom
+    // anywhere in a pattern; the glossary's "holding at s and e" is read as
+    // not excluding them)
+    cap_nl(sc, "(a$)\n(^b)", "a\nb", 0usize, 3usize)
+    cap(sc, "(a$)\n(^b)", "a\nb", 0usize, 3usize)
+    // from is not the beginning of the text
+    cap(sc, "(^a)", "aa", 1usize, 2usize)
+    cap(sc, "((^a)|a)", "aa", 1usize, 3usize)
+    cap(sc, "(a$)", "aa", 0usize, 2usize)
+    cap_nl(sc, "(^b)", "b\nb", 1usize, 2usize)
+    cap(sc, "(^b)", "b\nb", 1usize, 2usize)
+    cap_nl(sc, "(a$)|(^b)", "a\nb", 0usize, 3usize)
+    cap_nl(sc, "(a$)|(^b)", "a\nb", 1usize, 3usize)
+    cap_nl(sc, "(^.*$)", "ab\ncd", 0usize, 2usize)
+    cap_nl(sc, "(^.*$)", "ab\ncd", 1usize, 2usize)
+    cap(sc, "(^.*$)", "ab\ncd", 0usize, 2usize)
+    cap(sc, "(^.*$)", "ab\ncd", 1usize, 2usize)
+    // groups that hold an anchor and nothing else
+    cap(sc, "(^)a", "a", 0usize, 2usize)
+    cap(sc, "a($)", "a", 0usize, 2usize)
+    cap_nl(sc, "($)", "a\nb", 0usize, 2usize)
+    cap(sc, "($)", "a\nb", 0usize, 2usize)
+    cap_nl(sc, "(^)", "a\nb", 1usize, 2usize)
+    cap(sc, "(^)", "a\nb", 1usize, 2usize)
+
+    // R14. Matches left to right without overlap; an empty match that
+    // begins where the last match ended is passed over; a cursor at its end
+    // answers None however often it is asked. The first two are R14's own
+    // examples.
+    say("-- cursors: next")
+    each(sc, "x*", "abc")
+    each(sc, "a*", "baaac")
+    each(sc, "a*", "a")
+    each(sc, "a*", "aba")
+    each(sc, "b*", "abb")
+    each(sc, "b|a*", "ab")
+    // matches of more than one byte do not overlap
+    each(sc, "a", "aa")
+    each(sc, "aa", "aaaaa")
+    each(sc, "aba", "ababababa")
+    each(sc, "[0-9]+", "a12b345c6")
+    each(sc, "a|ab", "abaab")
+    // no match, and an empty text
+    each(sc, "z", "abc")
+    each(sc, "a", "")
+    each(sc, "a*", "")
+    each(sc, "", "")
+    each(sc, "", "ab")
+    each(sc, "^", "ab")
+    each(sc, "$", "ab")
+    each(sc, "^|$", "ab")
+    each(sc, "^|$", "")
+    // several lines, with newline and without
+    each_nl(sc, "^", "a\nb\n")
+    each(sc, "^", "a\nb\n")
+    each_nl(sc, "$", "a\nb\n")
+    each(sc, "$", "a\nb\n")
+    each_nl(sc, "^.*$", "ab\n\ncd")
+    each(sc, "^.*$", "ab\n\ncd")
+    each_nl(sc, ".+", "ab\n\ncd")
+    each(sc, ".+", "ab\n\ncd")
+    each_nl(sc, "^a", "a\nab\nba")
+    each_nl(sc, "a$", "a\nab\nba")
+    each_nl(sc, "[^a]", "a\nb")
+    each(sc, "[^a]", "a\nb")
+    each_nl(sc, "^", "\n\n")
+    each_nl(sc, "$", "\n\n")
+    each_nl(sc, "^$", "a\n\nb\n")
+    // a Cursor is a plain value: a copy goes on from where the original was
+    forked(sc, "a", "aaaa")
+
+    // R14. After true, groups is as captures leaves it for that match;
+    // after false it is unchanged, so the spans of a match that was passed
+    // over are never seen. groups is marked again before every call.
+    say("-- cursors: next_captures")
+    each_cap(sc, "a*", "a", 1usize)
+    each_cap(sc, "(a*)", "a", 2usize)
+    each_cap(sc, "(a)|b", "ba", 2usize)
+    each_cap(sc, "(a*)", "baaac", 2usize)
+    each_cap(sc, "(a)|(b)", "abc", 4usize)
+    each_cap(sc, "a", "aa", 0usize)
+    each_cap(sc, "(a)(b)?", "aba", 1usize)
+    each_cap(sc, "(x)*", "ab", 2usize)
+    each_cap(sc, "z", "abc", 2usize)
+    each_cap(sc, "(a)", "", 2usize)
+    // a group of one match is not seen in the next
+    each_cap(sc, "((a)|b)+", "abxb", 3usize)
+    // several lines
+    each_cap_nl(sc, "^(a|b)(.*)$", "ax\nb\ncz", 3usize)
+    each_cap_nl(sc, "(^)|(a)|($)", "a\na", 4usize)
+
+    // R13's last sentence: when a repetition's operand matches the empty
+    // string, which passage of a group counts as the last is not specified
+    // beyond the span lying within the match. The lines below are what the
+    // module gives: its second pass enters a state once at an offset, so a
+    // further iteration that takes no byte is not made. A backtracking
+    // search that counts such an iteration as a passage gives the answer
+    // noted beside each case, which the specification permits as well; the
+    // first three lines were that answer when this file was written, before
+    // the functions existed.
+    say("-- what the specification leaves open")
+    // or (0,0): one iteration that matches the empty string
+    cap(sc, "(a*)*", "b", 0usize, 2usize)
+    // or (2,2): the empty iteration after aa counted
+    cap(sc, "(a*)*", "aa", 0usize, 2usize)
+    // or (1,1), likewise
+    cap(sc, "(a*)+", "ab", 0usize, 2usize)
+    // both iterations are required, the second is empty; or (0,1)
+    cap(sc, "(a*){2}", "a", 0usize, 2usize)
+    return 0i32
+}

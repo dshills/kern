@@ -2,16 +2,18 @@
 //! expect: output regex_noalloc
 //! test-hooks: true
 // std/regex, no allocation in a search (specs/std-regex/SPEC.md, T5 and
-// R17). For three patterns and one Scratch reserved for each in turn:
-// testing.fail_next_alloc() is armed, which makes the program's next
-// allocation call fail; is_match and find run over four texts, one of
-// 4,003 bytes; then try_push on a new vector must return
-// Err(OutOfMemory), which shows the failure was still armed, so no search
-// made an allocation call. The same is done with a second Scratch after a
-// first search in place of reserve, and that first search is the least
-// there is: the empty text, from an offset past its end. Nothing is
-// printed between the arming and the check; the control that the hook
-// reaches a vector's growth is tests/trap/regex_noalloc_control.kern.
+// R17). For three patterns, one of them with a group, and one Scratch
+// reserved for each in turn: testing.fail_next_alloc() is armed, which
+// makes the program's next allocation call fail; is_match, find,
+// captures, and a cursor run to its end with next and another with
+// next_captures, go over four texts, one of 4,003 bytes; then try_push on
+// a new vector must return Err(OutOfMemory), which shows the failure was
+// still armed, so no search made an allocation call. The same is done
+// with a second Scratch after a first search in place of reserve, and
+// that first search is the least there is: the empty text, from an offset
+// past its end. Nothing is printed between the arming and the check; the
+// control that the hook reaches a vector's growth is
+// tests/trap/regex_noalloc_control.kern. The hook exists at debug only.
 module t
 import "std/regex"
 
@@ -29,22 +31,43 @@ func span(s: Option[regex.Span]) {
 }
 
 // Seen is what the searches of one pattern returned, for each of the four
-// texts: is_match, find from 0, find from 3.
-struct Seen { any: [4]bool; whole: [4]Option[regex.Span]; later: [4]Option[regex.Span] }
+// texts: is_match, find from 0, find from 3, captures from 0 with the
+// span it wrote for group 1, and how many matches a cursor yielded with
+// next and with next_captures.
+struct Seen {
+    any: [4]bool
+    whole: [4]Option[regex.Span]
+    later: [4]Option[regex.Span]
+    caps: [4]bool
+    group: [4]Option[regex.Span]
+    nexts: [4]u64
+    withs: [4]u64
+}
+
+func searches_of(re: view[regex.Regex], sc: edit[regex.Scratch], text: view[]u8, seen: edit[Seen], i: usize) {
+    seen.any[i] = re.is_match(sc, text)
+    seen.whole[i] = re.find(sc, text, 0usize)
+    seen.later[i] = re.find(sc, text, 3usize)
+    var g: [2]Option[regex.Span] = zero()
+    seen.caps[i] = re.captures(sc, text, 0usize, g)
+    seen.group[i] = g[1usize]
+    cur := regex.cursor()
+    var going: bool = true
+    while going {
+        match re.next(sc, text, cur) {
+            Some(m) => { seen.nexts[i] = seen.nexts[i] + 1u64 }
+            None => { going = false }
+        }
+    }
+    again := regex.cursor()
+    while re.next_captures(sc, text, again, g) { seen.withs[i] = seen.withs[i] + 1u64 }
+}
 
 func searches(re: view[regex.Regex], sc: edit[regex.Scratch], long: view[]u8, seen: edit[Seen]) {
-    seen.any[0usize] = re.is_match(sc, "abababc 12ab99 xxxx")
-    seen.whole[0usize] = re.find(sc, "abababc 12ab99 xxxx", 0usize)
-    seen.later[0usize] = re.find(sc, "abababc 12ab99 xxxx", 3usize)
-    seen.any[1usize] = re.is_match(sc, "")
-    seen.whole[1usize] = re.find(sc, "", 0usize)
-    seen.later[1usize] = re.find(sc, "", 3usize)
-    seen.any[2usize] = re.is_match(sc, long)
-    seen.whole[2usize] = re.find(sc, long, 0usize)
-    seen.later[2usize] = re.find(sc, long, 3usize)
-    seen.any[3usize] = re.is_match(sc, "y\0zxx")
-    seen.whole[3usize] = re.find(sc, "y\0zxx", 0usize)
-    seen.later[3usize] = re.find(sc, "y\0zxx", 3usize)
+    searches_of(re, sc, "abababc 12ab99 xxxx abc xxx", seen, 0usize)
+    searches_of(re, sc, "", seen, 1usize)
+    searches_of(re, sc, long, seen, 2usize)
+    searches_of(re, sc, "y\0zxx", seen, 3usize)
 }
 
 // still_armed is whether the next allocation call fails.
@@ -65,6 +88,16 @@ func line(label: view[]u8, seen: view[Seen], i: usize) {
     span(seen.whole[i])
     print_str(" ")
     span(seen.later[i])
+    print_str(", captures ")
+    print_bool(seen.caps[i])
+    if seen.caps[i] {
+        print_str(" ")
+        span(seen.group[i])
+    }
+    print_str(", next ")
+    print_u64(seen.nexts[i])
+    print_str(", next_captures ")
+    print_u64(seen.withs[i])
     println()
 }
 
@@ -88,7 +121,7 @@ func check(p: view[]u8, sc: edit[regex.Scratch], reserve: bool, long: view[]u8) 
                 testing.fail_next_alloc()
                 searches(re, sc, long, seen)
                 armed := still_armed()
-                line("\"abababc 12ab99 xxxx\"", seen, 0usize)
+                line("\"abababc 12ab99 xxxx abc xxx\"", seen, 0usize)
                 line("\"\"", seen, 1usize)
                 line("ab 2000 times, then c42:", seen, 2usize)
                 line("\"y<0>zxx\"", seen, 3usize)

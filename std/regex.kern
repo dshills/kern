@@ -995,34 +995,59 @@ func compile_with(pattern: view[]u8, o: Options) -> Result[Regex, CompileErr] {
 // in starts. mark holds, for each instruction, the generation in which it
 // was last entered: gen goes up at every offset, so an instruction is
 // entered once per offset and old marks need no clearing. stack holds the
-// ways of splits still to follow. All four are sized for the longest
-// program served, and a search only indexes them.
+// ways of splits still to follow. These four are sized for the longest
+// program served. caps and olds are what captures adds for the groups'
+// offsets (replay): caps is sized for the pattern, among those served,
+// whose program and groups need the most. A search only indexes them all.
 struct Scratch nocopy {
     list: Vec[u32]
     starts: Vec[usize]
     mark: Vec[u32]
     stack: Vec[u32]
+    caps: Vec[usize]
+    olds: Vec[usize]
     gen: u32
 }
 
 impl Scratch {
     func new() -> Scratch {
-        return Scratch { list: Vec[u32].new(), starts: Vec[usize].new(), mark: Vec[u32].new(), stack: Vec[u32].new(), gen: 0u32 }
+        return Scratch {
+            list: Vec[u32].new(),
+            starts: Vec[usize].new(),
+            mark: Vec[u32].new(),
+            stack: Vec[u32].new(),
+            caps: Vec[usize].new(),
+            olds: Vec[usize].new(),
+            gen: 0u32,
+        }
     }
 
-    // reserve sizes the Scratch for re, trapping oom when it cannot: a
-    // list holds each instruction at most once, and the stack one entry
-    // for each split entered. A pattern of ordinary bytes is searched for
-    // as a string and needs nothing. When nothing has to grow this is two
-    // comparisons. mark is sized last, so that it says what the others
-    // are sized for even after a trap.
+    // reserve sizes the Scratch for re, for every search and for captures,
+    // trapping oom when it cannot. A list holds each instruction at most
+    // once; the stack holds one entry for each split entered and two for
+    // each group mark; olds one for each group mark; caps the offsets of
+    // every group for each state of two lists and for the thread being
+    // followed. A pattern of ordinary bytes is searched for as a string
+    // and needs nothing. When nothing has to grow this is three
+    // comparisons. mark is sized last of the vectors sized by the program
+    // alone, so that it says what they are sized for even after a trap.
     func reserve(edit self, re: view[Regex]) {
+        if re.is_lit { return }
         n := re.prog.len()
-        if re.is_lit || self.mark.len() >= n { return }
-        self.list.resize(2usize * n, 0u32)
-        self.starts.resize(2usize * n, 0usize)
-        self.stack.resize(n + 2usize, 0u32)
-        self.mark.resize(n, 0u32)
+        if self.mark.len() < n {
+            self.list.resize(2usize * n, 0u32)
+            self.starts.resize(2usize * n, 0usize)
+            self.stack.resize(3usize * n + 2usize, 0u32)
+            self.olds.resize(n + 1usize, 0usize)
+            self.mark.resize(n, 0u32)
+        }
+        // a count past what a usize holds is one no allocation can meet
+        var need: usize = 18446744073709551615usize
+        match checked_mul(2usize * n + 1usize, 2usize * re.ngroups) {
+            Some(v) => { need = v }
+            None => { }
+        }
+        if self.caps.len() < need { self.caps.resize(need, 0usize) }
     }
 }
 
@@ -1192,6 +1217,218 @@ func search(re: view[Regex], sc: edit[Scratch], text: view[]u8, from: usize, any
     return run(re.prog.as_view(), re.sets.as_view(), re.first, re.nullable, re.anchored, text, from, any, sc.list.as_edit(), sc.starts.as_edit(), sc.mark.as_edit(), sc.stack.as_edit(), sc.gen)
 }
 
+// unset is the offset of a group mark no thread has passed.
+const unset: usize = 18446744073709551615usize
+// restore marks, on replay's stack, an entry that puts a group's offset
+// back; no instruction has this number (index_limit).
+const restore: u32 = 4294967295u32
+
+// replay finds the offsets of the groups for the match text[s:e], which
+// search has fixed: among the ways the pattern matches exactly that
+// stretch, the first that a search trying one alternative at a time would
+// find, taking at a split the first way before the second. It runs the
+// program again from s with one thread, taking no byte at or past e, with
+// `^` and `$` decided by the whole text as in a search.
+//
+// The states at each offset are kept in that order of preference: the
+// seeds are followed in the order of the last list, a split's first way
+// before its second, and an instruction already entered at this offset
+// is not entered again, since the thread that entered it comes first and
+// can go on in every way the later one could. Each state carries width
+// offsets, two for each group, in caps: the first width places are those
+// of the thread being followed, then come the two lists' states. A group
+// mark writes the offset it is passed at, and the old one is put back
+// when the thread's other ways are followed; nothing clears a group's
+// offsets when a repetition around it goes round again, so a group keeps
+// the stretch of its last passage. No thread is dropped when another
+// reaches Match before e. The first thread to reach Match at e is the
+// way sought: replay returns true with its offsets in the first width
+// places of caps. It returns false only if no thread gets there, which
+// cannot happen for a match that search returned.
+func replay(prog: view[]Inst, sets: view[]ByteSet, text: view[]u8, s: usize, e: usize, width: usize, list: edit[]u32, caps: edit[]usize, mark: edit[]u32, stack: edit[]u32, olds: edit[]usize, gen: edit[u32]) -> bool {
+    n := len(prog)
+    for k in 0usize..width { caps[k] = unset }
+    cur := 0usize
+    stop := 0usize
+    g := gen
+    pos := s
+    found := false
+    while true {
+        if g == 4294967295u32 {
+            for k in 0usize..len(mark) { mark[k] = 0u32 }
+            g = 0u32
+        }
+        g = g + 1u32
+        other := n - cur
+        end := other
+        var c: u8 = 0u8
+        if pos > s { c = text[pos - 1usize] }
+        i := cur
+        // the one thread begins at s
+        begun := pos > s
+        while !found {
+            var pc: u32 = 0u32
+            if i < stop {
+                at := list[i]
+                var ok: bool = false
+                match prog[usize(at)] {
+                    Byte(b) => { ok = b == c }
+                    Any => { ok = true }
+                    Set(k) => { ok = (sets[usize(k)].w[usize(c >> 6u32)] >> u32(c & 63u8)) & 1u64 == 1u64 }
+                    _ => { }
+                }
+                if !ok {
+                    i = i + 1usize
+                    continue
+                }
+                // the thread goes on with the offsets of this state
+                base := width * (i + 1usize)
+                for k in 0usize..width { caps[k] = caps[base + k] }
+                pc = at + 1u32
+                i = i + 1usize
+            } else {
+                if begun { break }
+                begun = true
+            }
+            sp := 0usize
+            saved := 0usize
+            while true {
+                if mark[usize(pc)] != g {
+                    mark[usize(pc)] = g
+                    match prog[usize(pc)] {
+                        Jmp(x) => {
+                            pc = x
+                            continue
+                        }
+                        Split(x, y) => {
+                            stack[sp] = y
+                            sp = sp + 1usize
+                            pc = x
+                            continue
+                        }
+                        Save(slot) => {
+                            k := usize(slot) - 2usize
+                            olds[saved] = caps[k]
+                            saved = saved + 1usize
+                            stack[sp] = slot
+                            stack[sp + 1usize] = restore
+                            sp = sp + 2usize
+                            caps[k] = pos
+                            pc = pc + 1u32
+                            continue
+                        }
+                        Bol(line) => {
+                            if pos == 0usize || (line && text[pos - 1usize] == 10u8) {
+                                pc = pc + 1u32
+                                continue
+                            }
+                        }
+                        Eol(line) => {
+                            if pos == len(text) || (line && text[pos] == 10u8) {
+                                pc = pc + 1u32
+                                continue
+                            }
+                        }
+                        Match => {
+                            if pos == e {
+                                found = true
+                                break
+                            }
+                        }
+                        _ => {
+                            list[end] = pc
+                            base := width * (end + 1usize)
+                            for k in 0usize..width { caps[base + k] = caps[k] }
+                            end = end + 1usize
+                        }
+                    }
+                }
+                // the next way kept on the stack, the offsets put back on
+                // the way to it
+                more := false
+                while sp > 0usize {
+                    sp = sp - 1usize
+                    v := stack[sp]
+                    if v != restore {
+                        pc = v
+                        more = true
+                        break
+                    }
+                    sp = sp - 1usize
+                    saved = saved - 1usize
+                    caps[usize(stack[sp]) - 2usize] = olds[saved]
+                }
+                if !more { break }
+            }
+        }
+        if found { break }
+        cur = other
+        stop = end
+        if pos >= e || stop == cur { break }
+        pos = pos + 1usize
+    }
+    gen = g
+    return found
+}
+
+// fill writes groups for the match text[s:e] as captures leaves them:
+// the match first, then each group's stretch or None, and None in every
+// element past the pattern's groups. The groups' offsets are looked for
+// only when groups has room for one.
+func fill(re: view[Regex], sc: edit[Scratch], text: view[]u8, s: usize, e: usize, groups: edit[]Option[Span]) {
+    count := len(groups)
+    if count == 0usize { return }
+    groups[0usize] = Some(Span { start: s, end: e })
+    if count == 1usize { return }
+    var known: usize = 0usize
+    if re.ngroups > 0usize {
+        width := 2usize * re.ngroups
+        if replay(re.prog.as_view(), re.sets.as_view(), text, s, e, width, sc.list.as_edit(), sc.caps.as_edit(), sc.mark.as_edit(), sc.stack.as_edit(), sc.olds.as_edit(), sc.gen) {
+            known = re.ngroups
+        }
+    }
+    for i in 1usize..count {
+        groups[i] = None
+        if i <= known {
+            a := sc.caps.get(2usize * i - 2usize)
+            b := sc.caps.get(2usize * i - 1usize)
+            if a != unset && b != unset { groups[i] = Some(Span { start: a, end: b }) }
+        }
+    }
+}
+
+// Cursor enumerates the matches of one pattern in one text, left to
+// right, without overlap: pos is where the next search begins, and last
+// the end of the match last returned once there is one (have_last). An
+// empty match directly after the last match returned is passed over.
+struct Cursor { pos: usize; last: usize; have_last: bool }
+
+// cursor is a Cursor at the beginning of a text.
+func cursor() -> Cursor { return Cursor { pos: 0usize, last: 0usize, have_last: false } }
+
+// advance returns the next match of the cursor and moves it past that
+// match, or returns none found and leaves the cursor past the text.
+func advance(re: view[Regex], sc: edit[Scratch], text: view[]u8, cur: edit[Cursor]) -> Best {
+    n := len(text)
+    while cur.pos <= n {
+        best := search(re, sc, text, cur.pos, false)
+        if !best.found {
+            cur.pos = n + 1usize
+            break
+        }
+        if best.start == best.end && cur.have_last && best.start == cur.last {
+            cur.pos = best.start + 1usize
+            continue
+        }
+        cur.last = best.end
+        cur.have_last = true
+        cur.pos = best.end
+        if best.start == best.end { cur.pos = best.end + 1usize }
+        return best
+    }
+    return Best { found: false, start: 0usize, end: 0usize }
+}
+
 impl Regex {
     // groups is the number of groups in the pattern, the whole match not
     // counted.
@@ -1208,5 +1445,40 @@ impl Regex {
         best := search(self, sc, text, from, false)
         if !best.found { return None }
         return Some(Span { start: best.start, end: best.end })
+    }
+
+    // captures returns whether find would return a match, and when it
+    // does writes groups: the match in groups[0], group i's stretch in
+    // groups[i] or None when the group took no part, and None in the
+    // elements past the pattern's groups. Among the ways the pattern
+    // matches the stretch, the groups are those of the first a search
+    // trying one alternative at a time would find, and a group passed
+    // more than once has the stretch of its last passage. When it returns
+    // false groups is unchanged. A groups of length 0 or 1 costs no more
+    // than find.
+    func captures(view self, sc: edit[Scratch], text: view[]u8, from: usize, groups: edit[]Option[Span]) -> bool {
+        best := search(self, sc, text, from, false)
+        if !best.found { return false }
+        fill(self, sc, text, best.start, best.end, groups)
+        return true
+    }
+
+    // next returns the cursor's next match in text and moves the cursor
+    // past it; None when there is no more. `x*` in `abc` yields the empty
+    // matches at 0, 1, 2 and 3.
+    func next(view self, sc: edit[Scratch], text: view[]u8, cur: edit[Cursor]) -> Option[Span] {
+        best := advance(self, sc, text, cur)
+        if !best.found { return None }
+        return Some(Span { start: best.start, end: best.end })
+    }
+
+    // next_captures is next with the groups of the match it returns, as
+    // captures writes them; false, with groups unchanged, when there is
+    // no more.
+    func next_captures(view self, sc: edit[Scratch], text: view[]u8, cur: edit[Cursor], groups: edit[]Option[Span]) -> bool {
+        best := advance(self, sc, text, cur)
+        if !best.found { return false }
+        fill(self, sc, text, best.start, best.end, groups)
+        return true
     }
 }
