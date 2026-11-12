@@ -17,7 +17,7 @@ condition stated on the parsed tree with its regression rows (phase
 replaced by "the phase is not done until the owner changes the spec".
 Round 3: EXECUTABLE_AS_IS, score 100, every requirement covered.
 
-Implements `specs/std-regex/SPEC.md` v0.15 in seven phases. The order is
+Implements `specs/std-regex/SPEC.md` v0.16 in seven phases. The order is
 chosen so that each phase is checked by something already in the
 repository: the `kawk` corpus goes in first (phase 1) and guards the
 port in phase 6; the module is built from its parser outward (phases 2

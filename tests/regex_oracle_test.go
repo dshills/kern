@@ -605,6 +605,27 @@ func regexSpans(tag string, matches [][]int) string {
 	return b.String()
 }
 
+// regexReplaced is what replace_all with the template `<&|\1>` appends for
+// these matches, by R15: the text between the matches, each match as `<`,
+// the match, `|`, group 1 (nothing when it took no part or the pattern
+// has no group) and `>`, and the rest of the text.
+func regexReplaced(text []byte, matches [][]int) []byte {
+	var out []byte
+	prev := 0
+	for _, m := range matches {
+		out = append(out, text[prev:m[0]]...)
+		out = append(out, '<')
+		out = append(out, text[m[0]:m[1]]...)
+		out = append(out, '|')
+		if len(m) >= 4 && m[2] >= 0 {
+			out = append(out, text[m[2]:m[3]]...)
+		}
+		out = append(out, '>')
+		prev = m[1]
+	}
+	return append(out, text[prev:]...)
+}
+
 // regexWant is one line the program is to print, and the pair it is for.
 type regexWant struct {
 	pair int
@@ -622,7 +643,9 @@ func regexOracleLines(want []regexWant, at int, text []byte, matches [][]int) []
 		tags = tags[:1]
 	}
 	for _, tag := range tags {
-		want = append(want, regexWant{at, regexSpans(tag, matches)})
+		want = append(want,
+			regexWant{at, regexSpans(tag, matches)},
+			regexWant{at, fmt.Sprintf("%sr %d %x", tag, len(matches), regexReplaced(text, matches))})
 	}
 	return want
 }
@@ -768,16 +791,30 @@ func matches(tag: view[]u8, re: view[regex.Regex], text: view[]u8, w: edit[Work]
     println()
 }
 
+// replaced prints the line of replace_all with the template <&|\1>: the
+// number it returned and what it appended, in hex.
+func replaced(tag: view[]u8, re: view[regex.Regex], text: view[]u8, w: edit[Work]) {
+    w.dst.clear()
+    n := re.replace_all(w.sc, text, "<&|\\1>", w.dst)
+    print_str(tag)
+    print_str("r ")
+    print_u64(u64(n))
+    print_str(" ")
+    print_hex(w.dst.as_view())
+    println()
+}
+
 // report prints the two lines of one compilation of a pair's pattern, the
 // error twice when the pattern was refused.
 func report(tag: view[]u8, r: view[Result[regex.Regex, regex.CompileErr]], text: view[]u8, w: edit[Work]) {
     match r {
         Ok(re) => {
             matches(tag, re, text, w)
+            replaced(tag, re, text, w)
         }
         Err(e) => {
             var i: usize = 0usize
-            while i < 1usize {
+            while i < 2usize {
                 print_str(tag)
                 if i == 0usize { print_str("m") } else { print_str("r") }
                 print_str(" error ")

@@ -1,6 +1,6 @@
 # Standard library: regular expressions (`std/regex`)
 
-**Version:** 0.15 (2026-11-12). **Review status.** speccritic
+**Version:** 0.16 (2026-11-12). **Review status.** speccritic
 (gpt-6.1-sol) round 1 on 0.1: INVALID, two critical findings, both
 resolved here: a repeated group keeps the span of its last passage even
 when an enclosing group's last iteration does not contain it, so the
@@ -26,7 +26,11 @@ and one warning: T9 gives its input and programs in full. Round 5 on
 0.5: VALID_WITH_GAPS, no critical finding; two warnings resolved in
 0.6: a `Scratch`'s memory bound is that of the largest pattern it has
 served (R18), and a backslash ending the pattern is `BadEscape` before
-any open construct is reported (R5). 0.15, when phase 3 was implemented: which of `BadRange` and
+any open construct is reported (R5). 0.16, when phases 4 to 6 were implemented: an anchor holds where the
+pattern places it (glossary); R18 says what one call is and that a
+whole `replace_all` can be quadratic; T5's hook check covers
+replacement and splitting; `kawk` takes the module's nesting limit
+(R21). 0.15, when phase 3 was implemented: which of `BadRange` and
 `BadClass` a class in a range is (R5), that a `-` before a byte other
 than `]` is the range operator even when that byte is a `-` (R8), and
 that the hook check of T5 runs where hooks exist. 0.14, with phase 3: an open interval `x{n,}` counts *n* copies, not
@@ -433,8 +437,15 @@ do at most *c* × (*n* + 1) × *m* steps and `captures` at most
 *c* that does not depend on the pattern or the text; a `Scratch` holds at most
 *c* × *m* × (*g* + 1) machine words for the pattern, among those it has
 been reserved for or searched with, for which that product is
-greatest (it does not shrink). In particular no
-pattern takes time exponential or quadratic in *n* for one call.
+greatest (it does not shrink): the tables for groups are sized by
+`reserve` and by a first search of any kind, so that R17 holds for a
+`captures` that follows a `find`. In particular no pattern takes time
+exponential or quadratic in *n* for one call of `is_match`, `find` or
+`captures`. A cursor step is one such call, so `replace_all`, `split`
+and a cursor run to its end take at most that bound for each match
+they pass: for a pattern that matches the empty string at most offsets
+after looking far ahead (`(a*b)?` in a long run of `a`) that is
+quadratic in *n* over the whole call.
 
 **R19. Sharing.** Any number of threads may search with one `Regex` at
 once, each with a `Scratch` of its own; their results are those of R11
@@ -545,8 +556,9 @@ interpreter and the native debug build: the toolchain refuses hooks at
 release), for three patterns and one `Scratch` reserved
 for each in turn: it arms `testing.fail_next_alloc()`, which makes the
 next allocation call of the program fail; runs `is_match`, `find`,
-`captures`, and a cursor to its end with `next` and with
-`next_captures`; and then calls `Vec[u8].try_push` on a new vector,
+`captures`, a cursor to its end with `next` and with `next_captures`,
+and `replace_all` and `split` into vectors given room beforehand; and
+then calls `Vec[u8].try_push` on a new vector,
 which must return `Err(OutOfMemory)`: the failure was still armed, so
 none of the searches made an allocation call. The same is done after a
 first search in place of `reserve`. (A `budget { allocations 0 }` block

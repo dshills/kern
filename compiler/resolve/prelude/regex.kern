@@ -641,61 +641,77 @@ impl Compiler {
         with slot := self.prog.at(usize(at)) { slot = ins }
     }
 
-    // emit appends the code of node n. A node's code is entered at its
-    // first instruction and left by running off its end, and every jump in
-    // it stays within it or goes to its end; that is what lets again copy
-    // it. The program is never longer than the pattern's size.
-    func emit(edit self, n: u32) {
+    // emit appends the code of node n and returns whether n can match the
+    // empty string. A node's code is entered at its first instruction and
+    // left by running off its end, and every jump in it stays within it
+    // or goes to its end; that is what lets again copy it. The program is
+    // never longer than the pattern's size.
+    func emit(edit self, n: u32) -> bool {
         nd := self.nodes.get(usize(n))
         match nd {
-            Empty => { }
-            Byte(b) => { self.prog.push(Inst.Byte(b)) }
-            Any => { self.prog.push(Inst.Any) }
-            Set(k) => { self.prog.push(Inst.Set(k)) }
+            Empty => { return true }
+            Byte(b) => {
+                self.prog.push(Inst.Byte(b))
+                return false
+            }
+            Any => {
+                self.prog.push(Inst.Any)
+                return false
+            }
+            Set(k) => {
+                self.prog.push(Inst.Set(k))
+                return false
+            }
             Bol => {
                 line := self.newline
                 self.prog.push(Inst.Bol(line))
+                return true
             }
             Eol => {
                 line := self.newline
                 self.prog.push(Inst.Eol(line))
+                return true
             }
             Group(a, k) => {
                 self.prog.push(Inst.Save(2u32 * k))
-                self.emit(a)
+                empty := self.emit(a)
                 self.prog.push(Inst.Save(2u32 * k + 1u32))
+                return empty
             }
             Cat(first, count) => {
+                var empty: bool = true
                 var i: u32 = 0u32
                 while i < count {
                     kid := self.kids.get(usize(first + i))
-                    self.emit(kid)
+                    if !self.emit(kid) { empty = false }
                     i = i + 1u32
                 }
+                return empty
             }
-            Alt(first, count) => { self.emit_alt(first, count) }
-            Piece(a, first, count) => { self.emit_piece(a, first, count) }
+            Alt(first, count) => { return self.emit_alt(first, count) }
+            Piece(a, first, count) => { return self.emit_piece(a, first, count) }
         }
     }
 
     // emit_alt: each branch but the last is entered by a split whose
     // other way is the next branch, and ends with a jump past the last.
-    func emit_alt(edit self, first: u32, count: u32) {
+    func emit_alt(edit self, first: u32, count: u32) -> bool {
         base := self.work.len()
+        var empty: bool = false
         var i: u32 = 0u32
         while i < count {
             kid := self.kids.get(usize(first + i))
             if i + 1u32 < count {
                 split := self.here()
                 self.prog.push(Inst.Jmp(0u32))
-                self.emit(kid)
+                if self.emit(kid) { empty = true }
                 jump := self.here()
                 self.work.push(jump)
                 self.prog.push(Inst.Jmp(0u32))
                 next := self.here()
                 self.patch(split, Inst.Split(split + 1u32, next))
             } else {
-                self.emit(kid)
+                if self.emit(kid) { empty = true }
             }
             i = i + 1u32
         }
@@ -706,6 +722,7 @@ impl Compiler {
                 None => { }
             }
         }
+        return empty
     }
 
     // emit_piece writes an atom under its operators without nesting a
@@ -715,7 +732,7 @@ impl Compiler {
     // split is, or where it would be. An operator that admits no passage
     // leaves nothing of its operand, so the atom and the operators up to
     // the last such one are not written at all.
-    func emit_piece(edit self, a: u32, first: u32, count: u32) {
+    func emit_piece(edit self, a: u32, first: u32, count: u32) -> bool {
         var live: u32 = 0u32
         var i: u32 = count
         while i > 0u32 {
@@ -734,7 +751,10 @@ impl Compiler {
             self.work.push(begin)
             if has_prefix(op) { self.prog.push(Inst.Jmp(0u32)) }
         }
-        if live == 0u32 { self.emit(a) }
+        // empty: whether the code written so far, the operand of the next
+        // operator, can match the empty string
+        var empty: bool = true
+        if live == 0u32 { empty = self.emit(a) }
         i = live
         while i < count {
             op := self.reps.get(usize(first + i))
@@ -743,24 +763,54 @@ impl Compiler {
                 Some(q) => { begin = q }
                 None => { }
             }
-            self.apply(op, begin)
+            empty = self.apply(op, begin, empty)
             i = i + 1u32
         }
+        return empty
     }
 
     // apply completes the code of one operator: its operand's code is what
     // the program holds from begin on, after the operator's split when it
-    // has one. Each prefers one more passage to stopping.
-    func apply(edit self, op: Rep, begin: u32) {
+    // has one, and empty says whether the operand can match the empty
+    // string. Each prefers one more passage to stopping. It returns
+    // whether the operand under the operator can match the empty string.
+    func apply(edit self, op: Rep, begin: u32, empty: bool) -> bool {
         end := self.here()
         match op {
-            Star => { self.loop_back(begin) }
-            Quest => { self.patch(begin, Inst.Split(begin + 1u32, end)) }
-            Plus => { self.prog.push(Inst.Split(begin, end + 1u32)) }
-            Range(lo, hi) => { self.repeat(begin, lo, hi) }
+            Star => {
+                self.loop_back(begin, empty)
+                return true
+            }
+            Quest => {
+                self.patch(begin, Inst.Split(begin + 1u32, end))
+                return true
+            }
+            Plus => {
+                self.prog.push(Inst.Split(begin, end + 1u32))
+                return empty
+            }
+            Range(lo, hi) => {
+                self.repeat(begin, lo, hi, empty)
+                return empty || lo == 0u32
+            }
         }
     }
-    func loop_back(edit self, begin: u32) {
+
+    // loop_back completes `*`: the split at begin enters the operand or
+    // passes it by, and after the operand the program goes round again.
+    // For an operand that takes a byte each time, that is a jump back to
+    // the split. For one that can match the empty string it is a second
+    // split, to the operand again or on: a passage that took no byte would
+    // be dropped at the first split, already entered at that offset, and
+    // its group marks with it, where it has to reach the end of the loop
+    // with them.
+    func loop_back(edit self, begin: u32, empty: bool) {
+        if empty {
+            end := self.here() + 1u32
+            self.prog.push(Inst.Split(begin + 1u32, end))
+            self.patch(begin, Inst.Split(begin + 1u32, end))
+            return
+        }
         self.prog.push(Inst.Jmp(begin))
         end := self.here()
         self.patch(begin, Inst.Split(begin + 1u32, end))
@@ -770,9 +820,9 @@ impl Compiler {
     // row; then for {n,} a split back to the last of them, and for {n,m}
     // m − n more copies, each entered by a split whose other way is the
     // end of them all, so that each is tried only after the one before it.
-    func repeat(edit self, begin: u32, lo: u32, hi: u32) {
+    func repeat(edit self, begin: u32, lo: u32, hi: u32, empty: bool) {
         if lo == 0u32 && hi == no_limit {
-            self.loop_back(begin)
+            self.loop_back(begin, empty)
             return
         }
         var from: u32 = begin
@@ -1429,6 +1479,87 @@ func advance(re: view[Regex], sc: edit[Scratch], text: view[]u8, cur: edit[Curso
     return Best { found: false, start: 0usize, end: 0usize }
 }
 
+// names_group is whether a template names a group from 1 to 9: only then
+// does a replacement need the groups' stretches.
+func names_group(template: view[]u8) -> bool {
+    n := len(template)
+    var i: usize = 0usize
+    while i < n {
+        if template[i] != 92u8 {
+            i = i + 1usize
+            continue
+        }
+        if i + 1usize < n && template[i + 1usize] >= 49u8 && template[i + 1usize] <= 57u8 { return true }
+        i = i + 2usize
+    }
+    return false
+}
+
+// expand appends what a template stands for with a match whose spans are
+// in groups (ten elements, the match first): `&` and `\0` are the match,
+// `\1` to `\9` a group's stretch and nothing for a group that took no
+// part or that the pattern does not have, a backslash before any other
+// byte is that byte (so `\&` is `&` and `\\` a backslash), a backslash
+// that ends the template is itself, and every other byte is itself.
+func expand(template: view[]u8, text: view[]u8, groups: view[]Option[Span], dst: edit[Vec[u8]]) {
+    n := len(template)
+    var i: usize = 0usize
+    while i < n {
+        c := template[i]
+        i = i + 1usize
+        var k: usize = 10usize
+        if c == 38u8 {
+            k = 0usize
+        } else if c == 92u8 && i < n {
+            d := template[i]
+            i = i + 1usize
+            if d >= 48u8 && d <= 57u8 {
+                k = usize(d - 48u8)
+            } else {
+                dst.push(d)
+                continue
+            }
+        } else {
+            dst.push(c)
+            continue
+        }
+        match groups[k] {
+            Some(m) => { dst.extend(text[m.start:m.end]) }
+            None => { }
+        }
+    }
+}
+
+// substitute appends text to dst with the matches a new cursor yields
+// replaced by the template's expansion, the first only unless all is set,
+// and returns how many it replaced. The groups are looked for only when
+// the template names one. It allocates only as dst grows.
+func substitute(re: view[Regex], sc: edit[Scratch], text: view[]u8, template: view[]u8, dst: edit[Vec[u8]], all: bool) -> usize {
+    var spans: [10]Option[Span] = zero()
+    for i in 0usize..10usize { spans[i] = None }
+    wide := names_group(template)
+    cur := cursor()
+    count := 0usize
+    // done is the end of the last match replaced
+    done := 0usize
+    while true {
+        best := advance(re, sc, text, cur)
+        if !best.found { break }
+        if wide {
+            fill(re, sc, text, best.start, best.end, spans)
+        } else {
+            spans[0usize] = Some(Span { start: best.start, end: best.end })
+        }
+        dst.extend(text[done:best.start])
+        expand(template, text, spans, dst)
+        done = best.end
+        count = count + 1usize
+        if !all { break }
+    }
+    dst.extend(text[done:len(text)])
+    return count
+}
+
 impl Regex {
     // groups is the number of groups in the pattern, the whole match not
     // counted.
@@ -1480,5 +1611,48 @@ impl Regex {
         if !best.found { return false }
         fill(self, sc, text, best.start, best.end, groups)
         return true
+    }
+
+    // replace_first appends text to dst with its first match replaced by
+    // the template's expansion, and returns whether there was a match;
+    // with none dst gains the whole text. In a template `&` and `\0` are
+    // the match, `\1` to `\9` a group's stretch (nothing for a group that
+    // took no part or that the pattern does not have), a backslash before
+    // any other byte is that byte, and a backslash that ends the template
+    // is itself. What dst held is neither read nor changed.
+    func replace_first(view self, sc: edit[Scratch], text: view[]u8, template: view[]u8, dst: edit[Vec[u8]]) -> bool {
+        return substitute(self, sc, text, template, dst, false) > 0usize
+    }
+
+    // replace_all is replace_first for every match a cursor yields, and
+    // returns their number: an empty match is replaced too, so a pattern
+    // that matches only the empty string puts the expansion before every
+    // byte and at the end.
+    func replace_all(view self, sc: edit[Scratch], text: view[]u8, template: view[]u8, dst: edit[Vec[u8]]) -> usize {
+        return substitute(self, sc, text, template, dst, true)
+    }
+
+    // split appends to fields the stretches of text between the matches
+    // of one byte or more that a cursor yields, as spans into text, and
+    // returns their number: the stretch before the first such match, the
+    // stretch between each two, and the stretch after the last, empty
+    // ones kept. A text with no such match is one field, and an empty
+    // text is none. What fields held stays.
+    func split(view self, sc: edit[Scratch], text: view[]u8, fields: edit[Vec[Span]]) -> usize {
+        n := len(text)
+        if n == 0usize { return 0usize }
+        cur := cursor()
+        count := 0usize
+        begin := 0usize
+        while true {
+            best := advance(self, sc, text, cur)
+            if !best.found { break }
+            if best.start == best.end { continue }
+            fields.push(Span { start: begin, end: best.start })
+            count = count + 1usize
+            begin = best.end
+        }
+        fields.push(Span { start: begin, end: n })
+        return count + 1usize
     }
 }

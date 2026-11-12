@@ -1,14 +1,15 @@
 //! phase: 6
 //! expect: output regex_groups
-// std/regex, groups and cursors
+// std/regex, groups, cursors, replacement and splitting
 // (specs/std-regex/SPEC.md, T3): captures with a groups sequence shorter
 // than, equal to and longer than groups() + 1, a call that returns false,
 // and from at and above the text's length (R12); which span each group has,
 // for groups that take no part, nested and repeated groups, and patterns
 // whose leftmost-longest match can be made in several ways (R13); groups
 // that hold an anchor, in the middle of a text, with and without the
-// newline option (R9); and cursors run to their end and asked again, by next
-// and by next_captures (R14). One Scratch
+// newline option (R9); cursors run to their end and asked again, by next
+// and by next_captures (R14); every form of a template, replace_first and
+// replace_all (R15); split (R16); and the edges of section 4. One Scratch
 // serves every call of the file. The expected output was written from the
 // specification before the functions existed, by someone who had not seen
 // them; the last section holds the cases the specification leaves open,
@@ -297,6 +298,97 @@ func forked(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8) {
     println()
 }
 
+// sub_o prints what replace_first or replace_all returns and the whole of
+// dst afterwards; dst holds the bytes of onto before the call.
+func sub_o(sc: edit[regex.Scratch], p: view[]u8, o: regex.Options, text: view[]u8, template: view[]u8, every: bool, onto: view[]u8) {
+    head(p, o, text)
+    print_str(" with ")
+    quoted(template)
+    if len(onto) > 0usize {
+        print_str(" onto ")
+        quoted(onto)
+    }
+    dst := Vec[u8].new()
+    dst.extend(onto)
+    with r := regex.compile_with(p, o) {
+        match r {
+            Ok(re) => {
+                if every {
+                    print_str(" replace_all => ")
+                    print_u64(u64(re.replace_all(sc, text, template, dst)))
+                } else {
+                    print_str(" replace_first => ")
+                    print_bool(re.replace_first(sc, text, template, dst))
+                }
+                print_str(" ")
+                quoted(dst.as_view())
+            }
+            Err(e) => { print_str(" does not compile") }
+        }
+    }
+    println()
+}
+func all(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, template: view[]u8) {
+    sub_o(sc, p, regex.options(), text, template, true, "")
+}
+func all_nl(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, template: view[]u8) {
+    sub_o(sc, p, with_newline(), text, template, true, "")
+}
+func all_onto(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, template: view[]u8, onto: view[]u8) {
+    sub_o(sc, p, regex.options(), text, template, true, onto)
+}
+func first(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, template: view[]u8) {
+    sub_o(sc, p, regex.options(), text, template, false, "")
+}
+func first_nl(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, template: view[]u8) {
+    sub_o(sc, p, with_newline(), text, template, false, "")
+}
+func first_onto(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, template: view[]u8, onto: view[]u8) {
+    sub_o(sc, p, regex.options(), text, template, false, onto)
+}
+
+// split_o prints what split returns and every element of fields
+// afterwards; fields holds kept elements, (800,800) and on, before the
+// call.
+func split_o(sc: edit[regex.Scratch], p: view[]u8, o: regex.Options, text: view[]u8, kept: usize) {
+    head(p, o, text)
+    print_str(" split")
+    fields := Vec[regex.Span].new()
+    var i: usize = 0usize
+    while i < kept {
+        fields.push(regex.Span { start: 800usize + i, end: 800usize + i })
+        i = i + 1usize
+    }
+    if kept > 0usize {
+        print_str(" onto ")
+        print_u64(u64(kept))
+    }
+    print_str(" => ")
+    with r := regex.compile_with(p, o) {
+        match r {
+            Ok(re) => {
+                print_u64(u64(re.split(sc, text, fields)))
+                print_str(":")
+                with d := fields.as_view() {
+                    i = 0usize
+                    while i < len(d) {
+                        print_str(" ")
+                        span(d[i])
+                        i = i + 1usize
+                    }
+                }
+            }
+            Err(e) => { print_str("does not compile") }
+        }
+    }
+    println()
+}
+func split(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8) { split_o(sc, p, regex.options(), text, 0usize) }
+func split_nl(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8) { split_o(sc, p, with_newline(), text, 0usize) }
+func split_onto(sc: edit[regex.Scratch], p: view[]u8, text: view[]u8, kept: usize) {
+    split_o(sc, p, regex.options(), text, kept)
+}
+
 func main() -> i32 {
     sc := regex.Scratch.new()
     // R12. With k the lesser of len(groups) and groups() + 1, the first k
@@ -557,17 +649,170 @@ func main() -> i32 {
     each_cap_nl(sc, "^(a|b)(.*)$", "ax\nb\ncz", 3usize)
     each_cap_nl(sc, "(^)|(a)|($)", "a\na", 4usize)
 
+    // R15. (b)(c)? matches abcd-b at (1,3), with both groups, and at (5,6),
+    // where the second group takes no part.
+    say("-- templates")
+    all(sc, "(b)(c)?", "abcd-b", "&")
+    all(sc, "(b)(c)?", "abcd-b", "[&]")
+    all(sc, "(b)(c)?", "abcd-b", "[\\0]")
+    all(sc, "(b)(c)?", "abcd-b", "<\\1>")
+    // a group that took no part, and group numbers above groups(), stand for nothing
+    all(sc, "(b)(c)?", "abcd-b", "<\\2>")
+    all(sc, "(b)(c)?", "abcd-b", "<\\3>")
+    all(sc, "(b)(c)?", "abcd-b", "\\4\\5\\6\\7\\8\\9")
+    all(sc, "(b)(c)?", "abcd-b", "\\2\\1&\\0")
+    all(sc, "(b)(c)?", "abcd-b", "&&")
+    all(sc, "(b)(c)?", "abcd-b", "")
+    all(sc, "(b)(c)?", "abcd-b", "XY")
+    // \& is an ampersand and \\ a backslash
+    all(sc, "(b)(c)?", "abcd-b", "\\&")
+    all(sc, "(b)(c)?", "abcd-b", "\\\\")
+    all(sc, "(b)(c)?", "abcd-b", "\\\\&")
+    all(sc, "(b)(c)?", "abcd-b", "\\\\\\&")
+    all(sc, "(b)(c)?", "abcd-b", "\\\\1")
+    // a backslash before any other byte is that byte: \n is the letter n
+    all(sc, "(b)(c)?", "abcd-b", "\\n")
+    all(sc, "(b)(c)?", "abcd-b", "<\\q\\.\\ >")
+    all(sc, "(b)(c)?", "abcd-b", "\\\x00")
+    all(sc, "(b)(c)?", "abcd-b", "\\\xe9")
+    // a backslash that ends the template is itself
+    all(sc, "(b)(c)?", "abcd-b", "\\")
+    all(sc, "(b)(c)?", "abcd-b", "x\\")
+    all(sc, "(b)(c)?", "abcd-b", "&\\")
+    all(sc, "(b)(c)?", "abcd-b", "\\\\\\")
+    // \1 to \9 are one digit each: \10 is group 1 and the byte 0
+    all(sc, "(b)(c)?", "abcd-b", "\\10")
+    all(sc, "(a)(b)(c)(d)(e)(f)(g)(h)(i)", "abcdefghi", "\\9\\8\\7\\6\\5\\4\\3\\2\\1|\\0")
+    all(sc, "(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)", "abcdefghij", "\\10|\\9")
+    // the groups are those of R13
+    all(sc, "(a|ab)(c|bcd)", "abcd", "\\2-\\1")
+    all(sc, "((a)|b)+", "ab", "[\\1|\\2]")
+    all(sc, "((a)|b)+", "abxb", "[\\1|\\2]")
+    // what a match or a group stands for is not read as a template again
+    all(sc, "(&|\\\\1)", "a&b\\1c", "[&\\1]")
+
+    // R15. The first match a new cursor yields; false and the whole text
+    // when there is none.
+    say("-- replace_first")
+    first(sc, "(b)(c)?", "abcd-b", "[&]")
+    first(sc, "(b)(c)?", "abcd-b", "<\\2>")
+    first(sc, "z", "abc", "X")
+    first(sc, "a", "", "X")
+    first(sc, "c", "abc", "")
+    first(sc, "a", "abc", "&&")
+    first(sc, "a", "aaa", "b")
+    first(sc, "a*", "baaac", "<&>")
+    first_nl(sc, "^b", "a\nb", "[&]")
+    first(sc, "^b", "a\nb", "[&]")
+
+    // R15, section 4. The number of matches is returned; a pattern that
+    // matches only the empty string puts the expansion before every byte
+    // and at the end, and replace_first puts it at the beginning.
+    say("-- replace_all")
+    all(sc, "z", "abc", "X")
+    all(sc, "a", "", "X")
+    all(sc, "a", "aaa", "bb")
+    all(sc, "a", "aba", "")
+    all(sc, "a*", "baaac", "<&>")
+    all(sc, "a*", "", "<&>")
+    all(sc, "x*", "abc", "-")
+    all(sc, "", "abc", "-")
+    all(sc, "", "", "-")
+    first(sc, "", "abc", "-")
+    first(sc, "", "", "-")
+    all(sc, "()", "ab", "[\\1&]")
+    all(sc, "^", "abc", ">")
+    all(sc, "$", "abc", "<")
+    // several lines
+    all_nl(sc, "^", "a\nb\n", "> ")
+    all(sc, "^", "a\nb\n", "> ")
+    all_nl(sc, "$", "a\nb", ";")
+    all_nl(sc, ".+", "ab\ncd", "(&)")
+    // the byte 0 and bytes above 127 are bytes like any other
+    all(sc, "\x00", "a\x00b\x00", "<&\x00>")
+    all(sc, "b", "\x00b\x00", "[&]")
+    all(sc, "a", "\xc8a\xff", "\xe9&")
+
+    // R15. Neither function reads dst's earlier contents or changes them.
+    say("-- replacing onto a dst that holds bytes")
+    all_onto(sc, "(b)(c)?", "abcd-b", "[&]", "pre:")
+    first_onto(sc, "(b)(c)?", "abcd-b", "[&]", "pre:")
+    all_onto(sc, "z", "abc", "X", "pre:")
+    first_onto(sc, "z", "abc", "X", "pre:")
+    all_onto(sc, "", "", "-", "\x00&\\")
+    all_onto(sc, "a", "", "-", "\\1&")
+
+    // R16. The separators are the matches of one byte or more; the fields
+    // are the stretches around them, empty ones kept; the number of fields
+    // is returned.
+    say("-- split")
+    split(sc, ",", "a,b,c")
+    // a separator at the start, at the end, two adjacent, none
+    split(sc, ",", ",a")
+    split(sc, ",", "a,")
+    split(sc, ",", "a,,b")
+    split(sc, ",", "abc")
+    split(sc, ",", ",")
+    split(sc, ",", ",,")
+    split(sc, "b", "abbbc")
+    // an empty text has no field
+    split(sc, ",", "")
+    split(sc, "", "")
+    split(sc, "x*", "")
+    // separators of several bytes
+    split(sc, ",+", "a,,b")
+    split(sc, ",+", ",,a,,")
+    split(sc, "[ \\t]+", "  a  b ")
+    split(sc, "a|ab", "xaby")
+    split(sc, "(,)|(;)", "a,b;c")
+    split(sc, "abc", "abc")
+    split(sc, ".*", "abc")
+    split(sc, ".", "abc")
+    // a pattern that matches only the empty string separates nothing
+    split(sc, "", "abc")
+    split(sc, "x*", "abc")
+    split(sc, "^", "abc")
+    split(sc, "$", "abc")
+    split(sc, "()", "a")
+    // empty matches between separators are passed over
+    split(sc, ",*", "a,b,,c")
+    // the byte 10 and the byte 0
+    split(sc, "\\n", "a\nb\n")
+    split_nl(sc, "^.", "ab\ncd")
+    split(sc, "^.", "ab\ncd")
+    split(sc, "\x00", "a\x00b")
+    // a fields vector that holds elements keeps them, and they are not counted
+    split_onto(sc, ",", "a,b", 2usize)
+    split_onto(sc, ",", "", 2usize)
+    split_onto(sc, "", "ab", 1usize)
+
+    // R11, R17. Every call above shares one Scratch; each call below has a
+    // new one, which the call makes ready as any first search does.
+    say("-- a Scratch that has served nothing")
+    f1 := regex.Scratch.new()
+    cap(f1, "(a)(b)", "xab", 0usize, 3usize)
+    f2 := regex.Scratch.new()
+    each(f2, "a*", "baaac")
+    f3 := regex.Scratch.new()
+    each_cap(f3, "(a)|b", "ba", 2usize)
+    f4 := regex.Scratch.new()
+    all(f4, "(b)(c)?", "abcd-b", "[\\1]")
+    f5 := regex.Scratch.new()
+    first(f5, "b", "abc", "&&")
+    f6 := regex.Scratch.new()
+    split(f6, ",", "a,b")
+
     // R13's last sentence: when a repetition's operand matches the empty
     // string, which passage of a group counts as the last is not specified
     // beyond the span lying within the match. The lines below are what the
-    // module gives: its second pass enters a state once at an offset, so a
-    // further iteration that takes no byte is not made. A backtracking
-    // search that counts such an iteration as a passage gives the answer
-    // noted beside each case, which the specification permits as well; the
-    // first three lines were that answer when this file was written, before
-    // the functions existed.
+    // module gives, which is what Go's regexp.CompilePOSIX gives for these
+    // too. A backtracking search that makes one more iteration before
+    // stopping and counts an iteration that takes no byte as a passage
+    // gives the answer noted beside the second and third, which the
+    // specification permits as well, and which those lines held when this
+    // file was written, before the functions existed.
     say("-- what the specification leaves open")
-    // or (0,0): one iteration that matches the empty string
+    // one iteration that matches the empty string; or -, no iteration
     cap(sc, "(a*)*", "b", 0usize, 2usize)
     // or (2,2): the empty iteration after aa counted
     cap(sc, "(a*)*", "aa", 0usize, 2usize)

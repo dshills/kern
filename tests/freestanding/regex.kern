@@ -4,8 +4,9 @@
 // std/regex on bare metal (specs/std-regex/SPEC.md, T7 and R20): the
 // module calls no runtime entry of its own, so compiling a pattern and
 // searching need only the allocator a Vec needs. Three patterns, each
-// compiled and searched with find, is_match and captures; a hosted run of
-// this file prints the same lines.
+// compiled and searched with find, is_match and captures, and used by
+// replace_all; one more splits a text. A hosted run of this file prints
+// the same lines.
 module fs
 import "std/regex"
 
@@ -47,6 +48,20 @@ func seek(re: view[regex.Regex], sc: edit[regex.Scratch], text: view[]u8, from: 
     println()
 }
 
+func sub(re: view[regex.Regex], sc: edit[regex.Scratch], text: view[]u8, template: view[]u8) {
+    print_str("  replace_all in \"")
+    print_str(text)
+    print_str("\" with \"")
+    print_str(template)
+    print_str("\" => ")
+    dst := Vec[u8].new()
+    print_u64(u64(re.replace_all(sc, text, template, dst)))
+    print_str(" \"")
+    print_str(dst.as_view())
+    print_str("\"")
+    println()
+}
+
 func main() -> i32 {
     sc := regex.Scratch.new()
     print_str("/(ab|c)+d/")
@@ -58,6 +73,7 @@ func main() -> i32 {
                 seek(re, sc, "xabcabd!", 0usize)
                 seek(re, sc, "xabcabd!", 2usize)
                 seek(re, sc, "abab", 0usize)
+                sub(re, sc, "xabcabd! cd", "[\\1&]")
             }
         }
     }
@@ -70,6 +86,7 @@ func main() -> i32 {
                 seek(re, sc, "a1 22 4567", 0usize)
                 seek(re, sc, "12", 0usize)
                 seek(re, sc, "1", 0usize)
+                sub(re, sc, "a1 22 4567", "#")
             }
         }
     }
@@ -84,6 +101,28 @@ func main() -> i32 {
                 seek(re, sc, "On BARE metal", 0usize)
                 seek(re, sc, "Kern", 0usize)
                 seek(re, sc, "kern kern", 1usize)
+                sub(re, sc, "Kern on BARE metal", "<&>")
+            }
+        }
+    }
+    with r := regex.compile(", *") {
+        match r {
+            Err(e) => {
+                print_str("/, */ refused")
+                println()
+            }
+            Ok(re) => {
+                fields := Vec[regex.Span].new()
+                print_str("/, */ split \"a, b,c\" => ")
+                print_u64(u64(re.split(sc, "a, b,c", fields)))
+                print_str(":")
+                for f in fields.as_view() {
+                    print_str(" ")
+                    print_u64(u64(f.start))
+                    print_str("-")
+                    print_u64(u64(f.end))
+                }
+                println()
             }
         }
     }
