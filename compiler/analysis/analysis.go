@@ -33,6 +33,13 @@ func Layout(prog *resolve.Program, target string) diag.ShowLayoutResult {
 		m := prog.Modules[name]
 		var decls []*resolve.TypeDecl
 		for _, td := range m.Types {
+			// a module's table also names what an impl made for a primitive
+			// type (`impl Hashable for u64`): a declaration with no source
+			// and no fields that carries the impl's methods, and has no
+			// layout of its own
+			if td.AST == nil {
+				continue
+			}
 			if len(td.TypeParams) == 0 && (td.Kind == resolve.KindStruct || td.Kind == resolve.KindUnion) {
 				decls = append(decls, td)
 			}

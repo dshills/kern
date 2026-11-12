@@ -536,3 +536,41 @@ func TestExplainOwnershipDeclaringFunction(t *testing.T) {
 		t.Errorf("local: accesses %q, drop %v, contract %v", got, local.DropAt, local.Contract)
 	}
 }
+
+// show-layout lists the program's types, not the declarations an impl makes
+// for a primitive type: std/map implements Hashable for five of them, and
+// each was listed as a type of size 0.
+func TestShowLayoutLeavesOutPrimitives(t *testing.T) {
+	path := writeProgram(t, `module main
+import "std/map"
+
+struct Pair { a: u64; b: u8 }
+
+func main() -> i32 {
+    var t: map.Map[u64, u64] = map.Map[u64, u64].new()
+    t.insert(1u64, 2u64)
+    p := Pair { a: 1u64, b: 2u8 }
+    return i32(t.len()) + i32(p.b)
+}
+`)
+	code, resp, _ := runWith(t, []string{"show-layout", path}, "")
+	if code != 0 || !resp.OK {
+		t.Fatalf("show-layout: exit %d resp %+v", code, resp)
+	}
+	sawPair := false
+	for _, ty := range resp.Result.(map[string]any)["types"].([]any) {
+		tm := ty.(map[string]any)
+		switch name := tm["name"].(string); name {
+		case "Pair":
+			sawPair = true
+			if tm["size"].(float64) != 16 {
+				t.Errorf("Pair: size %v, want 16", tm["size"])
+			}
+		case "u8", "u32", "u64", "i64", "usize":
+			t.Errorf("show-layout lists the primitive %s: %v", name, tm)
+		}
+	}
+	if !sawPair {
+		t.Error("show-layout does not list Pair")
+	}
+}
