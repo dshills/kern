@@ -545,7 +545,6 @@ entry raises its traps.
 |---|---|
 | `void kern_test_fail_next_alloc(void)` | Arms a failure of the next allocation. (A `--test-hooks` build only.) |
 | `void kern_test_require_hooks(void)` | Exists only with test hooks, so a program using them without the flag fails to link. (A `--test-hooks` build only.) |
-| `void kern_swap(char *a, char *b, int64_t n)` | Exchanges two regions of n bytes that are the same region or do not overlap. |
 | `uint32_t kern_next_identity(void)` | Issues the next container identity tag: from 1 in a debug build, 0 (unchecked) in a release build or after wrap-around. |
 | `void *kern_sysalloc_new(void)` | Returns the system allocator, a process-wide object. |
 | `void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at)` | Allocates size bytes at align into the Result at out: Ok(pointer) or Err(OutOfMemory); traps explicit on a violated obligation. |
@@ -723,7 +722,6 @@ entry raises its traps.
 
 | Entry | Contract |
 |---|---|
-| `void kern_swap(char *a, char *b, int64_t n)` | Exchanges two regions of n bytes that are the same region or do not overlap. |
 | `uint32_t kern_next_identity(void)` | Issues the next container identity tag: from 1 in a debug build, 0 (unchecked) in a release build or after wrap-around. |
 | `void *kern_sysalloc_new(void)` | Returns the system allocator, one object over the static arena. |
 | `void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at)` | Allocates size bytes at align into the Result at out: Ok(pointer) or Err(OutOfMemory); traps explicit on a violated obligation. |

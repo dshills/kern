@@ -818,7 +818,19 @@ func (fe *fnEmit) intrinsic(c *ir.Call) {
 			at[k] = fe.next("t")
 			fe.emit("%s = getelementptr i8, ptr %s, i64 %s", at[k], p, off)
 		}
-		fe.rt("kern_swap", "void (ptr, ptr, i64)", "ptr "+at[0]+", ptr "+at[1]+", i64 "+size)
+		// The size is a constant here, so the exchange is three copies of
+		// it through entry-block storage, which LLVM makes loads and stores
+		// (it was a call of the runtime's kern_swap, which copies a length
+		// it is passed through a buffer: 123 instructions a swap of a u64,
+		// and opaque to the loop around it). The two elements are the same
+		// element or do not overlap, which is what memcpy needs.
+		if size != "0" {
+			tmp := fe.alloca(fe.e.mty(fe.elemType(c, 0)))
+			fe.e.declare("llvm.memcpy.p0.p0.i64", "void (ptr, ptr, i64, i1)")
+			for _, mv := range [3][2]string{{tmp, at[0]}, {at[0], at[1]}, {at[1], tmp}} {
+				fe.emit("call void @llvm.memcpy.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)", mv[0], mv[1], size)
+			}
+		}
 	// raw pointers (spec §6)
 	case "ptr_null":
 		fe.vals[dst()] = "null"

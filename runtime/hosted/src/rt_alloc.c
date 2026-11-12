@@ -8,6 +8,13 @@
 // (a runtime object's, or the system allocator's, which the kern containers
 // use) fails.
 static _Atomic int kern_fail_next = 0;
+// kern_fail_armed takes the armed failure, if there is one. The flag is
+// read before it is exchanged: an exchange is a write, and every thread
+// that allocates would be writing the one cache line the flag is on (four
+// threads allocating took nine times as long as one).
+static inline int kern_fail_armed(void) {
+    return atomic_load(&kern_fail_next) && atomic_exchange(&kern_fail_next, 0);
+}
 #ifdef KERN_TEST_HOOKS
 void kern_test_fail_next_alloc(void) { atomic_store(&kern_fail_next, 1); }
 // kern_test_require_hooks exists only in a --test-hooks build: a program
@@ -170,7 +177,7 @@ static int kern_block_new(void *p, uint64_t size, uint32_t align, const kern_loc
 // blocks of the runtime's own objects (Shared, Mutex, Condvar, threads,
 // scopes, join handles). at is the user-level call that made the object.
 static void *kern_try_alloc(size_t n, const kern_loc *at) {
-    if (atomic_exchange(&kern_fail_next, 0)) return NULL;
+    if (kern_fail_armed()) return NULL;
     void *p = malloc(n ? n : 1);
 #ifndef KERN_RELEASE
     if (p != NULL && kern_cfg.alloc_report && !kern_block_new(p, n, 0, at)) { free(p); return NULL; }
@@ -221,15 +228,18 @@ struct kern_sysalloc { int unused; };
 void *kern_sysalloc_new(void) { static kern_sysalloc a; return &a; }
 void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at) {
     (void)a;
-    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap_loc(11, at);
-    if (atomic_exchange(&kern_fail_next, 0)) { out[0] = 1; return; } // the armed failure: Err(OutOfMemory)
+    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || (size & (align - 1)) != 0) kern_trap_loc(11, at);
+    if (kern_fail_armed()) { out[0] = 1; return; } // the armed failure: Err(OutOfMemory)
     // aligned_alloc needs an alignment of at least sizeof(void *) and a size
     // that is a multiple of it (macOS rejects smaller alignments): the
     // request is rounded up; the §6 obligations above are the caller's values
     size_t al = (size_t)align < sizeof(void *) ? sizeof(void *) : (size_t)align;
     if ((uint64_t)size > SIZE_MAX - (al - 1)) { out[0] = 1; return; } // unrepresentable after rounding
-    size_t sz = ((size_t)size + al - 1) / al * al;
-    void *p = aligned_alloc(al, sz ? sz : al);
+    size_t sz = ((size_t)size + al - 1) & ~(al - 1);
+    // malloc's block is 16-byte aligned on every supported host (the
+    // realloc and zeroed entries rely on the same), and costs less than
+    // aligned_alloc, which is kept for the alignments above that
+    void *p = al <= 16 ? malloc(sz ? sz : al) : aligned_alloc(al, sz ? sz : al);
     if (p == NULL) { out[0] = 1; return; }
 #ifndef KERN_RELEASE
     if (!kern_block_new(p, (uint64_t)size, (uint32_t)align, at)) { free(p); out[0] = 1; return; }
@@ -242,7 +252,7 @@ void kern_sysalloc_alloc(kern_sysalloc *a, int64_t size, int64_t align, char *ou
 // else by aligned_alloc, copy and free; on failure the old allocation stays.
 void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at) {
     (void)a;
-    if (old_size < 0 || size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap_loc(11, at);
+    if (old_size < 0 || size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || (size & (align - 1)) != 0) kern_trap_loc(11, at);
 #ifndef KERN_RELEASE
     // The block leaves the table before the allocator may free it, so that
     // another thread given the same address finds its slot free; a call
@@ -253,10 +263,10 @@ void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t 
 #else
 #define KERN_REALLOC_FAILED { out[0] = 1; return; }
 #endif
-    if (atomic_exchange(&kern_fail_next, 0)) KERN_REALLOC_FAILED
+    if (kern_fail_armed()) KERN_REALLOC_FAILED
     size_t al = (size_t)align < sizeof(void *) ? sizeof(void *) : (size_t)align;
     if ((uint64_t)size > SIZE_MAX - (al - 1)) KERN_REALLOC_FAILED
-    size_t sz = ((size_t)size + al - 1) / al * al;
+    size_t sz = ((size_t)size + al - 1) & ~(al - 1);
     if (sz == 0) sz = al;
     void *np;
     if (al <= 16) np = realloc(p, sz);
@@ -286,11 +296,11 @@ void kern_sysalloc_realloc(kern_sysalloc *a, void *p, int64_t old_size, int64_t 
 // from fresh zero pages without a memset), else aligned_alloc and memset.
 void kern_sysalloc_alloc_zeroed(kern_sysalloc *a, int64_t size, int64_t align, char *out, int64_t off, const kern_loc *at) {
     (void)a;
-    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || size % align != 0) kern_trap_loc(11, at);
-    if (atomic_exchange(&kern_fail_next, 0)) { out[0] = 1; return; }
+    if (size < 0 || align <= 0 || (align & (align - 1)) != 0 || align > 4096 || (size & (align - 1)) != 0) kern_trap_loc(11, at);
+    if (kern_fail_armed()) { out[0] = 1; return; }
     size_t al = (size_t)align < sizeof(void *) ? sizeof(void *) : (size_t)align;
     if ((uint64_t)size > SIZE_MAX - (al - 1)) { out[0] = 1; return; }
-    size_t sz = ((size_t)size + al - 1) / al * al;
+    size_t sz = ((size_t)size + al - 1) & ~(al - 1);
     if (sz == 0) sz = al;
     void *p;
     if (al <= 16) p = calloc(1, sz);

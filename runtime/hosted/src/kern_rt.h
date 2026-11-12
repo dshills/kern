@@ -243,8 +243,6 @@ void kern_test_fail_next_alloc(void);
 // Exists only with test hooks, so a program using them without the flag fails to link.
 void kern_test_require_hooks(void);
 #endif
-// Exchanges two regions of n bytes that are the same region or do not overlap.
-void kern_swap(char *a, char *b, int64_t n);
 // Issues the next container identity tag: from 1 in a debug build, 0 (unchecked) in a release build or after wrap-around.
 uint32_t kern_next_identity(void);
 // Returns the system allocator, a process-wide object.

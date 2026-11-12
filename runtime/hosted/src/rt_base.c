@@ -101,22 +101,6 @@ void print_bool(uint8_t v) { if (v) kern_out("true", 4); else kern_out("false", 
 void print_str(const char *p, int64_t n) { kern_out(p, (size_t)n); }
 void eprint_str(const char *p, int64_t n) { if (n > 0) (void)kern_write_all(2, p, (size_t)n); }
 void println(void) { kern_out("\n", 1); }
-// kern_swap exchanges two regions of n bytes (the prelude's swap_at): the
-// regions are two elements of one sequence, so they are the same region
-// or do not overlap.
-void kern_swap(char *a, char *b, int64_t n) {
-    if (a == b) return;
-    char tmp[64];
-    while (n > 0) {
-        size_t k = n < (int64_t)sizeof tmp ? (size_t)n : sizeof tmp;
-        memcpy(tmp, a, k);
-        memcpy(a, b, k);
-        memcpy(b, tmp, k);
-        a += k;
-        b += k;
-        n -= (int64_t)k;
-    }
-}
 static void kern_alloc_report(void); // rt_alloc.c: the report of KERN_ALLOC_REPORT=1 (RF2)
 void kern_exit(int32_t code) { kern_flush(); kern_alloc_report(); _exit(code); }
 
