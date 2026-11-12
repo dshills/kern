@@ -254,3 +254,19 @@ func TestRowTableLine(t *testing.T) {
 		t.Errorf("row line missing; report:\n%s", report)
 	}
 }
+
+// A kern binary's code is in two sections, the C runtime's __text and the
+// program's __kern_text; a C binary's is in __text alone.
+func TestMachoTextBytes(t *testing.T) {
+	kern := []byte("Segment __TEXT: 32768\n\tSection __text: 10868\n\tSection __kern_text: 6092\n\tSection __stubs: 564\n\ttotal 20000\n")
+	if n, ok := machoTextBytes(kern); !ok || n != 16960 {
+		t.Errorf("kern binary: %d, %v; want 16960", n, ok)
+	}
+	c := []byte("Segment __TEXT: 16384\n\tSection __text: 2356\n\tSection __stubs: 96\n")
+	if n, ok := machoTextBytes(c); !ok || n != 2356 {
+		t.Errorf("C binary: %d, %v; want 2356", n, ok)
+	}
+	if _, ok := machoTextBytes([]byte("no sections")); ok {
+		t.Error("no section matched, yet ok")
+	}
+}

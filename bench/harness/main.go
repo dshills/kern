@@ -412,13 +412,29 @@ func runOnce(root, bin string, env []string) (runResult, error) {
 	return res, nil
 }
 
+// machoCode matches the code sections of size -m's listing: __text, and
+// __kern_text, where a hosted kern function has been placed since its
+// location markers (a kern binary's __text is only the C runtime it is
+// linked with, which is all the column counted for kern until 2026-11-12).
+var machoCode = regexp.MustCompile(`Section (?:__text|__kern_text): (\d+)`)
+
+// machoTextBytes sums the code sections in the output of size -m.
+func machoTextBytes(out []byte) (int64, bool) {
+	var total int64
+	ms := machoCode.FindAllSubmatch(out, -1)
+	for _, m := range ms {
+		n, _ := strconv.ParseInt(string(m[1]), 10, 64)
+		total += n
+	}
+	return total, len(ms) > 0
+}
+
 // textBytes returns the size of the binary's text section from size(1),
 // falling back to the file size with a note.
 func textBytes(bin string) (int64, string) {
 	if runtime.GOOS == "darwin" {
 		if out, err := exec.Command("size", "-m", bin).Output(); err == nil {
-			if m := regexp.MustCompile(`Section __text: (\d+)`).FindSubmatch(out); m != nil {
-				n, _ := strconv.ParseInt(string(m[1]), 10, 64)
+			if n, ok := machoTextBytes(out); ok {
 				return n, ""
 			}
 		}
