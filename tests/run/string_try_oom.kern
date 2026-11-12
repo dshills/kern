@@ -32,10 +32,11 @@ func main() -> i32 {
     a := str.String.from("abcd"); show(a)
     testing.fail_next_alloc(); res(a.try_reserve(64usize)); show(a)
     say("try_push on a full string")
-    b := str.String.from("abcd"); show(b)
+    // sixteen bytes: a string's first storage, so this one is full
+    b := str.String.from("abcdefghijklmnop"); show(b)
     testing.fail_next_alloc(); res(b.try_push(101u8)); show(b)
     say("try_push_str that must grow")
-    c := str.String.from("abcd"); show(c)
+    c := str.String.from("abcdefghijklmnop"); show(c)
     testing.fail_next_alloc(); res(c.try_push_str(", world")); show(c)
     return 0i32
 }

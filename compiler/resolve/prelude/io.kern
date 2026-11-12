@@ -72,10 +72,30 @@ func err_of(code: i32) -> IoErr {
     return Other(code)
 }
 
-// read_from reads a descriptor to its end.
+// read_from reads a descriptor to its end. A regular file's size is asked
+// first and its bytes are read straight into a vector of that size, whose
+// zeroed storage is fresh pages when it is large; whatever the descriptor
+// has after that (the file grew, or it is a pipe, a terminal or a file
+// whose size the system reports as zero) is read a buffer at a time. (It
+// was 4,096 bytes at a time through the buffer for every descriptor:
+// 65,536 reads and as many copies for a 256 MiB file.)
 func read_from(fd: i32) -> Result[Vec[u8], IoErr] {
     data := Vec[u8].new()
-    var buf: [4096]u8 = zero()
+    var raw: [4]u64 = zero()
+    if io_fstat(fd, raw) == 0i32 && raw[0usize] == 1u64 && raw[1usize] > 0u64 && raw[1usize] < 4611686018427387904u64 {
+        want := usize(raw[1usize])
+        data.resize(want, 0u8)
+        var have: usize = 0usize
+        while have < want {
+            n := io_read(fd, data.as_edit()[have : want])
+            if n < 0i64 { return Err(err_of(truncate[i32](0i64 - n))) }
+            if n == 0i64 { break }
+            have = have + usize(n)
+        }
+        // a file that shrank meanwhile is as long as what was read
+        data.resize(have, 0u8)
+    }
+    var buf: [16384]u8 = zero()
     while true {
         n := io_read(fd, buf)
         if n < 0i64 { return Err(err_of(truncate[i32](0i64 - n))) }

@@ -80,6 +80,17 @@ func ptr_store_seq[T](p: RawPtr[T], src: view[]T)
 func swap_at[T](xs: edit[]T, i: usize, j: usize)
 // size_of and align_of are the §4.1 size and alignment of T in bytes.
 func size_of[T]() -> usize
+
+// first_cap is the capacity a vector's first growth gives it: four
+// elements, or for elements of one to three bytes as many as fill 16
+// bytes, the allocator's smallest block. (At four whatever the size, a
+// byte vector or a String reallocated at 4, 8 and 16 bytes inside that one
+// block: three calls of the allocator for its first sixteen bytes.)
+func first_cap[T]() -> usize {
+    s := size_of[T]()
+    if s == 0usize || s >= 4usize { return 4usize }
+    return 16usize / s
+}
 func align_of[T]() -> usize
 // trap_kind terminates with the given trap kind, written as a literal
 // variant (trap_kind(bounds)); the span reported is the call that entered
@@ -487,10 +498,10 @@ impl Vec[T] {
             self.cap = n
         }
     }
-    // grow doubles the capacity (4 elements at first).
+    // grow doubles the capacity (first_cap elements at first).
     func grow(edit self) {
         if self.cap > 9223372036854775807usize { trap_kind(oom) }
-        n := 4usize
+        n := first_cap[T]()
         if self.cap > 0usize { n = self.cap * 2usize }
         self.reserve(n)
     }
@@ -514,7 +525,7 @@ impl Vec[T] {
     // run of pushes.
     func grow_to(edit self, n: usize) {
         if self.cap > 9223372036854775807usize { trap_kind(oom) }
-        want := 4usize
+        want := first_cap[T]()
         if self.cap > 0usize { want = self.cap * 2usize }
         if want < n { want = n }
         self.reserve(want)
@@ -626,13 +637,13 @@ impl Vec[T] {
     // try_grow and try_grow_to are grow and grow_to.
     func try_grow(edit self) -> Result[(), AllocErr] {
         if self.cap > 9223372036854775807usize { return Err(OutOfMemory) }
-        n := 4usize
+        n := first_cap[T]()
         if self.cap > 0usize { n = self.cap * 2usize }
         return self.try_reserve(n)
     }
     func try_grow_to(edit self, n: usize) -> Result[(), AllocErr] {
         if self.cap > 9223372036854775807usize { return Err(OutOfMemory) }
-        want := 4usize
+        want := first_cap[T]()
         if self.cap > 0usize { want = self.cap * 2usize }
         if want < n { want = n }
         return self.try_reserve(want)
@@ -766,9 +777,21 @@ impl Vec[T] {
         self.size = rest
     }
     // clone deep-copies every element (the clone behind copy(v)).
+    // The copies are written straight into the new storage and the size is
+    // set once they all are: through push each one reloaded the capacity
+    // and stored the size, one element a step where a run of plain
+    // elements is now one block copy. A trap in a copy unwinds nothing, so
+    // the storage is never seen half filled.
+    contract { requires "data addresses cap elements of which the first size are live" }
     func clone(view self) -> Vec[T] {
         res := Vec[T].with_capacity(self.size)
-        for i in 0usize..self.size { res.push(copy(self.get(i))) }
+        n := self.size
+        unsafe {
+            for i in 0usize..n {
+                ptr_store(ptr_offset(res.data, truncate[isize](i)), copy(self.get(i)))
+            }
+        }
+        res.size = n
         return res
     }
     contract { requires "data addresses cap elements of which the first size are live" }
@@ -889,13 +912,13 @@ impl[T, A: Allocator] VecIn[T, A] {
     // try_grow and try_grow_to are Vec's growth steps, with its guard.
     func try_grow(edit self) -> Result[(), AllocErr] {
         if self.cap > 9223372036854775807usize { return Err(OutOfMemory) }
-        n := 4usize
+        n := first_cap[T]()
         if self.cap > 0usize { n = self.cap * 2usize }
         return self.try_reserve(n)
     }
     func try_grow_to(edit self, n: usize) -> Result[(), AllocErr] {
         if self.cap > 9223372036854775807usize { return Err(OutOfMemory) }
-        want := 4usize
+        want := first_cap[T]()
         if self.cap > 0usize { want = self.cap * 2usize }
         if want < n { want = n }
         return self.try_reserve(want)

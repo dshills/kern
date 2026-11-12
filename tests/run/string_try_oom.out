@@ -1,14 +1,14 @@
 try_from
   err out of memory
 try_reserve
-  abcd len 4 cap 4
+  abcd len 4 cap 16
   err out of memory
-  abcd len 4 cap 4
+  abcd len 4 cap 16
 try_push on a full string
-  abcd len 4 cap 4
+  abcdefghijklmnop len 16 cap 16
   err out of memory
-  abcd len 4 cap 4
+  abcdefghijklmnop len 16 cap 16
 try_push_str that must grow
-  abcd len 4 cap 4
+  abcdefghijklmnop len 16 cap 16
   err out of memory
-  abcd len 4 cap 4
+  abcdefghijklmnop len 16 cap 16
