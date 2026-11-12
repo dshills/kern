@@ -820,3 +820,33 @@ Left as they were, deliberately:
 
 `kern_swap` left both runtimes with its last caller: `TestRuntimeABI`
 refuses an entry no program declares.
+
+## What was done next (2026-11-12, the larger items)
+
+Five of the larger items, each implemented and measured the same way; the
+first two in the main tree, the other three by implementers in worktrees
+of their own, whose changes were then read, merged and run through the
+whole suite together.
+
+| item | change | before | after |
+|---|---|---|---|
+| 5.2 | `needs_drop[T]()` in `std/core`, asked before each take-and-drop loop of `Vec`, `VecIn`, `Arena`, `Pool`; the interpreter answers it, `size_of` and `align_of` when it compiles the call | interpreter: ksort 17.2 G, kzip 5.60 G, kdb 26.1 G, klisp 43.4 G, kvm 3.00 G | 11.8 G, 3.86 G, 22.6 G, 38.5 G, 2.85 G |
+| 4.1 | a value over 128 bytes crosses a kern call in memory (a pointer the callee copies from; one result through a pointer the caller passes), C-named functions keeping C's convention, a wrapper for a C function taken as a kern function value | kzip release build 2.06 s, debug 1.82 s, `__kern_text` 52,916 B | 0.60 s, 0.40 s, 31,884 B; ten benchmark workloads within 0.5% in instructions; fixture `tests/run/large_aggregates` |
+| 2.1 | `Map` is a wrapper over `MapIn[K, V, SystemAllocator]`; a differential test of 335,000 random operations against the old `Map` over ten key and value types found no difference in results, slot order, iteration order or destruction order | u64: 1,555–1,572 M instructions, 273–283 MB; `String` keys by `find_text`: 2,767 M, 55–60 MB | 522–529 M, 137–140 MB; 2,494 M, 37–40 MB |
+| 5.8 | the interpreter's raw heap: size-class free lists behind a 16 MiB quarantine, a lock-free chunk lookup with a per-thread last hit, handles released with the objects they name | `churn` 1,521 MB and 5.65 G; `handles` 18.98 G; `bigheap` 8.60 G | 111 MB and 3.88 G; 14.22 G; 5.59 G |
+| 6.2 | the language server's positions through a line table per document text, the old algorithm kept in the tests as the oracle | outline of kvm 2,700 M instructions, 138 MB; 16,000 lines 4,459 MB; a pass with 100 diagnostics 800 M | 340–390 M, 32 MB; 139 MB; 80 M |
+
+The outline of kvm is 27.6 ms where section 6.2 estimated 17: what is
+left is the request parsing and resolving the program again, which is
+that section's second bullet and still open.
+
+Three implementers, each running the whole suite on this loaded host,
+had `go test ./tests` stop at Go's ten-minute limit (it takes about 530 s
+alone); section 6.3 is the remedy, and until it is in the suite is run
+with `-timeout 60m`.
+
+Open of the larger items: byte comparison and search (2.4) and the
+fixture builds in parallel (6.3) were still being implemented when this
+was written; float formatting (1.5), the checksum and the other library
+additions (2.6), the interpreter's frames and layouts (5.5, 5.6), and the
+language server's caching (6.2, second bullet) are not started.

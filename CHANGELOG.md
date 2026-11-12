@@ -85,6 +85,20 @@ Five more examples, written to find flaws, and what they found.
   three times inside the allocator's smallest block (`json.parse` of a
   2.6 MB document, 24% fewer instructions). `capacity()` of a small byte
   vector reads 16 where it read 4 or 8.
+- `map.Map` is `map.MapIn` over the system allocator, with one probe,
+  one growth rule and one rebuild in the file: 2M inserts and 8M finds
+  of `u64` keys take 525 M instructions and 138 MB where they took
+  1,560 M and 278 MB. Slot order, iteration order and the order values
+  and keys are destroyed in are what they were (a new fixture pins
+  them). `Map`'s fields and its helpers `some_offset`, `place_opt` and
+  `insert_opt` are gone, and `Map.rebuild` called directly with too few
+  slots builds the smallest table that fits in one step. `Map.try_rebuild`
+  now does the same: asked for fewer slots than the map has entries it
+  never returned.
+- `needs_drop[T]()` says whether destroying a `T` does anything; `Vec`,
+  `VecIn`, `Arena` and `Pool` ask it before a loop that takes and drops
+  each element, which for plain elements only counted down (a native
+  build deleted it; the interpreter ran it an element at a time).
 - `io.read_file` asks a regular file's size and reads into a vector of
   that size, where it read 4,096 bytes at a time through a buffer (a
   256 MiB file: 570M instructions to 173M); pipes and terminals are read
@@ -124,6 +138,29 @@ Five more examples, written to find flaws, and what they found.
   start only when a collection during start-up happened to make it
   (`TestConnectsThatFailLeaveNoDescriptor` failed now and then for that
   reason, and every time under the heap floor).
+- A value of more than 128 bytes crosses a call in memory: a by-value
+  parameter is a pointer the callee copies from, and a function's one
+  result is written through a pointer its caller passes. As a first-class
+  LLVM value a struct of a thousand fields was a thousand registers at
+  every call and return: kzip's release build takes 0.60 s where it took
+  2.06 s, its debug build 0.40 s for 1.82 s, and its code is 40% smaller.
+  Functions under a C name keep C's convention. Ten benchmark workloads
+  retire the same instructions within 0.5%.
+- The interpreter's raw memory is reused: a freed block goes back to a
+  list for its size once 16 MiB has been freed after it, where memory
+  was never given back (a loop that allocates and frees 16 KB held
+  1.5 GB; it holds 111 MB, most of it the collector's floor). The chunk
+  an address lies in is found by a search without a lock, and the table
+  of handles is bounded by the objects alive. A use after free of a
+  block over 128 KiB traps once the block has left quarantine.
+- The interpreter answers `size_of`, `align_of` and `needs_drop` when it
+  compiles a call of them. With the destroy loops gone the examples'
+  demonstrations run 5 to 31% fewer instructions (ksort and kzip 31%).
+- The language server converts positions through a table of line starts
+  made once for a document's text: it decoded the whole file at every
+  conversion, four times a symbol in an outline (`kvm.kern`'s outline,
+  2,700 M instructions and 138 MB to about 360 M and 32 MB; a file of
+  16,000 lines, 4.5 GB allocated to 139 MB). The answers are the same.
 - The interpreter compiles an indexed load or store, `len`, and a
   union's tag (a tag of a container's element was read by decoding the
   whole union): with the above, ksum's demonstration runs 57% fewer
