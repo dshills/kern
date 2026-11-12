@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dshills/kern/compiler/backend/native"
@@ -161,19 +162,78 @@ func mutants(r *rand.Rand, src []byte, n int) []mutant {
 	return out
 }
 
+// diagInput is one input of TestSelfhostDiags: what the Go parser says of
+// it, and what the kern parser printed for it, which a worker fills in.
+type diagInput struct {
+	name     string
+	path     string // the file the kern parser reads it from
+	src      []byte
+	bodyless bool
+	want     string // the Go parser's lines
+	msgs     []string
+	out      string // the kern parser's lines and exit status
+	code     int
+	fatal    string // why the test cannot go on from this input
+}
+
+// run writes the input to its file and runs the kern parser on it.
+func (in *diagInput) run(bin string) {
+	src := in.src
+	in.src = nil
+	if err := os.WriteFile(in.path, src, 0o644); err != nil {
+		in.fatal = err.Error()
+		return
+	}
+	args := []string{in.path, "diags"}
+	if in.bodyless {
+		args = append(args, "bodyless")
+	}
+	out, err := exec.Command(bin, args...).Output()
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		in.code = ee.ExitCode()
+	} else if err != nil {
+		in.fatal = fmt.Sprintf("%s: %v", in.name, err)
+		return
+	}
+	in.out = string(out)
+}
+
 // With diags the kern parser prints the Go parser's diagnostics, every
 // lexical error or the one syntax error, with the same spans and messages,
 // for the corpus, the reject list and seeded mutants of every accepted
 // corpus file (specs/selfhost-diags R1-R4).
+//
+// The inputs are made in order by the test's own goroutine, which alone
+// draws the mutants from the seeded generator; a pool of testJobs workers
+// runs the kern parser, one process an input; and the results are judged
+// afterwards in the order the inputs were made, so what the test reports,
+// and in what order, is what it reported with one parser at a time.
 func TestSelfhostDiags(t *testing.T) {
 	if !native.Available() {
 		t.Skip("clang not available")
 	}
+	workers := testJobs(t)
 	bin := selfhostBin(t, filepath.Join("..", "examples", "selfhost_parser"))
 	dir := t.TempDir()
 	r := rand.New(rand.NewSource(20261104))
-	var inputs, lexical, syntax, skippedCorpus, skippedMutants, n, mutantCount int
+	var inputs, lexical, syntax, skippedCorpus, skippedMutants, mutantCount int
 	seen := map[string]int{}
+	var all []*diagInput
+	queue := make(chan *diagInput)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for in := range queue {
+				in.run(bin)
+			}
+		})
+	}
+	finish := sync.OnceFunc(func() {
+		close(queue)
+		wg.Wait()
+	})
+	defer finish()
 	check := func(name string, src []byte, bodyless, corpus bool) {
 		if nonASCIIOutside(src) {
 			if corpus {
@@ -183,81 +243,87 @@ func TestSelfhostDiags(t *testing.T) {
 			}
 			return
 		}
+		in := &diagInput{name: name, path: filepath.Join(dir, fmt.Sprintf("in%d.kern", len(all))), src: src, bodyless: bodyless}
+		in.want, in.msgs = goLines(name, src, bodyless)
+		all = append(all, in)
+		queue <- in
+	}
+	// stop ends the inputs where the test cannot go on: the failure is
+	// reported in its place, after the inputs before it are judged
+	stop := func(why string) {
+		all = append(all, &diagInput{fatal: why})
+	}
+	errStopped := errors.New("stopped")
+	produce := func() {
+		for _, d := range []string{"tests", "std", "examples", filepath.Join("bench", "kern"), filepath.Join("compiler", "resolve", "prelude")} {
+			bodyless := d == "std" || strings.Contains(d, "prelude")
+			werr := filepath.Walk(filepath.Join("..", d), func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if info.IsDir() || !strings.HasSuffix(path, ".kern") {
+					return nil
+				}
+				src, rerr := os.ReadFile(path)
+				if rerr != nil {
+					stop(rerr.Error())
+					return errStopped
+				}
+				check(path, src, bodyless, true)
+				if _, ds := parser.ParseWith(&source.File{Name: path, Bytes: src}, parser.Options{AllowBodyless: bodyless}); len(ds) == 0 {
+					for _, m := range mutants(r, src, 4) {
+						mutantCount++
+						check(path+" ("+m.what+")", m.src, bodyless, false)
+					}
+				}
+				return nil
+			})
+			if errors.Is(werr, errStopped) {
+				return
+			}
+			if werr != nil {
+				stop(fmt.Sprintf("walking %s: %v", d, werr))
+				return
+			}
+		}
+		names := make([]string, 0, len(selfhostRejects))
+		for name := range selfhostRejects {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			check("reject "+name, []byte(selfhostRejects[name]), false, false)
+		}
+		cases := make([]string, 0, len(diagCases))
+		for name := range diagCases {
+			cases = append(cases, name)
+		}
+		sort.Strings(cases)
+		for _, name := range cases {
+			check("case "+name, []byte(diagCases[name]), false, false)
+		}
+	}
+	produce()
+	finish()
+	for _, in := range all {
+		if in.fatal != "" {
+			t.Fatal(in.fatal)
+		}
 		inputs++
-		want, msgs := goLines(name, src, bodyless)
-		path := filepath.Join(dir, fmt.Sprintf("in%d.kern", n))
-		n++
-		if err := os.WriteFile(path, src, 0o644); err != nil {
-			t.Fatal(err)
+		if in.out != in.want || (in.code == 0) != (in.want == "") {
+			t.Errorf("%s: kern (exit %d)\n%s\nGo\n%s", in.name, in.code, in.out, in.want)
+			continue
 		}
-		args := []string{path, "diags"}
-		if bodyless {
-			args = append(args, "bodyless")
-		}
-		out, err := exec.Command(bin, args...).Output()
-		var ee *exec.ExitError
-		code := 0
-		if errors.As(err, &ee) {
-			code = ee.ExitCode()
-		} else if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if got := string(out); got != want || (code == 0) != (want == "") {
-			t.Errorf("%s: kern (exit %d)\n%s\nGo\n%s", name, code, got, want)
-			return
-		}
-		for _, m := range msgs {
+		for _, m := range in.msgs {
 			seen[formOf(m)]++
 		}
 		switch {
-		case len(msgs) == 0:
-		case strings.HasPrefix(formOf(msgs[0]), "unknown escape") || strings.HasPrefix(formOf(msgs[0]), "unterminated") || strings.HasPrefix(formOf(msgs[0]), "unexpected character"):
+		case len(in.msgs) == 0:
+		case strings.HasPrefix(formOf(in.msgs[0]), "unknown escape") || strings.HasPrefix(formOf(in.msgs[0]), "unterminated") || strings.HasPrefix(formOf(in.msgs[0]), "unexpected character"):
 			lexical++
 		default:
 			syntax++
 		}
-	}
-	for _, d := range []string{"tests", "std", "examples", filepath.Join("bench", "kern"), filepath.Join("compiler", "resolve", "prelude")} {
-		bodyless := d == "std" || strings.Contains(d, "prelude")
-		werr := filepath.Walk(filepath.Join("..", d), func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if info.IsDir() || !strings.HasSuffix(path, ".kern") {
-				return nil
-			}
-			src, rerr := os.ReadFile(path)
-			if rerr != nil {
-				t.Fatal(rerr)
-			}
-			check(path, src, bodyless, true)
-			if _, ds := parser.ParseWith(&source.File{Name: path, Bytes: src}, parser.Options{AllowBodyless: bodyless}); len(ds) == 0 {
-				for _, m := range mutants(r, src, 4) {
-					mutantCount++
-					check(path+" ("+m.what+")", m.src, bodyless, false)
-				}
-			}
-			return nil
-		})
-		if werr != nil {
-			t.Fatalf("walking %s: %v", d, werr)
-		}
-	}
-	names := make([]string, 0, len(selfhostRejects))
-	for name := range selfhostRejects {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		check("reject "+name, []byte(selfhostRejects[name]), false, false)
-	}
-	cases := make([]string, 0, len(diagCases))
-	for name := range diagCases {
-		cases = append(cases, name)
-	}
-	sort.Strings(cases)
-	for _, name := range cases {
-		check("case "+name, []byte(diagCases[name]), false, false)
 	}
 	var forms []string
 	for f, c := range seen {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -58,6 +59,15 @@ type header struct {
 
 func parseHeader(t *testing.T, f *source.File) header {
 	t.Helper()
+	h, err := readHeader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// readHeader is parseHeader for a caller that is not the fixture's test.
+func readHeader(f *source.File) (header, error) {
 	h := header{phase: -1}
 	for _, line := range f.Headers() {
 		key, val, _ := strings.Cut(line, ":")
@@ -72,7 +82,7 @@ func parseHeader(t *testing.T, f *source.File) header {
 		case "expect":
 			parts := strings.Fields(val)
 			if len(parts) == 0 {
-				t.Fatalf("%s: empty expect", f.Name)
+				return h, fmt.Errorf("%s: empty expect", f.Name)
 			}
 			h.expect = parts[0]
 			for _, p := range parts[1:] {
@@ -106,7 +116,7 @@ func parseHeader(t *testing.T, f *source.File) header {
 			h.target = val
 		}
 	}
-	return h
+	return h, nil
 }
 
 func fixText(fix *diag.StructuredEdit) string {
@@ -244,16 +254,25 @@ func expectedOutput(path, name string) string {
 // loadFixture loads a single-file or directory fixture.
 func loadFixture(t *testing.T, path string) (*source.File, []*source.File) {
 	t.Helper()
-	st, err := os.Stat(path)
+	f, all, err := readFixture(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return f, all
+}
+
+// readFixture is loadFixture for a caller that is not the fixture's test.
+func readFixture(path string) (*source.File, []*source.File, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, err
 	}
 	if !st.IsDir() {
 		f, err := source.Load(path)
 		if err != nil {
-			t.Fatal(err)
+			return nil, nil, err
 		}
-		return f, []*source.File{f}
+		return f, []*source.File{f}, nil
 	}
 	var names []string
 	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
@@ -264,21 +283,30 @@ func loadFixture(t *testing.T, path string) (*source.File, []*source.File) {
 	})
 	sort.Strings(names)
 	if len(names) == 0 {
-		t.Fatalf("directory fixture %s holds no .kern file that is not a test file", path)
+		return nil, nil, fmt.Errorf("directory fixture %s holds no .kern file that is not a test file", path)
 	}
 	var files []*source.File
 	for _, n := range names {
 		f, err := source.Load(n)
 		if err != nil {
-			t.Fatal(err)
+			return nil, nil, err
 		}
 		files = append(files, f)
 	}
-	return files[0], files
+	return files[0], files, nil
 }
 
 func TestFixtures(t *testing.T) {
-	for _, path := range fixtures(t) {
+	paths := fixtures(t)
+	// the native executables the subtests compare with the interpreter are
+	// built first, several at a time; everything else is in the loop
+	ahead := buildAhead(t, paths)
+	defer func() {
+		if ahead != nil && ahead.late > 0 {
+			t.Logf("%d native builds were not made ahead", ahead.late)
+		}
+	}()
+	for _, path := range paths {
 		path := path
 		t.Run(path, func(t *testing.T) {
 			f, all := loadFixture(t, path)
@@ -293,7 +321,7 @@ func TestFixtures(t *testing.T) {
 					t.Fatalf("expected acceptance, got %d diagnostics:\n%s", len(ds), render(ds))
 				}
 				if h.phase <= Phase {
-					execute(t, path, all, h)
+					execute(t, path, all, h, ahead)
 				}
 			case "reject":
 				if h.phase != -1 {
@@ -451,7 +479,8 @@ func itoa(i int) string {
 
 // execute runs an accepted fixture that has a main function through the
 // interpreter and checks its expected output or trap (spec §7 Testing).
-func execute(t *testing.T, path string, files []*source.File, h header) {
+// ahead holds the native builds made before the fixture loop, nil for none.
+func execute(t *testing.T, path string, files []*source.File, h header, ahead *aheadBuilds) {
 	t.Helper()
 	prog := resolve.Resolve(files)
 	if ds := check.Check(prog); len(ds) > 0 {
@@ -545,7 +574,7 @@ func execute(t *testing.T, path string, files []*source.File, h header) {
 	}
 	// every executable fixture also runs natively, with or without an
 	// expected-output file
-	nativeRun(t, files, h, out.Bytes(), errb.Bytes(), status)
+	nativeRun(t, path, files, h, out.Bytes(), errb.Bytes(), status, ahead)
 	if h.tsan == "clean" {
 		tsanRun(t, files, h)
 	}
@@ -789,16 +818,35 @@ func nativeOnly(t *testing.T, path string, files []*source.File, h header) {
 // release runtime lacks, not an identity-tag trap, which only a debug
 // build raises, and not one whose `config:` names debug), so the release
 // inliner (PLAN.md 6) is compared against the interpreter on every
-// executable fixture.
-func nativeRun(t *testing.T, files []*source.File, h header, wantOut, wantErr []byte, wantStatus int) {
+// executable fixture. A build made before the fixture loop (buildAhead) is
+// taken in place of building here.
+func nativeRun(t *testing.T, path string, files []*source.File, h header, wantOut, wantErr []byte, wantStatus int, ahead *aheadBuilds) {
 	t.Helper()
+	for _, level := range nativeLevels(h) {
+		if b := ahead.take(t, path, level); b != nil {
+			nativeCompare(t, b.exe, b.ds, b.err, wantOut, wantErr, wantStatus)
+			continue
+		}
+		nativeRunOpt(t, files, h, wantOut, wantErr, wantStatus, level)
+	}
+}
+
+// nativeLevels are the configurations nativeRun builds a fixture in, in
+// the order it runs them.
+func nativeLevels(h header) []string {
+	var levels []string
 	if !strings.Contains(h.config, "opt=release") {
-		nativeRunOpt(t, files, h, wantOut, wantErr, wantStatus, "debug")
+		levels = append(levels, "debug")
 	}
 	if h.testHooks || h.code == "identity" || strings.Contains(h.config, "opt=debug") {
-		return
+		return levels
 	}
-	nativeRunOpt(t, files, h, wantOut, wantErr, wantStatus, "release")
+	return append(levels, "release")
+}
+
+// nativeOptions are the build options of a fixture's differential run.
+func nativeOptions(h header, optLevel string) native.Options {
+	return native.Options{TestHooks: h.testHooks, Opt: optLevel}
 }
 
 func nativeRunOpt(t *testing.T, files []*source.File, h header, wantOut, wantErr []byte, wantStatus int, optLevel string) {
@@ -808,7 +856,14 @@ func nativeRunOpt(t *testing.T, files []*source.File, h header, wantOut, wantErr
 		return
 	}
 	exe := filepath.Join(t.TempDir(), "prog")
-	ds, err := native.Build(files, exe, native.Options{TestHooks: h.testHooks, Opt: optLevel})
+	ds, err := native.Build(files, exe, nativeOptions(h, optLevel))
+	nativeCompare(t, exe, ds, err, wantOut, wantErr, wantStatus)
+}
+
+// nativeCompare runs the executable a build made, when the build
+// succeeded, and compares the run with the interpreter's.
+func nativeCompare(t *testing.T, exe string, ds []diag.Diagnostic, err error, wantOut, wantErr []byte, wantStatus int) {
+	t.Helper()
 	if err != nil {
 		t.Fatalf("native build: %v", err)
 	}
