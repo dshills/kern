@@ -95,6 +95,18 @@ Five more examples, written to find flaws, and what they found.
   slots builds the smallest table that fits in one step. `Map.try_rebuild`
   now does the same: asked for fewer slots than the map has entries it
   never returned.
+- **`std/regex`: regular expressions.** A new module, in kern with no
+  `unsafe` block and no runtime entry, so it runs the same in both
+  engines and on a freestanding target. POSIX extended syntax over
+  bytes; `find` returns the leftmost-longest match in at most (text
+  length) × (pattern size) steps, whatever the pattern; `captures`
+  gives each group's span; a cursor enumerates matches;
+  `replace_first`, `replace_all` and `split` build on it. A search
+  with a reserved `Scratch` makes no allocation call. Groups follow
+  the rule Go's `regexp.CompilePOSIX` has, not POSIX's subexpression
+  rule, and the module is compared with that package on 20,000
+  generated patterns in the suite (200,000 by hand: no difference).
+  `docs/regex.md` is the reference; `specs/std-regex` the contract.
 - `str.equal`, `starts_with`, `ends_with` and `find` compare eight bytes
   at a step, and `str.find_byte` (new) finds a byte the same way; the
   line readers (`BufReader.read_line`, `LineBuf`) find their newline with
@@ -216,6 +228,17 @@ Five more examples, written to find flaws, and what they found.
   one-true-awk, version 20200816) on 548 programs, byte for byte in
   output and exit status, natively and in the interpreter; on a file of
   200,000 lines it retires 0.08 to 0.49 of that awk's instructions.
+- `kawk` now matches with `std/regex`: its own engine is gone, and what
+  the system awk reads differently is a rewriting of the pattern before
+  it is compiled (`lang/awkre.kern`). On three programs over 200,000
+  lines it retires 0.93 to 1.00 of what it did. A malformed dynamic
+  pattern (`"x" ~ "("`) ends it with status 2, as awk does, where it
+  trapped; groups that cannot be removed nest 200 deep, where it took
+  201.
+- `examples/kawk/corpus` holds the 555 programs `kawk` was compared with
+  the system awk on, with what awk printed and returned for each;
+  `TestKawkCorpus` runs them all without an awk on the host (27 that
+  start commands or read `ENVIRON` run on macOS only).
 
 ## [v0.2.3] - 2026-11-11
 
