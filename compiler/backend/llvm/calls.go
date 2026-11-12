@@ -12,9 +12,19 @@ import (
 )
 
 // typedArgs renders "ty val, ty val" for call arguments.
-func (fe *fnEmit) typedArgs(args []*ir.Value) string {
+func (fe *fnEmit) typedArgs(args []*ir.Value) string { return fe.typedArgsFor(args, false) }
+
+// typedArgsFor renders the arguments of a call by kern's convention, or by
+// C's when c is set.
+func (fe *fnEmit) typedArgsFor(args []*ir.Value, c bool) string {
 	var parts []string
 	for _, a := range args {
+		if !c && !fe.isAccess(a) && isLarge(a.Type) {
+			// in memory: the value's own storage, which nothing writes
+			// while the callee copies from it
+			parts = append(parts, "ptr "+fe.spill(a))
+			continue
+		}
 		parts = append(parts, fe.argParts(a)...)
 	}
 	return strings.Join(parts, ", ")
@@ -38,6 +48,24 @@ func (fe *fnEmit) argParts(a *ir.Value) []string {
 
 // callResult emits the call with the right result handling.
 func (fe *fnEmit) directCall(dsts []*ir.Value, retTypes []resolve.Type, callee string, args string) {
+	fe.callWith(dsts, retTypes, callee, args, false)
+}
+
+// callWith emits a call by kern's convention, or by C's when c is set.
+func (fe *fnEmit) callWith(dsts []*ir.Value, retTypes []resolve.Type, callee string, args string, c bool) {
+	if !c && retInMemory(retTypes) {
+		// the result is written into storage of this function's, which is
+		// then the value's own
+		a := fe.alloca(fe.e.mty(retTypes[0]))
+		if args != "" {
+			args = ", " + args
+		}
+		fe.emit("call void %s(ptr %s%s)", callee, a, args)
+		if len(dsts) == 1 {
+			fe.addrs[dsts[0]] = a
+		}
+		return
+	}
 	switch {
 	case len(retTypes) == 0 || (len(retTypes) == 1 && isUnit(retTypes[0])):
 		fe.emit("call void %s(%s)", callee, args)
@@ -96,11 +124,11 @@ func (fe *fnEmit) call(c *ir.Call) {
 	if callee.Extern != "" {
 		sym = "@" + bareName(c.Callee)
 	}
-	args := fe.typedArgs(c.Args)
+	args := fe.typedArgsFor(c.Args, cABI(callee))
 	if callee.Library {
 		args = fe.withSpan(args, c.Pos)
 	}
-	fe.directCall(c.Dsts, callee.Rets, sym, args)
+	fe.callWith(c.Dsts, callee.Rets, sym, args, cABI(callee))
 }
 
 // release calls an accessor's release function with its receiver.
@@ -1297,6 +1325,9 @@ func (fe *fnEmit) spawn(c *ir.Call) {
 		case seq && isAccessType(a.Type):
 			fmt.Fprintf(&tb, "  %%a%d = load { ptr, i64 }, ptr %%ap%d\n  %%a%dp = extractvalue { ptr, i64 } %%a%d, 0\n  %%a%dn = extractvalue { ptr, i64 } %%a%d, 1\n", k, k, k, k, k, k)
 			callArgs = append(callArgs, fmt.Sprintf("ptr %%a%dp, i64 %%a%dn", k, k))
+		case !isAccessType(a.Type) && isLarge(a.Type):
+			// in memory: the thread's own copy in the block
+			callArgs = append(callArgs, fmt.Sprintf("ptr %%ap%d", k))
 		default:
 			fmt.Fprintf(&tb, "  %%a%d = load %s, ptr %%ap%d\n", k, e.lty(a.Type), k)
 			callArgs = append(callArgs, e.lty(a.Type)+" %a"+fmt.Sprint(k))
@@ -1304,6 +1335,9 @@ func (fe *fnEmit) spawn(c *ir.Call) {
 	}
 	if retT == "{}" {
 		fmt.Fprintf(&tb, "  call void %%fn(%s)\n", strings.Join(callArgs, ", "))
+	} else if retInMemory(ft.Ret) {
+		// written straight into the block's result slot
+		fmt.Fprintf(&tb, "  %%rp = getelementptr %s, ptr %%pk, i32 0, i32 1\n  call void %%fn(%s)\n", sty, strings.Join(append([]string{"ptr %rp"}, callArgs...), ", "))
 	} else {
 		fmt.Fprintf(&tb, "  %%r = call %s %%fn(%s)\n  %%rp = getelementptr %s, ptr %%pk, i32 0, i32 1\n", e.lty(retType), strings.Join(callArgs, ", "), sty)
 		if resolve.IsBool(retType) {

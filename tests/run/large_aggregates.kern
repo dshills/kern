@@ -1,0 +1,140 @@
+//! phase: 6
+//! expect: output large_aggregates
+// Values of more than 128 bytes cross a call in memory: a parameter by
+// value or by move as a pointer the callee copies from, one result through
+// a pointer the caller passes. Every way a call is made is here: a direct
+// call, a method, a generic function, a function value, a closure, a
+// library function taking and returning one (Option, Vec), a thread's entry
+// and its result, an argument used again after the call, the same value
+// passed twice, a value that is not Copy, a result returned on two paths,
+// an out parameter and an edit parameter (accesses, as before), and a
+// result through a closure and through a function value. The same in every
+// engine and at each optimization level.
+module main
+
+struct Big {
+    a: [20]u64
+    n: u64
+}
+struct Owner nocopy {
+    cells: [24]u64
+    id: u64
+}
+impl Owner {
+    destructor(edit self) { print_str("destroyed "); print_u64(self.id); println() }
+}
+union Shape { Wide(cells: [18]u64); Narrow(n: u64) }
+
+func make(seed: u64) -> Big {
+    var b: Big = Big { a: zero(), n: seed }
+    for i in 0usize..20usize { b.a[i] = seed * 100u64 + u64(i) }
+    return b
+}
+func sum(b: Big) -> u64 {
+    var s: u64 = b.n
+    for i in 0usize..20usize { s = s + b.a[i] }
+    return s
+}
+// the callee writes its own copy: the caller's value is unchanged
+func bump(b: Big) -> Big {
+    var c: Big = b
+    c.n = c.n + 1u64
+    c.a[0usize] = 7u64
+    return c
+}
+func pick(first: bool, x: Big, y: Big) -> Big {
+    if first { return x }
+    return y
+}
+func both(x: Big, y: Big) -> u64 { return x.n * 1000u64 + y.n }
+func id[T](v: own T) -> T { return v }
+func apply(f: func(Big) -> Big, b: Big) -> Big { return f(b) }
+func through(f: closure(Big) -> u64, b: Big) -> u64 { return f(b) }
+func consume(o: own Owner) -> u64 { return o.id + o.cells[3usize] }
+func pass(o: own Owner) -> Owner { return o }
+func widen(n: u64) -> Shape {
+    if n > 5u64 {
+        var c: [18]u64 = zero()
+        c[17usize] = n
+        return Wide(c)
+    }
+    return Narrow(n)
+}
+func weigh(s: Shape) -> u64 {
+    match s {
+        Wide(cells) => { return cells[17usize] + 1000u64 }
+        Narrow(n) => { return n }
+    }
+}
+impl Big {
+    func scaled(view self, k: u64) -> Big {
+        var c: Big = copy(self)
+        c.n = c.n * k
+        return c
+    }
+    func plus(view self, other: Big) -> u64 { return self.n + other.n }
+}
+func entry(b: Big, k: u64) -> Big {
+    var c: Big = b
+    c.n = c.n + k
+    return c
+}
+func spawned() -> Result[u64, SpawnErr] {
+    t := thread.spawn(entry, make(4u64), 10u64)?
+    r := t.join()
+    return Ok(sum(r))
+}
+func fill(b: out Big, seed: u64) {
+    b = Big { a: zero(), n: seed }
+    b.a[19usize] = seed + 1u64
+}
+func twice(b: edit[Big]) { b.n = b.n * 2u64 }
+func build(f: closure(u64) -> Big, n: u64) -> Big { return f(n) }
+func result_of(f: func(u64) -> Big, n: u64) -> Big { return f(n) }
+func line(label: view[]u8, v: u64) { print_str(label); print_str(" "); print_u64(v); println() }
+
+func main() -> i32 {
+    b := make(1u64)
+    line("sum", sum(b))
+    c := bump(b)
+    line("bumped", c.n * 10u64 + c.a[0usize])
+    line("original", b.n * 1000u64 + b.a[0usize])
+    line("pick first", pick(true, b, c).n)
+    line("pick second", pick(false, b, c).n)
+    line("same twice", both(b, b))
+    line("generic", id[Big](c).n)
+    line("function value", apply(bump, c).n)
+    k := 5u64
+    line("closure", through(|x| x.n + k, c))
+    line("method", b.scaled(9u64).n + b.plus(c))
+    var some: Option[Big] = Some(make(3u64))
+    match some {
+        Some(x) => { line("option", sum(x)) }
+        None => { }
+    }
+    v := Vec[Big].new()
+    v.push(make(2u64))
+    v.push(c)
+    match v.pop() {
+        Some(x) => { line("popped", x.n) }
+        None => { }
+    }
+    line("in a vector", sum(copy(v.get(0usize))))
+    o := Owner { cells: zero(), id: 41u64 }
+    p := pass(move o)
+    line("moved through", consume(move p))
+    line("wide", weigh(widen(9u64)))
+    line("narrow", weigh(widen(2u64)))
+    var w: Big
+    fill(out w, 5u64)
+    line("out", w.n * 100u64 + w.a[19usize])
+    twice(w)
+    line("edited", w.n)
+    line("closure result", sum(build(|n| make(n + k), 1u64)))
+    line("function value result", sum(result_of(make, 2u64)))
+    match spawned() {
+        Ok(n) => { line("thread", n) }
+        Err(e) => { print_str("no thread"); println() }
+    }
+    return 0i32
+}

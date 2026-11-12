@@ -593,6 +593,10 @@ func (e *emitter) paramDecls(f *ir.Func, p *ir.Local, i int) []string {
 	case ast.ConvOut:
 		return []string{fmt.Sprintf("ptr noalias %%p%d", i)}
 	}
+	if !cABI(f) && isLarge(p.Type) {
+		// the caller's copy, read once into this function's slot
+		return []string{fmt.Sprintf("ptr noalias readonly %%p%d", i)}
+	}
 	t := e.lty(p.Type)
 	if t == "i1" && f.Extern != "" {
 		t = "i1 zeroext" // C bool
@@ -600,17 +604,50 @@ func (e *emitter) paramDecls(f *ir.Func, p *ir.Local, i int) []string {
 	return []string{fmt.Sprintf("%s %%p%d", t, i)}
 }
 
+// A large aggregate crosses a call of kern code in memory. A by-value (or
+// own) parameter of such a type is a pointer to storage the caller owns and
+// no longer writes, which the callee copies into its own slot; a function
+// whose one result is of such a type takes, first, a pointer to storage for
+// it and returns nothing. As a first-class LLVM value an aggregate was
+// taken apart into its scalar leaves at every call and return: a struct of
+// a thousand leaves was a thousand registers and stack slots, and clang
+// spent most of such a program's compile selecting instructions for them
+// (docs/reports/perf-review.md, 4.1). Functions under a C name keep C's
+// convention: cABI below.
+
+// retInMemory reports whether a function's results are returned through a
+// pointer the caller passes: one result, of a large type.
+func retInMemory(rets []resolve.Type) bool {
+	return len(rets) == 1 && isLarge(rets[0])
+}
+
+// retSlot is the name of the pointer parameter a result in memory is
+// written through.
+const retSlot = "%ret.out"
+
+// cABI reports whether f is called by C's convention: a function with a C
+// name, defined here or elsewhere.
+func cABI(f *ir.Func) bool { return f != nil && f.Extern != "" }
+
 func (e *emitter) retType(f *ir.Func) string {
-	switch len(f.Rets) {
+	if !cABI(f) && retInMemory(f.Rets) {
+		return "void"
+	}
+	return e.retTypeOf(f.Rets)
+}
+
+// retTypeOf is the register type of results returned by value.
+func (e *emitter) retTypeOf(rets []resolve.Type) string {
+	switch len(rets) {
 	case 0:
 		return "void"
 	case 1:
-		if isUnit(f.Rets[0]) {
+		if isUnit(rets[0]) {
 			return "void"
 		}
-		return e.lty(f.Rets[0])
+		return e.lty(rets[0])
 	}
-	return e.lty(&resolve.Tuple{Elems: f.Rets})
+	return e.lty(&resolve.Tuple{Elems: rets})
 }
 
 func (e *emitter) function(f *ir.Func) {
@@ -623,6 +660,9 @@ func (e *emitter) function(f *ir.Func) {
 		fe.labels[b] = fmt.Sprintf("bb%d", b.ID)
 	}
 	var ps []string
+	if !cABI(f) && retInMemory(f.Rets) {
+		ps = append(ps, "ptr noalias "+retSlot) // where the result is written
+	}
 	if f.Closure {
 		ps = append(ps, "ptr %env") // the captures, stored by MakeClosure
 	}
@@ -665,6 +705,12 @@ func (e *emitter) function(f *ir.Func) {
 		}
 		if pt == "i1" {
 			fmt.Fprintf(&fe.pstores, "  %%pz%d = zext i1 %%p%d to i8\n  store i8 %%pz%d, ptr %s\n", i, i, i, fe.local(p))
+			continue
+		}
+		if !cABI(f) && isLarge(p.Type) {
+			// passed in memory: copied from the caller's storage
+			e.declare("llvm.memcpy.p0.p0.i64", "void (ptr, ptr, i64, i1)")
+			fmt.Fprintf(&fe.pstores, "  call void @llvm.memcpy.p0.p0.i64(ptr %s, ptr %%p%d, i64 %d, i1 false)\n", fe.local(p), i, layout.Of(p.Type).Size)
 			continue
 		}
 		fmt.Fprintf(&fe.pstores, "  store %s %%p%d, ptr %s\n", pt, i, fe.local(p))
@@ -1326,7 +1372,7 @@ func (fe *fnEmit) instr(in ir.Instr) {
 		fe.emit("%s = insertvalue { ptr, ptr } %s, ptr %s, 1", fe.v(i.Dst), a, env)
 	case *ir.FuncRef:
 		if f := e.mod.Func(i.Name); f != nil && f.Extern != "" {
-			fe.vals[i.Dst] = "@" + bareName(i.Name)
+			fe.vals[i.Dst] = e.externThunk(f)
 		} else if f != nil && f.Library {
 			fe.vals[i.Dst] = e.libraryThunk(f)
 		} else {
@@ -1774,6 +1820,11 @@ func (fe *fnEmit) term(t ir.Term) {
 		}
 		fe.emit("switch i32 %s, label %%%s [ %s ]", fe.v(x.Tag), fe.labels[x.Default], strings.Join(parts, " "))
 	case *ir.Ret:
+		if !cABI(fe.f) && retInMemory(fe.f.Rets) && len(x.Vals) == 1 {
+			fe.storeValue(x.Vals[0], retSlot)
+			fe.emit("ret void")
+			return
+		}
 		rt := fe.e.retType(fe.f)
 		if rt == "void" {
 			fe.emit("ret void")
@@ -1806,6 +1857,10 @@ func (e *emitter) libraryThunk(f *ir.Func) string {
 	}
 	e.glue[name] = true
 	var ps, args []string
+	if retInMemory(f.Rets) {
+		ps = append(ps, "ptr noalias "+retSlot)
+		args = append(args, "ptr noalias "+retSlot)
+	}
 	for i, p := range f.Params {
 		decls := e.paramDecls(f, p, i)
 		ps = append(ps, decls...)
@@ -1822,6 +1877,67 @@ func (e *emitter) libraryThunk(f *ir.Func) string {
 	}
 	e.glueBody.WriteString(b.String())
 	return sym
+}
+
+// externThunk is the value a function with a C name has as a kern function
+// value: the function itself, or, when a large aggregate crosses its
+// signature, a wrapper (emitted once) that takes it by kern's convention
+// and calls the function by C's, so that a call through the value is the
+// same whatever it holds.
+func (e *emitter) externThunk(f *ir.Func) string {
+	inMemory := retInMemory(f.Rets)
+	for _, p := range f.Params {
+		inMemory = inMemory || isLarge(p.Type)
+	}
+	if !inMemory {
+		return "@" + bareName(f.Name)
+	}
+	name := f.Name + ".fnptr"
+	sym := fnSym(name)
+	if e.glue[name] {
+		return sym
+	}
+	e.glue[name] = true
+	var ps, args []string
+	var b strings.Builder
+	if retInMemory(f.Rets) {
+		ps = append(ps, "ptr noalias "+retSlot)
+	}
+	for i, p := range f.Params {
+		t := e.lty(p.Type)
+		if isLarge(p.Type) {
+			ps = append(ps, fmt.Sprintf("ptr noalias readonly %%p%d", i))
+			fmt.Fprintf(&b, "  %%a%d = load %s, ptr %%p%d\n", i, t, i)
+			args = append(args, fmt.Sprintf("%s %%a%d", t, i))
+			continue
+		}
+		if t == "i1" {
+			args = append(args, fmt.Sprintf("i1 zeroext %%p%d", i))
+		} else {
+			args = append(args, fmt.Sprintf("%s %%p%d", t, i))
+		}
+		ps = append(ps, fmt.Sprintf("%s %%p%d", t, i))
+	}
+	callee, cret := "@"+bareName(f.Name), e.retTypeOf(f.Rets)
+	head := fmt.Sprintf("define internal %s %s(%s) {\nentry:\n", e.retTypeOf(nonMemory(f.Rets)), sym, strings.Join(ps, ", "))
+	switch {
+	case retInMemory(f.Rets):
+		fmt.Fprintf(&b, "  %%r = call %s %s(%s)\n  store %s %%r, ptr %s\n  ret void\n}\n", cret, callee, strings.Join(args, ", "), cret, retSlot)
+	case cret == "void":
+		fmt.Fprintf(&b, "  call void %s(%s)\n  ret void\n}\n", callee, strings.Join(args, ", "))
+	default:
+		fmt.Fprintf(&b, "  %%r = call %s %s(%s)\n  ret %s %%r\n}\n", cret, callee, strings.Join(args, ", "), cret)
+	}
+	e.glueBody.WriteString(head + b.String())
+	return sym
+}
+
+// nonMemory is rets, or nothing when they are returned in memory.
+func nonMemory(rets []resolve.Type) []resolve.Type {
+	if retInMemory(rets) {
+		return nil
+	}
+	return rets
 }
 
 // baseName strips the specialization suffix: "Vec.grow[T=u64]" -> "Vec.grow".
