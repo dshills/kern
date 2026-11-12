@@ -104,7 +104,7 @@ func (s *Server) completion(p textDocumentPositionParams) (any, *rpcError) {
 	if src == nil {
 		return out, nil
 	}
-	off := ToOffset(src, p.Position, s.enc)
+	off := s.lines(d.path, src).offset(p.Position, s.enc)
 	start := off
 	for start > 0 && wordByte(src, start-1) {
 		start--

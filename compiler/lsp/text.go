@@ -4,7 +4,11 @@
 // explain-ownership to an editor.
 package lsp
 
-import "unicode/utf8"
+import (
+	"bytes"
+	"slices"
+	"unicode/utf8"
+)
 
 // Position is an LSP position: a 0-based line and a character offset in
 // the negotiated encoding.
@@ -77,17 +81,26 @@ func crlfInterior(text []byte, off int) bool {
 	return off > 0 && off < len(text) && text[off-1] == '\r' && text[off] == '\n'
 }
 
-// normalize clamps off to the text, moves it back to a character
-// boundary, and moves the inside of a \r\n to its \r (spec R8).
-func normalize(text []byte, off int, b []bool) int {
+// A position is found from the start of its line alone (spec R8). A line
+// starts at offset 0, after every \n, and after every \r that no \n
+// follows. Each start is a character boundary of the text, because a
+// byte below 0x80 is never part of a longer character, whatever bytes
+// are before it; so the characters of a line are the same decoded from
+// the line's start as decoded from the start of the text, and a
+// conversion reads one line.
+// ToPosition and ToOffset find the line by scanning the text up to it;
+// a lineTable finds it by binary search.
+
+// settle clamps off to the text and moves the inside of a \r\n to its
+// \r. (An offset inside a longer character is moved to the character's
+// start by column; such an offset is never before a \n, so the two
+// moves do not meet.)
+func settle(text []byte, off int) int {
 	if off < 0 {
 		off = 0
 	}
 	if off > len(text) {
 		off = len(text)
-	}
-	for !b[off] {
-		off--
 	}
 	if crlfInterior(text, off) {
 		off--
@@ -95,9 +108,49 @@ func normalize(text []byte, off int, b []bool) int {
 	return off
 }
 
-// ToPosition converts a byte offset of text to a position (spec R8).
+// column is the character offset of off in the line that starts at
+// start, start <= off <= len(text): the units of the characters that end
+// at or before off, so that an offset inside a character is the
+// character's start.
+func column(text []byte, start, off int, enc Encoding) int {
+	ch := 0
+	for i := start; i < off; {
+		r, n := utf8.DecodeRune(text[i:])
+		if i+n > off {
+			break
+		}
+		ch += units(r, n, enc)
+		i += n
+	}
+	return ch
+}
+
+// offsetIn is the offset of a character offset in the line text[start:end]:
+// the line's end when the line is shorter, and a character's start when
+// the offset is inside it.
+func offsetIn(text []byte, start, end, character int, enc Encoding) int {
+	ch := 0
+	for i := start; i < end; {
+		if ch >= character {
+			return i
+		}
+		r, n := utf8.DecodeRune(text[i:])
+		u := units(r, n, enc)
+		if ch+u > character {
+			return i
+		}
+		ch += u
+		i += n
+	}
+	return end
+}
+
+// ToPosition converts a byte offset of text to a position (spec R8): an
+// offset outside the text is its nearest end, one inside a character is
+// the character's start, and one inside a \r\n is its \r. It reads the
+// text up to the offset; a lineTable answers the same without.
 func ToPosition(text []byte, off int, enc Encoding) Position {
-	off = normalize(text, off, boundaries(text))
+	off = settle(text, off)
 	line, start := 0, 0
 	for i := 0; i < off; i++ {
 		switch text[i] {
@@ -110,13 +163,7 @@ func ToPosition(text []byte, off int, enc Encoding) Position {
 			line, start = line+1, i+1
 		}
 	}
-	ch := 0
-	for i := start; i < off; {
-		r, n := utf8.DecodeRune(text[i:])
-		ch += units(r, n, enc)
-		i += n
-	}
-	return Position{Line: line, Character: ch}
+	return Position{Line: line, Character: column(text, start, off, enc)}
 }
 
 // lineBounds returns the start of a 0-based line and the offset of its
@@ -146,7 +193,8 @@ func lineBounds(text []byte, line int) (start, end int, ok bool) {
 // ToOffset converts a position to a byte offset of text (spec R8): a line
 // past the last is the end of the text, a character past its line's end
 // is the line's end, and a character inside a multi-unit character is
-// that character's start.
+// that character's start. It reads the text up to the position's line; a
+// lineTable answers the same without.
 func ToOffset(text []byte, p Position, enc Encoding) int {
 	if p.Line < 0 {
 		return 0
@@ -155,20 +203,64 @@ func ToOffset(text []byte, p Position, enc Encoding) int {
 	if !ok {
 		return len(text)
 	}
-	ch := 0
-	for i := start; i < end; {
-		if ch >= p.Character {
-			return i
+	return offsetIn(text, start, end, p.Character, enc)
+}
+
+// lineTable is a text with the offsets at which its lines start: the
+// conversions of ToPosition and ToOffset, with the same answers, in the
+// time of a binary search over the lines and of reading one line. It is
+// built by one pass over the text and holds the text, which must not
+// change under it.
+type lineTable struct {
+	text   []byte
+	starts []int // ascending, starts[0] == 0; one for every line
+}
+
+// newLineTable builds the line table of text.
+func newLineTable(text []byte) *lineTable {
+	starts := make([]int, 1, bytes.Count(text, []byte{'\n'})+1)
+	for i, c := range text {
+		if c == '\n' || c == '\r' && (i+1 == len(text) || text[i+1] != '\n') {
+			starts = append(starts, i+1)
 		}
-		r, n := utf8.DecodeRune(text[i:])
-		u := units(r, n, enc)
-		if ch+u > p.Character {
-			return i
-		}
-		ch += u
-		i += n
 	}
-	return end
+	return &lineTable{text: text, starts: starts}
+}
+
+// position is ToPosition(t.text, off, enc).
+func (t *lineTable) position(off int, enc Encoding) Position {
+	off = settle(t.text, off)
+	// the line of off is the last that starts at or before it
+	line, found := slices.BinarySearch(t.starts, off)
+	if !found {
+		line--
+	}
+	return Position{Line: line, Character: column(t.text, t.starts[line], off, enc)}
+}
+
+// offset is ToOffset(t.text, p, enc).
+func (t *lineTable) offset(p Position, enc Encoding) int {
+	if p.Line < 0 {
+		return 0
+	}
+	if p.Line >= len(t.starts) {
+		return len(t.text)
+	}
+	start, end := t.starts[p.Line], len(t.text)
+	if p.Line+1 < len(t.starts) {
+		// the line ends at its break, which ends where the next line
+		// starts: a \n, a \r, or a \r\n
+		end = t.starts[p.Line+1] - 1
+		if t.text[end] == '\n' && end > start && t.text[end-1] == '\r' {
+			end--
+		}
+	}
+	return offsetIn(t.text, start, end, p.Character, enc)
+}
+
+// rng is the range of the span start..end of the text.
+func (t *lineTable) rng(start, end int, enc Encoding) Range {
+	return Range{Start: t.position(start, enc), End: t.position(end, enc)}
 }
 
 // MinimalEdit is the one edit turning old into new (spec R9): the common

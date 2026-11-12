@@ -70,7 +70,7 @@ func (s *Server) documentSymbol(p documentSymbolParams) (any, *rpcError) {
 			}
 		}
 	}
-	o := outliner{s: s, text: text, mod: mod, info: info}
+	o := outliner{s: s, text: text, lines: s.lines(d.path, text), mod: mod, info: info}
 	for _, decl := range file.Decls {
 		if sym, ok := o.decl(decl); ok {
 			out = append(out, sym)
@@ -81,15 +81,14 @@ func (s *Server) documentSymbol(p documentSymbolParams) (any, *rpcError) {
 
 // outliner builds a document's symbols.
 type outliner struct {
-	s    *Server
-	text []byte
-	mod  *resolve.Module
-	info *resolve.Info
+	s     *Server
+	text  []byte
+	lines *lineTable // of text
+	mod   *resolve.Module
+	info  *resolve.Info
 }
 
-func (o *outliner) rng(p ast.Pos) Range {
-	return Range{Start: ToPosition(o.text, p.Start, o.s.enc), End: ToPosition(o.text, p.End, o.s.enc)}
-}
+func (o *outliner) rng(p ast.Pos) Range { return o.lines.rng(p.Start, p.End, o.s.enc) }
 
 // symbol is an item over span p named name, its selection the name's
 // first whole occurrence inside p.
@@ -294,7 +293,7 @@ func (s *Server) signatureHelp(p textDocumentPositionParams) (any, *rpcError) {
 	if src == nil {
 		return nil, nil
 	}
-	off := ToOffset(src, p.Position, s.enc)
+	off := s.lines(d.path, src).offset(p.Position, s.enc)
 	call, lparen, prog := s.callAround(pg.files, d.path, src, off)
 	if call == nil {
 		// unclosed calls being typed (`pair(scale(`): close every one open

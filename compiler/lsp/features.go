@@ -68,7 +68,8 @@ func (s *Server) hover(p textDocumentPositionParams) (any, *rpcError) {
 	if text == nil {
 		return nil, nil // the loader could not read the document's program
 	}
-	off := ToOffset(text, p.Position, s.enc)
+	tab := s.lines(d.path, text)
+	off := tab.offset(p.Position, s.enc)
 	prog := s.opts.Resolve(pg.files)
 	best, found := s.nameAt(prog, d.path, off)
 	if !found {
@@ -81,7 +82,7 @@ func (s *Server) hover(p textDocumentPositionParams) (any, *rpcError) {
 			b.WriteString(s.renderPlace(pl))
 		}
 	}
-	return Hover{Contents: MarkupContent{Kind: "markdown", Value: b.String()}, Range: s.rangeOf(text, best.pos.Start, best.pos.End)}, nil
+	return Hover{Contents: MarkupContent{Kind: "markdown", Value: b.String()}, Range: tab.rng(best.pos.Start, best.pos.End, s.enc)}, nil
 }
 
 // nameAt is the innermost name of file whose span contains off, the end
@@ -177,8 +178,8 @@ func (s *Server) place(prog *resolve.Program, sym *resolve.Symbol) (diag.Place, 
 
 // renderPlace is the ownership part of a hover (spec R6).
 func (s *Server) renderPlace(pl diag.Place) string {
-	text := s.textOf(pl.Loc.File)
-	line := func(off int) int { return ToPosition(text, off, s.enc).Line + 1 }
+	tab := s.linesOf(pl.Loc.File)
+	line := func(off int) int { return tab.position(off, s.enc).Line + 1 }
 	var b strings.Builder
 	fmt.Fprintf(&b, "\nstate: %s\n", pl.State)
 	if len(pl.Accesses) > 0 {
@@ -188,7 +189,7 @@ func (s *Server) renderPlace(pl diag.Place) string {
 		}
 	}
 	if pl.DropAt != nil {
-		fmt.Fprintf(&b, "\ndropped at line %d\n", ToPosition(s.textOf(pl.DropAt.File), pl.DropAt.Span.Start, s.enc).Line+1)
+		fmt.Fprintf(&b, "\ndropped at line %d\n", s.linesOf(pl.DropAt.File).position(pl.DropAt.Span.Start, s.enc).Line+1)
 	}
 	if c := pl.Contract; c != nil {
 		for _, kc := range []struct {

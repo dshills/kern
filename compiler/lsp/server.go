@@ -60,6 +60,21 @@ type document struct {
 	text    []byte
 	version int
 	seq     int // order of the last open or change, for the alias rule
+
+	lines *lineTable // of text once a position was converted; see table
+}
+
+// table is the line table of the document's text: built when a request
+// first converts a position of this text, and kept for every request
+// until the text is replaced (a change puts a new slice in text, never
+// writes into the old one, which is how a table that is out of date is
+// known).
+func (d *document) table() *lineTable {
+	if t := d.lines; t != nil && len(t.text) == len(d.text) && (len(d.text) == 0 || &t.text[0] == &d.text[0]) {
+		return t
+	}
+	d.lines = newLineTable(d.text)
+	return d.lines
 }
 
 // kern reports whether the document is checked: a file URI ending in .kern.

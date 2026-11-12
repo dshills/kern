@@ -69,10 +69,10 @@ func TestRoundTrip(t *testing.T) {
 	texts := []string{"aé€😀\r\nb\rc\nd", "\xffx\x80\xe2\x82y", "\r\n\r\n", "", "line\n"}
 	for _, s := range texts {
 		text := []byte(s)
-		b := boundaries(text)
+		b := oracleBoundaries(text)
 		for _, enc := range []Encoding{UTF8, UTF16} {
 			for off := 0; off <= len(text); off++ {
-				want := normalize(text, off, b)
+				want := oracleNormalize(text, off, b)
 				if got := ToOffset(text, ToPosition(text, off, enc), enc); got != want {
 					t.Errorf("%q %v: offset %d -> %v -> %d, want %d", s, enc, off, ToPosition(text, off, enc), got, want)
 				}

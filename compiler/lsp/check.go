@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -99,6 +100,27 @@ func (s *Server) textOf(path string) []byte {
 	}
 	b, _ := os.ReadFile(path)
 	return b
+}
+
+// linesOf is the line table of a file's text through the overlay: the
+// holding document's own, which lasts as long as its text; else a table
+// of the file as it is now, empty when it cannot be read.
+func (s *Server) linesOf(path string) *lineTable {
+	if d := s.holder(path); d != nil {
+		return d.table()
+	}
+	b, _ := os.ReadFile(path)
+	return newLineTable(b)
+}
+
+// lines is the line table of text, which a request loaded as the text of
+// the file at path: the holding document's table when that is the
+// document's text, else a table made for this text.
+func (s *Server) lines(path string, text []byte) *lineTable {
+	if d := s.holder(path); d != nil && bytes.Equal(d.text, text) {
+		return d.table()
+	}
+	return newLineTable(text)
 }
 
 // uriOf is the URI a path is published on: the URI of the document that
@@ -267,9 +289,9 @@ func (s *Server) publishURI(uri, path string, ds []diag.Diagnostic, owner string
 	pb.kern = ds
 	pb.lsp = []Diagnostic{}
 	if len(ds) > 0 {
-		text := s.textOf(path)
+		tab := s.linesOf(path)
 		for _, k := range ds {
-			pb.lsp = append(pb.lsp, s.convert(uri, text, k))
+			pb.lsp = append(pb.lsp, s.convert(uri, tab, k))
 		}
 	}
 	params := PublishDiagnosticsParams{URI: uri, Diagnostics: pb.lsp}
@@ -280,8 +302,9 @@ func (s *Server) publishURI(uri, path string, ds []diag.Diagnostic, owner string
 	s.notify("textDocument/publishDiagnostics", params)
 }
 
-// convert is one kern diagnostic as an LSP diagnostic (spec R3).
-func (s *Server) convert(uri string, text []byte, k diag.Diagnostic) Diagnostic {
+// convert is one kern diagnostic of the file with line table tab as an
+// LSP diagnostic (spec R3).
+func (s *Server) convert(uri string, tab *lineTable, k diag.Diagnostic) Diagnostic {
 	sev := 1
 	if k.Severity == "warning" {
 		sev = 2
@@ -293,18 +316,14 @@ func (s *Server) convert(uri string, text []byte, k diag.Diagnostic) Diagnostic 
 	if k.Rule != "" {
 		msg += " (rule " + k.Rule + ")"
 	}
-	out := Diagnostic{Range: s.rangeOf(text, k.Span.Start, k.Span.End), Severity: sev, Code: string(k.Code), Source: "kern", Message: msg}
+	out := Diagnostic{Range: tab.rng(k.Span.Start, k.Span.End, s.enc), Severity: sev, Code: string(k.Code), Source: "kern", Message: msg}
 	for _, r := range k.Related {
 		out.RelatedInformation = append(out.RelatedInformation, DiagnosticRelatedInformation{
-			Location: Location{URI: uri, Range: s.rangeOf(text, r.Start, r.End)},
+			Location: Location{URI: uri, Range: tab.rng(r.Start, r.End, s.enc)},
 			Message:  r.Label,
 		})
 	}
 	return out
-}
-
-func (s *Server) rangeOf(text []byte, start, end int) Range {
-	return Range{Start: ToPosition(text, start, s.enc), End: ToPosition(text, end, s.enc)}
 }
 
 // close drops a document and clears the URIs only it had published

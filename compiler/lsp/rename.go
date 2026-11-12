@@ -48,7 +48,7 @@ func (s *Server) renameTarget(uri string, p Position) (program, map[string][]byt
 		return program{}, nil, nil, nameRef{}, nameRef{}, false
 	}
 	idx := buildNav(s.opts.Resolve(pg.files), text)
-	r, ok := idx.at(d.path, ToOffset(src, p, s.enc))
+	r, ok := idx.at(d.path, s.lines(d.path, src).offset(p, s.enc))
 	if !ok {
 		return program{}, nil, nil, nameRef{}, nameRef{}, false
 	}
@@ -64,7 +64,7 @@ func (s *Server) prepareRename(p textDocumentPositionParams) (any, *rpcError) {
 		return nil, nil
 	}
 	name := string(text[decl.file][decl.span.Start:decl.span.End])
-	return map[string]any{"range": s.rangeOf(text[r.file], r.span.Start, r.span.End), "placeholder": name}, nil
+	return map[string]any{"range": s.lines(r.file, text[r.file]).rng(r.span.Start, r.span.End, s.enc), "placeholder": name}, nil
 }
 
 // rename answers textDocument/rename (R3, R4): the document's program and,
@@ -140,9 +140,13 @@ func (s *Server) rename(p renameParams) (any, *rpcError) {
 		return all[i].span.Start < all[j].span.Start
 	})
 	edit := WorkspaceEdit{Changes: map[string][]TextEdit{}}
-	for _, x := range all {
+	var tab *lineTable // of the file of the edit before, which sorting put beside its others
+	for i, x := range all {
+		if i == 0 || x.file != all[i-1].file {
+			tab = s.lines(x.file, texts[x.file])
+		}
 		u := s.uriOf(x.file)
-		edit.Changes[u] = append(edit.Changes[u], TextEdit{Range: s.rangeOf(texts[x.file], x.span.Start, x.span.End), NewText: p.NewName})
+		edit.Changes[u] = append(edit.Changes[u], TextEdit{Range: tab.rng(x.span.Start, x.span.End, s.enc), NewText: p.NewName})
 	}
 	return edit, nil
 }

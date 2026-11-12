@@ -305,12 +305,14 @@ func (s *Server) navTarget(uri string, p Position) (*navIndex, nameRef, bool) {
 		return nil, nameRef{}, false
 	}
 	idx := buildNav(s.opts.Resolve(pg.files), text)
-	r, ok := idx.at(d.path, ToOffset(src, p, s.enc))
+	r, ok := idx.at(d.path, s.lines(d.path, src).offset(p, s.enc))
 	return idx, r, ok
 }
 
-func (s *Server) location(r nameRef) Location {
-	return Location{URI: s.uriOf(r.file), Range: s.rangeOf(s.textOf(r.file), r.span.Start, r.span.End)}
+// location is a name's location, tab being its file's line table
+// (linesOf).
+func (s *Server) location(r nameRef, tab *lineTable) Location {
+	return Location{URI: s.uriOf(r.file), Range: tab.rng(r.span.Start, r.span.End, s.enc)}
 }
 
 // definition answers textDocument/definition (spec R1, R2a).
@@ -323,7 +325,7 @@ func (s *Server) definition(p textDocumentPositionParams) (any, *rpcError) {
 	if !ok {
 		return nil, nil // a library declaration
 	}
-	return s.location(decl), nil
+	return s.location(decl, s.linesOf(decl.file)), nil
 }
 
 // references answers textDocument/references (spec R2, R2a).
@@ -363,8 +365,12 @@ func (s *Server) references(p referenceParams) (any, *rpcError) {
 		}
 		return refs[i].span.Start < refs[j].span.Start
 	})
-	for _, x := range refs {
-		out = append(out, s.location(x))
+	var tab *lineTable // of the file of the reference before, which sorting put beside its others
+	for i, x := range refs {
+		if i == 0 || x.file != refs[i-1].file {
+			tab = s.linesOf(x.file)
+		}
+		out = append(out, s.location(x, tab))
 	}
 	return out, nil
 }
