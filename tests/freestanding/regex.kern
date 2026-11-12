@@ -1,0 +1,81 @@
+//! phase: 6
+//! expect: output regex
+//! env: freestanding
+// std/regex on bare metal (specs/std-regex/SPEC.md, T7 and R20): the
+// module calls no runtime entry of its own, so compiling a pattern and
+// searching need only the allocator a Vec needs. Three patterns, each
+// compiled and searched; a hosted run of this file prints the same lines.
+module fs
+import "std/regex"
+
+func seek(re: view[regex.Regex], sc: edit[regex.Scratch], text: view[]u8, from: usize) {
+    print_str("  in \"")
+    print_str(text)
+    print_str("\" from ")
+    print_u64(u64(from))
+    print_str(" => ")
+    match re.find(sc, text, from) {
+        Some(m) => {
+            print_u64(u64(m.start))
+            print_str("-")
+            print_u64(u64(m.end))
+        }
+        None => print_str("none")
+    }
+    print_str(", is_match ")
+    print_bool(re.is_match(sc, text))
+    println()
+}
+
+func main() -> i32 {
+    sc := regex.Scratch.new()
+    print_str("/(ab|c)+d/")
+    println()
+    with r := regex.compile("(ab|c)+d") {
+        match r {
+            Err(e) => { print_str("  refused"); println() }
+            Ok(re) => {
+                seek(re, sc, "xabcabd!", 0usize)
+                seek(re, sc, "xabcabd!", 2usize)
+                seek(re, sc, "abab", 0usize)
+            }
+        }
+    }
+    print_str("/[[:digit:]]{2,3}$/")
+    println()
+    with r := regex.compile("[[:digit:]]{2,3}$") {
+        match r {
+            Err(e) => { print_str("  refused"); println() }
+            Ok(re) => {
+                seek(re, sc, "a1 22 4567", 0usize)
+                seek(re, sc, "12", 0usize)
+                seek(re, sc, "1", 0usize)
+            }
+        }
+    }
+    o := regex.options()
+    o.ignore_case = true
+    print_str("/^k.rn|bare/ ignore_case")
+    println()
+    with r := regex.compile_with("^k.rn|bare", o) {
+        match r {
+            Err(e) => { print_str("  refused"); println() }
+            Ok(re) => {
+                seek(re, sc, "On BARE metal", 0usize)
+                seek(re, sc, "Kern", 0usize)
+                seek(re, sc, "kern kern", 1usize)
+            }
+        }
+    }
+    with r := regex.compile("a{2,1}") {
+        match r {
+            Err(e) => {
+                print_str("/a{2,1}/ refused at ")
+                print_u64(u64(e.at))
+                println()
+            }
+            Ok(re) => { print_str("/a{2,1}/ accepted"); println() }
+        }
+    }
+    return 0i32
+}

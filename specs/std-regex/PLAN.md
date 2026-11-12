@@ -17,7 +17,7 @@ condition stated on the parsed tree with its regression rows (phase
 replaced by "the phase is not done until the owner changes the spec".
 Round 3: EXECUTABLE_AS_IS, score 100, every requirement covered.
 
-Implements `specs/std-regex/SPEC.md` v0.13 in seven phases. The order is
+Implements `specs/std-regex/SPEC.md` v0.15 in seven phases. The order is
 chosen so that each phase is checked by something already in the
 repository: the `kawk` corpus goes in first (phase 1) and guards the
 port in phase 6; the module is built from its parser outward (phases 2
@@ -29,8 +29,12 @@ Conventions that hold in every phase:
   byte-identical (edit `std/`, copy to the prelude;
   `TestStdCoreMatchesPrelude` compares them).
 - A fixture's expected output is written from the spec before the
-  fixture is run, and a fixture is run in the four configurations by
-  `go test ./tests -run 'TestFixtures$/DIR/NAME' -count=1`.
+  fixture is run. `go test ./tests -run 'TestFixtures$/DIR/NAME'
+  -count=1` runs a fixture in three of the four configurations (the
+  interpreter, native debug, native release); the fourth, the
+  interpreter at release, is run by hand for every fixture of this
+  plan (`kern run --opt=release FILE`) and compared with the same
+  expected output.
 - After a fixture is added or removed:
   `go test ./compiler/analysis -run TestHostedOnlyInventory -update-hosted-inventory`.
 - `gofmt -l` and `golangci-lint run ./...` are clean before a phase

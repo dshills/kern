@@ -1,0 +1,51 @@
+//! phase: 6
+//! expect: output regex_cost
+// std/regex, the cost of a search (specs/std-regex/SPEC.md, T5 and R18):
+// three patterns on which a search that tries one alternative at a time
+// takes time exponential or quadratic in the text, each against 200,000
+// bytes of `a`, where none matches, and against the same bytes followed
+// by `bc`. A search takes time proportional to the text, so the fixture
+// finishes; the spans are those of R11.
+module t
+import "std/regex"
+
+func span(s: Option[regex.Span]) {
+    match s {
+        Some(m) => {
+            print_u64(u64(m.start))
+            print_str("-")
+            print_u64(u64(m.end))
+        }
+        None => print_str("none")
+    }
+}
+
+func run(p: view[]u8, sc: edit[regex.Scratch], text: view[]u8, what: view[]u8) {
+    print_str("/")
+    print_str(p)
+    print_str("/ in ")
+    print_str(what)
+    print_str(" => ")
+    with r := regex.compile(p) {
+        match r {
+            Err(e) => { print_str("refused") }
+            Ok(re) => { span(re.find(sc, text, 0usize)) }
+        }
+    }
+    println()
+}
+
+func main() -> i32 {
+    text := Vec[u8].new()
+    text.resize(200000usize, 97u8)
+    sc := regex.Scratch.new()
+    run("(a*)*b", sc, text.as_view(), "200000 bytes of a")
+    run("(a|aa)*c", sc, text.as_view(), "200000 bytes of a")
+    run("a*a*a*a*a*b", sc, text.as_view(), "200000 bytes of a")
+    text.push(98u8)
+    text.push(99u8)
+    run("(a*)*b", sc, text.as_view(), "200000 bytes of a, then bc")
+    run("(a|aa)*c", sc, text.as_view(), "200000 bytes of a, then bc")
+    run("a*a*a*a*a*b", sc, text.as_view(), "200000 bytes of a, then bc")
+    return 0i32
+}

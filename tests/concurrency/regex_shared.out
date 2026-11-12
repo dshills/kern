@@ -1,0 +1,5 @@
+thread 0 agrees with one thread: true
+thread 1 agrees with one thread: true
+thread 2 agrees with one thread: true
+thread 3 agrees with one thread: true
+the four sums differ from one another: true

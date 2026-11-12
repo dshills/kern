@@ -1,15 +1,17 @@
 //! phase: 6
 //! expect: output regex_syntax
-// std/regex, what compile alone shows (specs/std-regex/SPEC.md, T1): every
-// form of the pattern language accepted, with the number of its groups;
-// each row of the error table with the kind and the index it reports, and
-// the first error of several; the escapes, a backslash before each of the
-// 256 bytes outside a bracket expression and inside one; a pattern's size,
-// compiled with max_insts at that size and one below; groups nested 200
-// and 201 deep; a pattern whose bytes are overwritten and destroyed after
-// the call; and the three plain structs copied by assignment. The last
-// section holds patterns the specification does not settle, with the
-// reading the module takes.
+// std/regex, the pattern language (specs/std-regex/SPEC.md, T1): every
+// form accepted, with the number of its groups; each row of the error
+// table with the kind and the index it reports, and the first error of
+// several; the escapes, a backslash before each of the 256 bytes outside a
+// bracket expression and inside one; a pattern's size, compiled with
+// max_insts at that size and one below; groups nested 200 and 201 deep; a
+// pattern whose bytes are overwritten and destroyed after the call; the
+// three plain structs copied by assignment; the cases R5 and R8 settle
+// for a hyphen where a member begins, a class form and an interval with
+// no atom; and, by searching, the bytes each named class and each escape
+// matches among all 256, and braces and a closing bracket matching
+// themselves.
 module t
 import "std/regex"
 
@@ -183,6 +185,73 @@ func kept() -> Result[regex.Regex, regex.CompileErr] {
     }
     drop(v)
     return r
+}
+
+// members prints the bytes b for which the pattern matches the text of
+// the one byte b, as ranges.
+func members(p: view[]u8, o: regex.Options) {
+    show(p)
+    if o.ignore_case { print_str(" ignore_case") }
+    if o.newline { print_str(" newline") }
+    print_str(" matches")
+    with r := regex.compile_with(p, o) {
+        match r {
+            Err(e) => { print_str(" nothing, refused") }
+            Ok(re) => {
+                sc := regex.Scratch.new()
+                var text: [1]u8 = zero()
+                var lo: u32 = 0u32
+                var open: bool = false
+                var b: u32 = 0u32
+                while b <= 256u32 {
+                    var got: bool = false
+                    if b < 256u32 {
+                        text[0usize] = truncate[u8](b)
+                        got = re.is_match(sc, text[0usize:1usize])
+                    }
+                    if got && !open {
+                        lo = b
+                        open = true
+                    } else if !got && open {
+                        print_str(" ")
+                        print_u64(u64(lo))
+                        if b - 1u32 > lo {
+                            print_str("-")
+                            print_u64(u64(b - 1u32))
+                        }
+                        open = false
+                    }
+                    b = b + 1u32
+                }
+            }
+        }
+    }
+    println()
+}
+
+// seek prints the match find returns from offset 0.
+func seek(p: view[]u8, text: view[]u8) {
+    show(p)
+    print_str(" in ")
+    show(text)
+    print_str(" => ")
+    with r := regex.compile(p) {
+        match r {
+            Err(e) => { print_str("refused") }
+            Ok(re) => {
+                sc := regex.Scratch.new()
+                match re.find(sc, text, 0usize) {
+                    Some(m) => {
+                        print_u64(u64(m.start))
+                        print_str("-")
+                        print_u64(u64(m.end))
+                    }
+                    None => print_str("none")
+                }
+            }
+        }
+    }
+    println()
 }
 
 func main() -> i32 {
@@ -447,9 +516,12 @@ func main() -> i32 {
     sized("(a|b)*c", 10usize)
     sized("a{0}", 1usize)
     sized("a{3}{4}", 13usize)
-    sized("x{2,}", 6usize)
+    sized("x{2,}", 5usize)
+    sized("a{0,}", 4usize)
+    sized("a{1,}", 4usize)
+    sized("(a{1,}){1,}", 8usize)
     sized("a{2,5}", 12usize)
-    sized("(ab){3,}x?", 22usize)
+    sized("(ab){3,}x?", 18usize)
     sized("[a-c]+|\\.$|^x{3}", 14usize)
     sized("(a{1000}){0}b", 2usize)
     sized("(a{100}){100}", 10201usize)
@@ -534,11 +606,75 @@ func main() -> i32 {
     print_u64(u64(t.end))
     println()
 
-    say("-- readings the specification leaves open")
+    say("-- a hyphen where a member begins, a class form, an interval with no atom (R5, R8)")
     pat("{2,1}")
     pat("[[:alpha]")
     pat("[[:alpha")
     pat("[a-[:foo:]]")
     pat("[--a]")
+    pat("[a-c--e]")
+    pat("[a--]")
+    // the name is read, and refused, before the hyphen after it is met
+    pat("[[:foo:]-z]")
+
+    say("-- the bytes each class matches")
+    plain := regex.options()
+    members("[[:alpha:]]", plain)
+    members("[[:digit:]]", plain)
+    members("[[:alnum:]]", plain)
+    members("[[:upper:]]", plain)
+    members("[[:lower:]]", plain)
+    members("[[:space:]]", plain)
+    members("[[:blank:]]", plain)
+    members("[[:punct:]]", plain)
+    members("[[:print:]]", plain)
+    members("[[:graph:]]", plain)
+    members("[[:cntrl:]]", plain)
+    members("[[:xdigit:]]", plain)
+    members("[[:space:][:xdigit:]_]", plain)
+    members("[^[:print:]]", plain)
+    members(".", plain)
+    lines := regex.options()
+    lines.newline = true
+    members("[^[:print:]]", lines)
+    members(".", lines)
+    members("[\\n]", lines)
+    fold := regex.options()
+    fold.ignore_case = true
+    members("[[:lower:]]", fold)
+    members("[^[:lower:]]", fold)
+    members("[x-z]", fold)
+    members("q", fold)
+    members("7", fold)
+
+    say("-- the byte each escape matches")
+    members("\\n", plain)
+    members("\\t", plain)
+    members("\\r", plain)
+    members("\\f", plain)
+    members("\\v", plain)
+    members("\\a", plain)
+    members("\\x41", plain)
+    members("\\x7", plain)
+    members("\\xfF", plain)
+    members("\\.", plain)
+    members("\\\\", plain)
+    members("[\\n\\t\\x41-\\x43\\]]", plain)
+
+    say("-- braces and a closing bracket match themselves")
+    seek("{", "a{b")
+    seek("}", "a}b")
+    seek("]", "a]b")
+    seek("a{", "xa{")
+    seek("a{,2}", "a{,2}")
+    seek("a{1,2,3}", "a{1,2,3}")
+    seek("a{12345}", "a{12345}")
+    seek("{a}", "x{a}")
+    seek("{*", "{{{")
+    seek("a{x}", "aa{x}")
+    seek("a{1", "a{1")
+    seek("[{}]+", "a{}}b")
+    seek("a{2}", "a{2}")
+    seek("a{2}", "baa")
     return 0i32
 }

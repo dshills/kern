@@ -1,0 +1,6 @@
+/(a*)*b/ in 200000 bytes of a => none
+/(a|aa)*c/ in 200000 bytes of a => none
+/a*a*a*a*a*b/ in 200000 bytes of a => none
+/(a*)*b/ in 200000 bytes of a, then bc => 0-200001
+/(a|aa)*c/ in 200000 bytes of a, then bc => 200001-200002
+/a*a*a*a*a*b/ in 200000 bytes of a, then bc => 0-200001

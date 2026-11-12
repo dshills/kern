@@ -241,9 +241,12 @@ BadEscape 209, other errors 0, every error at the backslash true
 /(a|b)*c/ size 10: ok 1, one below: TooLarge at 7
 /a{0}/ size 1: ok 0, one below: TooLarge at 4
 /a{3}{4}/ size 13: ok 0, one below: TooLarge at 7
-/x{2,}/ size 6: ok 0, one below: TooLarge at 5
+/x{2,}/ size 5: ok 0, one below: TooLarge at 5
+/a{0,}/ size 4: ok 0, one below: TooLarge at 5
+/a{1,}/ size 4: ok 0, one below: TooLarge at 5
+/(a{1,}){1,}/ size 8: ok 1, one below: TooLarge at 11
 /a{2,5}/ size 12: ok 0, one below: TooLarge at 6
-/(ab){3,}x?/ size 22: ok 1, one below: TooLarge at 10
+/(ab){3,}x?/ size 18: ok 1, one below: TooLarge at 10
 /[a-c]+|\.$|^x{3}/ size 14: ok 0, one below: TooLarge at 16
 /(a{1000}){0}b/ size 2: ok 1, one below: TooLarge at 13
 /(a{100}){100}/ size 10201: ok 1, one below: TooLarge at 13
@@ -271,9 +274,64 @@ BadClass at 3
 TooDeep at 9
 1 4
 1 7
--- readings the specification leaves open
+-- a hyphen where a member begins, a class form, an interval with no atom (R5, R8)
 /{2,1}/ => NothingToRepeat at 0
 /[[:alpha]/ => BadClass at 1
 /[[:alpha/ => BadClass at 1
 /[a-[:foo:]]/ => BadRange at 1
 /[--a]/ => ok 0
+/[a-c--e]/ => ok 0
+/[a--]/ => BadRange at 1
+/[[:foo:]-z]/ => BadClass at 1
+-- the bytes each class matches
+/[[:alpha:]]/ matches 65-90 97-122
+/[[:digit:]]/ matches 48-57
+/[[:alnum:]]/ matches 48-57 65-90 97-122
+/[[:upper:]]/ matches 65-90
+/[[:lower:]]/ matches 97-122
+/[[:space:]]/ matches 9-13 32
+/[[:blank:]]/ matches 9 32
+/[[:punct:]]/ matches 33-47 58-64 91-96 123-126
+/[[:print:]]/ matches 32-126
+/[[:graph:]]/ matches 33-126
+/[[:cntrl:]]/ matches 0-31 127
+/[[:xdigit:]]/ matches 48-57 65-70 97-102
+/[[:space:][:xdigit:]_]/ matches 9-13 32 48-57 65-70 95 97-102
+/[^[:print:]]/ matches 0-31 127-255
+/./ matches 0-255
+/[^[:print:]]/ newline matches 0-9 11-31 127-255
+/./ newline matches 0-9 11-255
+/[\n]/ newline matches 10
+/[[:lower:]]/ ignore_case matches 65-90 97-122
+/[^[:lower:]]/ ignore_case matches 0-64 91-96 123-255
+/[x-z]/ ignore_case matches 88-90 120-122
+/q/ ignore_case matches 81 113
+/7/ ignore_case matches 55
+-- the byte each escape matches
+/\n/ matches 10
+/\t/ matches 9
+/\r/ matches 13
+/\f/ matches 12
+/\v/ matches 11
+/\a/ matches 7
+/\x41/ matches 65
+/\x7/ matches 7
+/\xfF/ matches 255
+/\./ matches 46
+/\\/ matches 92
+/[\n\t\x41-\x43\]]/ matches 9-10 65-67 93
+-- braces and a closing bracket match themselves
+/{/ in /a{b/ => 1-2
+/}/ in /a}b/ => 1-2
+/]/ in /a]b/ => 1-2
+/a{/ in /xa{/ => 1-3
+/a{,2}/ in /a{,2}/ => 0-5
+/a{1,2,3}/ in /a{1,2,3}/ => 0-8
+/a{12345}/ in /a{12345}/ => 0-8
+/{a}/ in /x{a}/ => 1-4
+/{*/ in /{{{/ => 0-3
+/a{x}/ in /aa{x}/ => 1-5
+/a{1/ in /a{1/ => 0-3
+/[{}]+/ in /a{}}b/ => 1-4
+/a{2}/ in /a{2}/ => none
+/a{2}/ in /baa/ => 1-3

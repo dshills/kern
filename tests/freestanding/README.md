@@ -1,7 +1,7 @@
 # Freestanding fixtures (PLAN.md 3.1)
 
 Every fixture here carries `//! env: freestanding`. The harness runs it in the
-interpreter's freestanding emulation (`kern run --env freestanding`): the
+interpreter's freestanding emulation (`kern run --env=freestanding`): the
 console device at `0x0900_0000` is mapped to standard output, the system
 allocator (and so the library containers) is served from the interpreter's raw
 heap as in hosted mode (natively it is a static 1 MiB arena in `rt.c`, ADR-011),
@@ -10,7 +10,7 @@ a trap record goes to the console, and the run ends with the halt line
 trap record's `file` is the path the harness loads the fixture by, relative
 to `tests/` (`freestanding/stack.kern`), and QEMU must print the same.
 
-Native: `kern build --env freestanding -o image file.kern` compiles the
+Native: `kern build --env=freestanding -o image file.kern` compiles the
 program, `runtime/freestanding/src/rt.c`, `f64text.c` (the floating-point
 text entries, linked only into an image that calls them) and the startup
 code for

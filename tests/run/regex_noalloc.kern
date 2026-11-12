@@ -1,0 +1,120 @@
+//! phase: 6
+//! expect: output regex_noalloc
+//! test-hooks: true
+// std/regex, no allocation in a search (specs/std-regex/SPEC.md, T5 and
+// R17). For three patterns and one Scratch reserved for each in turn:
+// testing.fail_next_alloc() is armed, which makes the program's next
+// allocation call fail; is_match and find run over four texts, one of
+// 4,003 bytes; then try_push on a new vector must return
+// Err(OutOfMemory), which shows the failure was still armed, so no search
+// made an allocation call. The same is done with a second Scratch after a
+// first search in place of reserve, and that first search is the least
+// there is: the empty text, from an offset past its end. Nothing is
+// printed between the arming and the check; the control that the hook
+// reaches a vector's growth is tests/trap/regex_noalloc_control.kern.
+module t
+import "std/regex"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+func span(s: Option[regex.Span]) {
+    match s {
+        Some(m) => {
+            print_u64(u64(m.start))
+            print_str("-")
+            print_u64(u64(m.end))
+        }
+        None => print_str("none")
+    }
+}
+
+// Seen is what the searches of one pattern returned, for each of the four
+// texts: is_match, find from 0, find from 3.
+struct Seen { any: [4]bool; whole: [4]Option[regex.Span]; later: [4]Option[regex.Span] }
+
+func searches(re: view[regex.Regex], sc: edit[regex.Scratch], long: view[]u8, seen: edit[Seen]) {
+    seen.any[0usize] = re.is_match(sc, "abababc 12ab99 xxxx")
+    seen.whole[0usize] = re.find(sc, "abababc 12ab99 xxxx", 0usize)
+    seen.later[0usize] = re.find(sc, "abababc 12ab99 xxxx", 3usize)
+    seen.any[1usize] = re.is_match(sc, "")
+    seen.whole[1usize] = re.find(sc, "", 0usize)
+    seen.later[1usize] = re.find(sc, "", 3usize)
+    seen.any[2usize] = re.is_match(sc, long)
+    seen.whole[2usize] = re.find(sc, long, 0usize)
+    seen.later[2usize] = re.find(sc, long, 3usize)
+    seen.any[3usize] = re.is_match(sc, "y\0zxx")
+    seen.whole[3usize] = re.find(sc, "y\0zxx", 0usize)
+    seen.later[3usize] = re.find(sc, "y\0zxx", 3usize)
+}
+
+// still_armed is whether the next allocation call fails.
+func still_armed() -> bool {
+    v := Vec[u8].new()
+    match v.try_push(1u8) {
+        Ok(u) => { return false }
+        Err(e) => { return true }
+    }
+}
+
+func line(label: view[]u8, seen: view[Seen], i: usize) {
+    print_str("  ")
+    print_str(label)
+    print_str(" ")
+    print_bool(seen.any[i])
+    print_str(" ")
+    span(seen.whole[i])
+    print_str(" ")
+    span(seen.later[i])
+    println()
+}
+
+// check sizes sc for the pattern, by reserve or by a first search, arms
+// the failure, searches, and prints what the searches returned and
+// whether the failure was still armed after them.
+func check(p: view[]u8, sc: edit[regex.Scratch], reserve: bool, long: view[]u8) {
+    print_str("/")
+    print_str(p)
+    if reserve { say("/ after reserve") } else { say("/ after a first search") }
+    with r := regex.compile(p) {
+        match r {
+            Err(e) => { say("  refused") }
+            Ok(re) => {
+                var seen: Seen = zero()
+                if reserve {
+                    sc.reserve(re)
+                } else {
+                    first := re.find(sc, "", 1usize)
+                }
+                testing.fail_next_alloc()
+                searches(re, sc, long, seen)
+                armed := still_armed()
+                line("\"abababc 12ab99 xxxx\"", seen, 0usize)
+                line("\"\"", seen, 1usize)
+                line("ab 2000 times, then c42:", seen, 2usize)
+                line("\"y<0>zxx\"", seen, 3usize)
+                print_str("  the failure was still armed: ")
+                print_bool(armed)
+                println()
+            }
+        }
+    }
+}
+
+func main() -> i32 {
+    long := Vec[u8].new()
+    var i: usize = 0usize
+    while i < 2000usize {
+        long.extend("ab")
+        i = i + 1usize
+    }
+    long.extend("c42")
+    one := regex.Scratch.new()
+    check("(a|ab)*c", one, true, long.as_view())
+    check("[a-z]+[0-9]{2,4}$", one, true, long.as_view())
+    check("x{3,}|^y.z", one, true, long.as_view())
+    other := regex.Scratch.new()
+    check("(a|ab)*c", other, false, long.as_view())
+    check("[a-z]+[0-9]{2,4}$", other, false, long.as_view())
+    check("x{3,}|^y.z", other, false, long.as_view())
+    return 0i32
+}

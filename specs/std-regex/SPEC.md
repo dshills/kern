@@ -1,6 +1,6 @@
 # Standard library: regular expressions (`std/regex`)
 
-**Version:** 0.13 (2026-11-12). **Review status.** speccritic
+**Version:** 0.15 (2026-11-12). **Review status.** speccritic
 (gpt-6.1-sol) round 1 on 0.1: INVALID, two critical findings, both
 resolved here: a repeated group keeps the span of its last passage even
 when an enclosing group's last iteration does not contain it, so the
@@ -26,7 +26,13 @@ and one warning: T9 gives its input and programs in full. Round 5 on
 0.5: VALID_WITH_GAPS, no critical finding; two warnings resolved in
 0.6: a `Scratch`'s memory bound is that of the largest pattern it has
 served (R18), and a backslash ending the pattern is `BadEscape` before
-any open construct is reported (R5). 0.13 was made when phase 2 was implemented and settles what the
+any open construct is reported (R5). 0.15, when phase 3 was implemented: which of `BadRange` and
+`BadClass` a class in a range is (R5), that a `-` before a byte other
+than `]` is the range operator even when that byte is a `-` (R8), and
+that the hook check of T5 runs where hooks exist. 0.14, with phase 3: an open interval `x{n,}` counts *n* copies, not
+*n* + 1 (R3), so that `x{1,}` is the size of the `x+` it equals and
+nesting it does not double the size. 0.13 was made when phase 2 was
+implemented and settles what the
 reader found open: a `-` after a range begins a range, a class as
 either end of a range is `BadRange`, an unfinished `[:` is `BadClass`,
 an interval with nothing to repeat is `NothingToRepeat`, and sizes and
@@ -239,9 +245,10 @@ its text alone: an ordinary byte, an escape, `.`, a bracket expression,
 `^` and `$` are each 1; a group `(p)` is the size of `p` plus 2; a
 branch is the sum of its pieces, 0 when empty; an alternation of *k*
 branches is their sum plus 2 × (*k* − 1); `x*`, `x+` and `x?` are the
-size of `x` plus 2; `x{n}` is *n* times the size of `x`, `x{n,}` is
-(*n* + 1) times it plus 2, and `x{n,m}` is *m* times it plus
-2 × (*m* − *n*); and the pattern is the size of its alternation plus 1.
+size of `x` plus 2; `x{n}` is *n* times the size of `x`; `x{n,}` is
+*n* times it plus 2 when *n* is 1 or more and the size of `x` plus 2
+when *n* is 0 (so `x{0,}` and `x{1,}` have the sizes of `x*` and
+`x+`); and `x{n,m}` is *m* times it plus 2 × (*m* − *n*); and the pattern is the size of its alternation plus 1.
 When the size exceeds `max_insts`, `compile_with` returns `TooLarge`
 with `at` equal to the pattern's length; the comparison is made on the
 whole number, which does not wrap however large nested intervals make
@@ -266,8 +273,8 @@ inside an open group or bracket expression (`[\` is `BadEscape` at 1).
 | `UnclosedGroup` | the pattern ends inside a group | the group's `(` |
 | `UnmatchedClose` | a `)` with no group open | the `)` |
 | `UnclosedBracket` | the pattern ends inside a bracket expression | its `[` |
-| `BadRange` | a range whose first byte is greater than its last, or with a named class as either end (`[a-[:alpha:]]`, `[[:alpha:]-z]`), whether or not the class's name is one R8 lists | the range's first byte, or the `[` of the class that is its first end |
-| `BadClass` | `[:` inside a bracket expression that is not the start of `[:name:]` with a name R8 lists (an unknown name, or no closing `:]`), where it is not a range's end | the `[` of `[:` |
+| `BadRange` | a range whose first byte is greater than its last; a range whose second end is `[:`, whatever follows it (`[a-[:alpha:]]`, `[a-[:foo:]]`); a class R8 lists followed by a `-` and a byte other than `]` (`[[:alpha:]-z]`) | the range's first byte, or the `[` of the class that is its first end |
+| `BadClass` | `[:` where a member begins that is not the start of `[:name:]` with a name R8 lists (an unknown name, or no closing `:]`), whatever follows it (`[[:foo:]-z]`) | the `[` of `[:` |
 | `BadEscape` | a backslash that R7 gives no meaning and that is not `Unsupported`: at the end of the pattern; before an ASCII letter R7 does not list; before `0`; before a byte below 33 or above 126; or `\x` not followed by a hexadecimal digit | the backslash |
 | `Unsupported` | a backslash before a digit `1`-`9`; `[.` or `[=` inside a bracket expression | the backslash, or the inner `[` |
 | `BadInterval` | an `interval` with *n* > *m*, or with *n* or *m* above 1000 | its `{` |
@@ -298,8 +305,12 @@ ordinary byte there, and agrees with awk and with the oracle.
 `]` directly after the `[` or the `[^` is a member, not the end. Members
 are: a single byte (or escape); a range `a-b`, every byte from `a` to
 `b` inclusive by value, `a` and `b` each a single byte or escape; and a
-named class. A `-` that is last is a member. A `-` that is first, or
-directly after a range, is a member too, and like any member byte it is
+named class. A `-` directly after a single byte or escape and before a
+byte other than `]` is the range operator, and that byte is the range's
+last, even when it is itself a `-` (`[a--]` is the range from `a` to
+`-`, which is `BadRange`). A `-` that is last and not a range's end is
+a member. A `-` that is first, or directly after a range, is a member
+too, and like any member byte it is
 a range's first byte when a `-` and another byte follow it (`[--a]` is
 the range from 45 to 97; `[a-c--e]` is `a` to `c` and `-` to `e`). A
 `-` directly after a named class and not last makes a range with the
@@ -523,7 +534,9 @@ No difference is permitted.
 `a*a*a*a*a*b` each against 200,000 bytes of `a`, by `find` and by
 `captures`, finish within the harness's time limit in every
 configuration (R18). `regex_noalloc` (header `//! test-hooks: true`)
-checks R17 as it runs, for three patterns and one `Scratch` reserved
+checks R17 as it runs, in the configurations that have test hooks (the
+interpreter and the native debug build: the toolchain refuses hooks at
+release), for three patterns and one `Scratch` reserved
 for each in turn: it arms `testing.fail_next_alloc()`, which makes the
 next allocation call of the program fail; runs `is_match`, `find`,
 `captures`, and a cursor to its end with `next` and with

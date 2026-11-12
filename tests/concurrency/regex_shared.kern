@@ -1,0 +1,104 @@
+//! phase: 6
+//! expect: output regex_shared
+//! tsan: clean
+// std/regex, one Regex searched by several threads at once
+// (specs/std-regex/SPEC.md, T6 and R19): a Regex behind a Shared, four
+// threads each with a clone of it and a Scratch moved into the thread,
+// 1,000 texts each (2,000 searches, a find and an is_match per text), the
+// texts of each thread its own. Each thread's sum of its results must
+// equal the sum one thread gets for the same texts before any thread is
+// started. That this compiles shows a Regex is Send and Share and a
+// Scratch is Send.
+module cc
+import "std/regex"
+
+// fill writes text number i of thread id: 8 to 30 of the seven letters.
+func fill(text: edit[Vec[u8]], letters: view[]u8, id: u64, i: u64) {
+    text.clear()
+    x := id * 7919u64 + i * 104729u64 + 1u64
+    n := 8u64 + x % 23u64
+    var k: u64 = 0u64
+    while k < n {
+        x = (x * 1103515245u64 + 12345u64) % 2147483648u64
+        text.push(letters[usize((x >> 16u32) % 7u64)])
+        k = k + 1u64
+    }
+}
+
+// work searches the texts of thread id and returns a sum that depends on
+// every span found and on their order.
+func work(re: view[regex.Regex], sc: edit[regex.Scratch], id: u64) -> u64 {
+    text := Vec[u8].new()
+    var sum: u64 = 0u64
+    var i: u64 = 0u64
+    while i < 1000u64 {
+        fill(text, "abcd xy", id, i)
+        sum = wrapping_mul(sum, 31u64)
+        match re.find(sc, text.as_view(), usize(i % 3u64)) {
+            Some(m) => { sum = wrapping_add(sum, u64(m.start) * 64u64 + u64(m.end) + 1u64) }
+            None => { }
+        }
+        if re.is_match(sc, text.as_view()) { sum = wrapping_add(sum, 7u64) }
+        i = i + 1u64
+    }
+    return sum
+}
+
+func in_thread(re: own Shared[regex.Regex], sc: own regex.Scratch, id: u64) -> u64 {
+    mine := sc
+    with r := re.get() { return work(r, mine, id) }
+}
+
+func four(re: view[Shared[regex.Regex]], got: edit[[4]u64]) -> Result[(), SpawnErr] {
+    a := thread.spawn(in_thread, re.clone(), regex.Scratch.new(), 0u64)?
+    b := thread.spawn(in_thread, re.clone(), regex.Scratch.new(), 1u64)?
+    c := thread.spawn(in_thread, re.clone(), regex.Scratch.new(), 2u64)?
+    d := thread.spawn(in_thread, re.clone(), regex.Scratch.new(), 3u64)?
+    got[0usize] = a.join()
+    got[1usize] = b.join()
+    got[2usize] = c.join()
+    got[3usize] = d.join()
+    return Ok(())
+}
+
+func main() -> i32 {
+    r := regex.compile("(ab|c)+d|[x-y]{2,}$|a b")
+    match move r {
+        Err(e) => {
+            print_str("refused")
+            println()
+        }
+        Ok(re) => {
+            var alone: [4]u64 = zero()
+            sc := regex.Scratch.new()
+            var id: u64 = 0u64
+            while id < 4u64 {
+                alone[usize(id)] = work(re, sc, id)
+                id = id + 1u64
+            }
+            shared := Shared[regex.Regex].new(re)
+            var got: [4]u64 = zero()
+            match four(shared, got) {
+                Ok(u) => {
+                    id = 0u64
+                    while id < 4u64 {
+                        print_str("thread ")
+                        print_u64(id)
+                        print_str(" agrees with one thread: ")
+                        print_bool(got[usize(id)] == alone[usize(id)])
+                        println()
+                        id = id + 1u64
+                    }
+                    print_str("the four sums differ from one another: ")
+                    print_bool(alone[0usize] != alone[1usize] && alone[1usize] != alone[2usize] && alone[2usize] != alone[3usize] && alone[0usize] != alone[3usize])
+                    println()
+                }
+                Err(e) => {
+                    print_str("spawn failed")
+                    println()
+                }
+            }
+        }
+    }
+    return 0i32
+}

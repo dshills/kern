@@ -583,10 +583,10 @@ impl Compiler {
     // an anchor; 2 more than its pattern for a group; the sum of its
     // pieces for a branch; 2 for each `|` more than the branches for an
     // alternation; 2 more than its operand for `*`, `+` and `?`; n times
-    // the operand for {n}, n + 1 times and 2 for {n,}, m times and
-    // 2 × (m − n) for {n,m}. It is counted in a u64 that stops at its
-    // greatest value instead of wrapping, which is above every max_insts
-    // compile_with accepts.
+    // the operand for {n}; n times and 2 for {n,}, and as `*` when n is 0;
+    // m times and 2 × (m − n) for {n,m}. It is counted in a u64 that stops
+    // at its greatest value instead of wrapping, which is above every
+    // max_insts compile_with accepts.
     func size_of_node(view self, n: u32) -> u64 {
         nd := self.nodes.get(usize(n))
         match nd {
@@ -600,7 +600,8 @@ impl Compiler {
                     match op {
                         Range(lo, hi) => {
                             if hi == no_limit {
-                                s = sat_add(sat_mul(s, u64(lo) + 1u64), 2u64)
+                                if lo > 0u32 { s = sat_mul(s, u64(lo)) }
+                                s = sat_add(s, 2u64)
                             } else {
                                 s = sat_add(sat_mul(s, u64(hi)), 2u64 * u64(hi - lo))
                             }
@@ -982,8 +983,230 @@ func compile_with(pattern: view[]u8, o: Options) -> Result[Regex, CompileErr] {
     })
 }
 
+// Scratch is the memory a search works in, kept between searches so that
+// a search allocates nothing once the Scratch has been sized for its
+// pattern. It may serve any number of patterns in turn and grows to the
+// largest; what it served before never changes a result. Each thread
+// searches with a Scratch of its own.
+//
+// list holds two lists of states, one in each half: the states a search
+// is in at the offset it reads and those at the next one, each list in
+// the order its threads began, with those beginnings at the same places
+// in starts. mark holds, for each instruction, the generation in which it
+// was last entered: gen goes up at every offset, so an instruction is
+// entered once per offset and old marks need no clearing. stack holds the
+// ways of splits still to follow. All four are sized for the longest
+// program served, and a search only indexes them.
+struct Scratch nocopy {
+    list: Vec[u32]
+    starts: Vec[usize]
+    mark: Vec[u32]
+    stack: Vec[u32]
+    gen: u32
+}
+
+impl Scratch {
+    func new() -> Scratch {
+        return Scratch { list: Vec[u32].new(), starts: Vec[usize].new(), mark: Vec[u32].new(), stack: Vec[u32].new(), gen: 0u32 }
+    }
+
+    // reserve sizes the Scratch for re, trapping oom when it cannot: a
+    // list holds each instruction at most once, and the stack one entry
+    // for each split entered. A pattern of ordinary bytes is searched for
+    // as a string and needs nothing. When nothing has to grow this is two
+    // comparisons. mark is sized last, so that it says what the others
+    // are sized for even after a trap.
+    func reserve(edit self, re: view[Regex]) {
+        n := re.prog.len()
+        if re.is_lit || self.mark.len() >= n { return }
+        self.list.resize(2usize * n, 0u32)
+        self.starts.resize(2usize * n, 0usize)
+        self.stack.resize(n + 2usize, 0u32)
+        self.mark.resize(n, 0u32)
+    }
+}
+
+// Best is the best match a search has met so far: the least start, and
+// for that start the greatest end.
+struct Best { found: bool; start: usize; end: usize }
+
+// run is the search proper, on the vectors of a Scratch sized for the
+// program. It reads the text once from `from`, keeping every state the
+// pattern can be in; with any set it stops as soon as some match is known.
+//
+// At each offset the list of the states there is built in the half of
+// list the last one is not in. Its seeds are, first, the instruction after
+// each state of the last list whose instruction takes the byte just read,
+// in that list's order, which is the order the threads began in; then the
+// first instruction, for a thread that begins here. A thread begins at
+// each offset until a match is known (a later beginning cannot be
+// better), at offset 0 only when anchored is set, and, when the pattern
+// cannot match the empty string, only where the byte is one a match can
+// begin with. From a seed, every instruction reachable without taking a
+// byte is entered: one that takes a byte goes on the list with the offset
+// its thread began at, a split is followed one way at once with the other
+// kept on the stack, `^` and `$` are decided by the whole text, and Match
+// records the match when it is better than the best so far. An
+// instruction already entered in this generation belongs to a thread that
+// began no later, which is the one to keep.
+func run(prog: view[]Inst, sets: view[]ByteSet, first: view[ByteSet], nullable: bool, anchored: bool, text: view[]u8, from: usize, any: bool, list: edit[]u32, starts: edit[]usize, mark: edit[]u32, stack: edit[]u32, gen: edit[u32]) -> Best {
+    n := len(text)
+    half := len(list) / 2usize
+    best := Best { found: false, start: 0usize, end: 0usize }
+    // cur is where the last list begins and stop the index after its last
+    // state
+    cur := 0usize
+    stop := 0usize
+    g := gen
+    pos := from
+    while true {
+        // a new generation for the states at this offset
+        if g == 4294967295u32 {
+            for k in 0usize..len(mark) { mark[k] = 0u32 }
+            g = 0u32
+        }
+        g = g + 1u32
+        other := half - cur
+        end := other
+        var c: u8 = 0u8
+        if stop > cur { c = text[pos - 1usize] }
+        i := cur
+        begun := false
+        while true {
+            var pc: u32 = 0u32
+            var start: usize = pos
+            if i < stop {
+                start = starts[i]
+                // the list is in the order of beginnings: the rest began
+                // later than the match known
+                if best.found && start > best.start {
+                    i = stop
+                    continue
+                }
+                at := list[i]
+                i = i + 1usize
+                var ok: bool = false
+                match prog[usize(at)] {
+                    Byte(b) => { ok = b == c }
+                    Any => { ok = true }
+                    Set(k) => { ok = (sets[usize(k)].w[usize(c >> 6u32)] >> u32(c & 63u8)) & 1u64 == 1u64 }
+                    _ => { }
+                }
+                if !ok { continue }
+                pc = at + 1u32
+            } else {
+                if begun || best.found || (anchored && pos > 0usize) { break }
+                begun = true
+                if !nullable {
+                    if pos >= n { break }
+                    if (first.w[usize(text[pos] >> 6u32)] >> u32(text[pos] & 63u8)) & 1u64 == 0u64 { break }
+                }
+            }
+            sp := 0usize
+            while true {
+                if mark[usize(pc)] != g {
+                    mark[usize(pc)] = g
+                    match prog[usize(pc)] {
+                        Jmp(x) => {
+                            pc = x
+                            continue
+                        }
+                        Split(x, y) => {
+                            stack[sp] = y
+                            sp = sp + 1usize
+                            pc = x
+                            continue
+                        }
+                        Save(slot) => {
+                            pc = pc + 1u32
+                            continue
+                        }
+                        Bol(line) => {
+                            if pos == 0usize || (line && text[pos - 1usize] == 10u8) {
+                                pc = pc + 1u32
+                                continue
+                            }
+                        }
+                        Eol(line) => {
+                            if pos == n || (line && text[pos] == 10u8) {
+                                pc = pc + 1u32
+                                continue
+                            }
+                        }
+                        Match => {
+                            if !best.found || start < best.start || (start == best.start && pos > best.end) {
+                                best.found = true
+                                best.start = start
+                                best.end = pos
+                            }
+                        }
+                        _ => {
+                            list[end] = pc
+                            starts[end] = start
+                            end = end + 1usize
+                        }
+                    }
+                }
+                if sp == 0usize { break }
+                sp = sp - 1usize
+                pc = stack[sp]
+            }
+        }
+        cur = other
+        stop = end
+        if best.found && any { break }
+        if pos >= n { break }
+        pos = pos + 1usize
+        if stop == cur {
+            if best.found || anchored { break }
+            // nothing is under way: go on to the next byte that can begin
+            // a match
+            if !nullable {
+                while pos < n && (first.w[usize(text[pos] >> 6u32)] >> u32(text[pos] & 63u8)) & 1u64 == 0u64 { pos = pos + 1usize }
+                if pos >= n { break }
+            }
+        }
+    }
+    gen = g
+    return best
+}
+
+// search finds the match from `from`: among the matches that begin at or
+// after it, the one that begins first, and of those the longest. Three
+// shorter ways are taken where the pattern allows: a pattern of ordinary
+// bytes is searched for as a string; one that can only begin at offset 0
+// has no match from a later offset; and run passes over the bytes no
+// match can begin with.
+func search(re: view[Regex], sc: edit[Scratch], text: view[]u8, from: usize, any: bool) -> Best {
+    // first, so that any search at all leaves the Scratch sized for re
+    sc.reserve(re)
+    n := len(text)
+    if from > n { return Best { found: false, start: 0usize, end: 0usize } }
+    if re.is_lit {
+        match str.find(text[from:n], re.lit.as_view()) {
+            Some(k) => { return Best { found: true, start: from + k, end: from + k + re.lit.len() } }
+            None => { return Best { found: false, start: 0usize, end: 0usize } }
+        }
+    }
+    if re.anchored && from > 0usize { return Best { found: false, start: 0usize, end: 0usize } }
+    return run(re.prog.as_view(), re.sets.as_view(), re.first, re.nullable, re.anchored, text, from, any, sc.list.as_edit(), sc.starts.as_edit(), sc.mark.as_edit(), sc.stack.as_edit(), sc.gen)
+}
+
 impl Regex {
     // groups is the number of groups in the pattern, the whole match not
     // counted.
     func groups(view self) -> usize { return self.ngroups }
+
+    // is_match is whether the pattern matches anywhere in text.
+    func is_match(view self, sc: edit[Scratch], text: view[]u8) -> bool { return search(self, sc, text, 0usize, true).found }
+
+    // find returns the match from `from`: the one that begins first at or
+    // after that offset, and of those the longest. None when there is
+    // none, and when from is past the end of text. `^` and `$` refer to
+    // the whole text whatever from is.
+    func find(view self, sc: edit[Scratch], text: view[]u8, from: usize) -> Option[Span] {
+        best := search(self, sc, text, from, false)
+        if !best.found { return None }
+        return Some(Span { start: best.start, end: best.end })
+    }
 }

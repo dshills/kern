@@ -1,0 +1,16 @@
+//! phase: 6
+//! expect: trap oom
+//! test-hooks: true
+// The control of tests/run/regex_noalloc.kern (specs/std-regex/SPEC.md,
+// T5): that fixture takes a failure still armed after its searches to mean
+// that none of them made an allocation call, which holds only if the
+// armed failure reaches a vector's growth. Here the same arming is
+// followed by a push that grows a vector, which must trap oom.
+module t
+func main() -> i32 {
+    v := Vec[u8].new()
+    testing.fail_next_alloc()
+    v.push(1u8)
+    print_str("after the trap")
+    return 0i32
+}
