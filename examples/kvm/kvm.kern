@@ -1,0 +1,2080 @@
+//! phase: 6
+//! expect: output kvm
+// kvm: a compiler and a stack machine for a small scripting language.
+//
+//     kvm run FILE       compiles the program and runs it
+//     kvm dis FILE       compiles it and lists the instructions of every function
+//     kvm check FILE     compiles it and reports what is wrong with it, if anything
+//
+// The language: nil, booleans, whole numbers (64 bits, and arithmetic that
+// wraps), floats, strings and arrays; `let`, assignment to a name or to an
+// element, `if`/`else`, `while`, `return`; functions (`fn name(a, b) { }`,
+// and `fn(a) { }` as a value) that may call themselves and may be passed
+// and returned; + - * / % == != < <= > >= && || ! and indexing; the
+// built-in functions print len push pop str int float; `#` starts a
+// comment. A function that mentions a variable of the function around it
+// gets a copy of that variable's value when it is made. An array is
+// shared, not copied, so a counter keeps its count in one.
+//
+// How it is built:
+//   - A token, a node of the syntax tree, an instruction and a value of
+//     the running program are each a union, and each stage is a `match`.
+//   - The tree lives in an ArenaIn over the page allocator: a node names
+//     its children by ArenaId, a list of children is a run of a side
+//     vector, and the whole tree goes back to the system at once.
+//   - Expressions are parsed by precedence climbing. A mistake is
+//     reported with its line and column, and the parser then skips to the
+//     next line and goes on, so one run reports several.
+//   - Every name is interned in a Map, so a name is a number from the
+//     lexer on. Local variables are stack slots chosen by the compiler;
+//     a global is a slot too, found through a MapIn at compile time.
+//   - Jumps are emitted with no target and patched when it is known.
+//   - The machine has a value stack, a stack of call frames and a heap of
+//     strings, arrays and closures in a Pool, collected by mark and sweep
+//     when a loop goes round or a function is called: at those two points
+//     everything the program can still reach is on the stack, in a global,
+//     in a constant or in a frame.
+//   - Nothing the guest program does traps the host: a wrong type, a
+//     division by zero, an index out of range and a call 64 deep are
+//     errors of the guest, reported with its line.
+//
+// With no arguments the program compiles and runs programs of its own,
+// lists one, and shows every error it can report, which is how it runs as
+// a fixture.
+module kvm
+import "std/io"
+import "std/map"
+import "std/mem"
+import "std/str"
+
+// The keywords are the first names interned, in this order, and the
+// built-in functions follow them.
+const KLet: u8 = 0u8
+const KFn: u8 = 1u8
+const KIf: u8 = 2u8
+const KElse: u8 = 3u8
+const KWhile: u8 = 4u8
+const KReturn: u8 = 5u8
+const KTrue: u8 = 6u8
+const KFalse: u8 = 7u8
+const KNil: u8 = 8u8
+const keywords: u32 = 9u32
+const natives: usize = 7usize
+
+// The symbols, two bytes each in sym_text; a symbol's number is its place.
+const sym_text: view[]u8 = "( ) { } [ ] , = ==!=< <=> >=+ - * / % ! &&||"
+const LP: u8 = 0u8
+const RP: u8 = 1u8
+const LB: u8 = 2u8
+const RB: u8 = 3u8
+const LS: u8 = 4u8
+const RS: u8 = 5u8
+const COMMA: u8 = 6u8
+const ASSIGN: u8 = 7u8
+const EQ: u8 = 8u8
+const NE: u8 = 9u8
+const LT: u8 = 10u8
+const LE: u8 = 11u8
+const GT: u8 = 12u8
+const PLUS: u8 = 14u8
+const MINUS: u8 = 15u8
+const STAR: u8 = 16u8
+const SLASH: u8 = 17u8
+const BANG: u8 = 19u8
+const ANDAND: u8 = 20u8
+const OROR: u8 = 21u8
+const NoSym: u8 = 255u8
+
+const max_nesting: u32 = 100u32
+const max_frames: usize = 64usize
+const first_threshold: usize = 64usize
+
+func is_digit(c: u8) -> bool { return c >= 48u8 && c <= 57u8 }
+func is_letter(c: u8) -> bool { return (c >= 97u8 && c <= 122u8) || (c >= 65u8 && c <= 90u8) || c == 95u8 }
+
+// symbol_at is the symbol that begins with c, the two-byte one when d
+// completes it; NoSym when c begins none.
+func symbol_at(c: u8, d: u8) -> u8 {
+    var one: u8 = NoSym
+    for s in 0usize..22usize {
+        if sym_text[s * 2usize] == c {
+            if sym_text[s * 2usize + 1usize] == d { return truncate[u8](s) }
+            if sym_text[s * 2usize + 1usize] == 32u8 { one = truncate[u8](s) }
+        }
+    }
+    return one
+}
+func sym_len(s: u8) -> usize {
+    if sym_text[usize(s) * 2usize + 1usize] == 32u8 { return 1usize }
+    return 2usize
+}
+func push_sym(dst: edit[str.String], s: u8) { dst.push_str(sym_text[usize(s) * 2usize : usize(s) * 2usize + sym_len(s)]) }
+
+// binding is how tightly a binary operator holds its operands; 0 for a
+// symbol that is not one.
+func binding(s: u8) -> u8 {
+    if s == OROR { return 1u8 }
+    if s == ANDAND { return 2u8 }
+    if s == EQ || s == NE { return 3u8 }
+    if s >= LT && s < PLUS { return 4u8 }
+    if s == PLUS || s == MINUS { return 5u8 }
+    if s >= STAR && s < BANG { return 6u8 }
+    return 0u8
+}
+
+// ---- what the stages hand each other ----
+
+struct Diag { line: u32; col: u32; msg: str.String }
+
+union Tok { Int(v: i64); Float(v: f64); Str(id: u32); Ident(id: u32); Kw(k: u8); Sym(s: u8); Eof }
+struct Token { tok: Tok; line: u32; col: u32 }
+
+// Kind is a node of the tree. A list (arguments, elements, parameters,
+// the statements of a block) is `count` handles in Unit.kids from `first`.
+union Kind {
+    Nil
+    Bool(b: bool)
+    Int(v: i64)
+    Float(v: f64)
+    Str(id: u32)
+    Name(id: u32)
+    Unary(op: u8, e: ArenaId[Node])
+    Binary(op: u8, l: ArenaId[Node], r: ArenaId[Node])
+    Logic(op: u8, l: ArenaId[Node], r: ArenaId[Node])
+    Call(f: ArenaId[Node], first: u32, count: u32)
+    Index(a: ArenaId[Node], i: ArenaId[Node])
+    Array(first: u32, count: u32)
+    Func(name: u32, first: u32, count: u32, body: ArenaId[Node])
+    Let(name: u32, init: ArenaId[Node])
+    Assign(target: ArenaId[Node], value: ArenaId[Node])
+    If(cond: ArenaId[Node], then: ArenaId[Node], other: ArenaId[Node])
+    While(cond: ArenaId[Node], body: ArenaId[Node])
+    Return(e: ArenaId[Node])
+    Block(first: u32, count: u32)
+}
+struct Node { k: Kind; line: u32; col: u32 }
+
+// Op is an instruction. A jump's operand is the index it goes to.
+union Op {
+    Const(k: u32)
+    Nil
+    True
+    False
+    Pop
+    GetLocal(slot: u32)
+    SetLocal(slot: u32)
+    GetGlobal(slot: u32)
+    SetGlobal(slot: u32)
+    DefGlobal(slot: u32)
+    GetCap(i: u32)
+    Arith(op: u8)
+    Compare(op: u8)
+    Neg
+    Not
+    Jump(to: u32)
+    JumpIfFalse(to: u32)
+    AndJump(to: u32)
+    OrJump(to: u32)
+    Loop(to: u32)
+    Call(argc: u32)
+    Return
+    MakeArray(count: u32)
+    GetIndex
+    SetIndex
+    Closure(f: u32)
+}
+
+// Cap says where a closure finds a value it captures when it is made: a
+// local of the function making it, or one of that function's own captures.
+struct Cap { local: bool; index: u32 }
+struct Func { name: str.String; arity: u32; code: Vec[Op]; lines: Vec[u32]; caps: Vec[Cap] }
+union Const { Int(v: i64); Float(v: f64); Str(s: str.String) }
+// Program is what the machine runs: the last function is the program's
+// own text, and globals names the global slots.
+struct Program { funcs: Vec[Func]; consts: Vec[Const]; globals: Vec[str.String] }
+
+struct Local { name: u32; depth: u32 }
+// FnState is a function being compiled.
+struct FnState { f: Func; locals: Vec[Local]; captured: Vec[u32]; depth: u32 }
+// Use is where a global was first mentioned and whether anything defines it.
+struct Use { line: u32; col: u32; defined: bool }
+
+func new_func(name: view[]u8, arity: u32) -> Func {
+    return Func { name: str.String.from(name), arity: arity, code: Vec[Op].new(), lines: Vec[u32].new(), caps: Vec[Cap].new() }
+}
+
+func same_const(a: view[Const], b: view[Const]) -> bool {
+    match a {
+        Int(x) => {
+            match b {
+                Int(y) => { return x == y }
+                _ => { return false }
+            }
+        }
+        Float(x) => {
+            match b {
+                Float(y) => { return x == y }
+                _ => { return false }
+            }
+        }
+        Str(x) => {
+            match b {
+                Str(y) => { return x.equals(y.as_view()) }
+                _ => { return false }
+            }
+        }
+    }
+}
+
+// Unit is one compilation: the names, the tokens and the parser's place
+// in them, the tree, what was found wrong, and the program being built.
+struct Unit {
+    names: Vec[str.String]
+    ids: map.Map[str.String, u32]
+    toks: Vec[Token]
+    at: usize
+    prev_line: u32
+    stmt_start: usize
+    panic: bool
+    nesting: u32
+    ast: ArenaIn[Node, mem.PageAllocator]
+    kids: Vec[ArenaId[Node]]
+    diags: Vec[Diag]
+    fs: Vec[FnState]
+    slots: map.MapIn[u32, u32, mem.PageAllocator]
+    uses: Vec[Use]
+    prog: Program
+}
+
+// compile takes a text through the three stages; a stage runs only when
+// the one before it found nothing wrong.
+func compile(src: view[]u8) -> Unit {
+    u := Unit {
+        names: Vec[str.String].new(), ids: map.Map[str.String, u32].new(), toks: Vec[Token].new(), at: 0usize, prev_line: 0u32,
+        stmt_start: 0usize, panic: false, nesting: 0u32, ast: ArenaIn[Node, mem.PageAllocator].new_in(mem.PageAllocator.new()),
+        kids: Vec[ArenaId[Node]].new(), diags: Vec[Diag].new(), fs: Vec[FnState].new(),
+        slots: map.MapIn[u32, u32, mem.PageAllocator].new_in(mem.PageAllocator.new()), uses: Vec[Use].new(),
+        prog: Program { funcs: Vec[Func].new(), consts: Vec[Const].new(), globals: Vec[str.String].new() }
+    }
+    u.intern("let"); u.intern("fn"); u.intern("if"); u.intern("else"); u.intern("while"); u.intern("return")
+    u.intern("true"); u.intern("false"); u.intern("nil")
+    u.intern("print"); u.intern("len"); u.intern("push"); u.intern("pop"); u.intern("str"); u.intern("int"); u.intern("float")
+    u.lex(src)
+    if u.diags.len() == 0usize {
+        root := u.program()
+        if u.diags.len() == 0usize { u.generate(root) }
+    }
+    return u
+}
+
+impl Unit {
+    // intern is the number of a name or of a string's text, which it
+    // gives out the first time it sees it.
+    func intern(edit self, s: view[]u8) -> u32 {
+        match map.find_text(self.ids, s) {
+            Some(slot) => {
+                n := self.ids.value_at(slot)
+                return n
+            }
+            None => { }
+        }
+        id := truncate[u32](self.names.len())
+        self.names.push(str.String.from(s))
+        self.ids.insert(str.String.from(s), id)
+        return id
+    }
+
+    func problem(edit self, line: u32, col: u32, msg: view[]u8) {
+        self.diags.push(Diag { line: line, col: col, msg: str.String.from(msg) })
+    }
+    // problem_named is a problem whose message has a name in it.
+    func problem_named(edit self, line: u32, col: u32, before: view[]u8, name: u32, after: view[]u8) {
+        m := str.String.from(before)
+        m.push_str(self.names.get(usize(name)).as_view())
+        m.push_str(after)
+        self.diags.push(Diag { line: line, col: col, msg: m })
+    }
+
+    // ---- the lexer ----
+
+    func token(edit self, t: Tok, line: u32, col: u32) { self.toks.push(Token { tok: t, line: line, col: col }) }
+
+    func lex(edit self, src: view[]u8) {
+        n := len(src)
+        var i: usize = 0usize
+        var line: u32 = 1u32
+        var bol: usize = 0usize
+        while i < n {
+            c := src[i]
+            col := truncate[u32](i - bol) + 1u32
+            if c == 10u8 {
+                i = i + 1usize
+                line = line + 1u32
+                bol = i
+            } else if str.is_space(c) {
+                i = i + 1usize
+            } else if c == 35u8 {
+                while i < n && src[i] != 10u8 { i = i + 1usize }
+            } else if is_digit(c) {
+                start := i
+                while i < n && is_digit(src[i]) { i = i + 1usize }
+                if i + 1usize < n && src[i] == 46u8 && is_digit(src[i + 1usize]) {
+                    i = i + 1usize
+                    while i < n && is_digit(src[i]) { i = i + 1usize }
+                    match str.parse_f64(src[start : i]) {
+                        Some(v) => self.token(Tok.Float(v), line, col)
+                        None => self.problem(line, col, "this is not a number")
+                    }
+                } else {
+                    var fits: bool = false
+                    match str.parse_u64(src[start : i]) {
+                        Some(v) => {
+                            if v <= 9223372036854775807u64 {
+                                fits = true
+                                self.token(Tok.Int(i64(v)), line, col)
+                            }
+                        }
+                        None => { }
+                    }
+                    if !fits { self.problem(line, col, "this whole number is too large") }
+                }
+            } else if is_letter(c) {
+                start := i
+                while i < n && (is_letter(src[i]) || is_digit(src[i])) { i = i + 1usize }
+                id := self.intern(src[start : i])
+                if id < keywords { self.token(Tok.Kw(truncate[u8](id)), line, col) } else { self.token(Tok.Ident(id), line, col) }
+            } else if c == 34u8 {
+                text := str.String.new()
+                var closed: bool = false
+                i = i + 1usize
+                while i < n && src[i] != 10u8 && !closed {
+                    b := src[i]
+                    i = i + 1usize
+                    if b == 34u8 {
+                        closed = true
+                    } else if b == 92u8 && i < n && src[i] != 10u8 {
+                        if src[i] == 110u8 { text.push(10u8) } else if src[i] == 116u8 { text.push(9u8) } else { text.push(src[i]) }
+                        i = i + 1usize
+                    } else {
+                        text.push(b)
+                    }
+                }
+                if closed {
+                    id := self.intern(text.as_view())
+                    self.token(Tok.Str(id), line, col)
+                } else {
+                    self.problem(line, col, "this string is not closed before the line ends")
+                }
+            } else {
+                var d: u8 = 0u8
+                if i + 1usize < n { d = src[i + 1usize] }
+                s := symbol_at(c, d)
+                if s == NoSym {
+                    m := str.String.from("this character means nothing here: ")
+                    if c > 32u8 && c < 127u8 { m.push(c) } else { m.push_str("byte "); m.push_u64(u64(c)) }
+                    self.diags.push(Diag { line: line, col: col, msg: m })
+                    i = i + 1usize
+                } else {
+                    self.token(Tok.Sym(s), line, col)
+                    i = i + sym_len(s)
+                }
+            }
+        }
+        self.token(Tok.Eof, line, truncate[u32](n - bol) + 1u32)
+    }
+
+    // ---- the parser ----
+
+    func peek(view self) -> Token {
+        t := self.toks.get(self.at)
+        return t
+    }
+    func sym(view self) -> u8 {
+        match self.peek().tok {
+            Sym(s) => { return s }
+            _ => { return NoSym }
+        }
+    }
+    func at_end(view self) -> bool { return self.at + 1usize >= self.toks.len() }
+    func advance(edit self) {
+        self.prev_line = self.peek().line
+        if !self.at_end() { self.at = self.at + 1usize }
+    }
+    func accept(edit self, s: u8) -> bool {
+        if self.sym() != s { return false }
+        self.advance()
+        return true
+    }
+
+    // describe appends how a token reads in a message.
+    func describe(view self, t: Token, dst: edit[str.String]) {
+        match t.tok {
+            Int(v) => { dst.push_i64(v) }
+            Float(v) => { dst.push_f64(v) }
+            Str(id) => { dst.push_str("a string") }
+            Ident(id) => {
+                dst.push(39u8)
+                dst.push_str(self.names.get(usize(id)).as_view())
+                dst.push(39u8)
+            }
+            Kw(k) => {
+                dst.push(39u8)
+                dst.push_str(self.names.get(usize(k)).as_view())
+                dst.push(39u8)
+            }
+            Sym(s) => {
+                dst.push(39u8)
+                push_sym(dst, s)
+                dst.push(39u8)
+            }
+            Eof => { dst.push_str("the end of the program") }
+        }
+    }
+
+    // wanted reports that something else was expected where the parser
+    // is. Until the parser has skipped to a new line it reports nothing
+    // more: what follows a mistake is mostly noise.
+    func wanted(edit self, what: view[]u8) {
+        if self.panic { return }
+        self.panic = true
+        t := self.peek()
+        m := str.String.from("expected ")
+        m.push_str(what)
+        m.push_str(", found ")
+        self.describe(t, m)
+        self.diags.push(Diag { line: t.line, col: t.col, msg: m })
+    }
+    func want(edit self, s: u8, what: view[]u8) {
+        if !self.accept(s) { self.wanted(what) }
+    }
+
+    // recover skips the rest of the line the mistake is on, unless the
+    // statement had already run on to a new line when it was found. In a
+    // block it stops at a } too, which is then the end of the block.
+    func recover(edit self, in_block: bool) {
+        self.panic = false
+        if self.at > self.stmt_start && self.peek().line > self.prev_line { return }
+        if in_block && self.sym() == RB { return }
+        self.advance()
+        while !self.at_end() && self.peek().line == self.prev_line && !(in_block && self.sym() == RB) { self.advance() }
+    }
+
+    func mk(edit self, k: Kind, t: Token) -> ArenaId[Node] {
+        match self.ast.try_alloc(Node { k: k, line: t.line, col: t.col }) {
+            Ok(id) => { return id }
+            Err(e) => { trap_kind(oom) }
+        }
+        trap()
+    }
+    // keep stores a list of children and returns where it starts.
+    func keep(edit self, list: view[]ArenaId[Node]) -> u32 {
+        first := truncate[u32](self.kids.len())
+        self.kids.extend(list)
+        return first
+    }
+    func too_deep(edit self, t: Token) -> ArenaId[Node] {
+        if !self.panic { self.problem(t.line, t.col, "the program is nested too deeply here") }
+        self.panic = true
+        return self.mk(Kind.Nil, t)
+    }
+
+    // expression parses operators that bind at least as tightly as min:
+    // an operand, then for each such operator the expression to its
+    // right that binds more tightly still, so equal operators group to
+    // the left.
+    func expression(edit self, min: u8) -> ArenaId[Node] {
+        left := self.unary()
+        var chain: u32 = 0u32
+        while !self.panic {
+            t := self.peek()
+            s := self.sym()
+            p := binding(s)
+            if p == 0u8 || p < min { break }
+            // a run of n operators is a tree n deep on its left
+            chain = chain + 1u32
+            if chain > max_nesting { return self.too_deep(t) }
+            self.advance()
+            right := self.expression(p + 1u8)
+            if p <= 2u8 { left = self.mk(Kind.Logic(s, left, right), t) } else { left = self.mk(Kind.Binary(s, left, right), t) }
+        }
+        return left
+    }
+
+    func unary(edit self) -> ArenaId[Node] {
+        t := self.peek()
+        s := self.sym()
+        if s != MINUS && s != BANG { return self.postfix() }
+        if self.nesting >= max_nesting { return self.too_deep(t) }
+        self.advance()
+        self.nesting = self.nesting + 1u32
+        e := self.unary()
+        self.nesting = self.nesting - 1u32
+        return self.mk(Kind.Unary(s, e), t)
+    }
+
+    // list parses expressions separated by commas up to the symbol that
+    // closes them, and returns where the list is kept and its length (as
+    // the node of an array, which is what a list in brackets is).
+    func list(edit self, close: u8, what: view[]u8) -> Kind {
+        items := Vec[ArenaId[Node]].new()
+        while !self.panic && self.sym() != close {
+            items.push(self.expression(1u8))
+            if !self.accept(COMMA) { break }
+        }
+        self.want(close, what)
+        return Kind.Array(self.keep(items.as_view()), truncate[u32](items.len()))
+    }
+
+    // postfix parses calls and indexing, which must begin on the line
+    // where what they apply to ends: a line that starts with ( or [ is a
+    // new statement.
+    func postfix(edit self) -> ArenaId[Node] {
+        var e: ArenaId[Node] = self.primary()
+        while !self.panic && self.peek().line == self.prev_line {
+            t := self.peek()
+            if self.accept(LP) {
+                match self.list(RP, "')' after the arguments") {
+                    Array(first, count) => { e = self.mk(Kind.Call(e, first, count), t) }
+                    _ => { }
+                }
+            } else if self.accept(LS) {
+                i := self.expression(1u8)
+                self.want(RS, "']' after the index")
+                e = self.mk(Kind.Index(e, i), t)
+            } else {
+                break
+            }
+        }
+        return e
+    }
+
+    func primary(edit self) -> ArenaId[Node] {
+        t := self.peek()
+        if self.nesting >= max_nesting { return self.too_deep(t) }
+        match t.tok {
+            Int(v) => {
+                self.advance()
+                return self.mk(Kind.Int(v), t)
+            }
+            Float(v) => {
+                self.advance()
+                return self.mk(Kind.Float(v), t)
+            }
+            Str(id) => {
+                self.advance()
+                return self.mk(Kind.Str(id), t)
+            }
+            Ident(id) => {
+                self.advance()
+                return self.mk(Kind.Name(id), t)
+            }
+            Kw(k) => {
+                if k == KTrue || k == KFalse || k == KNil || k == KFn { self.advance() }
+                if k == KTrue { return self.mk(Kind.Bool(true), t) }
+                if k == KFalse { return self.mk(Kind.Bool(false), t) }
+                if k == KNil { return self.mk(Kind.Nil, t) }
+                if k == KFn { return self.function(t) }
+            }
+            Sym(s) => {
+                if s == LP {
+                    self.advance()
+                    self.nesting = self.nesting + 1u32
+                    e := self.expression(1u8)
+                    self.nesting = self.nesting - 1u32
+                    self.want(RP, "')'")
+                    return e
+                }
+                if s == LS {
+                    self.advance()
+                    self.nesting = self.nesting + 1u32
+                    elements := self.list(RS, "']' after the elements")
+                    self.nesting = self.nesting - 1u32
+                    return self.mk(elements, t)
+                }
+            }
+            Eof => { }
+        }
+        self.wanted("an expression")
+        return self.mk(Kind.Nil, t)
+    }
+
+    // function parses what follows `fn`: a name or none, the parameters
+    // and the body. A function with no name is called fn.
+    func function(edit self, t: Token) -> ArenaId[Node] {
+        var name: u32 = u32(KFn)
+        match self.peek().tok {
+            Ident(id) => {
+                name = id
+                self.advance()
+            }
+            _ => { }
+        }
+        self.want(LP, "'(' before the parameters")
+        params := Vec[ArenaId[Node]].new()
+        while !self.panic && self.sym() != RP {
+            p := self.peek()
+            match p.tok {
+                Ident(id) => {
+                    self.advance()
+                    params.push(self.mk(Kind.Name(id), p))
+                }
+                _ => { self.wanted("the name of a parameter") }
+            }
+            if !self.accept(COMMA) { break }
+        }
+        self.want(RP, "')' after the parameters")
+        body := self.block()
+        first := self.keep(params.as_view())
+        return self.mk(Kind.Func(name, first, truncate[u32](params.len()), body), t)
+    }
+
+    func block(edit self) -> ArenaId[Node] {
+        t := self.peek()
+        self.want(LB, "'{'")
+        items := Vec[ArenaId[Node]].new()
+        while !self.panic && self.sym() != RB && !self.at_end() {
+            items.push(self.statement())
+            if self.panic { self.recover(true) }
+        }
+        self.want(RB, "'}'")
+        first := self.keep(items.as_view())
+        return self.mk(Kind.Block(first, truncate[u32](items.len())), t)
+    }
+
+    func statement(edit self) -> ArenaId[Node] {
+        t := self.peek()
+        self.stmt_start = self.at
+        if self.nesting >= max_nesting { return self.too_deep(t) }
+        self.nesting = self.nesting + 1u32
+        s := self.statement_at(t)
+        self.nesting = self.nesting - 1u32
+        return s
+    }
+
+    func statement_at(edit self, t: Token) -> ArenaId[Node] {
+        match t.tok {
+            Kw(k) => {
+                if k == KLet {
+                    self.advance()
+                    var name: u32 = 0u32
+                    match self.peek().tok {
+                        Ident(id) => {
+                            name = id
+                            self.advance()
+                        }
+                        _ => { self.wanted("a name after 'let'") }
+                    }
+                    self.want(ASSIGN, "'=' after the name")
+                    init := self.expression(1u8)
+                    return self.mk(Kind.Let(name, init), t)
+                }
+                if k == KFn {
+                    // fn name(...) { } is let name = fn name(...) { }
+                    after := self.toks.get(self.at + 1usize)
+                    match after.tok {
+                        Ident(id) => {
+                            self.advance()
+                            f := self.function(t)
+                            return self.mk(Kind.Let(id, f), t)
+                        }
+                        _ => { }
+                    }
+                }
+                if k == KIf {
+                    self.advance()
+                    cond := self.expression(1u8)
+                    then := self.block()
+                    var other: ArenaId[Node] = self.mk(Kind.Nil, t)
+                    match self.peek().tok {
+                        Kw(e) => {
+                            if e == KElse {
+                                self.advance()
+                                match self.peek().tok {
+                                    Kw(again) => {
+                                        if again == KIf { other = self.statement() } else { other = self.block() }
+                                    }
+                                    _ => { other = self.block() }
+                                }
+                            }
+                        }
+                        _ => { }
+                    }
+                    return self.mk(Kind.If(cond, then, other), t)
+                }
+                if k == KWhile {
+                    self.advance()
+                    cond := self.expression(1u8)
+                    body := self.block()
+                    return self.mk(Kind.While(cond, body), t)
+                }
+                if k == KReturn {
+                    self.advance()
+                    var e: ArenaId[Node] = self.mk(Kind.Nil, t)
+                    if self.peek().line == t.line && self.sym() != RB && !self.at_end() { e = self.expression(1u8) }
+                    return self.mk(Kind.Return(e), t)
+                }
+            }
+            Sym(s) => {
+                if s == LB { return self.block() }
+            }
+            _ => { }
+        }
+        e := self.expression(1u8)
+        eq := self.peek()
+        if !self.accept(ASSIGN) { return e }
+        value := self.expression(1u8)
+        if !self.panic {
+            target := self.ast.get(e)
+            match target.k {
+                Name(id) => { }
+                Index(a, i) => { }
+                _ => { self.problem(eq.line, eq.col, "only a name or an element can be assigned to") }
+            }
+        }
+        return self.mk(Kind.Assign(e, value), eq)
+    }
+
+    // program parses the whole text as the statements of one block.
+    func program(edit self) -> ArenaId[Node] {
+        items := Vec[ArenaId[Node]].new()
+        while !self.at_end() {
+            items.push(self.statement())
+            if self.panic { self.recover(false) }
+        }
+        first := self.keep(items.as_view())
+        return self.mk(Kind.Block(first, truncate[u32](items.len())), self.peek())
+    }
+
+    // ---- the code generator ----
+
+    func emit(edit self, op: Op, line: u32) {
+        last := self.fs.len() - 1usize
+        with s := self.fs.at(last) {
+            s.f.code.push(op)
+            s.f.lines.push(line)
+        }
+    }
+    func here(view self) -> u32 { return truncate[u32](self.fs.get(self.fs.len() - 1usize).f.code.len()) }
+    // jump emits a jump that goes nowhere yet and returns where it is.
+    func jump(edit self, op: Op, line: u32) -> usize {
+        at := usize(self.here())
+        self.emit(op, line)
+        return at
+    }
+    // patch makes the jump at `at` go to the next instruction emitted.
+    func patch(edit self, at: usize) {
+        to := self.here()
+        last := self.fs.len() - 1usize
+        with s := self.fs.at(last) {
+            old := s.f.code.get(at)
+            var op: Op = Op.Jump(to)
+            match old {
+                JumpIfFalse(x) => { op = Op.JumpIfFalse(to) }
+                AndJump(x) => { op = Op.AndJump(to) }
+                OrJump(x) => { op = Op.OrJump(to) }
+                _ => { }
+            }
+            with slot := s.f.code.at(at) { slot = op }
+        }
+    }
+
+    // constant is the index of a constant, which is kept once.
+    func constant(edit self, c: own Const, line: u32) {
+        var k: usize = 0usize
+        while k < self.prog.consts.len() && !same_const(self.prog.consts.get(k), c) { k = k + 1usize }
+        if k == self.prog.consts.len() { self.prog.consts.push(c) } else { drop(c) }
+        self.emit(Op.Const(truncate[u32](k)), line)
+    }
+
+    // global is the slot of a global name, made the first time the name
+    // is met. A global may be used above the line that defines it (a
+    // function calls one defined further down), so whether anything
+    // defines it at all is known only at the end.
+    func global(edit self, name: u32, line: u32, col: u32, defines: bool) -> u32 {
+        var slot: u32 = truncate[u32](self.uses.len())
+        match self.slots.find(name) {
+            Some(at) => {
+                have := self.slots.value_at(at)
+                slot = have
+            }
+            None => {
+                match self.slots.try_insert(name, slot) {
+                    Ok(old) => { }
+                    Err(e) => { trap_kind(oom) }
+                }
+                self.uses.push(Use { line: line, col: col, defined: false })
+                self.prog.globals.push(self.names.get(usize(name)).clone())
+            }
+        }
+        if defines {
+            with u := self.uses.at(usize(slot)) { u.defined = true }
+        }
+        return slot
+    }
+
+    // local is the stack slot of a name in the function at a level, the
+    // innermost declaration first.
+    func local(view self, level: usize, name: u32) -> Option[u32] {
+        var i: usize = self.fs.get(level).locals.len()
+        while i > 0usize {
+            i = i - 1usize
+            if self.fs.get(level).locals.get(i).name == name { return Some(truncate[u32](i)) }
+        }
+        return None
+    }
+
+    // capture is the index, among the captures of the function at a
+    // level, of a name that belongs to a function around it; the
+    // functions in between capture it too, so that each can hand it on.
+    func capture(edit self, level: usize, name: u32) -> Option[u32] {
+        if level == 0usize { return None }
+        for i in 0usize..self.fs.get(level).captured.len() {
+            have := self.fs.get(level).captured.get(i)
+            if have == name { return Some(truncate[u32](i)) }
+        }
+        var cap: Cap = Cap { local: true, index: 0u32 }
+        match self.local(level - 1usize, name) {
+            Some(slot) => { cap.index = slot }
+            None => {
+                match self.capture(level - 1usize, name) {
+                    Some(i) => { cap = Cap { local: false, index: i } }
+                    None => { return None }
+                }
+            }
+        }
+        with s := self.fs.at(level) {
+            s.captured.push(name)
+            s.f.caps.push(cap)
+            return Some(truncate[u32](s.captured.len() - 1usize))
+        }
+    }
+
+    // gen emits the instructions that leave an expression's value on the stack.
+    func gen(edit self, id: ArenaId[Node]) {
+        n := self.ast.get(id)
+        match n.k {
+            Nil => { self.emit(Op.Nil, n.line) }
+            Bool(b) => {
+                if b { self.emit(Op.True, n.line) } else { self.emit(Op.False, n.line) }
+            }
+            Int(v) => { self.constant(Const.Int(v), n.line) }
+            Float(v) => { self.constant(Const.Float(v), n.line) }
+            Str(text) => { self.constant(Const.Str(self.names.get(usize(text)).clone()), n.line) }
+            Name(name) => {
+                level := self.fs.len() - 1usize
+                match self.local(level, name) {
+                    Some(slot) => {
+                        self.emit(Op.GetLocal(slot), n.line)
+                        return
+                    }
+                    None => { }
+                }
+                match self.capture(level, name) {
+                    Some(i) => { self.emit(Op.GetCap(i), n.line) }
+                    None => {
+                        slot := self.global(name, n.line, n.col, false)
+                        self.emit(Op.GetGlobal(slot), n.line)
+                    }
+                }
+            }
+            Unary(op, e) => {
+                self.gen(e)
+                if op == MINUS { self.emit(Op.Neg, n.line) } else { self.emit(Op.Not, n.line) }
+            }
+            Binary(op, l, r) => {
+                self.gen(l)
+                self.gen(r)
+                if op >= PLUS { self.emit(Op.Arith(op), n.line) } else { self.emit(Op.Compare(op), n.line) }
+            }
+            Logic(op, l, r) => {
+                // the left value is the result when it settles the matter
+                self.gen(l)
+                var over: usize = 0usize
+                if op == ANDAND { over = self.jump(Op.AndJump(0u32), n.line) } else { over = self.jump(Op.OrJump(0u32), n.line) }
+                self.gen(r)
+                self.patch(over)
+            }
+            Call(f, first, count) => {
+                self.gen(f)
+                self.gen_list(first, count)
+                self.emit(Op.Call(count), n.line)
+            }
+            Index(a, i) => {
+                self.gen(a)
+                self.gen(i)
+                self.emit(Op.GetIndex, n.line)
+            }
+            Array(first, count) => {
+                self.gen_list(first, count)
+                self.emit(Op.MakeArray(count), n.line)
+            }
+            Func(name, first, count, body) => {
+                self.fs.push(FnState { f: new_func(self.names.get(usize(name)).as_view(), count), locals: Vec[Local].new(), captured: Vec[u32].new(), depth: 1u32 })
+                for i in 0usize..usize(count) {
+                    p := self.ast.get(self.kids.get(usize(first) + i))
+                    match p.k {
+                        Name(param) => { self.declare(param, p) }
+                        _ => { }
+                    }
+                }
+                b := self.ast.get(body)
+                match b.k {
+                    Block(bf, bc) => { self.statements(bf, bc) }
+                    _ => { }
+                }
+                index := self.finish(b.line)
+                self.emit(Op.Closure(index), n.line)
+            }
+            _ => { }
+        }
+    }
+    func gen_list(edit self, first: u32, count: u32) {
+        for i in 0usize..usize(count) {
+            kid := self.kids.get(usize(first) + i)
+            self.gen(kid)
+        }
+    }
+    func statements(edit self, first: u32, count: u32) {
+        for i in 0usize..usize(count) {
+            kid := self.kids.get(usize(first) + i)
+            self.stmt(kid)
+        }
+    }
+
+    // finish ends the function being compiled with `return nil`, adds it
+    // to the program and returns its index.
+    func finish(edit self, line: u32) -> u32 {
+        self.emit(Op.Nil, line)
+        self.emit(Op.Return, line)
+        match self.fs.pop() {
+            Some(s) => { self.prog.funcs.push(replace(s.f, new_func("", 0u32))) }
+            None => { }
+        }
+        return truncate[u32](self.prog.funcs.len() - 1usize)
+    }
+
+    // declare makes the value on top of the stack a local variable: the
+    // slot it is in is the variable from here to the end of the block.
+    func declare(edit self, name: u32, n: Node) {
+        last := self.fs.len() - 1usize
+        depth := self.fs.get(last).depth
+        var i: usize = self.fs.get(last).locals.len()
+        while i > 0usize && self.fs.get(last).locals.get(i - 1usize).depth == depth {
+            i = i - 1usize
+            if self.fs.get(last).locals.get(i).name == name { self.problem_named(n.line, n.col, "'", name, "' is already a variable of this block") }
+        }
+        with s := self.fs.at(last) { s.locals.push(Local { name: name, depth: depth }) }
+    }
+
+    // stmt emits a statement, which leaves the stack as it found it
+    // (but for the slot of a variable it declares).
+    func stmt(edit self, id: ArenaId[Node]) {
+        n := self.ast.get(id)
+        last := self.fs.len() - 1usize
+        match n.k {
+            Let(name, init) => {
+                self.gen(init)
+                if last == 0usize && self.fs.get(last).depth == 0u32 {
+                    slot := self.global(name, n.line, n.col, true)
+                    self.emit(Op.DefGlobal(slot), n.line)
+                } else {
+                    self.declare(name, n)
+                }
+            }
+            Assign(target, value) => {
+                t := self.ast.get(target)
+                match t.k {
+                    Name(name) => {
+                        self.gen(value)
+                        match self.local(last, name) {
+                            Some(slot) => {
+                                self.emit(Op.SetLocal(slot), n.line)
+                                return
+                            }
+                            None => { }
+                        }
+                        match self.capture(last, name) {
+                            Some(i) => { self.problem_named(n.line, n.col, "'", name, "' belongs to the function around this one, which has only a copy of it to assign to") }
+                            None => {
+                                slot := self.global(name, t.line, t.col, false)
+                                self.emit(Op.SetGlobal(slot), n.line)
+                            }
+                        }
+                    }
+                    Index(a, i) => {
+                        self.gen(a)
+                        self.gen(i)
+                        self.gen(value)
+                        self.emit(Op.SetIndex, n.line)
+                    }
+                    _ => { }
+                }
+            }
+            If(cond, then, other) => {
+                self.gen(cond)
+                skip := self.jump(Op.JumpIfFalse(0u32), n.line)
+                self.stmt(then)
+                o := self.ast.get(other)
+                match o.k {
+                    Nil => { self.patch(skip) }
+                    _ => {
+                        done := self.jump(Op.Jump(0u32), n.line)
+                        self.patch(skip)
+                        self.stmt(other)
+                        self.patch(done)
+                    }
+                }
+            }
+            While(cond, body) => {
+                top := self.here()
+                self.gen(cond)
+                leave := self.jump(Op.JumpIfFalse(0u32), n.line)
+                self.stmt(body)
+                self.emit(Op.Loop(top), n.line)
+                self.patch(leave)
+            }
+            Return(e) => {
+                if last == 0usize { self.problem(n.line, n.col, "'return' outside a function") }
+                self.gen(e)
+                self.emit(Op.Return, n.line)
+            }
+            Block(first, count) => {
+                with s := self.fs.at(last) { s.depth = s.depth + 1u32 }
+                self.statements(first, count)
+                // the block's variables are the values on top of the stack
+                var gone: usize = 0usize
+                with s := self.fs.at(last) {
+                    s.depth = s.depth - 1u32
+                    while s.locals.len() > 0usize && s.locals.get(s.locals.len() - 1usize).depth > s.depth {
+                        s.locals.pop()
+                        gone = gone + 1usize
+                    }
+                }
+                for i in 0usize..gone { self.emit(Op.Pop, n.line) }
+            }
+            _ => {
+                self.gen(id)
+                self.emit(Op.Pop, n.line)
+            }
+        }
+    }
+
+    // generate compiles the program's own text as the last function.
+    func generate(edit self, root: ArenaId[Node]) {
+        for b in 0usize..natives { self.global(keywords + truncate[u32](b), 0u32, 0u32, true) }
+        self.fs.push(FnState { f: new_func("main", 0u32), locals: Vec[Local].new(), captured: Vec[u32].new(), depth: 0u32 })
+        r := self.ast.get(root)
+        match r.k {
+            Block(first, count) => { self.statements(first, count) }
+            _ => { }
+        }
+        self.finish(r.line)
+        for i in 0usize..self.uses.len() {
+            u := self.uses.get(i)
+            if !u.defined {
+                m := str.String.from("nothing defines '")
+                m.push_str(self.prog.globals.get(i).as_view())
+                m.push(39u8)
+                self.diags.push(Diag { line: u.line, col: u.col, msg: m })
+            }
+        }
+    }
+}
+
+// ---- the disassembler ----
+
+func ins(dst: edit[str.String], name: view[]u8, operand: u32) {
+    dst.push_str(name)
+    for i in len(name)..14usize { dst.push(32u8) }
+    dst.push_u64(u64(operand))
+}
+func ins_to(dst: edit[str.String], name: view[]u8, to: u32) {
+    dst.push_str(name)
+    for i in len(name)..14usize { dst.push(32u8) }
+    dst.push_str("-> ")
+    dst.push_padded(u64(to), 4usize, 48u8)
+}
+func ins_sym(dst: edit[str.String], name: view[]u8, s: u8) {
+    dst.push_str(name)
+    for i in len(name)..14usize { dst.push(32u8) }
+    push_sym(dst, s)
+}
+
+// push_float appends a float so that it cannot be taken for a whole number.
+func push_float(dst: edit[str.String], x: f64) {
+    start := dst.len()
+    dst.push_f64(x)
+    for i in start..dst.len() {
+        b := dst.byte(i)
+        if b == 46u8 || b == 101u8 || b == 78u8 || b == 73u8 { return }
+    }
+    dst.push_str(".0")
+}
+
+// disassemble appends the listing of one function: the index of each
+// instruction, the line it came from (a bar when it is the line above's),
+// and the instruction, with what an operand names after a semicolon.
+func disassemble(p: view[Program], fi: usize, dst: edit[str.String]) {
+    dst.push_str("== ")
+    dst.push_str(p.funcs.get(fi).name.as_view())
+    dst.push_str(" (parameters ")
+    dst.push_u64(u64(p.funcs.get(fi).arity))
+    dst.push_str(", captured ")
+    dst.push_u64(u64(p.funcs.get(fi).caps.len()))
+    dst.push_str(") ==\n")
+    var shown: u32 = 0u32
+    for i in 0usize..p.funcs.get(fi).code.len() {
+        {
+            dst.push_padded(u64(i), 4usize, 48u8)
+            line := p.funcs.get(fi).lines.get(i)
+            if line == shown { dst.push_str("    | ") } else { dst.push_padded(u64(line), 5usize, 32u8); dst.push(32u8) }
+            shown = line
+            match p.funcs.get(fi).code.get(i) {
+                Const(k) => {
+                    ins(dst, "const", k)
+                    dst.push_str("    ; ")
+                    match p.consts.get(usize(k)) {
+                        Int(v) => { dst.push_i64(v) }
+                        Float(v) => { push_float(dst, v) }
+                        Str(s) => {
+                            dst.push(34u8)
+                            dst.push_str(s.as_view())
+                            dst.push(34u8)
+                        }
+                    }
+                }
+                Nil => { dst.push_str("nil") }
+                True => { dst.push_str("true") }
+                False => { dst.push_str("false") }
+                Pop => { dst.push_str("pop") }
+                GetLocal(slot) => { ins(dst, "get_local", slot) }
+                SetLocal(slot) => { ins(dst, "set_local", slot) }
+                GetGlobal(slot) => {
+                    ins(dst, "get_global", slot)
+                    dst.push_str("    ; ")
+                    dst.push_str(p.globals.get(usize(slot)).as_view())
+                }
+                SetGlobal(slot) => {
+                    ins(dst, "set_global", slot)
+                    dst.push_str("    ; ")
+                    dst.push_str(p.globals.get(usize(slot)).as_view())
+                }
+                DefGlobal(slot) => {
+                    ins(dst, "def_global", slot)
+                    dst.push_str("    ; ")
+                    dst.push_str(p.globals.get(usize(slot)).as_view())
+                }
+                GetCap(c) => { ins(dst, "get_captured", c) }
+                Arith(op) => { ins_sym(dst, "arith", op) }
+                Compare(op) => { ins_sym(dst, "compare", op) }
+                Neg => { dst.push_str("negate") }
+                Not => { dst.push_str("not") }
+                Jump(to) => { ins_to(dst, "jump", to) }
+                JumpIfFalse(to) => { ins_to(dst, "jump_if_false", to) }
+                AndJump(to) => { ins_to(dst, "and_jump", to) }
+                OrJump(to) => { ins_to(dst, "or_jump", to) }
+                Loop(to) => { ins_to(dst, "loop", to) }
+                Call(argc) => { ins(dst, "call", argc) }
+                Return => { dst.push_str("return") }
+                MakeArray(count) => { ins(dst, "make_array", count) }
+                GetIndex => { dst.push_str("get_index") }
+                SetIndex => { dst.push_str("set_index") }
+                Closure(g) => {
+                    ins(dst, "closure", g)
+                    dst.push_str("    ; ")
+                    dst.push_str(p.funcs.get(usize(g)).name.as_view())
+                }
+            }
+            dst.push(10u8)
+        }
+    }
+}
+
+// ---- the machine ----
+
+// Value is a value of the running program. A string, an array and a
+// closure are on the heap and the value is their handle; Undef is what a
+// global holds before the line that defines it has run.
+union Value { Nil; Bool(b: bool); Int(v: i64); Float(v: f64); Str(r: PoolId[Obj]); Arr(r: PoolId[Obj]); Clo(r: PoolId[Obj]); Fn(f: u32); Native(n: u8); Undef }
+
+// Obj is a heap object: a string's bytes, an array's elements, or a
+// closure's function and the values it captured. The mark is set only
+// while a collection runs.
+union Body { Text(s: str.String); Items(v: Vec[Value]); Closure(f: u32, caps: Vec[Value]) }
+struct Obj { body: Body; marked: bool }
+
+// Frame is what a call puts aside: the caller's function, where it was in
+// it, where its locals begin on the stack, and its closure.
+struct Frame { f: usize; ip: usize; base: usize; clo: Value }
+
+struct Vm {
+    stack: Vec[Value]
+    frames: Vec[Frame]
+    f: usize
+    ip: usize
+    base: usize
+    clo: Value
+    heap: Pool[Obj]
+    all: Vec[PoolId[Obj]]
+    globals: Vec[Value]
+    consts: Vec[Value]
+    threshold: usize
+    made: u64
+    freed: u64
+    collections: u64
+}
+
+// text_of is a string's bytes, items_of the values an array or a closure
+// holds, vec_of an array's own vector, to change it, and func_of a
+// closure's function. Each is asked only of an object of its kind.
+func text_of(b: view[Body]) -> view[]u8 {
+    match b {
+        Text(s) => { return s.as_view() }
+        _ => { }
+    }
+    trap()
+}
+func items_of(b: view[Body]) -> view[]Value {
+    match b {
+        Items(v) => { return v.as_view() }
+        Closure(f, caps) => { return caps.as_view() }
+        _ => { }
+    }
+    trap()
+}
+func vec_of(b: edit[Body]) -> edit[Vec[Value]] {
+    match b {
+        Items(v) => { return v }
+        _ => { }
+    }
+    trap()
+}
+
+func func_of(b: view[Body]) -> u32 {
+    match b {
+        Closure(f, caps) => { return f }
+        _ => { }
+    }
+    trap()
+}
+
+func truthy(v: Value) -> bool {
+    match v {
+        Nil => { return false }
+        Bool(b) => { return b }
+        _ => { return true }
+    }
+}
+
+func push_type(dst: edit[str.String], v: Value) {
+    match v {
+        Nil => { dst.push_str("nil") }
+        Bool(b) => { dst.push_str("a boolean") }
+        Int(x) => { dst.push_str("a whole number") }
+        Float(x) => { dst.push_str("a float") }
+        Str(r) => { dst.push_str("a string") }
+        Arr(r) => { dst.push_str("an array") }
+        Undef => { dst.push_str("nothing") }
+        _ => { dst.push_str("a function") }
+    }
+}
+
+// wrong is the error of a value of the wrong type.
+func wrong(before: view[]u8, v: Value, after: view[]u8) -> str.String {
+    m := str.String.from(before)
+    push_type(m, v)
+    m.push_str(after)
+    return m
+}
+
+func ordered(op: u8, less: bool, equal: bool, greater: bool) -> bool {
+    if op == LT { return less }
+    if op == LE { return less || equal }
+    if op == GT { return greater }
+    return greater || equal
+}
+
+// int_arith is arithmetic on whole numbers, which wraps: the one thing
+// that is an error is a division by zero.
+func int_arith(op: u8, x: i64, y: i64) -> Result[Value, str.String] {
+    if op == PLUS { return Ok(Value.Int(wrapping_add(x, y))) }
+    if op == MINUS { return Ok(Value.Int(wrapping_sub(x, y))) }
+    if op == STAR { return Ok(Value.Int(wrapping_mul(x, y))) }
+    if y == 0i64 { return Err(str.String.from("division by zero")) }
+    if y == -1i64 {
+        // the smallest number divided by -1 does not fit, and wraps too
+        if op == SLASH { return Ok(Value.Int(wrapping_neg(x))) }
+        return Ok(Value.Int(0i64))
+    }
+    if op == SLASH { return Ok(Value.Int(x / y)) }
+    return Ok(Value.Int(x % y))
+}
+
+func float_arith(op: u8, x: f64, y: f64) -> Result[Value, str.String] {
+    if op == PLUS { return Ok(Value.Float(x + y)) }
+    if op == MINUS { return Ok(Value.Float(x - y)) }
+    if op == STAR { return Ok(Value.Float(x * y)) }
+    if op == SLASH { return Ok(Value.Float(x / y)) }
+    return Err(str.String.from("'%' needs two whole numbers"))
+}
+
+func text_order(a: view[]u8, b: view[]u8) -> i32 {
+    var i: usize = 0usize
+    while i < len(a) && i < len(b) {
+        if a[i] < b[i] { return -1i32 }
+        if a[i] > b[i] { return 1i32 }
+        i = i + 1usize
+    }
+    if len(a) < len(b) { return -1i32 }
+    if len(a) > len(b) { return 1i32 }
+    return 0i32
+}
+
+// new_vm makes a machine ready to run a program from its first instruction.
+func new_vm(p: view[Program]) -> Vm {
+    vm := Vm {
+        stack: Vec[Value].new(), frames: Vec[Frame].new(), f: p.funcs.len() - 1usize, ip: 0usize, base: 0usize, clo: Value.Nil,
+        heap: Pool[Obj].new(), all: Vec[PoolId[Obj]].new(), globals: Vec[Value].new(), consts: Vec[Value].new(),
+        threshold: first_threshold, made: 0u64, freed: 0u64, collections: 0u64
+    }
+    for i in 0usize..p.consts.len() {
+        match p.consts.get(i) {
+            Int(v) => { vm.consts.push(Value.Int(v)) }
+            Float(v) => { vm.consts.push(Value.Float(v)) }
+            Str(s) => {
+                t := vm.text(s.clone())
+                vm.consts.push(t)
+            }
+        }
+    }
+    for i in 0usize..p.globals.len() {
+        if i < natives { vm.globals.push(Value.Native(truncate[u8](i))) } else { vm.globals.push(Value.Undef) }
+    }
+    return vm
+}
+
+impl Vm {
+    // ---- the heap ----
+
+    func alloc(edit self, body: own Body) -> PoolId[Obj] {
+        match self.heap.alloc(Obj { body: body, marked: false }) {
+            Ok(id) => {
+                self.all.push(id)
+                self.made = self.made + 1u64
+                return id
+            }
+            Err(e) => { trap_kind(oom) }
+        }
+        trap()
+    }
+    func text(edit self, s: own str.String) -> Value { return Value.Str(self.alloc(Body.Text(s))) }
+    func array(edit self, items: own Vec[Value]) -> Value { return Value.Arr(self.alloc(Body.Items(items))) }
+
+    func bytes(view self, r: PoolId[Obj]) -> view[]u8 { return text_of(self.heap.get(r).body) }
+    func items(view self, r: PoolId[Obj]) -> view[]Value { return items_of(self.heap.get(r).body) }
+    func elements(edit self, r: PoolId[Obj]) -> edit[Vec[Value]] { return vec_of(self.heap.at(r).body) }
+
+    // mark sets an object's mark and reports whether it was clear.
+    func mark(edit self, r: PoolId[Obj]) -> bool {
+        with o := self.heap.at(r) {
+            if o.marked { return false }
+            o.marked = true
+            return true
+        }
+    }
+
+    // collect frees every object that the stack, the globals, the
+    // constants and the closures of the calls in progress do not reach.
+    func collect(edit self) {
+        work := Vec[Value].new()
+        work.extend(self.stack.as_view())
+        work.extend(self.globals.as_view())
+        work.extend(self.consts.as_view())
+        work.push(self.clo)
+        for i in 0usize..self.frames.len() { work.push(self.frames.get(i).clo) }
+        while true {
+            match work.pop() {
+                Some(v) => {
+                    match v {
+                        Str(r) => { self.mark(r) }
+                        Arr(r) => {
+                            if self.mark(r) { work.extend(self.items(r)) }
+                        }
+                        Clo(r) => {
+                            if self.mark(r) { work.extend(self.items(r)) }
+                        }
+                        _ => { }
+                    }
+                }
+                None => { break }
+            }
+        }
+        var i: usize = 0usize
+        while i < self.all.len() {
+            r := self.all.get(i)
+            var keep: bool = false
+            with o := self.heap.at(r) {
+                keep = o.marked
+                o.marked = false
+            }
+            if keep {
+                i = i + 1usize
+            } else {
+                self.heap.free(r)
+                self.freed = self.freed + 1u64
+                match self.all.pop() {
+                    Some(last) => {
+                        if i < self.all.len() {
+                            with slot := self.all.at(i) { slot = last }
+                        }
+                    }
+                    None => { }
+                }
+            }
+        }
+        self.collections = self.collections + 1u64
+        self.threshold = self.all.len() * 2usize
+        if self.threshold < first_threshold { self.threshold = first_threshold }
+    }
+
+    // ---- values ----
+
+    // show appends a value as print writes it; a string inside an array
+    // is written with its quotes.
+    func show(view self, v: Value, dst: edit[str.String], quoted: bool, depth: u32) {
+        match v {
+            Nil => { dst.push_str("nil") }
+            Bool(b) => {
+                if b { dst.push_str("true") } else { dst.push_str("false") }
+            }
+            Int(x) => { dst.push_i64(x) }
+            Float(x) => { push_float(dst, x) }
+            Str(r) => {
+                if quoted { dst.push(34u8) }
+                dst.push_str(self.bytes(r))
+                if quoted { dst.push(34u8) }
+            }
+            Arr(r) => {
+                // an array may hold itself
+                if depth >= 4u32 {
+                    dst.push_str("[...]")
+                    return
+                }
+                dst.push(91u8)
+                for i in 0usize..len(self.items(r)) {
+                    if i > 0usize { dst.push_str(", ") }
+                    self.show(self.items(r)[i], dst, true, depth + 1u32)
+                }
+                dst.push(93u8)
+            }
+            Native(n) => { dst.push_str("<built-in function>") }
+            Undef => { dst.push_str("<nothing>") }
+            _ => { dst.push_str("<function>") }
+        }
+    }
+
+    func same(view self, a: Value, b: Value) -> bool {
+        match a {
+            Int(x) => {
+                match b {
+                    Float(y) => { return f64(x) == y }
+                    _ => { }
+                }
+            }
+            Float(x) => {
+                match b {
+                    Int(y) => { return x == f64(y) }
+                    Float(y) => { return x == y }
+                    _ => { }
+                }
+            }
+            Str(x) => {
+                match b {
+                    Str(y) => { return str.equal(self.bytes(x), self.bytes(y)) }
+                    _ => { }
+                }
+            }
+            _ => { }
+        }
+        return a == b
+    }
+
+    func operands(view self, op: u8, a: Value, b: Value) -> str.String {
+        m := str.String.from("'")
+        push_sym(m, op)
+        m.push_str("' cannot take ")
+        push_type(m, a)
+        m.push_str(" and ")
+        push_type(m, b)
+        return m
+    }
+
+    func arith(edit self, op: u8, a: Value, b: Value) -> Result[Value, str.String] {
+        match a {
+            Int(x) => {
+                match b {
+                    Int(y) => { return int_arith(op, x, y) }
+                    Float(y) => { return float_arith(op, f64(x), y) }
+                    _ => { }
+                }
+            }
+            Float(x) => {
+                match b {
+                    Int(y) => { return float_arith(op, x, f64(y)) }
+                    Float(y) => { return float_arith(op, x, y) }
+                    _ => { }
+                }
+            }
+            Str(x) => {
+                match b {
+                    Str(y) => {
+                        if op == PLUS {
+                            joined := str.String.from(self.bytes(x))
+                            joined.push_str(self.bytes(y))
+                            return Ok(self.text(joined))
+                        }
+                    }
+                    _ => { }
+                }
+            }
+            _ => { }
+        }
+        return Err(self.operands(op, a, b))
+    }
+
+    func compare(view self, op: u8, a: Value, b: Value) -> Result[bool, str.String] {
+        if op == EQ { return Ok(self.same(a, b)) }
+        if op == NE { return Ok(!self.same(a, b)) }
+        match a {
+            Int(x) => {
+                match b {
+                    Int(y) => { return Ok(ordered(op, x < y, x == y, x > y)) }
+                    Float(y) => { return Ok(ordered(op, f64(x) < y, f64(x) == y, f64(x) > y)) }
+                    _ => { }
+                }
+            }
+            Float(x) => {
+                match b {
+                    Int(y) => { return Ok(ordered(op, x < f64(y), x == f64(y), x > f64(y))) }
+                    Float(y) => { return Ok(ordered(op, x < y, x == y, x > y)) }
+                    _ => { }
+                }
+            }
+            Str(x) => {
+                match b {
+                    Str(y) => {
+                        c := text_order(self.bytes(x), self.bytes(y))
+                        return Ok(ordered(op, c < 0i32, c == 0i32, c > 0i32))
+                    }
+                    _ => { }
+                }
+            }
+            _ => { }
+        }
+        return Err(self.operands(op, a, b))
+    }
+
+    // subscript is an index that is within n elements, or the error.
+    func subscript(view self, i: Value, n: usize) -> Result[usize, str.String] {
+        match i {
+            Int(x) => {
+                if x >= 0i64 && x < i64(n) { return Ok(usize(x)) }
+                m := str.String.from("index ")
+                m.push_i64(x)
+                m.push_str(" is outside the ")
+                m.push_u64(u64(n))
+                m.push_str(" elements there are")
+                return Err(m)
+            }
+            _ => { return Err(wrong("an index is a whole number, not ", i, "")) }
+        }
+    }
+
+    func index(edit self, a: Value, i: Value) -> Result[Value, str.String] {
+        match a {
+            Arr(r) => {
+                k := self.subscript(i, len(self.items(r)))?
+                return Ok(self.items(r)[k])
+            }
+            Str(r) => {
+                k := self.subscript(i, len(self.bytes(r)))?
+                one := str.String.new()
+                one.push(self.bytes(r)[k])
+                return Ok(self.text(one))
+            }
+            _ => { return Err(wrong("only an array or a string has elements, not ", a, "")) }
+        }
+    }
+
+    func store(edit self, a: Value, i: Value, v: Value) -> Result[(), str.String] {
+        match a {
+            Arr(r) => {
+                k := self.subscript(i, len(self.items(r)))?
+                with slot := self.elements(r).at(k) { slot = v }
+                return Ok(())
+            }
+            _ => { return Err(wrong("only an element of an array can be assigned, not one of ", a, "")) }
+        }
+    }
+
+    // ---- the built-in functions ----
+
+    // native calls built-in function n with the argc values on top of
+    // the stack, and leaves its result in place of them and of itself.
+    func native(edit self, p: view[Program], n: u8, argc: usize) -> Result[(), str.String] {
+        first := self.stack.len() - argc
+        var need: usize = 1usize
+        if n == 2u8 { need = 2usize }
+        if n != 0u8 && argc != need { return Err(arity(p.globals.get(usize(n)).as_view(), need, argc)) }
+        var result: Value = Value.Nil
+        var a: Value = Value.Nil
+        if argc > 0usize { a = self.stack.get(first) }
+        if n == 0u8 {
+            line := str.String.new()
+            for i in 0usize..argc {
+                if i > 0usize { line.push(32u8) }
+                self.show(self.stack.get(first + i), line, false, 0u32)
+            }
+            line.push(10u8)
+            print_str(line.as_view())
+        } else if n == 1u8 {
+            match a {
+                Str(r) => { result = Value.Int(i64(len(self.bytes(r)))) }
+                Arr(r) => { result = Value.Int(i64(len(self.items(r)))) }
+                _ => { return Err(wrong("len takes a string or an array, not ", a, "")) }
+            }
+        } else if n == 2u8 || n == 3u8 {
+            match a {
+                Arr(r) => {
+                    if n == 2u8 {
+                        v := self.stack.get(first + 1usize)
+                        self.elements(r).push(v)
+                    } else {
+                        match self.elements(r).pop() {
+                            Some(v) => { result = v }
+                            None => { return Err(str.String.from("pop from an empty array")) }
+                        }
+                    }
+                }
+                _ => { return Err(wrong("push and pop take an array, not ", a, "")) }
+            }
+        } else if n == 4u8 {
+            s := str.String.new()
+            self.show(a, s, false, 0u32)
+            result = self.text(s)
+        } else if n == 5u8 {
+            match a {
+                Int(x) => { result = a }
+                Float(x) => {
+                    // a conversion that does not fit would trap the host
+                    if x >= -9223372036854775808.0f64 && x < 9223372036854775808.0f64 { result = Value.Int(i64(x)) } else { return Err(str.String.from("int: the float is not in the range of a whole number")) }
+                }
+                Str(r) => {
+                    var digits: usize = 0usize
+                    if len(self.bytes(r)) > 1usize && self.bytes(r)[0usize] == 45u8 { digits = 1usize }
+                    var ok: bool = false
+                    match str.parse_u64(self.bytes(r)[digits : len(self.bytes(r))]) {
+                        Some(u) => {
+                            if u <= 9223372036854775807u64 {
+                                ok = true
+                                if digits == 1usize { result = Value.Int(0i64 - i64(u)) } else { result = Value.Int(i64(u)) }
+                            }
+                        }
+                        None => { }
+                    }
+                    if !ok { return Err(str.String.from("int: the string is not a whole number")) }
+                }
+                _ => { return Err(wrong("int takes a number or a string, not ", a, "")) }
+            }
+        } else {
+            match a {
+                Int(x) => { result = Value.Float(f64(x)) }
+                Float(x) => { result = a }
+                Str(r) => {
+                    match str.parse_f64(self.bytes(r)) {
+                        Some(x) => { result = Value.Float(x) }
+                        None => { return Err(str.String.from("float: the string is not a number")) }
+                    }
+                }
+                _ => { return Err(wrong("float takes a number or a string, not ", a, "")) }
+            }
+        }
+        self.stack.resize(first - 1usize, Value.Nil)
+        self.stack.push(result)
+        return Ok(())
+    }
+
+    // ---- running ----
+
+    func pop(edit self) -> Value {
+        match self.stack.pop() {
+            Some(v) => { return v }
+            None => { }
+        }
+        trap()
+    }
+    func top(view self, down: usize) -> Value {
+        v := self.stack.get(self.stack.len() - 1usize - down)
+        return v
+    }
+    func captured(view self, i: usize) -> Value {
+        match self.clo {
+            Clo(r) => { return self.items(r)[i] }
+            _ => { return Value.Nil }
+        }
+    }
+
+    // call begins a call of the value under the argc arguments on top of
+    // the stack: the arguments become the first locals of the new frame.
+    func call(edit self, p: view[Program], argc: usize) -> Result[(), str.String] {
+        callee := self.top(argc)
+        var f: usize = 0usize
+        match callee {
+            Fn(g) => { f = usize(g) }
+            Clo(r) => { f = usize(func_of(self.heap.get(r).body)) }
+            Native(n) => { return self.native(p, n, argc) }
+            _ => { return Err(wrong("only a function can be called, not ", callee, "")) }
+        }
+        need := usize(p.funcs.get(f).arity)
+        if need != argc { return Err(arity(p.funcs.get(f).name.as_view(), need, argc)) }
+        if self.frames.len() + 1usize >= max_frames { return Err(str.String.from("the stack overflowed: calls are more than 64 deep")) }
+        self.frames.push(Frame { f: self.f, ip: self.ip, base: self.base, clo: self.clo })
+        self.f = f
+        self.ip = 0usize
+        self.base = self.stack.len() - argc
+        self.clo = callee
+        return Ok(())
+    }
+
+    // run executes instructions until the program's own text returns, or
+    // something goes wrong: the error is then what happened, and f and
+    // ip say where.
+    func run(edit self, p: view[Program]) -> Result[(), str.String] {
+        while true {
+            op := p.funcs.get(self.f).code.get(self.ip)
+            self.ip = self.ip + 1usize
+            match op {
+                Const(k) => { self.stack.push(self.consts.get(usize(k))) }
+                Nil => { self.stack.push(Value.Nil) }
+                True => { self.stack.push(Value.Bool(true)) }
+                False => { self.stack.push(Value.Bool(false)) }
+                Pop => { self.pop() }
+                GetLocal(slot) => { self.stack.push(self.stack.get(self.base + usize(slot))) }
+                SetLocal(slot) => {
+                    v := self.pop()
+                    with place := self.stack.at(self.base + usize(slot)) { place = v }
+                }
+                GetGlobal(slot) => {
+                    v := self.globals.get(usize(slot))
+                    if v == Value.Undef { return Err(early(p.globals.get(usize(slot)).as_view())) }
+                    self.stack.push(v)
+                }
+                SetGlobal(slot) => {
+                    v := self.pop()
+                    with place := self.globals.at(usize(slot)) {
+                        if place == Value.Undef { return Err(early(p.globals.get(usize(slot)).as_view())) }
+                        place = v
+                    }
+                }
+                DefGlobal(slot) => {
+                    v := self.pop()
+                    with place := self.globals.at(usize(slot)) { place = v }
+                }
+                GetCap(i) => { self.stack.push(self.captured(usize(i))) }
+                Arith(o) => {
+                    b := self.pop()
+                    a := self.pop()
+                    r := self.arith(o, a, b)?
+                    self.stack.push(r)
+                }
+                Compare(o) => {
+                    b := self.pop()
+                    a := self.pop()
+                    self.stack.push(Value.Bool(self.compare(o, a, b)?))
+                }
+                Neg => {
+                    a := self.pop()
+                    match a {
+                        Int(x) => { self.stack.push(Value.Int(wrapping_neg(x))) }
+                        Float(x) => { self.stack.push(Value.Float(0.0f64 - x)) }
+                        _ => { return Err(wrong("'-' cannot take ", a, "")) }
+                    }
+                }
+                Not => {
+                    a := self.pop()
+                    self.stack.push(Value.Bool(!truthy(a)))
+                }
+                Jump(to) => { self.ip = usize(to) }
+                JumpIfFalse(to) => {
+                    if !truthy(self.pop()) { self.ip = usize(to) }
+                }
+                AndJump(to) => {
+                    if truthy(self.top(0usize)) { self.pop() } else { self.ip = usize(to) }
+                }
+                OrJump(to) => {
+                    if truthy(self.top(0usize)) { self.ip = usize(to) } else { self.pop() }
+                }
+                Loop(to) => {
+                    self.ip = usize(to)
+                    if self.all.len() >= self.threshold { self.collect() }
+                }
+                Call(argc) => {
+                    if self.all.len() >= self.threshold { self.collect() }
+                    self.call(p, usize(argc))?
+                }
+                Return => {
+                    v := self.pop()
+                    match self.frames.pop() {
+                        Some(caller) => {
+                            self.stack.resize(self.base - 1usize, Value.Nil)
+                            self.stack.push(v)
+                            self.f = caller.f
+                            self.ip = caller.ip
+                            self.base = caller.base
+                            self.clo = caller.clo
+                        }
+                        None => { return Ok(()) }
+                    }
+                }
+                MakeArray(count) => {
+                    start := self.stack.len() - usize(count)
+                    items := Vec[Value].new()
+                    items.extend(self.stack.as_view()[start : self.stack.len()])
+                    self.stack.resize(start, Value.Nil)
+                    made := self.array(items)
+                    self.stack.push(made)
+                }
+                GetIndex => {
+                    i := self.pop()
+                    a := self.pop()
+                    v := self.index(a, i)?
+                    self.stack.push(v)
+                }
+                SetIndex => {
+                    v := self.pop()
+                    i := self.pop()
+                    a := self.pop()
+                    self.store(a, i, v)?
+                }
+                Closure(g) => {
+                    // a function that captures nothing needs no object
+                    count := p.funcs.get(usize(g)).caps.len()
+                    if count == 0usize {
+                        self.stack.push(Value.Fn(g))
+                    } else {
+                        caps := Vec[Value].new()
+                        for k in 0usize..count {
+                            c := p.funcs.get(usize(g)).caps.get(k)
+                            if c.local { caps.push(self.stack.get(self.base + usize(c.index))) } else { caps.push(self.captured(usize(c.index))) }
+                        }
+                        made := self.alloc(Body.Closure(g, caps))
+                        self.stack.push(Value.Clo(made))
+                    }
+                }
+            }
+        }
+        return Ok(())
+    }
+}
+
+func arity(name: view[]u8, need: usize, given: usize) -> str.String {
+    m := str.String.from(name)
+    m.push_str(" takes ")
+    m.push_u64(u64(need))
+    if need == 1usize { m.push_str(" argument, not ") } else { m.push_str(" arguments, not ") }
+    m.push_u64(u64(given))
+    return m
+}
+
+func early(name: view[]u8) -> str.String {
+    m := str.String.from("'")
+    m.push_str(name)
+    m.push_str("' is used before the line that defines it has run")
+    return m
+}
+
+// ---- the commands ----
+
+func say(to_err: bool, s: view[]u8) {
+    if to_err { eprint_str(s) } else { print_str(s) }
+}
+
+// report writes what is wrong with a program, each line after `prefix`.
+// It returns whether there was anything.
+func report(u: view[Unit], prefix: view[]u8, to_err: bool) -> bool {
+    for d in u.diags.as_view() {
+        line := str.String.from(prefix)
+        line.push_u64(u64(d.line))
+        line.push(58u8)
+        line.push_u64(u64(d.col))
+        line.push_str(": ")
+        line.push_str(d.msg.as_view())
+        line.push(10u8)
+        say(to_err, line.as_view())
+    }
+    return u.diags.len() > 0usize
+}
+
+// execute compiles a text and runs it. With stats it then says what the
+// heap did.
+func execute(src: view[]u8, prefix: view[]u8, to_err: bool, stats: bool) -> i32 {
+    u := compile(src)
+    if report(u, prefix, to_err) { return 1i32 }
+    vm := new_vm(u.prog)
+    var status: i32 = 0i32
+    match vm.run(u.prog) {
+        Ok(done) => { }
+        Err(msg) => {
+            at := u.prog.funcs.get(vm.f).lines.get(vm.ip - 1usize)
+            line := str.String.from(prefix)
+            line.push_u64(u64(at))
+            line.push_str(": error in ")
+            line.push_str(u.prog.funcs.get(vm.f).name.as_view())
+            line.push_str(": ")
+            line.push_str(msg.as_view())
+            line.push(10u8)
+            say(to_err, line.as_view())
+            status = 1i32
+        }
+    }
+    if stats {
+        vm.collect()
+        print_str("heap: ")
+        print_u64(vm.made)
+        print_str(" objects made, ")
+        print_u64(vm.collections)
+        print_str(" collections, ")
+        print_u64(vm.freed)
+        print_str(" freed, ")
+        print_u64(u64(vm.all.len()))
+        print_str(" live at the end\n")
+    }
+    return status
+}
+
+// listing writes every function of a program, the program's own text last.
+func listing(src: view[]u8, prefix: view[]u8, to_err: bool) -> i32 {
+    u := compile(src)
+    if report(u, prefix, to_err) { return 1i32 }
+    text := str.String.new()
+    for i in 0usize..u.prog.funcs.len() { disassemble(u.prog, i, text) }
+    print_str(text.as_view())
+    return 0i32
+}
+
+// ---- the demonstration ----
+
+const fib_src: view[]u8 = "fn fib(n) {\n    if n < 2 { return n }\n    return fib(n - 1) + fib(n - 2)\n}\nlet row = []\nlet i = 0\nwhile i <= 10 {\n    push(row, fib(i))\n    i = i + 1\n}\nprint(\"fib 0..10:\", row)\nprint(\"fib(13) =\", fib(13))\n"
+
+const sieve_src: view[]u8 = "let n = 60\nlet composite = []\nlet i = 0\nwhile i <= n {\n    push(composite, false)\n    i = i + 1\n}\nlet primes = []\ni = 2\nwhile i <= n {\n    if !composite[i] {\n        push(primes, i)\n        let j = i * i\n        while j <= n {\n            composite[j] = true\n            j = j + i\n        }\n    }\n    i = i + 1\n}\nprint(len(primes), \"primes up to\", n)\nprint(primes)\n"
+
+const text_src: view[]u8 = "let words = [\"a\", \"stack\", \"machine\", \"in\", \"kern\"]\nlet s = \"\"\nlet i = 0\nwhile i < len(words) {\n    if i > 0 { s = s + \" \" }\n    s = s + words[i]\n    i = i + 1\n}\nprint(s, \"is\", len(s), \"bytes\")\nlet back = \"\"\ni = len(s)\nwhile i > 0 {\n    i = i - 1\n    back = back + s[i]\n}\nprint(back)\nprint(\"abc\" < \"abd\", \"kern\" == \"ke\" + \"rn\", 2 == 2.0, nil == false, [1] == [1])\nprint(\"7 / 2 =\", 7 / 2, \"  7.0 / 2 =\", 7.0 / 2, \"  1.0 / 3 =\", 1.0 / 3, \"  -7 % 3 =\", -7 % 3)\nprint(\"0.1 + 0.2 =\", 0.1 + 0.2, \"  2.0 * 3 =\", 2.0 * 3, \"  1.0 / 0 =\", 1.0 / 0)\nprint(\"the largest number + 1 =\", 9223372036854775807 + 1)\nprint(\"3037000500 squared =\", 3037000500 * 3037000500)\nprint(int(\"42\") + int(3.99), float(\"2.5\") * 2, str(1.5) + \"!\", int(\"-17\"))\nprint(nil && missing_is_not_called(), 0 || \"zero is true\", !nil, print, fn(x) { return x })\nfn missing_is_not_called() { return 1 }\n"
+
+const closure_src: view[]u8 = "fn counter() {\n    let n = [0]\n    return fn() {\n        n[0] = n[0] + 1\n        return n[0]\n    }\n}\nfn map(f, xs) {\n    let ys = []\n    let i = 0\n    while i < len(xs) {\n        push(ys, f(xs[i]))\n        i = i + 1\n    }\n    return ys\n}\nfn adder(k) { return fn(x) { return x + k } }\nfn compose(f, g) { return fn(x) { return f(g(x)) } }\nlet tick = counter()\nlet other = counter()\ntick()\ntick()\nprint(\"counters:\", tick(), tick(), other(), tick())\nprint(map(adder(10), [1, 2, 3]))\nprint(map(compose(adder(1), fn(x) { return x * x }), [1, 2, 3, 4]))\nfn twice(f) { return compose(f, f) }\nprint(twice(twice(adder(2.5)))(0))\n"
+
+const sort_src: view[]u8 = "fn sort(xs, before) {\n    let i = 1\n    while i < len(xs) {\n        let x = xs[i]\n        let j = i\n        while j > 0 && before(x, xs[j - 1]) {\n            xs[j] = xs[j - 1]\n            j = j - 1\n        }\n        xs[j] = x\n        i = i + 1\n    }\n    return xs\n}\nlet seed = [42]\nfn random() {\n    seed[0] = seed[0] * 6364136223846793005 + 1442695040888963407\n    let r = seed[0] / 4294967296 % 100\n    if r < 0 { return 0 - r }\n    return r\n}\nlet xs = []\nwhile len(xs) < 12 { push(xs, random()) }\nprint(\"unsorted:  \", xs)\nprint(\"ascending: \", sort(xs, fn(a, b) { return a < b }))\nprint(\"descending:\", sort(xs, fn(a, b) { return a > b }))\nprint(sort([\"pear\", \"apple\", \"fig\", \"banana\"], fn(a, b) { return a < b }))\nprint(sort([\"pear\", \"apple\", \"fig\", \"banana\"], fn(a, b) { return len(a) < len(b) }))\n"
+
+const garbage_src: view[]u8 = "let keep = []\nlet i = 0\nwhile i < 200 {\n    let s = \"item \" + str(i)\n    if i % 50 == 0 { push(keep, s) }\n    i = i + 1\n}\nlet ring = [1]\npush(ring, ring)\nprint(keep, ring)\nring = nil\n"
+
+const listed_src: view[]u8 = "fn sum_to(n) {\n    let total = 0\n    let i = 1\n    while i <= n && total >= 0 {\n        total = total + i\n        i = i + 1\n    }\n    return total\n}\nlet scale = 2.5\nprint(\"sum:\", sum_to(10) * scale)\n"
+
+func show_source(src: view[]u8) {
+    var start: usize = 0usize
+    for i in 0usize..len(src) {
+        if src[i] == 10u8 {
+            print_str("    | ")
+            print_str(src[start : i + 1usize])
+            start = i + 1usize
+        }
+    }
+}
+
+func title(s: view[]u8) {
+    print_str("-- ")
+    print_str(s)
+    println()
+}
+
+// faulty shows a program that is wrong and what is said of it.
+func faulty(src: view[]u8) {
+    show_source(src)
+    execute(src, "    line ", false, false)
+}
+
+func demo() -> i32 {
+    title("recursion")
+    a := execute(fib_src, "line ", false, false)
+    title("a sieve")
+    b := execute(sieve_src, "line ", false, false)
+    title("strings, numbers and what is true")
+    c := execute(text_src, "line ", false, false)
+    title("closures and functions as values")
+    d := execute(closure_src, "line ", false, false)
+    title("a sort that takes its order as a function")
+    e := execute(sort_src, "line ", false, false)
+    title("garbage, a ring included")
+    f := execute(garbage_src, "line ", false, true)
+    title("a program and its instructions")
+    show_source(listed_src)
+    g := listing(listed_src, "line ", false)
+    h := execute(listed_src, "line ", false, false)
+    title("mistakes the lexer finds")
+    faulty("let s = \"never closed\nlet t = 3 $ 4 @ 5\nlet big = 99999999999999999999\nlet x = 1.5.2\n")
+    title("mistakes the parser finds, one a line")
+    faulty("let x = (1 + ) * 2\nlet = 5\nif x > 2 print(x)\nlet y = [1, 2\nwhile y { y = y - }\nx + 1 = 3\nfn f(a, 7) { return a }\nprint(\"reached the end\"\n")
+    title("mistakes the compiler finds")
+    faulty("fn f(a) {\n    let a = 1\n    let g = fn() { a = 2 }\n    return missing(a) + g\n}\nreturn f\n")
+    title("mistakes found as the program runs")
+    faulty("print(\"before\")\nprint(1 + \"one\")\n")
+    faulty("fn half(n) { return 10 / (n - n) }\nprint(half(3))\n")
+    faulty("print(7 % 2.0)\n")
+    faulty("let a = [1, 2, 3]\nprint(a[2])\nprint(a[3])\n")
+    faulty("let a = [1, 2, 3]\na[-1] = 0\n")
+    faulty("print(\"abc\"[\"b\"])\n")
+    faulty("fn down(n) { return down(n + 1) + 1 }\nprint(down(0))\n")
+    faulty("let f = 3\nf(1)\n")
+    faulty("fn two(a, b) { return a }\ntwo(1)\n")
+    faulty("print(len(1, 2))\n")
+    faulty("print(-true)\n")
+    faulty("print([1] < [2])\n")
+    faulty("print(late)\nlet late = 1\n")
+    faulty("pop([])\n")
+    faulty("print(int(1.0 / 0))\n")
+    faulty("print(int(\"12x\"))\n")
+    faulty("let s = \"abc\"\ns[0] = \"x\"\n")
+    return a + b + c + d + e + f + g + h
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize { return demo() }
+    var command: u8 = 0u8
+    if args.len() == 3usize {
+        if str.equal(args.get(1usize).as_view(), "run") { command = 1u8 }
+        if str.equal(args.get(1usize).as_view(), "dis") { command = 2u8 }
+        if str.equal(args.get(1usize).as_view(), "check") { command = 3u8 }
+    }
+    if command == 0u8 {
+        eprint_str("usage: kvm run FILE | kvm dis FILE | kvm check FILE\n")
+        return 2i32
+    }
+    prefix := str.String.from(args.get(2usize).as_view())
+    prefix.push(58u8)
+    match io.read_file(args.get(2usize).as_view()) {
+        Ok(src) => {
+            if command == 1u8 { return execute(src.as_view(), prefix.as_view(), true, false) }
+            if command == 2u8 { return listing(src.as_view(), prefix.as_view(), true) }
+            u := compile(src.as_view())
+            if report(u, prefix.as_view(), true) { return 1i32 }
+            print_str(args.get(2usize).as_view())
+            print_str(": nothing wrong\n")
+            return 0i32
+        }
+        Err(e) => {
+            eprint_str("kvm: cannot read ")
+            eprint_str(args.get(2usize).as_view())
+            eprint_str("\n")
+            return 2i32
+        }
+    }
+}

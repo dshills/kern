@@ -1,0 +1,1421 @@
+//! phase: 6
+//! expect: output ksim
+// ksim: a discrete-event simulator, and three models that run on it.
+//
+//     ksim MODEL [--seed N] [--until SECONDS] [key=value ...]
+//
+//     ksim mmc    arrive=2.4 serve=1 servers=3 memory=65536
+//         a queue with one line and several servers (M/M/c); the mean
+//         wait is set beside what the Erlang C formula says it should be
+//     ksim net    packets=400 loss=0.05 gap=0.004 rto=0.05 tries=6 room=8
+//         a sender, two routers and a receiver in a row; links lose
+//         frames, a full router drops them, and the sender sends again
+//         when its timer runs out, waiting twice as long each time
+//     ksim cross  north=7 east=11 green=20 yellow=3 clear=2 headway=2
+//         two roads that cross under a traffic light, which is a state
+//         machine
+//
+// How it is built:
+//   - The containers are written here over interfaces declared here: a
+//     binary heap Heap[T: Ordered] is the queue of events, a ring
+//     Ring[T] is every waiting line, and Stats[T: Measure] keeps a count,
+//     a mean and a variance as the values arrive (Welford's method) and
+//     the values themselves for percentiles and a histogram.
+//   - The engine, Sim[P], is generic over what an event carries, and a
+//     model is anything with Model[P]. The crossing keeps its handlers
+//     as a table of function values; what watches a run is a closure
+//     that sees each event and the model after it.
+//   - Time is a time.Duration since the start of the run, added with a
+//     check; the clock of the machine is never read. Chance is rand.Rng,
+//     one stream for each purpose, split from one seed. The logarithm
+//     and the square root are computed here, by a series and by Newton's
+//     method, so a run prints the same digits everywhere.
+//   - What is simulated lives in a PoolIn or an ArenaIn over Bounded, an
+//     allocator with a limit, and is named by handles. At the limit the
+//     model is told, by a value, and counts what it had to refuse.
+//
+// With no arguments the program checks its containers and its random
+// numbers, runs each model from a fixed seed, runs the queue once more
+// with too little memory, and asks for an event further ahead than time
+// goes, which is how it runs as a test.
+module ksim
+import "std/io"
+import "std/rand"
+import "std/str"
+import "std/time"
+
+// ---- numbers ----
+
+// root is the square root, by Newton's method.
+func root(x: f64) -> f64 {
+    if !(x > 0.0f64) { return 0.0f64 }
+    var r: f64 = x
+    if r < 1.0f64 { r = 1.0f64 }
+    for i in 0u32..200u32 {
+        next := 0.5f64 * (r + x / r)
+        if !(next < r) { break }
+        r = next
+    }
+    return r
+}
+
+// ln is the natural logarithm of a positive number: the number is
+// brought between the roots of a half and of two by halving or doubling,
+// which is exact, and the rest is the series of 2 atanh((m-1)/(m+1)).
+func ln(x: f64) -> f64 {
+    if !(x > 0.0f64) { return 0.0f64 }
+    var m: f64 = x
+    var k: f64 = 0.0f64
+    while m > 1.4142135623730951f64 {
+        m = m / 2.0f64
+        k = k + 1.0f64
+    }
+    while m < 0.7071067811865476f64 {
+        m = m * 2.0f64
+        k = k - 1.0f64
+    }
+    t := (m - 1.0f64) / (m + 1.0f64)
+    t2 := t * t
+    var term: f64 = t
+    var sum: f64 = 0.0f64
+    var n: f64 = 1.0f64
+    for i in 0u32..13u32 {
+        sum = sum + term / n
+        term = term * t2
+        n = n + 2.0f64
+    }
+    half := k * 0.6931471805599453f64
+    return 2.0f64 * sum + half
+}
+
+// unit is a number above 0 and below 1.
+func unit(rng: edit[rand.Rng]) -> f64 { return (f64(rng.next_u64() >> 11u32) + 0.5f64) / 9007199254740992.0f64 }
+
+// stream is a generator of its own, its state taken from another's
+// numbers.
+func stream(from: edit[rand.Rng]) -> rand.Rng {
+    var s: [4]u64 = zero()
+    for i in 0usize..4usize { s[i] = from.next_u64() }
+    s[0usize] = s[0usize] | 1u64
+    return rand.Rng.from_state(s)
+}
+
+// span is a number of seconds as a time: nothing for a number that is
+// not above zero, and for ever for one too large to hold.
+func span(seconds: f64) -> time.Duration {
+    if !(seconds > 0.0f64) { return time.nanos(0u64) }
+    if seconds >= 9000000000.0f64 { return time.nanos(18446744073709551615u64) }
+    return time.nanos(u64(seconds * 1000000000.0f64 + 0.5f64))
+}
+
+// ---- text ----
+
+func say(s: view[]u8) { print_str(s); println() }
+
+// push_fixed appends v with the given number of decimals, rounded half
+// up. The digits come from an integer, so they are the same wherever
+// the arithmetic is.
+func push_fixed(t: edit[str.String], v: f64, places: u32) {
+    var x: f64 = v
+    if x < 0.0f64 { x = 0.0f64 - x }
+    // a number too large to convert, or not a number at all
+    if !(x < 1000000000000.0f64) {
+        t.push_str("?")
+        return
+    }
+    var scale: u64 = 1u64
+    for i in 0u32..places { scale = scale * 10u64 }
+    n := u64(x * f64(scale) + 0.5f64)
+    if v < 0.0f64 && n > 0u64 { t.push(45u8) }
+    t.push_u64(n / scale)
+    if places > 0u32 {
+        t.push(46u8)
+        t.push_padded(n % scale, usize(places), 48u8)
+    }
+}
+
+// push_right appends s after enough spaces to fill width.
+func push_right(t: edit[str.String], s: view[]u8, width: usize) {
+    var n: usize = len(s)
+    while n < width {
+        t.push(32u8)
+        n = n + 1usize
+    }
+    t.push_str(s)
+}
+
+func push_fixed_right(t: edit[str.String], v: f64, places: u32, width: usize) {
+    cell := str.String.new()
+    push_fixed(cell, v, places)
+    push_right(t, cell.as_view(), width)
+}
+
+// push_time appends a time in seconds and milliseconds, cut, by integer
+// arithmetic alone.
+func push_time(t: edit[str.String], d: time.Duration) {
+    t.push_u64(d.ns / 1000000000u64)
+    t.push(46u8)
+    t.push_padded(d.ns % 1000000000u64 / 1000000u64, 3usize, 48u8)
+    t.push_str(" s")
+}
+
+// num, fix and when append a label and then a number, a number with
+// decimals, or a time.
+func num(t: edit[str.String], label: view[]u8, n: u64) {
+    t.push_str(label)
+    t.push_u64(n)
+}
+func fix(t: edit[str.String], label: view[]u8, v: f64, places: u32) {
+    t.push_str(label)
+    push_fixed(t, v, places)
+}
+func when(t: edit[str.String], label: view[]u8, d: time.Duration) {
+    t.push_str(label)
+    push_time(t, d)
+}
+
+// ---- the interfaces ----
+
+// Ordered is what a heap and a sort need to know of their elements.
+interface Ordered {
+    func before(view self, other: view[Self]) -> bool
+}
+
+// Measure is a value that statistics can be kept of. unit_scale is what
+// one of the type's own units is in the unit as_f64 gives.
+interface Measure {
+    func as_f64(view self) -> f64
+    func unit_scale() -> f64
+}
+
+// Distribution is a law that numbers are drawn from.
+interface Distribution {
+    func draw(view self, rng: edit[rand.Rng]) -> f64
+    func mean(view self) -> f64
+    func deviation(view self) -> f64
+}
+
+impl Ordered for f64 {
+    func before(view self, other: view[f64]) -> bool { return self < other }
+}
+impl Measure for f64 {
+    func as_f64(view self) -> f64 { return self }
+    func unit_scale() -> f64 { return 1.0f64 }
+}
+// A time is measured in seconds.
+impl Measure for time.Duration {
+    func as_f64(view self) -> f64 { return f64(self.ns) / 1000000000.0f64 }
+    func unit_scale() -> f64 { return 0.000000001f64 }
+}
+
+struct Exponential { each: f64 }
+impl Distribution for Exponential {
+    func draw(view self, rng: edit[rand.Rng]) -> f64 { return 0.0f64 - self.each * ln(unit(rng)) }
+    func mean(view self) -> f64 { return self.each }
+    func deviation(view self) -> f64 { return self.each }
+}
+
+struct Uniform { lo: f64; hi: f64 }
+impl Distribution for Uniform {
+    func draw(view self, rng: edit[rand.Rng]) -> f64 { return self.lo + (self.hi - self.lo) * unit(rng) }
+    func mean(view self) -> f64 { return (self.lo + self.hi) / 2.0f64 }
+    func deviation(view self) -> f64 { return (self.hi - self.lo) / root(12.0f64) }
+}
+
+// Normal draws by the polar method: a point in the unit circle, found by
+// trying, gives the number without a sine or a cosine.
+struct Normal { mid: f64; sd: f64 }
+impl Distribution for Normal {
+    func draw(view self, rng: edit[rand.Rng]) -> f64 {
+        while true {
+            u := 2.0f64 * unit(rng) - 1.0f64
+            v := 2.0f64 * unit(rng) - 1.0f64
+            s := u * u + v * v
+            if s > 0.0f64 && s < 1.0f64 { return self.mid + self.sd * u * root(0.0f64 - 2.0f64 * ln(s) / s) }
+        }
+        return self.mid
+    }
+    func mean(view self) -> f64 { return self.mid }
+    func deviation(view self) -> f64 { return self.sd }
+}
+
+// time_from is a draw, taken as seconds.
+func time_from[D: Distribution](d: view[D], rng: edit[rand.Rng]) -> time.Duration { return span(d.draw(rng)) }
+
+// ---- the containers ----
+
+// Heap is a binary heap: the element that is before every other is at
+// the top.
+struct Heap[T: Ordered] { items: Vec[T] }
+impl[T: Ordered] Heap[T] {
+    func new() -> Heap[T] { return Heap[T] { items: Vec[T].new() } }
+    func len(view self) -> usize { return self.items.len() }
+    func top(view self) -> view[T] { return self.items.get(0usize) }
+    // least is a copy of the top, for elements that can be copied.
+    func least(view self) -> Option[T] where T: Copy {
+        if self.items.len() == 0usize { return None }
+        return Some(self.items.get(0usize))
+    }
+    func try_push(edit self, v: own T) -> Result[(), AllocErr] {
+        self.items.try_push(v)?
+        var i: usize = self.items.len() - 1usize
+        while i > 0usize {
+            p := (i - 1usize) / 2usize
+            if !self.items.get(i).before(self.items.get(p)) { break }
+            swap_at(self.items.as_edit(), i, p)
+            i = p
+        }
+        return Ok(())
+    }
+    func pop(edit self) -> Option[T] {
+        n := self.items.len()
+        if n == 0usize { return None }
+        swap_at(self.items.as_edit(), 0usize, n - 1usize)
+        out_top := self.items.pop()
+        var i: usize = 0usize
+        while true {
+            var c: usize = 2usize * i + 1usize
+            if c >= n - 1usize { break }
+            if c + 1usize < n - 1usize && self.items.get(c + 1usize).before(self.items.get(c)) { c = c + 1usize }
+            if !self.items.get(c).before(self.items.get(i)) { break }
+            swap_at(self.items.as_edit(), c, i)
+            i = c
+        }
+        return out_top
+    }
+}
+
+// drain empties a heap in order, showing each element to a closure.
+func drain[T: Ordered](h: edit[Heap[T]], each: closure(view[T])) {
+    while true {
+        match h.pop() {
+            Some(v) => each(v)
+            None => { break }
+        }
+    }
+}
+
+// sink and sort_in_place are a heap sort of any sequence whose elements
+// are Ordered.
+func sink[T: Ordered](xs: edit[]T, from: usize, end: usize) {
+    var i: usize = from
+    while true {
+        var c: usize = 2usize * i + 1usize
+        if c >= end { break }
+        if c + 1usize < end && xs[c].before(xs[c + 1usize]) { c = c + 1usize }
+        if !xs[i].before(xs[c]) { break }
+        swap_at(xs, i, c)
+        i = c
+    }
+}
+func sort_in_place[T: Ordered](xs: edit[]T) {
+    n := len(xs)
+    var s: usize = n / 2usize
+    while s > 0usize {
+        s = s - 1usize
+        sink(xs, s, n)
+    }
+    var e: usize = n
+    while e > 1usize {
+        e = e - 1usize
+        swap_at(xs, 0usize, e)
+        sink(xs, 0usize, e)
+    }
+}
+func in_order[T: Ordered](xs: view[]T) -> bool {
+    for i in 1usize..len(xs) { if xs[i].before(xs[i - 1usize]) { return false } }
+    return true
+}
+
+// Ring is a line with room for a fixed number of elements: what comes
+// first leaves first, and an element that finds no room is handed back.
+struct Ring[T] { slots: Vec[Option[T]]; head: usize; count: usize }
+impl[T] Ring[T] {
+    func try_new(room: usize) -> Result[Ring[T], AllocErr] {
+        slots := Vec[Option[T]].try_with_capacity(room)?
+        for i in 0usize..room { slots.try_push(None)? }
+        return Ok(Ring[T] { slots: slots, head: 0usize, count: 0usize })
+    }
+    func len(view self) -> usize { return self.count }
+    func push(edit self, v: own T) -> Result[(), T] {
+        if self.count == self.slots.len() { return Err(v) }
+        at := (self.head + self.count) % self.slots.len()
+        with s := self.slots.at(at) { s = Some(v) }
+        self.count = self.count + 1usize
+        return Ok(())
+    }
+    func pop(edit self) -> Option[T] {
+        if self.count == 0usize { return None }
+        var got: Option[T] = None
+        with s := self.slots.at(self.head) { got = replace(s, None) }
+        self.head = (self.head + 1usize) % self.slots.len()
+        self.count = self.count - 1usize
+        return got
+    }
+    // each shows the elements to a closure, the oldest first.
+    func each(view self, f: closure(view[T])) {
+        for k in 0usize..self.count {
+            match self.slots.get((self.head + k) % self.slots.len()) {
+                Some(v) => f(v)
+                None => { }
+            }
+        }
+    }
+}
+
+// Stats keeps what is known of the values it was given: how many, their
+// mean and the sum of squares about it, kept up as each arrives, the
+// least and the greatest, and the values themselves, in the unit that
+// scale makes of as_f64's.
+struct Stats[T: Measure] { n: u64; mean: f64; squares: f64; lo: f64; hi: f64; scale: f64; sample: Vec[f64]; sorted: bool; missed: u64 }
+impl[T: Measure] Stats[T] {
+    func new(scale: f64) -> Stats[T] {
+        return Stats[T] { n: 0u64, mean: 0.0f64, squares: 0.0f64, lo: 0.0f64, hi: 0.0f64, scale: scale, sample: Vec[f64].new(), sorted: true, missed: 0u64 }
+    }
+    func add(edit self, value: view[T]) {
+        x := value.as_f64() * self.scale
+        self.n = self.n + 1u64
+        delta := x - self.mean
+        self.mean = self.mean + delta / f64(self.n)
+        self.squares = self.squares + delta * (x - self.mean)
+        if self.n == 1u64 || x < self.lo { self.lo = x }
+        if self.n == 1u64 || x > self.hi { self.hi = x }
+        match self.sample.try_push(x) {
+            Ok(u) => { self.sorted = false }
+            Err(e) => { self.missed = self.missed + 1u64 }
+        }
+    }
+    func variance(view self) -> f64 {
+        if self.n < 2u64 { return 0.0f64 }
+        return self.squares / f64(self.n - 1u64)
+    }
+    // percentile is the value that the given part of the sample is below.
+    func percentile(edit self, part: f64) -> f64 {
+        n := self.sample.len()
+        if n == 0usize { return 0.0f64 }
+        if !self.sorted {
+            sort_in_place(self.sample.as_edit())
+            self.sorted = true
+        }
+        var at: usize = usize(part * f64(n))
+        if at >= n { at = n - 1usize }
+        return self.sample.get(at)
+    }
+    // show prints one line of the numbers.
+    func show(edit self, name: view[]u8, places: u32) {
+        t := str.String.from("  ")
+        t.push_str(name)
+        num(t, ": n ", self.n)
+        fix(t, "  mean ", self.mean, places)
+        fix(t, "  sd ", root(self.variance()), places)
+        fix(t, "  min ", self.lo, places)
+        fix(t, "  p50 ", self.percentile(0.5f64), places)
+        fix(t, "  p90 ", self.percentile(0.9f64), places)
+        fix(t, "  p99 ", self.percentile(0.99f64), places)
+        fix(t, "  max ", self.hi, places)
+        say(t.as_view())
+    }
+    // bars prints the sample as a histogram of equal buckets from lo to
+    // hi, and a last one for what is above; the longest bar is forty
+    // characters.
+    func bars(view self, lo: f64, hi: f64, places: u32) {
+        var counts: [11]u64 = zero()
+        width := (hi - lo) / 10.0f64
+        for x in self.sample.as_view() {
+            var b: usize = 10usize
+            if x < lo { b = 0usize } else if x < hi { b = usize((x - lo) / width) }
+            if b > 10usize { b = 10usize }
+            counts[b] = counts[b] + 1u64
+        }
+        var most: u64 = 1u64
+        for c in counts { if c > most { most = c } }
+        for b in 0usize..11usize {
+            t := str.String.from("    ")
+            push_fixed_right(t, lo + width * f64(b), places, 8usize)
+            if b < 10usize {
+                t.push_str(" to ")
+                push_fixed_right(t, lo + width * f64(b + 1usize), places, 8usize)
+            } else {
+                t.push_str(" and over   ")
+            }
+            n := str.String.new()
+            n.push_u64(counts[b])
+            push_right(t, n.as_view(), 7usize)
+            var long: u64 = counts[b] * 40u64 / most
+            if long == 0u64 && counts[b] > 0u64 { long = 1u64 }
+            if long > 0u64 { t.push(32u8) }
+            for k in 0u64..long { t.push(35u8) }
+            say(t.as_view())
+        }
+    }
+}
+
+// ---- memory with a bound ----
+
+// Bounded is an allocator that gives out the system's memory up to a
+// limit and refuses beyond it, and counts what it did.
+struct Bounded nocopy { limit: usize; used: usize; peak: usize; refused: u64; sys: SystemAllocator }
+
+func bounded(limit: usize) -> Bounded { return Bounded { limit: limit, used: 0usize, peak: 0usize, refused: 0u64, sys: SystemAllocator.new() } }
+
+impl Allocator for Bounded {
+    contract { requires "size and align meet the allocator obligations of spec §6" }
+    func alloc(edit self, size: usize, align: usize) -> Result[RawPtr[u8], AllocErr] {
+        if size > self.limit - self.used {
+            self.refused = self.refused + 1u64
+            return Err(OutOfMemory)
+        }
+        unsafe {
+            p := self.sys.alloc(size, align)?
+            self.used = self.used + size
+            if self.used > self.peak { self.peak = self.used }
+            return Ok(p)
+        }
+    }
+    contract { requires "ptr, size and align are those of one earlier alloc of this allocator, not yet freed" }
+    func free(edit self, ptr: RawPtr[u8], size: usize, align: usize) {
+        self.used = self.used - size
+        unsafe { self.sys.free(ptr, size, align) }
+    }
+}
+
+func memory_line(a: view[Bounded]) {
+    t := str.String.new()
+    num(t, "  memory: ", u64(a.used))
+    num(t, " bytes in use, ", u64(a.peak))
+    num(t, " at most, of ", u64(a.limit))
+    num(t, "; requests refused: ", a.refused)
+    say(t.as_view())
+}
+
+// ---- the engine ----
+
+union SimErr { NoMemory; TimeOverflow; BadSetting }
+
+// mem is the result of an allocation as the engine's kind of result.
+func mem[T](r: own Result[T, AllocErr]) -> Result[T, SimErr] {
+    match move r {
+        Ok(v) => { return Ok(v) }
+        Err(e) => { return Err(NoMemory) }
+    }
+}
+
+// Timed is something that happens at a time. Of two at one time, the one
+// that was asked for first is first.
+struct Timed[P] { at: time.Duration; seq: u64; what: P }
+impl[P] Ordered for Timed[P] {
+    func before(view self, other: view[Timed[P]]) -> bool {
+        if self.at.ns != other.at.ns { return self.at.less(other.at) }
+        return self.seq < other.seq
+    }
+}
+
+// Sim is the clock and what is still to happen.
+struct Sim[P] { now: time.Duration; seq: u64; queue: Heap[Timed[P]] }
+impl[P] Sim[P] {
+    func new() -> Sim[P] { return Sim[P] { now: time.nanos(0u64), seq: 0u64, queue: Heap[Timed[P]].new() } }
+    // after asks for an event a while from now. A time past what a
+    // Duration holds is an error, not a trap.
+    func after(edit self, d: time.Duration, what: own P) -> Result[(), SimErr] {
+        match checked_add(self.now.ns, d.ns) {
+            Some(at) => {
+                self.seq = self.seq + 1u64
+                return mem(self.queue.try_push(Timed[P] { at: time.nanos(at), seq: self.seq, what: what }))
+            }
+            None => {
+                drop(what)
+                return Err(TimeOverflow)
+            }
+        }
+    }
+}
+
+// Model is what the engine drives: it is given each event at its time,
+// and may ask for more.
+interface Model[P] {
+    func handle(edit self, sim: edit[Sim[P]], ev: view[P]) -> Result[(), SimErr]
+}
+
+// run lets everything happen that is due up to a time, shows each event
+// and the model after it to whoever watches, and returns how many
+// events there were.
+func run[P, M: Model[P]](sim: edit[Sim[P]], model: edit[M], until: time.Duration, watch: closure(time.Duration, view[P], view[M])) -> Result[u64, SimErr] {
+    var fired: u64 = 0u64
+    while sim.queue.len() > 0usize {
+        if until.less(sim.queue.top().at) { break }
+        match sim.queue.pop() {
+            Some(t) => {
+                sim.now = t.at
+                model.handle(sim, t.what)?
+                watch(t.at, t.what, model)
+                fired = fired + 1u64
+            }
+            None => { break }
+        }
+    }
+    if sim.now.less(until) && sim.queue.len() > 0usize { sim.now = until }
+    return Ok(fired)
+}
+
+// ---- settings ----
+
+// Settings are the key=value arguments: a model asks for each number it
+// knows by name, and a name nobody asked for is a mistake.
+struct Settings { names: Vec[str.String]; values: Vec[f64]; asked: Vec[bool] }
+impl Settings {
+    func new() -> Settings { return Settings { names: Vec[str.String].new(), values: Vec[f64].new(), asked: Vec[bool].new() } }
+    func put(edit self, name: view[]u8, v: f64) {
+        self.names.push(str.String.from(name))
+        self.values.push(v)
+        self.asked.push(false)
+    }
+    func number(edit self, name: view[]u8, otherwise: f64) -> f64 {
+        var v: f64 = otherwise
+        for i in 0usize..self.names.len() {
+            if self.names.get(i).equals(name) {
+                v = self.values.get(i)
+                with a := self.asked.at(i) { a = true }
+            }
+        }
+        return v
+    }
+    // whole is a setting that must be a whole number from lo to hi.
+    func whole(edit self, name: view[]u8, otherwise: u64, lo: u64, hi: u64) -> Result[u64, SimErr] {
+        v := self.number(name, f64(otherwise))
+        if !(v >= f64(lo) && v <= f64(hi)) { return Err(BadSetting) }
+        n := u64(v)
+        if f64(n) != v { return Err(BadSetting) }
+        return Ok(n)
+    }
+    // positive is a setting that must be above zero and not absurd.
+    func positive(edit self, name: view[]u8, otherwise: f64) -> Result[f64, SimErr] {
+        v := self.number(name, otherwise)
+        if !(v > 0.0f64 && v <= 1000000.0f64) { return Err(BadSetting) }
+        return Ok(v)
+    }
+    func all_asked(view self) -> bool {
+        for a in self.asked.as_view() { if !a { return false } }
+        return true
+    }
+}
+
+// ---- a queue with several servers ----
+
+struct Customer { id: u64; arrived: time.Duration }
+union QEv { Arrive; Depart(u32) }
+
+// Mmc is the queue: who is being served by each server, who waits, and
+// the areas under the length of the line and the number of busy servers,
+// from which their means over time come.
+struct Mmc { servers: u32; gaps: Exponential; work: Exponential; rng_gaps: rand.Rng; rng_work: rand.Rng; people: PoolIn[Customer, Bounded]; line: Ring[PoolId[Customer]]; serving: Vec[Option[PoolId[Customer]]]; busy: u32; waits: Stats[time.Duration]; stays: Stats[time.Duration]; came: u64; waited: u64; refused: u64; refused_at: time.Duration; line_area: f64; busy_area: f64; last: time.Duration }
+
+func new_mmc(seed: u64, set: edit[Settings]) -> Result[Mmc, SimErr] {
+    arrive := set.positive("arrive", 2.4f64)?
+    serve := set.positive("serve", 1.0f64)?
+    servers := set.whole("servers", 3u64, 1u64, 64u64)?
+    memory := set.whole("memory", 65536u64, 0u64, 1073741824u64)?
+    master := rand.Rng.seeded(seed)
+    serving := Vec[Option[PoolId[Customer]]].new()
+    for i in 0u64..servers { serving.push(None) }
+    line := mem(Ring[PoolId[Customer]].try_new(4096usize))?
+    return Ok(Mmc { servers: truncate[u32](servers), gaps: Exponential { each: 1.0f64 / arrive }, work: Exponential { each: 1.0f64 / serve }, rng_gaps: stream(master), rng_work: stream(master), people: PoolIn[Customer, Bounded].new_in(bounded(usize(memory))), line: line, serving: serving, busy: 0u32, waits: Stats[time.Duration].new(1.0f64), stays: Stats[time.Duration].new(1.0f64), came: 0u64, waited: 0u64, refused: 0u64, refused_at: time.nanos(0u64), line_area: 0.0f64, busy_area: 0.0f64, last: time.nanos(0u64) })
+}
+
+impl Mmc {
+    func account(edit self, now: time.Duration) {
+        dt := now.minus(self.last).as_f64()
+        self.line_area = self.line_area + dt * f64(self.line.len())
+        self.busy_area = self.busy_area + dt * f64(self.busy)
+        self.last = now
+    }
+    func idle_server(view self) -> Option[u32] {
+        for s in 0usize..self.serving.len() {
+            if self.serving.get(s) == None { return Some(truncate[u32](s)) }
+        }
+        return None
+    }
+    func begin(edit self, sim: edit[Sim[QEv]], server: u32, who: PoolId[Customer]) -> Result[(), SimErr] {
+        wait := sim.now.minus(self.people.get(who).arrived)
+        self.waits.add(wait)
+        if wait.ns > 0u64 { self.waited = self.waited + 1u64 }
+        with s := self.serving.at(usize(server)) { s = Some(who) }
+        self.busy = self.busy + 1u32
+        return sim.after(time_from(self.work, self.rng_work), Depart(server))
+    }
+    // turn_away counts a customer there was no room or no memory for.
+    func turn_away(edit self, now: time.Duration) {
+        self.refused = self.refused + 1u64
+        if self.refused == 1u64 { self.refused_at = now }
+    }
+    func arrive(edit self, sim: edit[Sim[QEv]]) -> Result[(), SimErr] {
+        sim.after(time_from(self.gaps, self.rng_gaps), Arrive)?
+        self.came = self.came + 1u64
+        match self.people.try_alloc(Customer { id: self.came, arrived: sim.now }) {
+            Ok(who) => {
+                match self.idle_server() {
+                    Some(s) => { return self.begin(sim, s, who) }
+                    None => { }
+                }
+                match self.line.push(who) {
+                    Ok(u) => { }
+                    Err(back) => {
+                        self.people.free(back)
+                        self.turn_away(sim.now)
+                    }
+                }
+            }
+            Err(e) => self.turn_away(sim.now)
+        }
+        return Ok(())
+    }
+    func depart(edit self, sim: edit[Sim[QEv]], server: u32) -> Result[(), SimErr] {
+        match self.serving.get(usize(server)) {
+            Some(who) => {
+                stay := sim.now.minus(self.people.get(who).arrived)
+                self.stays.add(stay)
+                self.people.free(who)
+            }
+            None => { }
+        }
+        with s := self.serving.at(usize(server)) { s = None }
+        self.busy = self.busy - 1u32
+        match self.line.pop() {
+            Some(next) => { return self.begin(sim, server, next) }
+            None => { return Ok(()) }
+        }
+    }
+}
+
+impl Model[QEv] for Mmc {
+    func handle(edit self, sim: edit[Sim[QEv]], ev: view[QEv]) -> Result[(), SimErr] {
+        self.account(sim.now)
+        match ev {
+            Arrive => { return self.arrive(sim) }
+            Depart(server) => { return self.depart(sim, server) }
+        }
+    }
+}
+
+// erlang_c is the chance that an arrival must wait, for a load (the
+// arrival rate over one server's rate) offered to a number of servers.
+func erlang_c(servers: u32, load: f64) -> f64 {
+    var term: f64 = 1.0f64
+    var sum: f64 = 0.0f64
+    for k in 0u32..servers {
+        sum = sum + term
+        term = term * load / f64(k + 1u32)
+    }
+    last := term / (1.0f64 - load / f64(servers))
+    return last / (sum + last)
+}
+
+func run_mmc(seed: u64, until: f64, set: edit[Settings]) -> Result[(), SimErr] {
+    m := new_mmc(seed, set)?
+    if !set.all_asked() { return Err(BadSetting) }
+    sim := Sim[QEv].new()
+    sim.after(time.nanos(0u64), Arrive)?
+    var longest: usize = 0usize
+    var left: u64 = 0u64
+    events := run(sim, m, span(until), |at, ev, model| {
+        if model.line.len() > longest { longest = model.line.len() }
+        if ev != Arrive { left = left + 1u64 }
+    })?
+    m.account(sim.now)
+    t := str.String.new()
+    num(t, "  ", u64(m.servers))
+    num(t, " servers; ", events)
+    when(t, " events in ", sim.now)
+    num(t, "; ", m.came)
+    num(t, " came, ", left)
+    num(t, " left, ", m.refused)
+    t.push_str(" were turned away")
+    say(t.as_view())
+    m.waits.show("wait (s)", 3u32)
+    m.stays.show("stay (s)", 3u32)
+    m.waits.bars(0.0f64, 5.0f64, 1u32)
+    seconds := sim.now.as_f64()
+    load := m.work.mean() / m.gaps.mean()
+    t.clear()
+    fix(t, "  mean wait: simulated ", m.waits.mean, 3u32)
+    if load < f64(m.servers) {
+        c := erlang_c(m.servers, load)
+        fix(t, " s, by Erlang C ", c * m.work.mean() / (f64(m.servers) - load), 3u32)
+        fix(t, " s; waited at all: simulated ", f64(m.waited) / f64(m.waits.n), 3u32)
+        fix(t, ", by Erlang C ", c, 3u32)
+    } else {
+        t.push_str(" s, by Erlang C no limit (the servers cannot keep up)")
+    }
+    say(t.as_view())
+    t.clear()
+    fix(t, "  mean line ", m.line_area / seconds, 3u32)
+    num(t, ", longest ", u64(longest))
+    fix(t, "; servers busy ", m.busy_area / seconds / f64(m.servers), 3u32)
+    num(t, " of the time; still here ", u64(m.people.len()))
+    say(t.as_view())
+    if m.refused > 0u64 {
+        t.clear()
+        when(t, "  out of memory first at ", m.refused_at)
+        say(t.as_view())
+    }
+    memory_line(m.people.allocator())
+    return Ok(())
+}
+
+// ---- routers in a row ----
+
+// Packet is what the sender remembers of something it sent: when it was
+// first sent and how often. Frame is a copy on its way, or the answer to
+// one on its way back.
+struct Packet { seq: u64; born: time.Duration; tries: u32 }
+struct Frame { pkt: PoolId[Packet]; seq: u64; ack: bool }
+union NEv { Send; Reach(u32, Frame); Sent(u32); Timeout(PoolId[Packet], u64) }
+
+// Node is one machine: the frame it is sending and the line behind it.
+struct Node { line: Ring[Frame]; sending: Option[Frame]; forwarded: u64; dropped: u64 }
+
+// What the sender knows of a sequence number: still waiting for the
+// answer, answered, or forgotten (its packet is freed, so its handle
+// must not be used again; a pool has no way to ask whether a handle is
+// still good that does not trap).
+const waiting: u8 = 0u8
+const answered: u8 = 1u8
+const forgotten: u8 = 2u8
+
+struct Net { nodes: ArenaIn[Node, Bounded]; ids: Vec[ArenaId[Node]]; packets: PoolIn[Packet, Bounded]; state: Vec[u8]; got: Vec[bool]; gaps: Exponential; work: Uniform; delay: Normal; loss: f64; rto: time.Duration; max_tries: u32; total: u64; rng_gaps: rand.Rng; rng_loss: rand.Rng; rng_delay: rand.Rng; rng_work: rand.Rng; sent: u64; frames: u64; again: u64; lost: u64; delivered: u64; twice: u64; acked: u64; late: u64; gave_up: u64; refused: u64; latency: Stats[time.Duration]; tries: Stats[f64] }
+
+func new_net(seed: u64, set: edit[Settings]) -> Result[Net, SimErr] {
+    total := set.whole("packets", 400u64, 1u64, 1000000u64)?
+    hops := set.whole("nodes", 4u64, 2u64, 64u64)?
+    room := set.whole("room", 8u64, 1u64, 4096u64)?
+    tries := set.whole("tries", 6u64, 1u64, 64u64)?
+    memory := set.whole("memory", 65536u64, 0u64, 1073741824u64)?
+    gap := set.positive("gap", 0.004f64)?
+    rto := set.positive("rto", 0.05f64)?
+    loss := set.number("loss", 0.05f64)
+    if !(loss >= 0.0f64 && loss < 1.0f64) { return Err(BadSetting) }
+    master := rand.Rng.seeded(seed)
+    nodes := ArenaIn[Node, Bounded].new_in(bounded(usize(memory)))
+    ids := Vec[ArenaId[Node]].new()
+    for i in 0u64..hops {
+        line := mem(Ring[Frame].try_new(usize(room)))?
+        ids.push(mem(nodes.try_alloc(Node { line: line, sending: None, forwarded: 0u64, dropped: 0u64 }))?)
+    }
+    state := Vec[u8].new()
+    got := Vec[bool].new()
+    mem(state.try_resize(usize(total), forgotten))?
+    mem(got.try_resize(usize(total), false))?
+    return Ok(Net { nodes: nodes, ids: ids, packets: PoolIn[Packet, Bounded].new_in(bounded(usize(memory))), state: state, got: got, gaps: Exponential { each: gap }, work: Uniform { lo: 0.0005f64, hi: 0.0015f64 }, delay: Normal { mid: 0.005f64, sd: 0.001f64 }, loss: loss, rto: span(rto), max_tries: truncate[u32](tries), total: total, rng_gaps: stream(master), rng_loss: stream(master), rng_delay: stream(master), rng_work: stream(master), sent: 0u64, frames: 0u64, again: 0u64, lost: 0u64, delivered: 0u64, twice: 0u64, acked: 0u64, late: 0u64, gave_up: 0u64, refused: 0u64, latency: Stats[time.Duration].new(1000.0f64), tries: Stats[f64].new(1.0f64) })
+}
+
+impl Net {
+    // enter gives a frame to a node: it is sent at once, or waits in the
+    // line, or is dropped when the line is full.
+    func enter(edit self, sim: edit[Sim[NEv]], at: u32, f: Frame) -> Result[(), SimErr] {
+        id := self.ids.get(usize(at))
+        with n := self.nodes.at(id) {
+            if n.sending != None {
+                match n.line.push(f) {
+                    Ok(u) => { }
+                    Err(back) => { n.dropped = n.dropped + 1u64 }
+                }
+                return Ok(())
+            }
+            n.sending = Some(f)
+        }
+        return sim.after(time_from(self.work, self.rng_work), Sent(at))
+    }
+    // transmit sends a packet's frame from the first node and sets the
+    // timer: the first wait is rto, and each one after is twice as long.
+    func transmit(edit self, sim: edit[Sim[NEv]], pkt: PoolId[Packet], seq: u64, tries: u32) -> Result[(), SimErr] {
+        self.frames = self.frames + 1u64
+        self.enter(sim, 0u32, Frame { pkt: pkt, seq: seq, ack: false })?
+        match checked_shl(self.rto.ns, tries - 1u32) {
+            Some(wait) => { return sim.after(time.nanos(wait), Timeout(pkt, seq)) }
+            None => { return Err(TimeOverflow) }
+        }
+    }
+    func send(edit self, sim: edit[Sim[NEv]]) -> Result[(), SimErr] {
+        if self.sent >= self.total { return Ok(()) }
+        seq := self.sent
+        self.sent = self.sent + 1u64
+        if self.sent < self.total { sim.after(time_from(self.gaps, self.rng_gaps), Send)? }
+        match self.packets.try_alloc(Packet { seq: seq, born: sim.now, tries: 1u32 }) {
+            Ok(pkt) => {
+                with s := self.state.at(usize(seq)) { s = waiting }
+                return self.transmit(sim, pkt, seq, 1u32)
+            }
+            Err(e) => {
+                self.refused = self.refused + 1u64
+                return Ok(())
+            }
+        }
+    }
+    // cross puts a frame on the link to a neighbour, where it may be lost.
+    func cross(edit self, sim: edit[Sim[NEv]], to: u32, f: Frame) -> Result[(), SimErr] {
+        if unit(self.rng_loss) < self.loss {
+            self.lost = self.lost + 1u64
+            return Ok(())
+        }
+        var d: time.Duration = time_from(self.delay, self.rng_delay)
+        if d.ns < 100000u64 { d = time.micros(100u64) }
+        return sim.after(d, Reach(to, f))
+    }
+    // sent_from is a node done with a frame: the next in its line starts,
+    // and the frame goes on, or has arrived.
+    func sent_from(edit self, sim: edit[Sim[NEv]], at: u32) -> Result[(), SimErr] {
+        id := self.ids.get(usize(at))
+        var frame: Option[Frame] = None
+        var more: bool = false
+        with n := self.nodes.at(id) {
+            frame = n.sending
+            n.forwarded = n.forwarded + 1u64
+            n.sending = n.line.pop()
+            more = n.sending != None
+        }
+        if more { sim.after(time_from(self.work, self.rng_work), Sent(at))? }
+        match frame {
+            Some(f) => {
+                if f.ack {
+                    if at == 0u32 { return self.answer(sim, f) }
+                    return self.cross(sim, at - 1u32, f)
+                }
+                if usize(at) + 1usize < self.ids.len() { return self.cross(sim, at + 1u32, f) }
+                // at the receiver: count it, and answer
+                if self.got.get(usize(f.seq)) {
+                    self.twice = self.twice + 1u64
+                } else {
+                    self.delivered = self.delivered + 1u64
+                    with g := self.got.at(usize(f.seq)) { g = true }
+                }
+                return self.cross(sim, at - 1u32, Frame { pkt: f.pkt, seq: f.seq, ack: true })
+            }
+            None => { return Ok(()) }
+        }
+    }
+    // answer is an answer back at the sender. Only the first for a packet
+    // counts, and only then is the packet's handle known to be good.
+    func answer(edit self, sim: edit[Sim[NEv]], f: Frame) -> Result[(), SimErr] {
+        if self.state.get(usize(f.seq)) != waiting {
+            self.late = self.late + 1u64
+            return Ok(())
+        }
+        with s := self.state.at(usize(f.seq)) { s = answered }
+        self.acked = self.acked + 1u64
+        took := sim.now.minus(self.packets.get(f.pkt).born)
+        self.latency.add(took)
+        tries := f64(self.packets.get(f.pkt).tries)
+        self.tries.add(tries)
+        return Ok(())
+    }
+    // timeout is a packet's timer running out: an answered packet is
+    // forgotten, one sent often enough is given up, any other is sent
+    // again.
+    func timeout(edit self, sim: edit[Sim[NEv]], pkt: PoolId[Packet], seq: u64) -> Result[(), SimErr] {
+        tries := self.packets.get(pkt).tries
+        was := self.state.get(usize(seq))
+        if was == waiting && tries < self.max_tries {
+            with p := self.packets.at(pkt) { p.tries = tries + 1u32 }
+            self.again = self.again + 1u64
+            return self.transmit(sim, pkt, seq, tries + 1u32)
+        }
+        if was == waiting { self.gave_up = self.gave_up + 1u64 }
+        self.packets.free(pkt)
+        with s := self.state.at(usize(seq)) { s = forgotten }
+        return Ok(())
+    }
+}
+
+impl Model[NEv] for Net {
+    func handle(edit self, sim: edit[Sim[NEv]], ev: view[NEv]) -> Result[(), SimErr] {
+        match ev {
+            Send => { return self.send(sim) }
+            Reach(to, f) => { return self.enter(sim, to, f) }
+            Sent(at) => { return self.sent_from(sim, at) }
+            Timeout(pkt, seq) => { return self.timeout(sim, pkt, seq) }
+        }
+    }
+}
+
+func run_net(seed: u64, until: f64, set: edit[Settings]) -> Result[(), SimErr] {
+    m := new_net(seed, set)?
+    if !set.all_asked() { return Err(BadSetting) }
+    sim := Sim[NEv].new()
+    sim.after(time.nanos(0u64), Send)?
+    var timers: u64 = 0u64
+    var hops: u64 = 0u64
+    events := run(sim, m, span(until), |at, ev, model| {
+        match ev {
+            Timeout(pkt, seq) => { timers = timers + 1u64 }
+            Reach(to, f) => { hops = hops + 1u64 }
+            _ => { }
+        }
+    })?
+    t := str.String.new()
+    num(t, "  ", u64(m.ids.len()))
+    num(t, " nodes; ", events)
+    when(t, " events in ", sim.now)
+    num(t, "; ", timers)
+    num(t, " timers ran out, ", hops)
+    t.push_str(" frames crossed a link")
+    say(t.as_view())
+    t.clear()
+    num(t, "  packets ", m.sent)
+    num(t, ": delivered ", m.delivered)
+    num(t, ", answered ", m.acked)
+    num(t, ", given up ", m.gave_up)
+    num(t, ", no memory for ", m.refused)
+    num(t, ", still in hand ", u64(m.packets.len()))
+    say(t.as_view())
+    t.clear()
+    num(t, "  frames sent ", m.frames)
+    num(t, " (", m.again)
+    num(t, " again): lost on a link ", m.lost)
+    num(t, ", delivered twice ", m.twice)
+    num(t, ", answers too late to count ", m.late)
+    say(t.as_view())
+    for i in 0usize..m.ids.len() {
+        t.clear()
+        num(t, "  node ", u64(i))
+        with n := m.nodes.get(m.ids.get(i)) {
+            num(t, ": sent on ", n.forwarded)
+            num(t, ", dropped for want of room ", n.dropped)
+            num(t, ", in its line ", u64(n.line.len()))
+        }
+        say(t.as_view())
+    }
+    m.latency.show("answered after (ms)", 2u32)
+    m.tries.show("times sent", 2u32)
+    m.latency.bars(0.0f64, 200.0f64, 0u32)
+    memory_line(m.packets.allocator())
+    return Ok(())
+}
+
+// ---- two roads and a light ----
+
+union Road { North; East }
+// Light is the state of the crossing: a road has green, or yellow, or
+// both have red until the road named gets green.
+union Light { Green(Road); Yellow(Road); AllRed(Road) }
+union XEv { Car(Road); Change; Go(Road) }
+
+func push_road(t: edit[str.String], r: Road) {
+    if r == North { t.push_str("north") } else { t.push_str("east") }
+}
+
+// Lane is one road's cars: when each arrived, and what became of them.
+struct Lane { line: Ring[time.Duration]; gaps: Exponential; rng: rand.Rng; waits: Stats[time.Duration]; moving: bool; passed: u64; refused: u64; longest: usize }
+
+func new_lane(mean_gap: f64, from: edit[rand.Rng]) -> Result[Lane, SimErr] {
+    line := mem(Ring[time.Duration].try_new(256usize))?
+    return Ok(Lane { line: line, gaps: Exponential { each: mean_gap }, rng: stream(from), waits: Stats[time.Duration].new(1.0f64), moving: false, passed: 0u64, refused: 0u64, longest: 0usize })
+}
+
+// Cross is the crossing. on is its handlers, one for each kind of event.
+struct Cross { light: Light; north: Lane; east: Lane; green: time.Duration; yellow: time.Duration; clear: time.Duration; headway: time.Duration; changes: u64; on: [3]func(edit[Cross], edit[Sim[XEv]], Road) -> Result[(), SimErr] }
+
+impl Cross {
+    func lane(edit self, r: Road) -> edit[Lane] {
+        if r == North { return self.north }
+        return self.east
+    }
+    // set_moving starts a road's line across, one car every headway,
+    // when it has green, has cars, and is not moving already.
+    func set_moving(edit self, sim: edit[Sim[XEv]], r: Road) -> Result[(), SimErr] {
+        if self.light != Green(r) { return Ok(()) }
+        headway := self.headway
+        with l := self.lane(r) {
+            if l.line.len() == 0usize || l.moving { return Ok(()) }
+            l.moving = true
+        }
+        return sim.after(headway, Go(r))
+    }
+}
+
+// on_car: a car arrives on a road and joins its line, and the next one
+// is asked for.
+func on_car(x: edit[Cross], sim: edit[Sim[XEv]], r: Road) -> Result[(), SimErr] {
+    with l := x.lane(r) {
+        sim.after(time_from(l.gaps, l.rng), Car(r))?
+        match l.line.push(sim.now) {
+            Ok(u) => { }
+            Err(back) => { l.refused = l.refused + 1u64 }
+        }
+        if l.line.len() > l.longest { l.longest = l.line.len() }
+    }
+    return x.set_moving(sim, r)
+}
+
+// on_change: the light goes on to its next state.
+func on_change(x: edit[Cross], sim: edit[Sim[XEv]], unused: Road) -> Result[(), SimErr] {
+    x.changes = x.changes + 1u64
+    match x.light {
+        Green(r) => {
+            x.light = Yellow(r)
+            return sim.after(x.yellow, Change)
+        }
+        Yellow(r) => {
+            x.light = AllRed(r)
+            return sim.after(x.clear, Change)
+        }
+        AllRed(r) => {
+            var next: Road = North
+            if r == North { next = East }
+            x.light = Green(next)
+            sim.after(x.green, Change)?
+            return x.set_moving(sim, next)
+        }
+    }
+}
+
+// on_go: the first car of a moving line crosses, if the light is still
+// green for it, and the one behind it follows.
+func on_go(x: edit[Cross], sim: edit[Sim[XEv]], r: Road) -> Result[(), SimErr] {
+    green := x.light == Green(r)
+    with l := x.lane(r) {
+        l.moving = false
+        if !green { return Ok(()) }
+        match l.line.pop() {
+            Some(arrived) => {
+                wait := sim.now.minus(arrived)
+                l.waits.add(wait)
+                l.passed = l.passed + 1u64
+            }
+            None => { }
+        }
+    }
+    return x.set_moving(sim, r)
+}
+
+impl Model[XEv] for Cross {
+    func handle(edit self, sim: edit[Sim[XEv]], ev: view[XEv]) -> Result[(), SimErr] {
+        var kind: usize = 1usize
+        var road: Road = North
+        match ev {
+            Car(r) => {
+                kind = 0usize
+                road = r
+            }
+            Change => { }
+            Go(r) => {
+                kind = 2usize
+                road = r
+            }
+        }
+        f := self.on[kind]
+        return f(self, sim, road)
+    }
+}
+
+func new_cross(seed: u64, set: edit[Settings]) -> Result[Cross, SimErr] {
+    north := set.positive("north", 7.0f64)?
+    east := set.positive("east", 11.0f64)?
+    green := set.positive("green", 20.0f64)?
+    yellow := set.positive("yellow", 3.0f64)?
+    clear := set.positive("clear", 2.0f64)?
+    headway := set.positive("headway", 2.0f64)?
+    master := rand.Rng.seeded(seed)
+    a := new_lane(north, master)?
+    b := new_lane(east, master)?
+    return Ok(Cross { light: AllRed(East), north: a, east: b, green: span(green), yellow: span(yellow), clear: span(clear), headway: span(headway), changes: 0u64, on: [on_car, on_change, on_go] })
+}
+
+func lane_lines(l: edit[Lane], r: Road) {
+    t := str.String.from("  ")
+    push_road(t, r)
+    num(t, ": crossed ", l.passed)
+    num(t, ", waiting ", u64(l.line.len()))
+    num(t, ", longest line ", u64(l.longest))
+    num(t, ", found no room ", l.refused)
+    say(t.as_view())
+    t.clear()
+    push_road(t, r)
+    t.push_str(" wait (s)")
+    l.waits.show(t.as_view(), 2u32)
+}
+
+func run_cross(seed: u64, until: f64, set: edit[Settings]) -> Result[(), SimErr] {
+    m := new_cross(seed, set)?
+    if !set.all_asked() { return Err(BadSetting) }
+    sim := Sim[XEv].new()
+    sim.after(time.nanos(0u64), Change)?
+    sim.after(time_from(m.north.gaps, m.north.rng), Car(North))?
+    sim.after(time_from(m.east.gaps, m.east.rng), Car(East))?
+    var shown: u32 = 0u32
+    events := run(sim, m, span(until), |at, ev, model| {
+        if ev == Change && shown < 7u32 {
+            shown = shown + 1u32
+            t := str.String.new()
+            when(t, "  at ", at)
+            match model.light {
+                Green(r) => {
+                    t.push_str(" green for ")
+                    push_road(t, r)
+                }
+                Yellow(r) => {
+                    t.push_str(" yellow for ")
+                    push_road(t, r)
+                }
+                AllRed(r) => {
+                    t.push_str(" red for both, after ")
+                    push_road(t, r)
+                }
+            }
+            say(t.as_view())
+        }
+    })?
+    t := str.String.new()
+    num(t, "  ", events)
+    when(t, " events in ", sim.now)
+    num(t, "; the light changed ", m.changes)
+    t.push_str(" times")
+    say(t.as_view())
+    lane_lines(m.north, North)
+    lane_lines(m.east, East)
+    m.north.waits.bars(0.0f64, 50.0f64, 0u32)
+    return Ok(())
+}
+
+// ---- the demonstration ----
+
+// law_line draws from a law and sets the sample's mean and deviation
+// beside the law's own.
+func law_line[D: Distribution](name: view[]u8, law: view[D], rng: edit[rand.Rng]) {
+    s := Stats[f64].new(1.0f64)
+    for i in 0u32..1000u32 {
+        x := law.draw(rng)
+        s.add(x)
+    }
+    t := str.String.from("  ")
+    t.push_str(name)
+    fix(t, ": mean ", s.mean, 4u32)
+    fix(t, " for ", law.mean(), 4u32)
+    fix(t, ", deviation ", root(s.variance()), 4u32)
+    fix(t, " for ", law.deviation(), 4u32)
+    fix(t, ", from ", s.lo, 4u32)
+    fix(t, " to ", s.hi, 4u32)
+    say(t.as_view())
+}
+
+// offer pushes a name on a ring of names and notes one that is handed
+// back.
+func offer(ring: edit[Ring[str.String]], name: view[]u8, t: edit[str.String]) {
+    match ring.push(str.String.from(name)) {
+        Ok(u) => { }
+        Err(back) => {
+            t.push_str(" no room for ")
+            t.push_str(back.as_view())
+            t.push(59u8)
+        }
+    }
+}
+
+func containers() -> Result[(), AllocErr] {
+    say("-- the containers")
+    rng := rand.Rng.seeded(7u64)
+    heap := Heap[Timed[u32]].new()
+    for i in 0u32..12u32 { heap.try_push(Timed[u32] { at: time.millis(rng.below(50u64)), seq: u64(i), what: i })? }
+    t := str.String.from("  a heap of twelve events, the earliest ")
+    match heap.least() {
+        Some(e) => push_time(t, e.at)
+        None => { }
+    }
+    t.push_str("; emptied (ms.order):")
+    var early: u32 = 0u32
+    var last: u64 = 0u64
+    drain(heap, |e| {
+        num(t, " ", e.at.as_millis())
+        num(t, ".", u64(e.what))
+        if e.at.ns < last { early = early + 1u32 }
+        last = e.at.ns
+    })
+    say(t.as_view())
+    ring := Ring[str.String].try_new(3usize)?
+    t.clear()
+    t.push_str("  a ring with room for three:")
+    offer(ring, "one", t)
+    offer(ring, "two", t)
+    offer(ring, "three", t)
+    offer(ring, "four", t)
+    match ring.pop() {
+        Some(first) => {
+            t.push_str(" first out ")
+            t.push_str(first.as_view())
+        }
+        None => { }
+    }
+    offer(ring, "five", t)
+    t.push_str("; then it holds")
+    ring.each(|s| {
+        t.push(32u8)
+        t.push_str(s.as_view())
+    })
+    say(t.as_view())
+    values := Vec[f64].new()
+    for i in 0u32..200u32 { values.push(unit(rng)) }
+    before := in_order(values.as_view())
+    sort_in_place(values.as_edit())
+    print_str("  two hundred numbers in order before the sort: ")
+    print_bool(before)
+    print_str(", after: ")
+    print_bool(in_order(values.as_view()))
+    print_str("; events that came out of the heap early: ")
+    print_u64(u64(early))
+    println()
+    s := Stats[time.Duration].new(time.Duration.unit_scale() * 1000000000.0f64)
+    for i in 1u64..11u64 {
+        d := time.seconds(i)
+        s.add(d)
+    }
+    t.clear()
+    fix(t, "  one to ten seconds: variance ", s.variance(), 4u32)
+    fix(t, ", the root of two ", root(2.0f64), 9u32)
+    fix(t, ", the logarithm of ten ", ln(10.0f64), 9u32)
+    say(t.as_view())
+    s.show("one to ten", 2u32)
+    return Ok(())
+}
+
+func laws() {
+    say("-- a thousand draws from each law")
+    master := rand.Rng.seeded(2026u64)
+    a := stream(master)
+    e := Exponential { each: 0.25f64 }
+    u := Uniform { lo: 2.0f64, hi: 6.0f64 }
+    n := Normal { mid: 10.0f64, sd: 2.0f64 }
+    law_line("exponential", e, a)
+    law_line("uniform", u, a)
+    law_line("normal", n, a)
+    again := rand.Rng.from_state(master.state())
+    print_str("  a generator taken up again from its saved state gives the same number: ")
+    print_bool(again.next_u64() == master.next_u64())
+    println()
+}
+
+func report(r: Result[(), SimErr]) -> bool {
+    match r {
+        Ok(u) => { return true }
+        Err(e) => {
+            match e {
+                NoMemory => say("  stopped: out of memory")
+                TimeOverflow => say("  stopped: an event further ahead than time goes")
+                BadSetting => say("  a setting is unknown or out of range")
+            }
+            return false
+        }
+    }
+}
+
+// Idle is a model that only counts what happens to it.
+struct Idle { seen: u32 }
+impl Model[u32] for Idle {
+    func handle(edit self, sim: edit[Sim[u32]], ev: view[u32]) -> Result[(), SimErr] {
+        self.seen = self.seen + ev
+        return Ok(())
+    }
+}
+
+func demo() -> i32 {
+    match containers() {
+        Ok(u) => { }
+        Err(e) => say("  no memory")
+    }
+    laws()
+    say("-- a queue: 2.4 arrivals a second, three servers of one a second, 1,000 seconds")
+    plain := Settings.new()
+    ok := report(run_mmc(11u64, 1000.0f64, plain))
+    say("-- four nodes in a row: 300 packets, one frame in twenty lost on each link")
+    fewer := Settings.new()
+    fewer.put("packets", 300.0f64)
+    ok = report(run_net(12u64, 3600.0f64, fewer)) && ok
+    say("-- a crossing: half an hour of cars")
+    ok = report(run_cross(13u64, 1800.0f64, plain)) && ok
+    say("-- the queue again with 1,000 bytes for its customers and too few servers")
+    tight := Settings.new()
+    tight.put("memory", 1000.0f64)
+    tight.put("servers", 2.0f64)
+    tight.put("arrive", 3.0f64)
+    ok = report(run_mmc(11u64, 200.0f64, tight)) && ok
+    say("-- an event five hundred and seventy years ahead")
+    sim := Sim[u32].new()
+    idle := Idle { seen: 0u32 }
+    far := time.seconds(18000000000u64)
+    ok = report(sim.after(far, 1u32)) && ok
+    match run(sim, idle, far, |at, ev, model| { }) {
+        Ok(n) => {
+            t := str.String.new()
+            when(t, "  it is reached, at ", sim.now)
+            t.push_str("; one more as far ahead again:")
+            say(t.as_view())
+        }
+        Err(e) => { ok = false }
+    }
+    ok = !report(sim.after(far, 2u32)) && ok
+    if ok { return 0i32 }
+    return 1i32
+}
+
+// ---- the program ----
+
+func usage() -> i32 {
+    eprint_str("usage: ksim mmc|net|cross [--seed N] [--until SECONDS] [key=value ...]\n")
+    return 2i32
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize { return demo() }
+    var seed: u64 = 1u64
+    var until: f64 = 3600.0f64
+    set := Settings.new()
+    var i: usize = 2usize
+    while i < args.len() {
+        // what follows a flag is read before the argument itself is
+        // bound, since a bound view keeps args to itself
+        var whole: Option[u64] = None
+        var number: Option[f64] = None
+        if i + 1usize < args.len() {
+            whole = str.parse_u64(args.get(i + 1usize).as_view())
+            number = str.parse_f64(args.get(i + 1usize).as_view())
+        }
+        with a := args.get(i).as_view() {
+            if str.equal(a, "--seed") {
+                match whole {
+                    Some(n) => { seed = n }
+                    None => { return usage() }
+                }
+                i = i + 1usize
+            } else if str.equal(a, "--until") {
+                match number {
+                    Some(v) => { until = v }
+                    None => { return usage() }
+                }
+                i = i + 1usize
+            } else {
+                match str.find(a, "=") {
+                    Some(k) => {
+                        match str.parse_f64(a[k + 1usize : len(a)]) {
+                            Some(v) => set.put(a[0usize : k], v)
+                            None => { return usage() }
+                        }
+                    }
+                    None => { return usage() }
+                }
+            }
+        }
+        i = i + 1usize
+    }
+    var done: bool = false
+    with model := args.get(1usize).as_view() {
+        if str.equal(model, "mmc") {
+            done = report(run_mmc(seed, until, set))
+        } else if str.equal(model, "net") {
+            done = report(run_net(seed, until, set))
+        } else if str.equal(model, "cross") {
+            done = report(run_cross(seed, until, set))
+        } else {
+            return usage()
+        }
+    }
+    if done { return 0i32 }
+    return 1i32
+}

@@ -1,0 +1,97 @@
+-- the containers
+  a heap of twelve events, the earliest 0.003 s; emptied (ms.order): 3.10 8.8 14.3 14.4 16.6 19.9 21.5 24.1 38.2 44.0 46.7 46.11
+  a ring with room for three: no room for four; first out one; then it holds two three five
+  two hundred numbers in order before the sort: false, after: true; events that came out of the heap early: 0
+  one to ten seconds: variance 9.1667, the root of two 1.414213562, the logarithm of ten 2.302585093
+  one to ten: n 10  mean 5.50  sd 3.03  min 1.00  p50 6.00  p90 10.00  p99 10.00  max 10.00
+-- a thousand draws from each law
+  exponential: mean 0.2417 for 0.2500, deviation 0.2359 for 0.2500, from 0.0001 to 1.8401
+  uniform: mean 4.0038 for 4.0000, deviation 1.1705 for 1.1547, from 2.0080 to 5.9966
+  normal: mean 10.0293 for 10.0000, deviation 1.9468 for 2.0000, from 3.7970 to 15.5069
+  a generator taken up again from its saved state gives the same number: true
+-- a queue: 2.4 arrivals a second, three servers of one a second, 1,000 seconds
+  3 servers; 4770 events in 1000.000 s; 2387 came, 2383 left, 0 were turned away
+  wait (s): n 2386  mean 1.042  sd 1.463  min 0.000  p50 0.398  p90 3.430  p99 6.148  max 7.089
+  stay (s): n 2383  mean 2.033  sd 1.783  min 0.004  p50 1.464  p90 4.589  p99 7.618  max 10.875
+         0.0 to      0.5   1276 ########################################
+         0.5 to      1.0    311 #########
+         1.0 to      1.5    219 ######
+         1.5 to      2.0    123 ###
+         2.0 to      2.5     92 ##
+         2.5 to      3.0     68 ##
+         3.0 to      3.5     73 ##
+         3.5 to      4.0     73 ##
+         4.0 to      4.5     50 #
+         4.5 to      5.0     34 #
+         5.0 and over        67 ##
+  mean wait: simulated 1.042 s, by Erlang C 1.079 s; waited at all: simulated 0.636, by Erlang C 0.647
+  mean line 2.488, longest 21; servers busy 0.787 of the time; still here 4
+  memory: 896 bytes in use, 1344 at most, of 65536; requests refused: 0
+-- four nodes in a row: 300 packets, one frame in twenty lost on each link
+  4 nodes; 5245 events in 1.491 s; 406 timers ran out, 2067 frames crossed a link
+  packets 300: delivered 300, answered 300, given up 0, no memory for 0, still in hand 0
+  frames sent 406 (106 again): lost on a link 102, delivered twice 53, answers too late to count 3
+  node 0: sent on 709, dropped for want of room 0, in its line 0
+  node 1: sent on 708, dropped for want of room 0, in its line 0
+  node 2: sent on 702, dropped for want of room 1, in its line 0
+  node 3: sent on 353, dropped for want of room 0, in its line 0
+  answered after (ms): n 300  mean 63.68  sd 56.16  min 33.07  p50 42.21  p90 94.20  p99 392.07  max 399.60
+  times sent: n 300  mean 1.35  sd 0.66  min 1.00  p50 1.00  p90 2.00  p99 4.00  max 4.00
+           0 to       20      0
+          20 to       40     90 ##########################
+          40 to       60    134 ########################################
+          60 to       80      0
+          80 to      100     54 ################
+         100 to      120      2 #
+         120 to      140      0
+         140 to      160      0
+         160 to      180      0
+         180 to      200     15 ####
+         200 and over         5 #
+  memory: 2304 bytes in use, 3456 at most, of 65536; requests refused: 0
+-- a crossing: half an hour of cars
+  at 0.000 s green for north
+  at 20.000 s yellow for north
+  at 23.000 s red for both, after north
+  at 25.000 s green for east
+  at 45.000 s yellow for east
+  at 48.000 s red for both, after east
+  at 50.000 s green for north
+  1122 events in 1800.000 s; the light changed 217 times
+  north: crossed 248, waiting 3, longest line 10, found no room 0
+  north wait (s): n 248  mean 19.67  sd 12.57  min 2.00  p50 20.38  p90 34.93  p99 51.04  max 55.67
+  east: crossed 189, waiting 1, longest line 9, found no room 0
+  east wait (s): n 189  mean 17.71  sd 11.40  min 2.00  p50 16.25  p90 32.66  p99 48.45  max 49.50
+           0 to        5     42 ########################################
+           5 to       10     31 #############################
+          10 to       15     27 #########################
+          15 to       20     22 ####################
+          20 to       25     34 ################################
+          25 to       30     41 #######################################
+          30 to       35     28 ##########################
+          35 to       40      8 #######
+          40 to       45      7 ######
+          45 to       50      4 ###
+          50 and over         4 ###
+-- the queue again with 1,000 bytes for its customers and too few servers
+  2 servers; 1029 events in 200.000 s; 606 came, 423 left, 168 were turned away
+  wait (s): n 425  mean 5.227  sd 2.207  min 0.000  p50 5.067  p90 8.153  p99 10.812  max 11.505
+  stay (s): n 423  mean 6.164  sd 2.458  min 0.846  p50 6.015  p90 9.211  p99 12.464  max 18.062
+         0.0 to      0.5      4 #
+         0.5 to      1.0      2 #
+         1.0 to      1.5      7 #
+         1.5 to      2.0     16 ##
+         2.0 to      2.5     20 ###
+         2.5 to      3.0     27 ####
+         3.0 to      3.5     15 ##
+         3.5 to      4.0     35 ######
+         4.0 to      4.5     32 #####
+         4.5 to      5.0     49 ########
+         5.0 and over       218 ########################################
+  mean wait: simulated 5.227 s, by Erlang C no limit (the servers cannot keep up)
+  mean line 11.251, longest 14; servers busy 0.999 of the time; still here 15
+  out of memory first at 20.868 s
+  memory: 448 bytes in use, 672 at most, of 1000; requests refused: 168
+-- an event five hundred and seventy years ahead
+  it is reached, at 18000000000.000 s; one more as far ahead again:
+  stopped: an event further ahead than time goes

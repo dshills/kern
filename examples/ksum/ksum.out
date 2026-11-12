@@ -1,0 +1,83 @@
+published vectors
+  ok    sha256 of nothing
+  ok    sha256 of abc
+  ok    sha256 of 448 bits
+  ok    sha256 of a thousand a, in pieces
+  ok    sha512 of nothing
+  ok    sha512 of abc
+  ok    sha512 of 448 bits
+  ok    sha512 of a thousand a, in pieces
+  ok    sha1 of nothing
+  ok    sha1 of abc
+  ok    sha1 of 448 bits
+  ok    sha1 of a thousand a, in pieces
+  ok    md5 of nothing
+  ok    md5 of abc
+  ok    md5 of 448 bits
+  ok    md5 of a thousand a, in pieces
+  ok    blake2s of nothing
+  ok    blake2s of abc
+  ok    blake2s of 448 bits
+  ok    blake2s of a thousand a, in pieces
+  ok    crc32c of nothing
+  ok    crc32c of abc
+  ok    crc32c of 448 bits
+  ok    crc32c of a thousand a, in pieces
+  ok    crc32c of 123456789
+  ok    crc32c of 32 zero bytes
+  ok    crc32c of 32 bytes of ones
+  ok    crc32c of 32 rising bytes
+  ok    blake2s keyed, of nothing
+  ok    blake2s keyed, of 255 bytes
+  ok    blake2s refuses a key of 255 bytes
+  ok    hmac-sha256, RFC 4231 case 1
+  ok    hmac-sha256, RFC 4231 case 2
+  ok    hmac-sha256, RFC 4231 case 3
+  ok    hmac-sha256, RFC 4231 case 6
+  ok    hmac-sha512, RFC 4231 case 1
+  ok    hmac-sha512, RFC 4231 case 2
+  ok    hmac-sha512, RFC 4231 case 3
+  ok    hmac-sha512, RFC 4231 case 6
+  ok    hmac-sha1, RFC 2202 case 1
+  ok    hmac-sha1, RFC 2202 case 2
+  ok    hmac-md5, RFC 2202 case 1
+  ok    hmac-blake2s, the key and text of case 2
+  ok    pbkdf2-hmac-sha1, 1 round
+  ok    pbkdf2-hmac-sha1, 2 rounds
+  ok    pbkdf2-hmac-sha1, 3 rounds, 25 bytes
+  ok    pbkdf2-hmac-sha256, 2 rounds, 40 bytes
+  ok    hkdf-sha256, RFC 5869 case 1
+  ok    hkdf-sha256, RFC 5869 case 2
+  ok    hkdf-sha256, RFC 5869 case 3
+  ok    hkdf-sha1, RFC 5869 case 4
+  ok    tree of nothing
+  ok    tree of one leaf
+  ok    tree of seven leaves
+  ok    tree of sixteen leaves, sha256
+  ok    tree of sixteen leaves, blake2s
+  ok    tree of four leaves, md5
+  57 of 57 agree
+files, hashed on threads and on one
+  sha256: the same on three threads and on one, listing 06dd6489eef0825ca3a4717d11a43631ae636cd6f6073641cfddb5fd0f2014db
+  sha512: the same on three threads and on one, listing fa154587fc1e434e971999c591a70db6ab8c5164d4f90edbaaa20d6771edc4e7
+  sha1: the same on three threads and on one, listing 7ce2a04f6db81dbab5523e41c48662835d5b3e9643f29547b022d2a653d7c58f
+  md5: the same on three threads and on one, listing 12770ce201917e9ff9078dad1c2697b71055cd96fe89265edb974aef1f0a8369
+  blake2s: the same on three threads and on one, listing 6df062eef00d8ebf29d7c6d725bb15016e170dfb6bf0611b216b88bf996490f0
+  crc32c: the same on three threads and on one, listing 501289c1415338b0b45faace7db26b4e3db9e505a327776bd0ef16836e71173f
+a check file with one digest changed and one file missing
+  file00.bin: OK
+  file01.bin: OK
+  file02.bin: OK
+  file03.bin: FAILED
+  file04.bin: OK
+  file05.bin: OK
+  file06.bin: OK
+  file07.bin: OK
+  file08.bin: OK
+  file09.bin: OK
+  file10.bin: OK
+  missing.bin: FAILED open or read
+  ok 10, changed 1, unread 1, lines not understood 1
+the tree over the largest file, in pieces of 1,024 bytes and of 100
+  sha256  a5a06b2a6afba37fabb82729cdabc7b4c0630e355ddc0c5f6562988c28bf9cbc
+  blake2s eeb2e56b5875b9368fd397b0074b07522e39edd3fe641b2128f2c684859415c6

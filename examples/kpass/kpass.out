@@ -1,0 +1,74 @@
+-- three workers behind one loop
+status: workers 3 active 0 accepted 0 completed 0 lost 0 replaced 0 draining 0
+-- a TCP client
+t> echo hello, worker
+t< hello, worker
+t> upper kern passes descriptors
+t< KERN PASSES DESCRIPTORS
+t> sum 1 2 3 40
+t< 46
+t> sum 1 two
+t< ERR sum takes whole numbers
+t> sum 18446744073709551615 1
+t< ERR sum overflows
+t> whoami
+t< ERR whoami needs a Unix-domain connection
+t> frobnicate
+t< ERR unknown command
+t> quit
+t< bye
+then the worker closes the connection: yes
+-- a Unix-domain client
+whoami is the user and group the client sees at its own peer: yes
+u> quit
+u< bye
+-- four connections, each to the worker with the fewest
+a> worker
+a< worker 0 incarnation 1
+b> worker
+b< worker 1 incarnation 1
+c> worker
+c< worker 2 incarnation 1
+d> worker
+d< worker 0 incarnation 1
+-- b quits, and the next connection goes where it was
+b> quit
+b< bye
+e> worker
+e< worker 1 incarnation 1
+-- e sets an idle limit and says nothing more
+e> idle 25
+e< idle limit 25 ms
+e< idle: closing
+then the worker closes the connection: yes
+-- d makes its worker crash; a is served by the same worker
+d's connection is closed: yes
+a's connection is closed: yes
+status: workers 3 active 1 accepted 7 completed 4 lost 2 replaced 1 draining 0
+f> worker
+f< worker 0 incarnation 2
+-- Terminate: nothing new is accepted, what is open is served
+a new connection is refused: yes
+c> echo still served
+c< still served
+c> quit
+c< bye
+f> sum 20 22
+f< 42
+f> quit
+f< bye
+the server's log:
+  3 workers started
+  worker 0 died with 2 connections in flight; replaced
+  draining: 2 connections in flight
+  every worker drained before the deadline
+-- a second server: one worker, and a client that stays past the deadline
+g> echo here to stay
+g< here to stay
+the connection is closed when the deadline has passed: yes
+the server's log:
+  1 worker started
+  draining: 1 connection in flight
+  worker 0 was stopped at the deadline with 1 connection in flight
+-- afterwards
+as many descriptors are open as before the servers: yes

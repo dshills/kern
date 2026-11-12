@@ -1,0 +1,64 @@
+-- a new store: 400 keys in a shuffled order, through 24 frames
+entries 400, height 3, pages 73, free 0, commit 5
+cache: 24 frames, 1291 hits, 210 misses, 186 evictions, 140 pages read, 239 written
+check: 400 entries in 68 leaves under 3 interior pages, 0 free pages, 0 problems
+-- lookups
+station-00000/observations/temperature/hourly/quality-checked = reading 1 ...... (331 bytes)
+station-00234/observations/temperature/hourly/quality-checked = reading 8659 ... (485 bytes)
+station-00399/observations/temperature/hourly/quality-checked = reading 14764 .. (368 bytes)
+station-00400 is not there
+a is not there
+-- scans along the leaves
+  station-00198/observations/temperature/hourly/quality-checked 445
+  station-00199/observations/temperature/hourly/quality-checked 452
+  station-00200/observations/temperature/hourly/quality-checked 459
+  station-00201/observations/temperature/hourly/quality-checked 466
+  station-00202/observations/temperature/hourly/quality-checked 473
+from station-00198 to station-00203: 5
+all: 400 entries, 0 out of order
+from station-00390 on: 10, past the last key: 0
+-- deletes: a run of 120 keys, and every fifth of the rest
+a key that is gone can be deleted again: false
+entries 224, height 3, pages 73, free 20, commit 5
+cache: 24 frames, 1939 hits, 419 misses, 395 evictions, 349 pages read, 286 written
+check: 224 entries in 48 leaves under 3 interior pages, 20 free pages, 0 problems
+-- longer values for 60 keys, and 40 of the deleted keys again
+entries 264, height 3, pages 73, free 12, commit 6
+cache: 24 frames, 2367 hits, 514 misses, 490 evictions, 444 pages read, 331 written
+-- opened again, for reading, through 8 frames
+wrong against the model: 0
+check: 264 entries in 56 leaves under 3 interior pages, 12 free pages, 0 problems
+entries 264, height 3, pages 73, free 12, commit 6
+cache: 8 frames, 216 hits, 172 misses, 164 evictions, 172 pages read, 0 written
+a reader's put: the store is open for reading
+-- a header torn after its pages were written
+  the header has a damaged copy: a writer will repair it
+  the header counts other entries than the leaves hold
+  the header counts pages that are neither in the tree nor free
+check: 241 entries in 51 leaves under 3 interior pages, 12 free pages, 3 problems
+a writer opened it and repaired the header: true
+entries 241, height 3, pages 73, free 17, commit 8
+cache: 24 frames, 52 hits, 72 misses, 48 evictions, 55 pages read, 17 written
+check: 241 entries in 51 leaves under 3 interior pages, 17 free pages, 0 problems
+zebra = striped (7 bytes)
+wrong against the model: 0
+-- a page with one byte changed, and changed back
+station-00042/observations/temperature/hourly/quality-checked: page 34 fails its checksum
+  page 34 fails its checksum
+  page 56 is not linked to the leaf before it
+  the header counts other entries than the leaves hold
+  the header counts pages that are neither in the tree nor free
+check: 234 entries in 50 leaves under 3 interior pages, 17 free pages, 4 problems
+-- two opens of one store
+a second writer: refused: the store has a writer
+a reader beside the idle writer: done
+the writer's commit beside the reader: refused: the pages are in use by another open of the store
+yak is not there
+the same commit with the reader gone: done
+yak = shaggy (6 bytes)
+a reader beside a writer that is writing pages: refused: the pages are in use by another open of the store
+a reader after the commit: done
+-- every key deleted, and one put
+check: 0 entries in 1 leaves under 0 interior pages, 70 free pages, 0 problems
+entries 1, height 1, pages 73, free 70, commit 11
+cache: 24 frames, 915 hits, 168 misses, 144 evictions, 168 pages read, 65 written

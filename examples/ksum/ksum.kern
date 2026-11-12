@@ -1,0 +1,1385 @@
+//! phase: 6
+//! expect: output ksum
+// ksum: prints and checks the digests of files, in the manner of shasum,
+// with six algorithms written here behind one interface.
+//
+//     ksum [-a ALGO] [-j N] FILE...     one line "HEX  NAME" for each file
+//     ksum [-a ALGO] [-j N] -c SUMS     checks the files such lines name
+//     ksum --tree FILE                  the root of the file's hash tree
+//
+// ALGO is sha256 (the default), sha512, sha1, md5, blake2s or crc32c; -j
+// sets the number of hashing threads (0: the thread that started does
+// it). The lines are those shasum and md5sum write and read. -c takes
+// the algorithm from the length of the first digest when -a is not
+// given, and exits 1 when a file does not match or cannot be read.
+// --tree hashes the file in pieces of 1,024 bytes into the SHA-256 tree
+// of RFC 6962 (a leaf is H(00 piece), a node H(01 left right)).
+//
+// How it is built:
+//   - Hasher is the interface: reset, update, finish into the caller's
+//     buffer, and the two sizes as functions of the type, without a
+//     receiver. Core is a second one, a compression function with its
+//     chaining value, and Md[C: Core] is a Hasher for any Core: the
+//     buffering, padding and length of SHA-256, SHA-512, SHA-1 and MD5
+//     are written once, and a Core holds only what differs (word size,
+//     byte order, rounds). BLAKE2s and CRC-32C implement Hasher
+//     themselves, and Hmac[H] is a Hasher over any Hasher, so pbkdf2,
+//     hkdf, hex_digest and merkle_root take any of them. Nothing is
+//     dispatched at run time: every use is compiled for its hasher, and
+//     the algorithm named on the command line is a match on Algo.
+//   - The compression functions declare that they allocate nothing and
+//     index nothing the compiler has not proved in range
+//     (budget { allocations 0; bounds_checks 0 }): a schedule is sixteen
+//     words addressed under a mask, and a block's words are read behind
+//     a test of the block's length.
+//   - Arithmetic is modulo a power of two by request only: a sum is
+//     wrapping_add and a rotation a shift right and a wrapping shift
+//     left, since + and << trap on what they would lose.
+//   - Many files go through three stages joined by two bounded channels:
+//     one thread opens the files and reads the small ones, N threads
+//     hash (a large file is mapped by the thread that hashes it), and
+//     the thread that started writes the results in the order of the
+//     arguments, holding back those that come early. A full channel
+//     stops the stage that fills it, so the files in memory are bounded
+//     by the channels' depth however slow the hashing is.
+//
+// With no arguments the program checks every algorithm against published
+// vectors, hashes generated files on threads and on one thread and
+// compares, and verifies a check file, which is how it runs as a test.
+module ksum
+import "std/io"
+import "std/mem"
+import "std/str"
+import "std/sync"
+
+// ---- the interfaces ----
+
+interface Hasher {
+    // reset begins a new message.
+    func reset(edit self)
+    func update(edit self, data: view[]u8)
+    // finish writes the digest to the first digest_size bytes of into,
+    // which must be that long; the hasher is then spent until reset.
+    func finish(edit self, into: edit[]u8)
+    // The sizes belong to the type, not to a value: H.digest_size().
+    func block_size() -> usize
+    func digest_size() -> usize
+}
+
+// Core is a chaining value and the function that mixes one block into it.
+interface Core {
+    func init(edit self)
+    // compress takes a block of exactly block_bytes bytes.
+    func compress(edit self, block: view[]u8)
+    func emit(view self, into: edit[]u8)
+    func block_bytes() -> usize
+    func digest_bytes() -> usize
+    // big_endian says how the message length is written.
+    func big_endian() -> bool
+}
+
+// ---- words ----
+
+const ones: u32 = 4294967295u32
+
+func rotl32(x: u32, n: u32) -> u32 { return wrapping_shl(x, n) | (x >> (32u32 - n)) }
+func rotr32(x: u32, n: u32) -> u32 { return (x >> n) | wrapping_shl(x, 32u32 - n) }
+func rotr64(x: u64, n: u32) -> u64 { return (x >> n) | wrapping_shl(x, 64u32 - n) }
+
+// words32 reads a 64-byte block as sixteen words. The test of the length
+// is what proves each read in range; a block is never short.
+budget { allocations 0; bounds_checks 0 }
+func words32(block: view[]u8, w: edit[[16]u32], big: bool) {
+    for i in 0usize..16usize {
+        at := i * 4usize
+        if at + 4usize <= len(block) {
+            if big { w[i] = load_be[u32](block, at) } else { w[i] = load_le[u32](block, at) }
+        }
+    }
+}
+
+// emit32 writes words as bytes, as many as into has room for.
+budget { allocations 0; bounds_checks 0 }
+func emit32(words: view[]u32, into: edit[]u8, big: bool) {
+    for i in 0usize..len(words) {
+        at := i * 4usize
+        if at + 4usize <= len(into) {
+            if big { store_be[u32](into, at, words[i]) } else { store_le[u32](into, at, words[i]) }
+        }
+    }
+}
+
+// clear zeroes the bytes of buf from a to b.
+func clear(buf: edit[]u8, a: usize, b: usize) {
+    for i in a..b { buf[i] = 0u8 }
+}
+
+// put copies src to into from at, as much as there is room for, and
+// returns the place after the last byte written.
+func put(into: edit[]u8, at: usize, src: view[]u8) -> usize {
+    var to: usize = at
+    for b in src {
+        if to >= len(into) { break }
+        into[to] = b
+        to = to + 1usize
+    }
+    return to
+}
+
+// ---- SHA-256 (FIPS 180-4) ----
+
+const sha256_iv: [8]u32 = [1779033703u32, 3144134277u32, 1013904242u32, 2773480762u32, 1359893119u32, 2600822924u32, 528734635u32, 1541459225u32]
+const sha256_k: [64]u32 = [1116352408u32, 1899447441u32, 3049323471u32, 3921009573u32, 961987163u32, 1508970993u32, 2453635748u32, 2870763221u32, 3624381080u32, 310598401u32, 607225278u32, 1426881987u32, 1925078388u32, 2162078206u32, 2614888103u32, 3248222580u32, 3835390401u32, 4022224774u32, 264347078u32, 604807628u32, 770255983u32, 1249150122u32, 1555081692u32, 1996064986u32, 2554220882u32, 2821834349u32, 2952996808u32, 3210313671u32, 3336571891u32, 3584528711u32, 113926993u32, 338241895u32, 666307205u32, 773529912u32, 1294757372u32, 1396182291u32, 1695183700u32, 1986661051u32, 2177026350u32, 2456956037u32, 2730485921u32, 2820302411u32, 3259730800u32, 3345764771u32, 3516065817u32, 3600352804u32, 4094571909u32, 275423344u32, 430227734u32, 506948616u32, 659060556u32, 883997877u32, 958139571u32, 1322822218u32, 1537002063u32, 1747873779u32, 1955562222u32, 2024104815u32, 2227730452u32, 2361852424u32, 2428436474u32, 2756734187u32, 3204031479u32, 3329325298u32]
+
+struct Sha256 { h: [8]u32 }
+
+impl Core for Sha256 {
+    func init(edit self) { self.h = sha256_iv }
+
+    budget { allocations 0; bounds_checks 0 }
+    func compress(edit self, block: view[]u8) {
+        var w: [16]u32 = zero()
+        words32(block, w, true)
+        var s: [8]u32 = self.h
+        for t in 0usize..64usize {
+            if t >= 16usize {
+                x := w[(t + 1usize) & 15usize]
+                y := w[(t + 14usize) & 15usize]
+                s0 := rotr32(x, 7u32) ^ rotr32(x, 18u32) ^ (x >> 3u32)
+                s1 := rotr32(y, 17u32) ^ rotr32(y, 19u32) ^ (y >> 10u32)
+                w[t & 15usize] = wrapping_add(wrapping_add(w[t & 15usize], s0), wrapping_add(w[(t + 9usize) & 15usize], s1))
+            }
+            a := s[0]
+            e := s[4]
+            big1 := rotr32(e, 6u32) ^ rotr32(e, 11u32) ^ rotr32(e, 25u32)
+            ch := (e & s[5]) ^ ((e ^ ones) & s[6])
+            t1 := wrapping_add(wrapping_add(wrapping_add(s[7], big1), wrapping_add(ch, sha256_k[t])), w[t & 15usize])
+            big0 := rotr32(a, 2u32) ^ rotr32(a, 13u32) ^ rotr32(a, 22u32)
+            maj := (a & s[1]) ^ (a & s[2]) ^ (s[1] & s[2])
+            s[7] = s[6]; s[6] = s[5]; s[5] = e; s[4] = wrapping_add(s[3], t1)
+            s[3] = s[2]; s[2] = s[1]; s[1] = a; s[0] = wrapping_add(t1, wrapping_add(big0, maj))
+        }
+        for i in 0usize..8usize { self.h[i] = wrapping_add(self.h[i], s[i]) }
+    }
+
+    func emit(view self, into: edit[]u8) { emit32(self.h, into, true) }
+    func block_bytes() -> usize { return 64usize }
+    func digest_bytes() -> usize { return 32usize }
+    func big_endian() -> bool { return true }
+}
+
+// ---- SHA-512: the same shape on 64-bit words, eighty rounds ----
+
+const sha512_iv: [8]u64 = [7640891576956012808u64, 13503953896175478587u64, 4354685564936845355u64, 11912009170470909681u64, 5840696475078001361u64, 11170449401992604703u64, 2270897969802886507u64, 6620516959819538809u64]
+const sha512_k: [80]u64 = [4794697086780616226u64, 8158064640168781261u64, 13096744586834688815u64, 16840607885511220156u64, 4131703408338449720u64, 6480981068601479193u64, 10538285296894168987u64, 12329834152419229976u64, 15566598209576043074u64, 1334009975649890238u64, 2608012711638119052u64, 6128411473006802146u64, 8268148722764581231u64, 9286055187155687089u64, 11230858885718282805u64, 13951009754708518548u64, 16472876342353939154u64, 17275323862435702243u64, 1135362057144423861u64, 2597628984639134821u64, 3308224258029322869u64, 5365058923640841347u64, 6679025012923562964u64, 8573033837759648693u64, 10970295158949994411u64, 12119686244451234320u64, 12683024718118986047u64, 13788192230050041572u64, 14330467153632333762u64, 15395433587784984357u64, 489312712824947311u64, 1452737877330783856u64, 2861767655752347644u64, 3322285676063803686u64, 5560940570517711597u64, 5996557281743188959u64, 7280758554555802590u64, 8532644243296465576u64, 9350256976987008742u64, 10552545826968843579u64, 11727347734174303076u64, 12113106623233404929u64, 14000437183269869457u64, 14369950271660146224u64, 15101387698204529176u64, 15463397548674623760u64, 17586052441742319658u64, 1182934255886127544u64, 1847814050463011016u64, 2177327727835720531u64, 2830643537854262169u64, 3796741975233480872u64, 4115178125766777443u64, 5681478168544905931u64, 6601373596472566643u64, 7507060721942968483u64, 8399075790359081724u64, 8693463985226723168u64, 9568029438360202098u64, 10144078919501101548u64, 10430055236837252648u64, 11840083180663258601u64, 13761210420658862357u64, 14299343276471374635u64, 14566680578165727644u64, 15097957966210449927u64, 16922976911328602910u64, 17689382322260857208u64, 500013540394364858u64, 748580250866718886u64, 1242879168328830382u64, 1977374033974150939u64, 2944078676154940804u64, 3659926193048069267u64, 4368137639120453308u64, 4836135668995329356u64, 5532061633213252278u64, 6448918945643986474u64, 6902733635092675308u64, 7801388544844847127u64]
+
+struct Sha512 { h: [8]u64 }
+
+impl Core for Sha512 {
+    func init(edit self) { self.h = sha512_iv }
+
+    budget { allocations 0; bounds_checks 0 }
+    func compress(edit self, block: view[]u8) {
+        var w: [16]u64 = zero()
+        for i in 0usize..16usize {
+            at := i * 8usize
+            if at + 8usize <= len(block) { w[i] = load_be[u64](block, at) }
+        }
+        var s: [8]u64 = self.h
+        for t in 0usize..80usize {
+            if t >= 16usize {
+                x := w[(t + 1usize) & 15usize]
+                y := w[(t + 14usize) & 15usize]
+                s0 := rotr64(x, 1u32) ^ rotr64(x, 8u32) ^ (x >> 7u32)
+                s1 := rotr64(y, 19u32) ^ rotr64(y, 61u32) ^ (y >> 6u32)
+                w[t & 15usize] = wrapping_add(wrapping_add(w[t & 15usize], s0), wrapping_add(w[(t + 9usize) & 15usize], s1))
+            }
+            a := s[0]
+            e := s[4]
+            big1 := rotr64(e, 14u32) ^ rotr64(e, 18u32) ^ rotr64(e, 41u32)
+            ch := (e & s[5]) ^ ((e ^ 18446744073709551615u64) & s[6])
+            t1 := wrapping_add(wrapping_add(wrapping_add(s[7], big1), wrapping_add(ch, sha512_k[t])), w[t & 15usize])
+            big0 := rotr64(a, 28u32) ^ rotr64(a, 34u32) ^ rotr64(a, 39u32)
+            maj := (a & s[1]) ^ (a & s[2]) ^ (s[1] & s[2])
+            s[7] = s[6]; s[6] = s[5]; s[5] = e; s[4] = wrapping_add(s[3], t1)
+            s[3] = s[2]; s[2] = s[1]; s[1] = a; s[0] = wrapping_add(t1, wrapping_add(big0, maj))
+        }
+        for i in 0usize..8usize { self.h[i] = wrapping_add(self.h[i], s[i]) }
+    }
+
+    func emit(view self, into: edit[]u8) {
+        for i in 0usize..8usize {
+            at := i * 8usize
+            if at + 8usize <= len(into) { store_be[u64](into, at, self.h[i]) }
+        }
+    }
+    func block_bytes() -> usize { return 128usize }
+    func digest_bytes() -> usize { return 64usize }
+    func big_endian() -> bool { return true }
+}
+
+// ---- SHA-1 ----
+
+const sha1_iv: [5]u32 = [1732584193u32, 4023233417u32, 2562383102u32, 271733878u32, 3285377520u32]
+const sha1_k: [4]u32 = [1518500249u32, 1859775393u32, 2400959708u32, 3395469782u32]
+
+struct Sha1 { h: [5]u32 }
+
+impl Core for Sha1 {
+    func init(edit self) { self.h = sha1_iv }
+
+    budget { allocations 0; bounds_checks 0 }
+    func compress(edit self, block: view[]u8) {
+        var w: [16]u32 = zero()
+        words32(block, w, true)
+        var s: [5]u32 = self.h
+        for t in 0usize..80usize {
+            if t >= 16usize {
+                w[t & 15usize] = rotl32(w[(t + 13usize) & 15usize] ^ w[(t + 8usize) & 15usize] ^ w[(t + 2usize) & 15usize] ^ w[t & 15usize], 1u32)
+            }
+            b := s[1]; c := s[2]; d := s[3]
+            var f: u32 = b ^ c ^ d
+            if t < 20usize {
+                f = (b & c) | ((b ^ ones) & d)
+            } else if t >= 40usize && t < 60usize {
+                f = (b & c) | (b & d) | (c & d)
+            }
+            x := wrapping_add(wrapping_add(rotl32(s[0], 5u32), f), wrapping_add(wrapping_add(s[4], sha1_k[(t / 20usize) & 3usize]), w[t & 15usize]))
+            s[4] = d; s[3] = c; s[2] = rotl32(b, 30u32); s[1] = s[0]; s[0] = x
+        }
+        for i in 0usize..5usize { self.h[i] = wrapping_add(self.h[i], s[i]) }
+    }
+
+    func emit(view self, into: edit[]u8) { emit32(self.h, into, true) }
+    func block_bytes() -> usize { return 64usize }
+    func digest_bytes() -> usize { return 20usize }
+    func big_endian() -> bool { return true }
+}
+
+// ---- MD5 (RFC 1321): little-endian words, length and digest ----
+
+const md5_k: [64]u32 = [3614090360u32, 3905402710u32, 606105819u32, 3250441966u32, 4118548399u32, 1200080426u32, 2821735955u32, 4249261313u32, 1770035416u32, 2336552879u32, 4294925233u32, 2304563134u32, 1804603682u32, 4254626195u32, 2792965006u32, 1236535329u32, 4129170786u32, 3225465664u32, 643717713u32, 3921069994u32, 3593408605u32, 38016083u32, 3634488961u32, 3889429448u32, 568446438u32, 3275163606u32, 4107603335u32, 1163531501u32, 2850285829u32, 4243563512u32, 1735328473u32, 2368359562u32, 4294588738u32, 2272392833u32, 1839030562u32, 4259657740u32, 2763975236u32, 1272893353u32, 4139469664u32, 3200236656u32, 681279174u32, 3936430074u32, 3572445317u32, 76029189u32, 3654602809u32, 3873151461u32, 530742520u32, 3299628645u32, 4096336452u32, 1126891415u32, 2878612391u32, 4237533241u32, 1700485571u32, 2399980690u32, 4293915773u32, 2240044497u32, 1873313359u32, 4264355552u32, 2734768916u32, 1309151649u32, 4149444226u32, 3174756917u32, 718787259u32, 3951481745u32]
+const md5_s: [64]u32 = [7u32, 12u32, 17u32, 22u32, 7u32, 12u32, 17u32, 22u32, 7u32, 12u32, 17u32, 22u32, 7u32, 12u32, 17u32, 22u32, 5u32, 9u32, 14u32, 20u32, 5u32, 9u32, 14u32, 20u32, 5u32, 9u32, 14u32, 20u32, 5u32, 9u32, 14u32, 20u32, 4u32, 11u32, 16u32, 23u32, 4u32, 11u32, 16u32, 23u32, 4u32, 11u32, 16u32, 23u32, 4u32, 11u32, 16u32, 23u32, 6u32, 10u32, 15u32, 21u32, 6u32, 10u32, 15u32, 21u32, 6u32, 10u32, 15u32, 21u32, 6u32, 10u32, 15u32, 21u32]
+
+struct Md5 { h: [4]u32 }
+
+impl Core for Md5 {
+    func init(edit self) { self.h = [sha1_iv[0], sha1_iv[1], sha1_iv[2], sha1_iv[3]] }
+
+    budget { allocations 0; bounds_checks 0 }
+    func compress(edit self, block: view[]u8) {
+        var m: [16]u32 = zero()
+        words32(block, m, false)
+        var s: [4]u32 = self.h
+        for i in 0usize..64usize {
+            b := s[1]; c := s[2]; d := s[3]
+            var f: u32 = 0u32
+            var g: usize = i % 16usize
+            if i < 16usize {
+                f = (b & c) | ((b ^ ones) & d)
+            } else if i < 32usize {
+                f = (d & b) | ((d ^ ones) & c)
+                g = (5usize * i + 1usize) % 16usize
+            } else if i < 48usize {
+                f = b ^ c ^ d
+                g = (3usize * i + 5usize) % 16usize
+            } else {
+                f = c ^ (b | (d ^ ones))
+                g = (7usize * i) % 16usize
+            }
+            x := wrapping_add(wrapping_add(s[0], f), wrapping_add(md5_k[i], m[g]))
+            s[0] = d; s[3] = c; s[2] = b; s[1] = wrapping_add(b, rotl32(x, md5_s[i]))
+        }
+        for i in 0usize..4usize { self.h[i] = wrapping_add(self.h[i], s[i]) }
+    }
+
+    func emit(view self, into: edit[]u8) { emit32(self.h, into, false) }
+    func block_bytes() -> usize { return 64usize }
+    func digest_bytes() -> usize { return 16usize }
+    func big_endian() -> bool { return false }
+}
+
+// ---- the construction the four share ----
+
+// Md hashes a message with a Core: whole blocks go to compress where
+// they lie, the rest waits in buf, and finish appends the byte 80, zeros
+// and the length in bits in the last eighth of a block.
+struct Md[C: Core] { core: C; buf: [128]u8; fill: usize; total: u64 }
+
+impl[C: Core] Hasher for Md[C] {
+    func reset(edit self) {
+        self.core.init()
+        self.fill = 0usize
+        self.total = 0u64
+    }
+
+    func update(edit self, data: view[]u8) {
+        bs := C.block_bytes()
+        self.total = wrapping_add(self.total, u64(len(data)))
+        var at: usize = 0usize
+        while at < len(data) {
+            if self.fill == 0usize && at + bs <= len(data) {
+                self.core.compress(data[at : at + bs])
+                at = at + bs
+            } else {
+                self.buf[self.fill] = data[at]
+                self.fill = self.fill + 1usize
+                at = at + 1usize
+                if self.fill == bs {
+                    self.core.compress(self.buf[0usize : bs])
+                    self.fill = 0usize
+                }
+            }
+        }
+    }
+
+    func finish(edit self, into: edit[]u8) {
+        bs := C.block_bytes()
+        self.buf[self.fill] = 128u8
+        clear(self.buf, self.fill + 1usize, bs)
+        if self.fill + 1usize > bs - bs / 8usize {
+            self.core.compress(self.buf[0usize : bs])
+            clear(self.buf, 0usize, bs)
+        }
+        // the length in bits is the count of bytes times eight: its low
+        // 64 bits, and for a 128-bit field the three bits that left them
+        low := wrapping_shl(self.total, 3u32)
+        if C.big_endian() {
+            store_be[u64](self.buf, bs - 8usize, low)
+            if bs == 128usize { store_be[u64](self.buf, bs - 16usize, self.total >> 61u32) }
+        } else {
+            store_le[u64](self.buf, bs - 8usize, low)
+        }
+        self.core.compress(self.buf[0usize : bs])
+        self.core.emit(into)
+    }
+
+    func block_size() -> usize { return C.block_bytes() }
+    func digest_size() -> usize { return C.digest_bytes() }
+}
+
+func md[C: Core](core: own C) -> Md[C] {
+    var h: Md[C] = Md[C] { core: core, buf: zero(), fill: 0usize, total: 0u64 }
+    h.reset()
+    return h
+}
+
+func new_sha256() -> Md[Sha256] { return md(Sha256 { h: zero() }) }
+func new_sha512() -> Md[Sha512] { return md(Sha512 { h: zero() }) }
+func new_sha1() -> Md[Sha1] { return md(Sha1 { h: zero() }) }
+func new_md5() -> Md[Md5] { return md(Md5 { h: zero() }) }
+
+// ---- BLAKE2s (RFC 7693), with an optional key ----
+
+const blake_sigma: [10][16]u8 = [[0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8], [14u8, 10u8, 4u8, 8u8, 9u8, 15u8, 13u8, 6u8, 1u8, 12u8, 0u8, 2u8, 11u8, 7u8, 5u8, 3u8], [11u8, 8u8, 12u8, 0u8, 5u8, 2u8, 15u8, 13u8, 10u8, 14u8, 3u8, 6u8, 7u8, 1u8, 9u8, 4u8], [7u8, 9u8, 3u8, 1u8, 13u8, 12u8, 11u8, 14u8, 2u8, 6u8, 5u8, 10u8, 4u8, 0u8, 15u8, 8u8], [9u8, 0u8, 5u8, 7u8, 2u8, 4u8, 10u8, 15u8, 14u8, 1u8, 11u8, 12u8, 6u8, 8u8, 3u8, 13u8], [2u8, 12u8, 6u8, 10u8, 0u8, 11u8, 8u8, 3u8, 4u8, 13u8, 7u8, 5u8, 15u8, 14u8, 1u8, 9u8], [12u8, 5u8, 1u8, 15u8, 14u8, 13u8, 4u8, 10u8, 0u8, 7u8, 6u8, 3u8, 9u8, 2u8, 8u8, 11u8], [13u8, 11u8, 7u8, 14u8, 12u8, 1u8, 3u8, 9u8, 5u8, 0u8, 15u8, 4u8, 8u8, 6u8, 2u8, 10u8], [6u8, 15u8, 14u8, 9u8, 11u8, 3u8, 0u8, 8u8, 12u8, 2u8, 13u8, 7u8, 1u8, 4u8, 10u8, 5u8], [10u8, 2u8, 8u8, 4u8, 7u8, 6u8, 1u8, 5u8, 15u8, 11u8, 9u8, 14u8, 3u8, 12u8, 13u8, 0u8]]
+
+// BlakeCore is the chaining value and the count of bytes compressed.
+struct BlakeCore { h: [8]u32; t: u64 }
+
+budget { allocations 0; bounds_checks 0 }
+func blake_mix(v: edit[[16]u32], a: usize, b: usize, c: usize, d: usize, x: u32, y: u32) {
+    ia := a & 15usize; ib := b & 15usize; ic := c & 15usize; id := d & 15usize
+    v[ia] = wrapping_add(wrapping_add(v[ia], v[ib]), x)
+    v[id] = rotr32(v[id] ^ v[ia], 16u32)
+    v[ic] = wrapping_add(v[ic], v[id])
+    v[ib] = rotr32(v[ib] ^ v[ic], 12u32)
+    v[ia] = wrapping_add(wrapping_add(v[ia], v[ib]), y)
+    v[id] = rotr32(v[id] ^ v[ia], 8u32)
+    v[ic] = wrapping_add(v[ic], v[id])
+    v[ib] = rotr32(v[ib] ^ v[ic], 7u32)
+}
+
+// pick is the message word the round's permutation puts at place k.
+budget { allocations 0; bounds_checks 0 }
+func pick(m: view[[16]u32], s: view[[16]u8], k: usize) -> u32 { return m[usize(s[k & 15usize]) & 15usize] }
+
+impl BlakeCore {
+    budget { allocations 0; bounds_checks 0 }
+    func compress(edit self, block: view[]u8, last: bool) {
+        var m: [16]u32 = zero()
+        words32(block, m, false)
+        var v: [16]u32 = zero()
+        for i in 0usize..8usize {
+            v[i & 15usize] = self.h[i]
+            v[(i + 8usize) & 15usize] = sha256_iv[i]
+        }
+        // the 64-bit count goes in as two 32-bit halves
+        v[12] = v[12] ^ truncate[u32](self.t)
+        v[13] = v[13] ^ truncate[u32](self.t >> 32u32)
+        if last { v[14] = v[14] ^ ones }
+        for r in 0usize..10usize {
+            s := blake_sigma[r]
+            for j in 0usize..4usize {
+                blake_mix(v, j, 4usize + j, 8usize + j, 12usize + j, pick(m, s, 2usize * j), pick(m, s, 2usize * j + 1usize))
+            }
+            for j in 0usize..4usize {
+                blake_mix(v, j, 4usize + (j + 1usize) % 4usize, 8usize + (j + 2usize) % 4usize, 12usize + (j + 3usize) % 4usize, pick(m, s, 8usize + 2usize * j), pick(m, s, 9usize + 2usize * j))
+            }
+        }
+        for i in 0usize..8usize { self.h[i] = self.h[i] ^ v[i & 15usize] ^ v[(i + 8usize) & 15usize] }
+    }
+}
+
+// Blake2s keeps the last block back, since the final one is compressed
+// with a flag; a key is hashed as a first block of its own.
+struct Blake2s { core: BlakeCore; buf: [64]u8; fill: usize; key: [32]u8; key_len: usize }
+
+impl Hasher for Blake2s {
+    func reset(edit self) {
+        // BLAKE2s starts from the words SHA-256 starts from, the first
+        // mixed with 01 01 (a hash that is not a tree), the key's length
+        // and the digest's, 32
+        self.core.h = sha256_iv
+        self.core.h[0] = self.core.h[0] ^ 16842752u32 ^ wrapping_shl(u32(self.key_len), 8u32) ^ 32u32
+        self.core.t = 0u64
+        self.fill = 0usize
+        if self.key_len > 0usize {
+            clear(self.buf, 0usize, 64usize)
+            end := put(self.buf, 0usize, self.key)
+            self.fill = 64usize
+        }
+    }
+
+    func update(edit self, data: view[]u8) {
+        var at: usize = 0usize
+        while at < len(data) {
+            if self.fill == 64usize {
+                self.core.t = self.core.t + 64u64
+                self.core.compress(self.buf, false)
+                self.fill = 0usize
+            }
+            if self.fill == 0usize && len(data) - at > 64usize {
+                // a whole block that is not the last, where it lies
+                self.core.t = self.core.t + 64u64
+                self.core.compress(data[at : at + 64usize], false)
+                at = at + 64usize
+            } else {
+                self.buf[self.fill] = data[at]
+                self.fill = self.fill + 1usize
+                at = at + 1usize
+            }
+        }
+    }
+
+    func finish(edit self, into: edit[]u8) {
+        self.core.t = self.core.t + u64(self.fill)
+        clear(self.buf, self.fill, 64usize)
+        self.core.compress(self.buf, true)
+        emit32(self.core.h, into, false)
+    }
+
+    func block_size() -> usize { return 64usize }
+    func digest_size() -> usize { return 32usize }
+}
+
+// new_blake2s_keyed is BLAKE2s as a keyed hash: None for a key of more
+// than 32 bytes, which the function does not take.
+func new_blake2s_keyed(key: view[]u8) -> Option[Blake2s] {
+    if len(key) > 32usize { return None }
+    var h: Blake2s = Blake2s { core: BlakeCore { h: zero(), t: 0u64 }, buf: zero(), fill: 0usize, key: zero(), key_len: len(key) }
+    end := put(h.key, 0usize, key)
+    h.reset()
+    return Some(h)
+}
+
+func new_blake2s() -> Blake2s {
+    var h: Blake2s = Blake2s { core: BlakeCore { h: zero(), t: 0u64 }, buf: zero(), fill: 0usize, key: zero(), key_len: 0usize }
+    h.reset()
+    return h
+}
+
+// ---- CRC-32C (Castagnoli), four bits at a time ----
+
+const crc_nibble: [16]u32 = [0u32, 274646895u32, 549293790u32, 820201905u32, 1098587580u32, 1361435347u32, 1640403810u32, 1905808397u32, 2197175160u32, 2460548119u32, 2722870694u32, 2987750089u32, 3280807620u32, 3553878443u32, 3811616794u32, 4084100981u32]
+
+budget { allocations 0; bounds_checks 0 }
+func crc32c_bytes(from: u32, data: view[]u8) -> u32 {
+    var c: u32 = from
+    for b in data {
+        c = c ^ u32(b)
+        c = crc_nibble[usize(c & 15u32)] ^ (c >> 4u32)
+        c = crc_nibble[usize(c & 15u32)] ^ (c >> 4u32)
+    }
+    return c
+}
+
+// Crc32c is a checksum, not a digest: it finds accidents and stops no
+// one. It is a Hasher so that the same code runs it.
+struct Crc32c { crc: u32 }
+
+impl Hasher for Crc32c {
+    func reset(edit self) { self.crc = ones }
+    func update(edit self, data: view[]u8) { self.crc = crc32c_bytes(self.crc, data) }
+    func finish(edit self, into: edit[]u8) { store_be[u32](into, 0usize, self.crc ^ ones) }
+    func block_size() -> usize { return 1usize }
+    func digest_size() -> usize { return 4usize }
+}
+
+func new_crc32c() -> Crc32c { return Crc32c { crc: ones } }
+
+// ---- generic code over Hasher ----
+
+// digest hashes data as one message and returns the digest's length.
+func digest[H: Hasher](h: edit[H], data: view[]u8, into: edit[]u8) -> usize {
+    h.reset()
+    h.update(data)
+    h.finish(into)
+    return H.digest_size()
+}
+
+const hex_digits: view[]u8 = "0123456789abcdef"
+
+func push_hex(s: edit[str.String], bytes: view[]u8) {
+    for b in bytes {
+        s.push(hex_digits[usize(b >> 4u32)])
+        s.push(hex_digits[usize(b & 15u8)])
+    }
+}
+
+func hex_digest[H: Hasher](h: edit[H], data: view[]u8) -> str.String {
+    var d: [64]u8 = zero()
+    n := digest(h, data, d)
+    s := str.String.new()
+    push_hex(s, d[0usize : n])
+    return s
+}
+
+// Hmac is the keyed hash of RFC 2104 over any Hasher that can be copied:
+// the two hashers that have taken the padded key are kept, so a message
+// costs no more than its own blocks and one for the outer hash.
+struct Hmac[H: Hasher + Copy] { inner: H; outer: H; h: H }
+
+impl[H: Hasher + Copy] Hmac[H] {
+    func new(proto: H, key: view[]u8) -> Hmac[H] {
+        var h: H = proto
+        bs := H.block_size()
+        var k: [128]u8 = zero()
+        if len(key) > bs { n := digest(h, key, k) } else { end := put(k, 0usize, key) }
+        var pad: [128]u8 = zero()
+        for i in 0usize..128usize { pad[i] = k[i] ^ 54u8 }
+        h.reset()
+        h.update(pad[0usize : bs])
+        inner := h
+        for i in 0usize..128usize { pad[i] = k[i] ^ 92u8 }
+        h.reset()
+        h.update(pad[0usize : bs])
+        return Hmac[H] { inner: inner, outer: h, h: inner }
+    }
+}
+
+impl[H: Hasher + Copy] Hasher for Hmac[H] {
+    func reset(edit self) { self.h = self.inner }
+    func update(edit self, data: view[]u8) { self.h.update(data) }
+    func finish(edit self, into: edit[]u8) {
+        var d: [64]u8 = zero()
+        self.h.finish(d)
+        n := H.digest_size()
+        self.h = self.outer
+        self.h.update(d[0usize : n])
+        self.h.finish(into)
+    }
+    func block_size() -> usize { return H.block_size() }
+    func digest_size() -> usize { return H.digest_size() }
+}
+
+// pbkdf2 fills into with the key RFC 8018 derives from a password: block
+// i is the exclusive or of rounds chained HMACs of the salt and i (one,
+// for rounds below 2). Like hkdf it works in arrays of its own.
+budget { allocations 0 }
+func pbkdf2[H](proto: H, password: view[]u8, salt: view[]u8, rounds: u32, into: edit[]u8) where H: Hasher + Copy {
+    mac := Hmac[H].new(proto, password)
+    dn := H.digest_size()
+    var u: [64]u8 = zero()
+    var t: [64]u8 = zero()
+    var number: [4]u8 = zero()
+    var block: u32 = 1u32
+    var at: usize = 0usize
+    while at < len(into) {
+        store_be[u32](number, 0usize, block)
+        mac.reset()
+        mac.update(salt)
+        mac.update(number)
+        mac.finish(u)
+        t = u
+        for r in 1u32..rounds {
+            mac.reset()
+            mac.update(u[0usize : dn])
+            mac.finish(u)
+            for i in 0usize..64usize { t[i] = t[i] ^ u[i] }
+        }
+        at = put(into, at, t[0usize : dn])
+        block = block + 1u32
+    }
+}
+
+// hkdf is RFC 5869: a key is extracted from the input with the salt,
+// then expanded with info into as many bytes as into holds. It returns
+// false, having written nothing, for more than 255 digests of output.
+budget { allocations 0 }
+func hkdf[H](proto: H, salt: view[]u8, input: view[]u8, info: view[]u8, into: edit[]u8) -> bool where H: Hasher + Copy {
+    extract := Hmac[H].new(proto, salt)
+    var prk: [64]u8 = zero()
+    dn := digest(extract, input, prk)
+    if len(into) > 255usize * dn { return false }
+    expand := Hmac[H].new(proto, prk[0usize : dn])
+    var t: [64]u8 = zero()
+    var have: usize = 0usize
+    var count: [1]u8 = [0u8]
+    var at: usize = 0usize
+    while at < len(into) {
+        count[0] = count[0] + 1u8
+        expand.reset()
+        expand.update(t[0usize : have])
+        expand.update(info)
+        expand.update(count)
+        expand.finish(t)
+        have = dn
+        at = put(into, at, t[0usize : dn])
+    }
+    return true
+}
+
+const leaf_tag: view[]u8 = "\x00"
+const node_tag: view[]u8 = "\x01"
+
+// merkle_root writes the root of the hash tree over data cut into pieces
+// of chunk bytes (RFC 6962, section 2.1) and returns the number of
+// leaves. A level is built over the one below in the same vector; a node
+// without a sibling moves up as it is.
+func merkle_root[H: Hasher](h: edit[H], data: view[]u8, chunk: usize, into: edit[]u8) -> usize {
+    dn := H.digest_size()
+    var d: [64]u8 = zero()
+    if len(data) == 0usize || chunk == 0usize {
+        n := digest(h, "", into)
+        return 0usize
+    }
+    level := Vec[u8].new()
+    var count: usize = 0usize
+    var at: usize = 0usize
+    while at < len(data) {
+        var end: usize = len(data)
+        if end - at > chunk { end = at + chunk }
+        h.reset()
+        h.update(leaf_tag)
+        h.update(data[at : end])
+        h.finish(d)
+        level.extend(d[0usize : dn])
+        count = count + 1usize
+        at = end
+    }
+    var n: usize = count
+    while n > 1usize {
+        var made: usize = 0usize
+        var i: usize = 0usize
+        while i < n {
+            with below := level.as_view() {
+                if i + 1usize < n {
+                    h.reset()
+                    h.update(node_tag)
+                    h.update(below[i * dn : (i + 2usize) * dn])
+                    h.finish(d)
+                } else {
+                    end := put(d, 0usize, below[i * dn : (i + 1usize) * dn])
+                }
+            }
+            with above := level.as_edit() { end := put(above, made * dn, d[0usize : dn]) }
+            made = made + 1usize
+            i = i + 2usize
+        }
+        n = made
+    }
+    with root := level.as_view() { end := put(into, 0usize, root[0usize : dn]) }
+    return count
+}
+
+// ---- the algorithm named at run time ----
+
+union Algo { sha256; sha512; sha1; md5; blake2s; crc32c }
+
+func algo_named(name: view[]u8) -> Option[Algo] {
+    if str.equal(name, "sha256") { return Some(Algo.sha256) }
+    if str.equal(name, "sha512") { return Some(Algo.sha512) }
+    if str.equal(name, "sha1") { return Some(Algo.sha1) }
+    if str.equal(name, "md5") { return Some(Algo.md5) }
+    if str.equal(name, "blake2s") { return Some(Algo.blake2s) }
+    if str.equal(name, "crc32c") { return Some(Algo.crc32c) }
+    return None
+}
+
+// algo_of_width is the algorithm whose digest has that many hexadecimal
+// digits; 64 is taken to be SHA-256.
+func algo_of_width(digits: usize) -> Option[Algo] {
+    if digits == 64usize { return Some(Algo.sha256) }
+    if digits == 128usize { return Some(Algo.sha512) }
+    if digits == 40usize { return Some(Algo.sha1) }
+    if digits == 32usize { return Some(Algo.md5) }
+    if digits == 8usize { return Some(Algo.crc32c) }
+    return None
+}
+
+// ---- the pipeline ----
+
+// Source is a file on its way to be hashed: its bytes, or for a large
+// one the open file, or the fact that it could not be read.
+union Source { Bytes(Vec[u8]); Large(io.File); Unread }
+
+struct Job { index: usize; src: Source }
+
+// Done is the result for the file at index: its digest, or ok false.
+struct Done { index: usize; ok: bool; len: usize; digest: [64]u8 }
+
+const queue_depth: usize = 4usize
+
+// open_source opens a file and reads it, unless it has map_from bytes
+// or more.
+func open_source(path: view[]u8, map_from: u64) -> Result[Source, io.IoErr] {
+    f := io.open_read(path)?
+    m := f.metadata()?
+    if m.size >= map_from { return Ok(Large(f)) }
+    bytes := Vec[u8].new()
+    n := io.read_to_end(f, bytes)?
+    return Ok(Bytes(bytes))
+}
+
+func job_for(paths: view[Vec[Vec[u8]]], i: usize, map_from: u64) -> Job {
+    match open_source(paths.get(i).as_view(), map_from) {
+        Ok(src) => { return Job { index: i, src: src } }
+        Err(e) => { return Job { index: i, src: Unread } }
+    }
+}
+
+func hash_job[H: Hasher](h: edit[H], job: own Job) -> Done {
+    var d: Done = zero()
+    d.index = job.index
+    match job.src {
+        Bytes(bytes) => {
+            d.ok = true
+            d.len = digest(h, bytes.as_view(), d.digest)
+        }
+        Large(f) => {
+            match mem.map_file(f, false) {
+                Ok(m) => {
+                    d.ok = true
+                    with bytes := m.bytes() { d.len = digest(h, bytes, d.digest) }
+                }
+                Err(e) => { }
+            }
+        }
+        Unread => { }
+    }
+    return d
+}
+
+// read_stage sends every file down the channel in order and closes it.
+func read_stage(paths: view[Vec[Vec[u8]]], jobs: view[sync.Channel[Job]], map_from: u64) -> u64 {
+    var sent: u64 = 0u64
+    for i in 0usize..paths.len() {
+        match jobs.send(job_for(paths, i, map_from)) {
+            Ok(u) => { sent = sent + 1u64 }
+            Err(back) => { break }
+        }
+    }
+    jobs.close()
+    return sent
+}
+
+// hash_stage hashes what comes down one channel and sends the results
+// down the other, until the first is closed and empty.
+func hash_stage[H: Hasher + Copy + Send + Share](proto: H, jobs: view[sync.Channel[Job]], done: view[sync.Channel[Done]]) -> u64 {
+    var h: H = proto
+    var hashed: u64 = 0u64
+    while true {
+        match jobs.recv() {
+            Some(job) => {
+                match done.send(hash_job(h, job)) {
+                    Ok(u) => { hashed = hashed + 1u64 }
+                    Err(back) => { return hashed }
+                }
+            }
+            None => { return hashed }
+        }
+    }
+    return hashed
+}
+
+func hash_in_turn[H: Hasher](h: edit[H], paths: view[Vec[Vec[u8]]], map_from: u64, emit: closure(Done)) {
+    for i in 0usize..paths.len() { emit(hash_job(h, job_for(paths, i, map_from))) }
+}
+
+// hash_files hashes every file and calls emit with each result in the
+// order of paths, on the calling thread. With workers 0, or when no
+// thread can be started, the calling thread does all of it.
+func hash_files[H: Hasher + Copy + Send + Share](proto: H, paths: view[Vec[Vec[u8]]], workers: usize, map_from: u64, emit: closure(Done)) {
+    var h: H = proto
+    n := paths.len()
+    if workers == 0usize || n == 0usize {
+        hash_in_turn(h, paths, map_from, emit)
+        return
+    }
+    jobs := sync.Channel[Job].new(queue_depth)
+    done := sync.Channel[Done].new(queue_depth)
+    // held and have are the results that came before their turn
+    held := Vec[Done].new()
+    held.resize(n, zero())
+    have := Vec[bool].new()
+    have.resize(n, false)
+    hashers := Vec[Join[u64]].new()
+    with s := thread.scope() {
+        match s.spawn(read_stage, paths, jobs, map_from) {
+            Ok(reader) => {
+                for w in 0usize..workers {
+                    match s.spawn(hash_stage[H], proto, jobs, done) {
+                        Ok(j) => hashers.push(j)
+                        Err(e) => { }
+                    }
+                }
+                var next: usize = 0usize
+                if hashers.len() == 0usize {
+                    // the reader sends in order, so this thread can hash
+                    // and write as the files come
+                    while true {
+                        match jobs.recv() {
+                            Some(job) => emit(hash_job(h, job))
+                            None => { break }
+                        }
+                    }
+                    next = n
+                }
+                while next < n {
+                    match done.recv() {
+                        Some(d) => {
+                            with slot := held.at(d.index) { slot = d }
+                            with flag := have.at(d.index) { flag = true }
+                            while next < n && have.get(next) == true {
+                                emit(held.get(next))
+                                next = next + 1usize
+                            }
+                        }
+                        None => { break }
+                    }
+                }
+                sent := reader.get()
+                while true {
+                    match hashers.pop() {
+                        Some(j) => { hashed := j.get() }
+                        None => { break }
+                    }
+                }
+            }
+            Err(e) => hash_in_turn(h, paths, map_from, emit)
+        }
+    }
+}
+
+// sums_for is hash_files compiled for each algorithm, and the one place
+// where the algorithm is chosen as the program runs.
+func sums_for(a: Algo, paths: view[Vec[Vec[u8]]], workers: usize, map_from: u64, emit: closure(Done)) {
+    match a {
+        sha256 => hash_files(new_sha256(), paths, workers, map_from, emit)
+        sha512 => hash_files(new_sha512(), paths, workers, map_from, emit)
+        sha1 => hash_files(new_sha1(), paths, workers, map_from, emit)
+        md5 => hash_files(new_md5(), paths, workers, map_from, emit)
+        blake2s => hash_files(new_blake2s(), paths, workers, map_from, emit)
+        crc32c => hash_files(new_crc32c(), paths, workers, map_from, emit)
+    }
+}
+
+// tree_of is the root of the hash tree over data, in hexadecimal.
+func tree_of[H: Hasher](h: edit[H], data: view[]u8, chunk: usize) -> str.String {
+    var d: [64]u8 = zero()
+    leaves := merkle_root(h, data, chunk, d)
+    s := str.String.new()
+    push_hex(s, d[0usize : H.digest_size()])
+    return s
+}
+
+// ---- check files ----
+
+// Entry is one line of a check file: the digest as written, in lower
+// case, and the name.
+struct Entry { name: Vec[u8]; want: Vec[u8] }
+
+struct Verdict { ok: usize; failed: usize; unread: usize; malformed: usize }
+
+// nibble is the value of a hexadecimal digit, or 255.
+func nibble(c: u8) -> u8 {
+    if c >= 48u8 && c <= 57u8 { return c - 48u8 }
+    if c >= 97u8 && c <= 102u8 { return c - 87u8 }
+    if c >= 65u8 && c <= 70u8 { return c - 55u8 }
+    return 255u8
+}
+
+// parse_sums reads lines of the form "HEX  NAME" (or "HEX *NAME") and
+// returns how many lines were something else.
+func parse_sums(text: view[]u8, entries: edit[Vec[Entry]]) -> usize {
+    var malformed: usize = 0usize
+    var start: usize = 0usize
+    while start < len(text) {
+        var end: usize = start
+        while end < len(text) && text[end] != 10u8 { end = end + 1usize }
+        var stop: usize = end
+        if stop > start && text[stop - 1usize] == 13u8 { stop = stop - 1usize }
+        var i: usize = start
+        while i < stop && nibble(text[i]) != 255u8 { i = i + 1usize }
+        digits := i - start
+        if digits > 0usize && digits % 2usize == 0usize && i + 2usize < stop && text[i] == 32u8 && (text[i + 1usize] == 32u8 || text[i + 1usize] == 42u8) {
+            want := Vec[u8].new()
+            for c in text[start : i] { want.push(hex_digits[usize(nibble(c) & 15u8)]) }
+            name := Vec[u8].new()
+            name.extend(text[i + 2usize : stop])
+            entries.push(Entry { name: name, want: want })
+        } else if stop > start {
+            malformed = malformed + 1usize
+        }
+        start = end + 1usize
+    }
+    return malformed
+}
+
+// verify hashes the files the entries name and writes a line for each:
+// lead, then the name without its first skip bytes, then the finding.
+func verify(a: Algo, entries: view[Vec[Entry]], workers: usize, map_from: u64, lead: view[]u8, skip: usize) -> Verdict {
+    paths := Vec[Vec[u8]].new()
+    for e in entries.as_view() { paths.push(e.name.clone()) }
+    var v: Verdict = Verdict { ok: 0usize, failed: 0usize, unread: 0usize, malformed: 0usize }
+    got := str.String.new()
+    sums_for(a, paths, workers, map_from, |d| {
+        with e := entries.get(d.index) {
+            print_str(lead)
+            with name := e.name.as_view() { print_str(name[skip : len(name)]) }
+            got.clear()
+            push_hex(got, d.digest[0usize : d.len])
+            if !d.ok {
+                v.unread = v.unread + 1usize
+                say(": FAILED open or read")
+            } else if str.equal(got.as_view(), e.want.as_view()) {
+                v.ok = v.ok + 1usize
+                say(": OK")
+            } else {
+                v.failed = v.failed + 1usize
+                say(": FAILED")
+            }
+        }
+    })
+    return v
+}
+
+// ---- the demonstration ----
+
+func say(s: view[]u8) { print_str(s); println() }
+
+struct Tally { run: usize; failed: usize }
+
+func check(t: edit[Tally], what: view[]u8, got: view[]u8, want: view[]u8) {
+    t.run = t.run + 1usize
+    if str.equal(got, want) { print_str("  ok    ") } else { print_str("  FAIL  "); t.failed = t.failed + 1usize }
+    say(what)
+}
+
+func repeat(b: u8, n: usize) -> Vec[u8] {
+    bytes := Vec[u8].new()
+    bytes.resize(n, b)
+    return bytes
+}
+
+// counting is n bytes: from, from + 1, and so on.
+func counting(from: u8, n: usize) -> Vec[u8] {
+    bytes := Vec[u8].new()
+    for i in 0usize..n { bytes.push(wrapping_add(from, truncate[u8](i))) }
+    return bytes
+}
+
+func joined(a: view[]u8, b: view[]u8) -> str.String {
+    s := str.String.from(a)
+    s.push_str(b)
+    return s
+}
+
+const two_blocks: view[]u8 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+
+// plain checks a hasher against its digests of nothing, of "abc", of the
+// 448-bit message that needs a second block, and of a thousand "a" (the
+// usual million, a thousandth of it for the interpreter's sake), given
+// in pieces of 1, 2, 3, ... bytes: every fill of the buffer, and every
+// way a piece can lie across the end of a block.
+func plain[H: Hasher](t: edit[Tally], name: view[]u8, h: edit[H], empty: view[]u8, abc: view[]u8, two: view[]u8, thousand: view[]u8) {
+    check(t, joined(name, " of nothing").as_view(), hex_digest(h, "").as_view(), empty)
+    check(t, joined(name, " of abc").as_view(), hex_digest(h, "abc").as_view(), abc)
+    check(t, joined(name, " of 448 bits").as_view(), hex_digest(h, two_blocks).as_view(), two)
+    many := repeat(97u8, 1000usize)
+    var d: [64]u8 = zero()
+    h.reset()
+    var at: usize = 0usize
+    var step: usize = 1usize
+    with bytes := many.as_view() {
+        while at < len(bytes) {
+            var end: usize = at + step
+            if end > len(bytes) { end = len(bytes) }
+            h.update(bytes[at : end])
+            at = end
+            step = step + 1usize
+        }
+    }
+    h.finish(d)
+    got := str.String.new()
+    push_hex(got, d[0usize : H.digest_size()])
+    check(t, joined(name, " of a thousand a, in pieces").as_view(), got.as_view(), thousand)
+}
+
+// keyed checks an HMAC through the Hasher interface.
+func keyed[H: Hasher + Copy](t: edit[Tally], what: view[]u8, proto: H, key: view[]u8, data: view[]u8, want: view[]u8) {
+    mac := Hmac[H].new(proto, key)
+    check(t, what, hex_digest(mac, data).as_view(), want)
+}
+
+func derived[H: Hasher + Copy](t: edit[Tally], what: view[]u8, proto: H, password: view[]u8, salt: view[]u8, rounds: u32, n: usize, want: view[]u8) {
+    key := repeat(0u8, n)
+    pbkdf2(proto, password, salt, rounds, key.as_edit())
+    got := str.String.new()
+    push_hex(got, key.as_view())
+    check(t, what, got.as_view(), want)
+}
+
+func expanded[H: Hasher + Copy](t: edit[Tally], what: view[]u8, proto: H, salt: view[]u8, input: view[]u8, info: view[]u8, n: usize, want: view[]u8) {
+    key := repeat(0u8, n)
+    got := str.String.new()
+    if hkdf(proto, salt, input, info, key.as_edit()) { push_hex(got, key.as_view()) }
+    check(t, what, got.as_view(), want)
+}
+
+func vectors(t: edit[Tally]) {
+    h0 := new_sha256()
+    plain(t, "sha256", h0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3")
+    h1 := new_sha512()
+    plain(t, "sha512", h1, "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e", "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f", "204a8fc6dda82f0a0ced7beb8e08a41657c16ef468b228a8279be331a703c33596fd15c13b1b07f9aa1d3bea57789ca031ad85c7a71dd70354ec631238ca3445", "67ba5535a46e3f86dbfbed8cbbaf0125c76ed549ff8b0b9e03e0c88cf90fa634fa7b12b47d77b694de488ace8d9a65967dc96df599727d3292a8d9d447709c97")
+    h2 := new_sha1()
+    plain(t, "sha1", h2, "da39a3ee5e6b4b0d3255bfef95601890afd80709", "a9993e364706816aba3e25717850c26c9cd0d89d", "84983e441c3bd26ebaae4aa1f95129e5e54670f1", "291e9a6c66994949b57ba5e650361e98fc36b1ba")
+    h3 := new_md5()
+    plain(t, "md5", h3, "d41d8cd98f00b204e9800998ecf8427e", "900150983cd24fb0d6963f7d28e17f72", "8215ef0796a20bcaaae116d3876c664a", "cabe45dcc9ae5b66ba86600cca6b8ba8")
+    h4 := new_blake2s()
+    plain(t, "blake2s", h4, "69217a3079908094e11121d042354a7c1f55b6482ca1a51e1b250dfd1ed0eef9", "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982", "6f4df5116a6f332edab1d9e10ee87df6557beab6259d7663f3bcd5722c13f189", "a4691c2bf852334ece63c024234338fc6c150bdf04fa3f6e0e4c5209b326438d")
+    h5 := new_crc32c()
+    plain(t, "crc32c", h5, "00000000", "364b3fb7", "071325f5", "9f19ef6a")
+    // the check value of the CRC catalogue, and three of RFC 3720, B.4
+    check(t, "crc32c of 123456789", hex_digest(h5, "123456789").as_view(), "e3069283")
+    zeros := repeat(0u8, 32usize)
+    check(t, "crc32c of 32 zero bytes", hex_digest(h5, zeros.as_view()).as_view(), "8a9136aa")
+    full := repeat(255u8, 32usize)
+    check(t, "crc32c of 32 bytes of ones", hex_digest(h5, full.as_view()).as_view(), "62a8ab43")
+    rising := counting(0u8, 32usize)
+    check(t, "crc32c of 32 rising bytes", hex_digest(h5, rising.as_view()).as_view(), "46dd794e")
+    // BLAKE2s with a key: the first and the last line of the reference table
+    most := counting(0u8, 255usize)
+    match new_blake2s_keyed(rising.as_view()) {
+        Some(with_key) => {
+            check(t, "blake2s keyed, of nothing", hex_digest(with_key, "").as_view(), "48a8997da407876b3d79c0d92325ad3b89cbb754d86ab71aee047ad345fd2c49")
+            check(t, "blake2s keyed, of 255 bytes", hex_digest(with_key, most.as_view()).as_view(), "3fb735061abc519dfe979e54c1ee5bfad0a9d858b3315bad34bde999efd724dd")
+        }
+        None => check(t, "blake2s takes a key of 32 bytes", "no", "yes")
+    }
+    match new_blake2s_keyed(most.as_view()) {
+        Some(with_key) => check(t, "blake2s refuses a key of 255 bytes", "no", "yes")
+        None => check(t, "blake2s refuses a key of 255 bytes", "yes", "yes")
+    }
+    // HMAC: RFC 4231 cases 1, 2, 3 and 6 (a key longer than a block), RFC 2202
+    k0b := repeat(11u8, 20usize)
+    kaa := repeat(170u8, 20usize)
+    long_key := repeat(170u8, 131usize)
+    dd := repeat(221u8, 50usize)
+    keyed(t, "hmac-sha256, RFC 4231 case 1", new_sha256(), k0b.as_view(), "Hi There", "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
+    keyed(t, "hmac-sha256, RFC 4231 case 2", new_sha256(), "Jefe", "what do ya want for nothing?", "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+    keyed(t, "hmac-sha256, RFC 4231 case 3", new_sha256(), kaa.as_view(), dd.as_view(), "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe")
+    keyed(t, "hmac-sha256, RFC 4231 case 6", new_sha256(), long_key.as_view(), "Test Using Larger Than Block-Size Key - Hash Key First", "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")
+    keyed(t, "hmac-sha512, RFC 4231 case 1", new_sha512(), k0b.as_view(), "Hi There", "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854")
+    keyed(t, "hmac-sha512, RFC 4231 case 2", new_sha512(), "Jefe", "what do ya want for nothing?", "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737")
+    keyed(t, "hmac-sha512, RFC 4231 case 3", new_sha512(), kaa.as_view(), dd.as_view(), "fa73b0089d56a284efb0f0756c890be9b1b5dbdd8ee81a3655f83e33b2279d39bf3e848279a722c806b485a47e67c807b946a337bee8942674278859e13292fb")
+    keyed(t, "hmac-sha512, RFC 4231 case 6", new_sha512(), long_key.as_view(), "Test Using Larger Than Block-Size Key - Hash Key First", "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598")
+    keyed(t, "hmac-sha1, RFC 2202 case 1", new_sha1(), k0b.as_view(), "Hi There", "b617318655057264e28bc0b6fb378c8ef146be00")
+    keyed(t, "hmac-sha1, RFC 2202 case 2", new_sha1(), "Jefe", "what do ya want for nothing?", "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79")
+    with key16 := k0b.as_view() {
+        keyed(t, "hmac-md5, RFC 2202 case 1", new_md5(), key16[0usize : 16usize], "Hi There", "9294727a3638bb1c13f48ef8158bfc9d")
+    }
+    keyed(t, "hmac-blake2s, the key and text of case 2", new_blake2s(), "Jefe", "what do ya want for nothing?", "90b6281e2f3038c9056af0b4a7e763cae6fe5d9eb4386a0ec95237890c104ff0")
+    // PBKDF2: RFC 6070 cases 1 and 2, case 5 with 3 rounds for its 4,096, and SHA-256
+    derived(t, "pbkdf2-hmac-sha1, 1 round", new_sha1(), "password", "salt", 1u32, 20usize, "0c60c80f961f0e71f3a9b524af6012062fe037a6")
+    derived(t, "pbkdf2-hmac-sha1, 2 rounds", new_sha1(), "password", "salt", 2u32, 20usize, "ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957")
+    derived(t, "pbkdf2-hmac-sha1, 3 rounds, 25 bytes", new_sha1(), "passwordPASSWORDpassword", "saltSALTsaltSALTsaltSALTsaltSALTsalt", 3u32, 25usize, "12bff094c08980616953161b483d7890d5c26e2b22e694bac5")
+    derived(t, "pbkdf2-hmac-sha256, 2 rounds, 40 bytes", new_sha256(), "password", "salt", 2u32, 40usize, "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43830651afcb5c862f")
+    // HKDF: RFC 5869 cases 1 to 4
+    ikm := repeat(11u8, 22usize)
+    salt1 := counting(0u8, 13usize)
+    info1 := counting(240u8, 10usize)
+    ikm2 := counting(0u8, 80usize)
+    salt2 := counting(96u8, 80usize)
+    info2 := counting(176u8, 80usize)
+    expanded(t, "hkdf-sha256, RFC 5869 case 1", new_sha256(), salt1.as_view(), ikm.as_view(), info1.as_view(), 42usize, "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
+    expanded(t, "hkdf-sha256, RFC 5869 case 2", new_sha256(), salt2.as_view(), ikm2.as_view(), info2.as_view(), 82usize, "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87")
+    expanded(t, "hkdf-sha256, RFC 5869 case 3", new_sha256(), "", ikm.as_view(), "", 42usize, "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8")
+    with ikm4 := ikm.as_view() {
+        expanded(t, "hkdf-sha1, RFC 5869 case 4", new_sha1(), salt1.as_view(), ikm4[0usize : 11usize], info1.as_view(), 42usize, "085a01ea1b10f36933068b56efa5ad81a4f14b822f5b091568a9cdd4f155fda2c22e422478d305f3f896")
+    }
+    // hash trees, against RFC 6962 written out in another language
+    thousand := repeat(97u8, 1000usize)
+    check(t, "tree of nothing", tree_of(h0, "", 4usize).as_view(), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    check(t, "tree of one leaf", tree_of(h0, "abc", 4usize).as_view(), "609f6e36d2405585188d5cfd761f407c7cc46a7d3f314c88270469dde315fcd1")
+    check(t, "tree of seven leaves", tree_of(h0, "abcdefg", 1usize).as_view(), "4ae191939f548d9934740b88dea2c5cb89bb8870fc4505cd79dec6bbfaaee9cb")
+    check(t, "tree of sixteen leaves, sha256", tree_of(h0, thousand.as_view(), 64usize).as_view(), "c311a88c12c183cac6c3fcb9895651dbf840adbd3166232f6cf808c9a723fecb")
+    check(t, "tree of sixteen leaves, blake2s", tree_of(h4, thousand.as_view(), 64usize).as_view(), "f29506e8583ed9f78775aa9e7d59d936c17ebf4f4ceef3c0edcce8ae3944deb5")
+    check(t, "tree of four leaves, md5", tree_of(h3, "abcdefg", 2usize).as_view(), "2dc9fe87fbfa69cc5e1986e5a850a931")
+}
+
+// noise is n bytes of a xorshift generator, the same for the same seed.
+func noise(seed: u64, n: usize) -> Vec[u8] {
+    bytes := Vec[u8].with_capacity(n)
+    var x: u64 = seed
+    while bytes.len() < n {
+        x = x ^ wrapping_shl(x, 13u32)
+        x = x ^ (x >> 7u32)
+        x = x ^ wrapping_shl(x, 17u32)
+        word := wrapping_mul(x, 2685821657736338717u64)
+        var k: u32 = 0u32
+        while k < 8u32 && bytes.len() < n {
+            bytes.push(truncate[u8](word >> (8u32 * k)))
+            k = k + 1u32
+        }
+    }
+    return bytes
+}
+
+// listing hashes the files on the given number of threads and returns
+// the lines ksum would print, each name without its first skip bytes.
+func listing(a: Algo, paths: view[Vec[Vec[u8]]], workers: usize, map_from: u64, skip: usize) -> str.String {
+    lines := str.String.new()
+    sums_for(a, paths, workers, map_from, |d| {
+        if d.ok { push_hex(lines, d.digest[0usize : d.len]) } else { lines.push_str("unread") }
+        lines.push_str("  ")
+        with name := paths.get(d.index).as_view() { lines.push_str(name[skip : len(name)]) }
+        lines.push(10u8)
+    })
+    return lines
+}
+
+// compare hashes the files on three threads and on one and says whether
+// the listings are the same, with the digest of the listing.
+func compare(name: view[]u8, a: Algo, paths: view[Vec[Vec[u8]]], skip: usize) -> bool {
+    threaded := listing(a, paths, 3usize, 1000u64, skip)
+    alone := listing(a, paths, 0usize, 1000u64, skip)
+    same := str.equal(threaded.as_view(), alone.as_view())
+    print_str("  ")
+    print_str(name)
+    if same { print_str(": the same on three threads and on one, listing ") } else { print_str(": DIFFERENT, listing ") }
+    h := new_sha256()
+    say(hex_digest(h, threaded.as_view()).as_view())
+    return same
+}
+
+func demo_in(dir: view[]u8) -> Result[bool, io.IoErr] {
+    var t: Tally = Tally { run: 0usize, failed: 0usize }
+    say("published vectors")
+    vectors(t)
+    print_str("  ")
+    print_u64(u64(t.run - t.failed))
+    print_str(" of ")
+    print_u64(u64(t.run))
+    say(" agree")
+
+    // files around every boundary: the padding's, a block's, the size
+    // from which a file is mapped
+    say("files, hashed on threads and on one")
+    sizes := [0usize, 1usize, 55usize, 56usize, 64usize, 111usize, 112usize, 128usize, 999usize, 1000usize, 2500usize]
+    paths := Vec[Vec[u8]].new()
+    name := str.String.new()
+    for i, size in sizes {
+        name.clear()
+        name.push_str("file")
+        name.push_padded(u64(i), 2usize, 48u8)
+        name.push_str(".bin")
+        path := io.join(dir, name.as_view())
+        io.write_file(path.as_view(), noise(u64(i) + 1u64, size).as_view())?
+        paths.push(path)
+    }
+    full := listing(Algo.sha256, paths, 2usize, 1000u64, 0usize)
+    paths.push(io.join(dir, "missing.bin"))
+    skip := len(dir) + 1usize
+    var same: bool = compare("sha256", Algo.sha256, paths, skip)
+    same = compare("sha512", Algo.sha512, paths, skip) && same
+    same = compare("sha1", Algo.sha1, paths, skip) && same
+    same = compare("md5", Algo.md5, paths, skip) && same
+    same = compare("blake2s", Algo.blake2s, paths, skip) && same
+    same = compare("crc32c", Algo.crc32c, paths, skip) && same
+
+    // a check file as ksum writes it, the temporary directory in its
+    // names; then one digest is changed in its first digit, and lines
+    // are added for a file that is not there and for nothing at all
+    say("a check file with one digest changed and one file missing")
+    sums := Vec[u8].new()
+    sums.extend(full.as_view())
+    line := 64usize + 2usize + len(dir) + 1usize + 11usize
+    with first := sums.at(3usize * line) { if first == 48u8 { first = 49u8 } else { first = 48u8 } }
+    with whole := full.as_view() { sums.extend(whole[0usize : 66usize]) }
+    sums.extend(paths.get(11usize).as_view())
+    sums.extend("\nnot a line of a check file\n")
+    sums_path := io.join(dir, "SUMS")
+    io.write_file(sums_path.as_view(), sums.as_view())?
+    text := io.read_file(sums_path.as_view())?
+    entries := Vec[Entry].new()
+    malformed := parse_sums(text.as_view(), entries)
+    var v: Verdict = verify(Algo.sha256, entries, 3usize, 1000u64, "  ", skip)
+    v.malformed = malformed
+    print_str("  ok ")
+    print_u64(u64(v.ok))
+    print_str(", changed ")
+    print_u64(u64(v.failed))
+    print_str(", unread ")
+    print_u64(u64(v.unread))
+    print_str(", lines not understood ")
+    print_u64(u64(v.malformed))
+    println()
+
+    say("the tree over the largest file, in pieces of 1,024 bytes and of 100")
+    large := io.read_file(paths.get(10usize).as_view())?
+    h256 := new_sha256()
+    print_str("  sha256  ")
+    say(tree_of(h256, large.as_view(), 1024usize).as_view())
+    hb := new_blake2s()
+    print_str("  blake2s ")
+    say(tree_of(hb, large.as_view(), 100usize).as_view())
+    return Ok(t.failed == 0usize && same && v.ok == 10usize && v.failed == 1usize && v.unread == 1usize)
+}
+
+func demo() -> Result[bool, io.IoErr] {
+    dir := io.make_temp_dir("ksum")?
+    done := demo_in(dir.as_view())
+    removed := io.remove_dir_all(dir.as_view())
+    good := done?
+    removed?
+    return Ok(good)
+}
+
+// ---- the program ----
+
+func usage() -> i32 {
+    eprint_str("usage: ksum [-a sha256|sha512|sha1|md5|blake2s|crc32c] [-j N] FILE...\n       ksum [-a ALGO] [-j N] -c SUMS\n       ksum --tree FILE\n")
+    return 2i32
+}
+
+func complain(name: view[]u8, what: view[]u8) {
+    eprint_str("ksum: ")
+    eprint_str(name)
+    eprint_str(what)
+}
+
+// map_from is the size from which a file is mapped instead of read.
+const map_from: u64 = 65536u64
+const tree_chunk: usize = 1024usize
+
+// list_files writes a line for each file and returns the exit status.
+func list_files(a: Algo, paths: view[Vec[Vec[u8]]], workers: usize) -> i32 {
+    var unread: usize = 0usize
+    line := str.String.new()
+    sums_for(a, paths, workers, map_from, |d| {
+        if d.ok {
+            line.clear()
+            push_hex(line, d.digest[0usize : d.len])
+            line.push_str("  ")
+            line.push_str(paths.get(d.index).as_view())
+            say(line.as_view())
+        } else {
+            unread = unread + 1usize
+            complain(paths.get(d.index).as_view(), ": cannot be read\n")
+        }
+    })
+    if unread > 0usize { return 1i32 }
+    return 0i32
+}
+
+// check_file verifies the files a check file names; named says that the
+// algorithm was given, and is not to be taken from the first digest.
+func check_file(given: Algo, named: bool, path: view[]u8, workers: usize) -> Result[i32, io.IoErr] {
+    text := io.read_file(path)?
+    entries := Vec[Entry].new()
+    malformed := parse_sums(text.as_view(), entries)
+    if entries.len() == 0usize {
+        complain(path, ": no line of a check file\n")
+        return Ok(1i32)
+    }
+    var a: Algo = given
+    if !named {
+        match algo_of_width(entries.get(0usize).want.len()) {
+            Some(c) => { a = c }
+            None => { }
+        }
+    }
+    v := verify(a, entries, workers, map_from, "", 0usize)
+    if malformed > 0usize { complain(path, ": some lines are not of a check file\n") }
+    if v.unread > 0usize { complain(path, ": some files could not be read\n") }
+    if v.failed > 0usize { complain(path, ": some digests did NOT match\n") }
+    if v.failed + v.unread > 0usize { return Ok(1i32) }
+    return Ok(0i32)
+}
+
+func tree_file(path: view[]u8) -> Result[i32, io.IoErr] {
+    f := io.open_read(path)?
+    m := mem.map_file(f, false)?
+    h := new_sha256()
+    with bytes := m.bytes() { print_str(tree_of(h, bytes, tree_chunk).as_view()) }
+    print_str("  ")
+    say(path)
+    return Ok(0i32)
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize {
+        match demo() {
+            Ok(good) => { if good { return 0i32 } }
+            Err(e) => say("the demonstration could not use the temporary directory")
+        }
+        return 1i32
+    }
+    var a: Algo = Algo.sha256
+    var named: bool = false
+    var workers: usize = thread.available_parallelism()
+    var mode: u8 = 0u8
+    var at: usize = 1usize
+    while at < args.len() {
+        if str.equal(args.get(at).as_view(), "-a") && at + 1usize < args.len() {
+            at = at + 1usize
+            match algo_named(args.get(at).as_view()) {
+                Some(c) => { a = c; named = true }
+                None => { return usage() }
+            }
+        } else if str.equal(args.get(at).as_view(), "-j") && at + 1usize < args.len() {
+            at = at + 1usize
+            match str.parse_u64(args.get(at).as_view()) {
+                Some(n) => { if n <= 256u64 { workers = usize(n) } else { return usage() } }
+                None => { return usage() }
+            }
+        } else if str.equal(args.get(at).as_view(), "-c") {
+            mode = 1u8
+        } else if str.equal(args.get(at).as_view(), "--tree") {
+            mode = 2u8
+        } else {
+            break
+        }
+        at = at + 1usize
+    }
+    if at >= args.len() || (mode != 0u8 && at + 1usize != args.len()) { return usage() }
+    var status: Result[i32, io.IoErr] = Ok(0i32)
+    if mode == 1u8 {
+        status = check_file(a, named, args.get(at).as_view(), workers)
+    } else if mode == 2u8 {
+        status = tree_file(args.get(at).as_view())
+    } else {
+        paths := Vec[Vec[u8]].new()
+        for i in at..args.len() { paths.push(args.get(i).clone()) }
+        status = Ok(list_files(a, paths, workers))
+    }
+    match status {
+        Ok(code) => { return code }
+        Err(e) => {
+            complain(args.get(at).as_view(), ": cannot be read\n")
+            return 1i32
+        }
+    }
+}

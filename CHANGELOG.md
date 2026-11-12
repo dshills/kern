@@ -8,6 +8,83 @@ section of this file into a GitHub release is `docs/releasing.md`.
 
 ## [Unreleased]
 
+Five more examples, written to find flaws, and what they found.
+
+### Language
+
+- **A view of what a lock guards could outlive the lock.** `with g :=
+  m.lock() { return g }` was accepted (and the same through a field of
+  `g` or a `match` arm's binding inside the `with`), while `return
+  m.lock()` was refused: the caller then read what another thread may
+  write. It is `ACC_RELEASE_ESCAPE` now. A program that did this no
+  longer compiles; copy the value out inside the `with`.
+- **`match v? { ... }` on a variable never destroyed what `?`
+  unwrapped.** The variable counted as moved while the arms were given
+  views, so the payloads' destructors did not run (descriptors held in
+  them leaked). What `?` unwraps is now an owned subject whatever it
+  was applied to, as it was for a call: the arms own the payloads.
+- A `match` whose subject is a part of what an accessor returned
+  (`v.get(i).field`) lost the part: both engines failed on a program
+  the checker accepted. An arm of such a match with no access binding
+  now leaves the container free, as Rule 5.3.1 says (an edit of `self`
+  in it was an internal error), and through an edit accessor
+  (`v.at(i).field`) the arm's bindings are edits (they were read-only).
+- What an accessor returns is an assignment target, as Rule 5.3.3 says:
+  `v.at(i) = x` and `v.at(i).f = x` were each refused as a conflict of
+  the projection with itself. The value is evaluated before the
+  accessor is called.
+- An accessor may return a view reached through a `match` arm's binding
+  inside a `with` (each alone was accepted, the two nested refused).
+- An interface's function without a receiver is called through a type
+  parameter, `T.f(...)` (it was refused with "`()` has no method");
+  called on a value it is `TYPE_MISMATCH` (it was an internal error).
+  `spec/types.md` says so.
+- A type's static function is a value, `g := A.make` and
+  `W[u32].wrap` (it passed the check and was an internal error); with a
+  type argument missing it is `TYPE_INFER_FAILED`.
+- A function the runtime provides (`print_u64`) is not a function value
+  (`TYPE_MISMATCH`; it was accepted and failed in both engines), and an
+  array literal cannot hold string literals (`ACC_ESCAPE_STORE`; the
+  same).
+- A conversion reads through an accessor's `Copy` result
+  (`u64(v.get(i))`), and an array an accessor returned coerces to a
+  sequence argument as an array place does (Rule 5.2.4).
+- Five examples, longer than the earlier ones (1,300 to 2,100 lines):
+  `kdb` (a B+tree of 4,096-byte pages in one file: `load_le` and
+  `store_le` page layouts, a bounded cache grown with the `try_` forms,
+  two header slots, range locks between processes, a header read
+  through a writable `mem.Mapping`), `kvm` (a small scripting language:
+  a Pratt parser into an `ArenaIn`, a bytecode compiler with closures,
+  a stack machine with a mark-and-sweep heap in a `Pool`, every guest
+  error reported without a trap), `kpass` (a pre-forking server:
+  connections passed as `Descriptor`s over `UnixStream`s, peer
+  credentials, one `Poller` over listeners, workers, a `UnixDatagram`
+  status socket and signals, `time.Deadline`s for idle connections and
+  shutdown), `ksim` (a discrete-event simulator: interfaces and generic
+  containers of its own, `rand` streams, `time.Duration` with checked
+  arithmetic, entities in a `PoolIn` and an `ArenaIn` over a bounded
+  `Allocator`) and `ksum` (SHA-256, SHA-512, SHA-1, MD5, BLAKE2s and
+  CRC-32C behind one interface, HMAC, PBKDF2 and HKDF generic over it,
+  compression functions under `budget { allocations 0; bounds_checks 0
+  }`, a reader, hashing workers and an ordered writer joined by
+  `sync.Channel`s).
+
+### Library
+
+- `UnixStream.send_with` and `docs/runtime.md` say that the sender
+  keeps its descriptor until the receiver has taken the one sent: on
+  macOS a socket closed by its sender while in flight can arrive
+  already at its end, with what its peer wrote lost.
+
+### Tooling
+
+- The interpreter read every element of an array held in a `Box` or a
+  container each time it checked an index into it through a sequence
+  parameter (55 µs an access for 4,096 bytes; a length now comes from
+  the type).
+- The README said `kern run` runs a program natively; it runs the
+  interpreter.
+
 ## [v0.2.3] - 2026-11-11
 
 One defect of v0.2.2: the lost write that release fixed for a `match`

@@ -1,0 +1,1305 @@
+//! phase: 6
+//! expect: output kdb
+// kdb: an ordered key-value store kept in one file, as a B+tree of
+// 4,096-byte pages.
+//
+//     kdb FILE put KEY VALUE
+//     kdb FILE get KEY             the value, or exit status 1
+//     kdb FILE del KEY
+//     kdb FILE scan [FROM [TO]]    the entries with FROM <= key < TO, in order
+//     kdb FILE check               walks the tree and says what is wrong
+//     kdb FILE stats
+//
+// A key is 1 to 64 bytes and a value at most 512; keys order bytewise.
+//
+// How it is built:
+//   - Pages 0 and 1 each hold a copy of the header (the counts, the free
+//     list, the height), numbered by commit. A commit writes the changed
+//     pages, syncs the file, and only then writes the header into the
+//     slot of the older copy and syncs that: a header torn by a crash
+//     fails its checksum, and the other copy is used.
+//   - The root is always page 2. A page is 20 bytes of header (kind,
+//     count, checksum, where the cells begin, the bytes lost to removed
+//     cells, two links), a table of two-byte cell offsets in key order,
+//     and the cells, filled from the end of the page downwards. A cell
+//     is a key and a value; in an interior page the value is the number
+//     of the child that holds the keys from that key on. Every field is
+//     read and written with load_le and store_le.
+//   - A full page is split in two and the separator handed to the page
+//     above. Deletion is lazy: pages are never merged, but a leaf that
+//     loses its last entry leaves the chain of leaves and its parent and
+//     goes to the free list, from which the next split takes its page.
+//     Leaves are linked both ways, and a scan follows the links.
+//   - Pages are reached through a cache with a bound on the frames it
+//     holds. It grows a frame at a time with the try_ forms of Vec, and
+//     when there is no memory for a frame it makes do with those it has:
+//     the least recently used frame is written back, if it changed, and
+//     reused. There are no pin counts: a frame is used inside a `with`,
+//     and the compiler refuses a fetch while one is open.
+//   - Pages are read and written at their offsets through the io.File;
+//     the header is read and written through a mem.Mapping of the file.
+//   - Locks are on ranges of the file's bytes. A writer holds byte 0 for
+//     as long as it is open, so there is one writer. A reader holds the
+//     bytes from 8,192 on, shared, for as long as it is open; the writer
+//     takes them exclusively from the first page it writes back until
+//     its commit is done. So readers and an idle writer get along, and
+//     nobody reads a tree that is half written.
+//
+// What it does not do: pages are changed in place, so a crash between
+// the first page written and the header leaves a tree that neither
+// header describes. `check` finds that; closing the gap takes a log.
+// What a writer does repair when it opens is a damaged header: it counts
+// the tree, puts every page the tree does not reach on the free list,
+// and writes both headers anew.
+//
+// With no arguments the program builds a store in a temporary directory,
+// deletes from it, reads it back, damages and repairs it, and opens it
+// twice, which is how it runs as a test.
+module kdb
+import "std/io"
+import "std/mem"
+import "std/rand"
+import "std/str"
+
+const page_size: usize = 4096usize
+const page_bytes: u64 = 4096u64
+const head: usize = 20usize
+const max_key: usize = 64usize
+const max_val: usize = 512usize
+const root: u32 = 2u32
+const kind_leaf: u8 = 1u8
+const kind_inner: u8 = 2u8
+const kind_free: u8 = 3u8
+const magic: u32 = 828531819u32
+const slot_bytes: usize = 40usize
+// The bytes from data_from on are the lock of the tree's pages.
+const data_from: u64 = 8192u64
+
+union DbErr { Io(io.IoErr); Corrupt(u32); NoMemory; Locked; Busy; TooLarge; BadHeader; ReadOnly; Damaged }
+
+// iof makes a file error an error of the store.
+func iof[T](r: own Result[T, io.IoErr]) -> Result[T, DbErr] {
+    match move r {
+        Ok(v) => { return Ok(v) }
+        Err(e) => { return Err(Io(e)) }
+    }
+}
+
+// acquire takes a lock on bytes of a file, waiting for it or not: false is
+// a refusal.
+func acquire(file: edit[io.File], from: u64, n: u64, exclusive: bool, wait: bool) -> Result[bool, DbErr] {
+    if !wait { return iof(file.try_lock_range(from, n, exclusive)) }
+    iof(file.lock_range(from, n, exclusive))?
+    return Ok(true)
+}
+
+// ---- a page ----
+
+func kind(p: view[]u8) -> u8 { return p[0usize] }
+func count(p: view[]u8) -> usize { return usize(load_le[u16](p, 2usize)) }
+func cells_from(p: view[]u8) -> usize { return usize(load_le[u16](p, 8usize)) }
+func dead(p: view[]u8) -> usize { return usize(load_le[u16](p, 10usize)) }
+// link is the next leaf of a leaf, the leftmost child of an interior
+// page and the next free page of a free one; back is the leaf before.
+func link(p: view[]u8) -> u32 { return load_le[u32](p, 12usize) }
+func back(p: view[]u8) -> u32 { return load_le[u32](p, 16usize) }
+func set_link(p: edit[]u8, to: u32) { store_le[u32](p, 12usize, to) }
+func set_back(p: edit[]u8, to: u32) { store_le[u32](p, 16usize, to) }
+func slot(p: view[]u8, i: usize) -> usize { return usize(load_le[u16](p, head + 2usize * i)) }
+
+func key_at(p: view[]u8, i: usize) -> view[]u8 {
+    at := slot(p, i)
+    return p[at + 4usize : at + 4usize + usize(load_le[u16](p, at))]
+}
+func val_at(p: view[]u8, i: usize) -> view[]u8 {
+    at := slot(p, i)
+    from := at + 4usize + usize(load_le[u16](p, at))
+    return p[from : from + usize(load_le[u16](p, at + 2usize))]
+}
+func cell_size(p: view[]u8, i: usize) -> usize {
+    at := slot(p, i)
+    return 4usize + usize(load_le[u16](p, at)) + usize(load_le[u16](p, at + 2usize))
+}
+// room is what lies between the offsets and the cells.
+func room(p: view[]u8) -> usize { return cells_from(p) - (head + 2usize * count(p)) }
+
+// compare orders two keys bytewise. Eight bytes read high byte first
+// order as their number does, so it goes by eights while it can.
+func compare(a: view[]u8, b: view[]u8) -> i32 {
+    var n: usize = len(a)
+    if len(b) < n { n = len(b) }
+    var i: usize = 0usize
+    while i + 8usize <= n {
+        x := load_be[u64](a, i)
+        y := load_be[u64](b, i)
+        if x < y { return -1i32 }
+        if x > y { return 1i32 }
+        i = i + 8usize
+    }
+    while i < n {
+        if a[i] < b[i] { return -1i32 }
+        if a[i] > b[i] { return 1i32 }
+        i = i + 1usize
+    }
+    if len(a) < len(b) { return -1i32 }
+    if len(a) > len(b) { return 1i32 }
+    return 0i32
+}
+
+// copy_to writes src into p from at on, by eights while it can.
+func copy_to(p: edit[]u8, at: usize, src: view[]u8) {
+    var i: usize = 0usize
+    while i + 8usize <= len(src) { store_le[u64](p, at + i, load_le[u64](src, i)); i = i + 8usize }
+    while i < len(src) { p[at + i] = src[i]; i = i + 1usize }
+}
+
+// lower_bound is the number of cells whose key is below key.
+func lower_bound(p: view[]u8, key: view[]u8) -> usize {
+    var lo: usize = 0usize
+    var hi: usize = count(p)
+    while lo < hi {
+        mid := (lo + hi) / 2usize
+        if compare(key_at(p, mid), key) < 0i32 { lo = mid + 1usize } else { hi = mid }
+    }
+    return lo
+}
+func holds(p: view[]u8, i: usize, key: view[]u8) -> bool { return i < count(p) && compare(key_at(p, i), key) == 0i32 }
+
+// The children of an interior page are numbered from 0, the leftmost;
+// child n is that of cell n - 1.
+func child_index(p: view[]u8, key: view[]u8) -> usize {
+    i := lower_bound(p, key)
+    if holds(p, i, key) { return i + 1usize }
+    return i
+}
+func child_at(p: view[]u8, n: usize) -> u32 {
+    if n == 0usize { return link(p) }
+    return load_le[u32](val_at(p, n - 1usize), 0usize)
+}
+
+func init_page(p: edit[[4096]u8], k: u8) {
+    p = zero()
+    p[0usize] = k
+    store_le[u16](p, 8usize, 4096u16)
+}
+
+// put_cell makes a cell the i-th of a page that has room for it.
+func put_cell(p: edit[]u8, i: usize, key: view[]u8, val: view[]u8) {
+    n := count(p)
+    at := cells_from(p) - (4usize + len(key) + len(val))
+    store_le[u16](p, at, truncate[u16](len(key)))
+    store_le[u16](p, at + 2usize, truncate[u16](len(val)))
+    copy_to(p, at + 4usize, key)
+    copy_to(p, at + 4usize + len(key), val)
+    var s: usize = n
+    while s > i {
+        store_le[u16](p, head + 2usize * s, load_le[u16](p, head + 2usize * (s - 1usize)))
+        s = s - 1usize
+    }
+    store_le[u16](p, head + 2usize * i, truncate[u16](at))
+    store_le[u16](p, 8usize, truncate[u16](at))
+    store_le[u16](p, 2usize, truncate[u16](n + 1usize))
+}
+
+// drop_cell forgets the i-th cell. Its bytes are counted as dead until
+// the page is closed up, unless the page is now empty.
+func drop_cell(p: edit[]u8, i: usize) {
+    n := count(p)
+    gone := cell_size(p, i)
+    var s: usize = i
+    while s + 1usize < n {
+        store_le[u16](p, head + 2usize * s, load_le[u16](p, head + 2usize * (s + 1usize)))
+        s = s + 1usize
+    }
+    store_le[u16](p, 2usize, truncate[u16](n - 1usize))
+    if n == 1usize {
+        store_le[u16](p, 8usize, 4096u16)
+        store_le[u16](p, 10usize, 0u16)
+    } else {
+        store_le[u16](p, 10usize, truncate[u16](dead(p) + gone))
+    }
+}
+
+// repack copies a page without the bytes its removed cells left.
+func repack(old: view[]u8, fresh: edit[[4096]u8]) {
+    init_page(fresh, kind(old))
+    set_link(fresh, link(old))
+    set_back(fresh, back(old))
+    for c in 0usize..count(old) { put_cell(fresh, c, key_at(old, c), val_at(old, c)) }
+}
+
+// split deals the cells of a page to two new ones, about half the bytes
+// to each, and returns the number of the cell whose key separates them.
+// In an interior page that cell goes to neither: its child is the
+// leftmost of the right page.
+func split(old: view[]u8, l: edit[[4096]u8], r: edit[[4096]u8]) -> usize {
+    n := count(old)
+    var used: usize = 0usize
+    for i in 0usize..n { used = used + cell_size(old, i) + 2usize }
+    var m: usize = 0usize
+    var left: usize = 0usize
+    while m + 1usize < n && left < used / 2usize {
+        left = left + cell_size(old, m) + 2usize
+        m = m + 1usize
+    }
+    init_page(l, kind(old))
+    init_page(r, kind(old))
+    for i in 0usize..m { put_cell(l, i, key_at(old, i), val_at(old, i)) }
+    var from: usize = m
+    if kind(old) == kind_inner {
+        set_link(l, link(old))
+        set_link(r, child_at(old, m + 1usize))
+        from = m + 1usize
+    }
+    for i in from..n { put_cell(r, i - from, key_at(old, i), val_at(old, i)) }
+    return m
+}
+
+// page_sum is the checksum of a page: every byte but the checksum's own.
+func page_sum(p: view[]u8) -> u32 {
+    var h: u64 = wrapping_mul(14695981039346656037u64 ^ u64(load_le[u32](p, 0usize)), 1099511628211u64)
+    var at: usize = 8usize
+    while at < page_size {
+        h = wrapping_mul(h ^ load_le[u64](p, at), 1099511628211u64)
+        at = at + 8usize
+    }
+    return truncate[u32](h ^ (h >> 32u32))
+}
+
+// ---- the header ----
+
+// Meta is what a header slot holds: the number of the commit that wrote
+// it, the entries, the pages of the file, the free list and the height.
+struct Meta { seq: u64; count: u64; npages: u32; free_head: u32; nfree: u32; height: u32 }
+
+func slot_sum(b: view[]u8) -> u32 {
+    var h: u64 = 14695981039346656037u64
+    for w in 1usize..5usize { h = wrapping_mul(h ^ load_le[u64](b, 8usize * w), 1099511628211u64) }
+    return truncate[u32](h ^ (h >> 32u32))
+}
+
+func write_slot(b: edit[]u8, m: Meta) {
+    store_le[u32](b, 0usize, magic)
+    store_le[u64](b, 8usize, m.seq)
+    store_le[u64](b, 16usize, m.count)
+    store_le[u32](b, 24usize, m.npages)
+    store_le[u32](b, 28usize, m.free_head)
+    store_le[u32](b, 32usize, m.nfree)
+    store_le[u32](b, 36usize, m.height)
+    store_le[u32](b, 4usize, slot_sum(b))
+}
+
+// read_slot reads a slot and says whether it is whole.
+func read_slot(b: view[]u8, m: out Meta) -> bool {
+    m = Meta { seq: load_le[u64](b, 8usize), count: load_le[u64](b, 16usize), npages: load_le[u32](b, 24usize), free_head: load_le[u32](b, 28usize), nfree: load_le[u32](b, 32usize), height: load_le[u32](b, 36usize) }
+    return load_le[u32](b, 0usize) == magic && load_le[u32](b, 4usize) == slot_sum(b)
+}
+
+// ---- the cache ----
+
+// Frame says what a frame holds: the page's number (0 for none),
+// whether it differs from the file, and when it was last asked for.
+struct Frame { pno: u32; dirty: bool; tick: u64 }
+
+// Pager is the file and the cache: the frames' bytes, one after another
+// in one vector, and what each frame holds. index[p] is one more than
+// the frame that holds page p, or 0. wait says whether it waits for
+// locks, and holding that the lock on the pages is taken.
+struct Pager { file: io.File; bytes: Vec[u8]; frames: Vec[Frame]; index: Vec[u32]; bound: usize; tick: u64; writer: bool; wait: bool; holding: bool; hits: u64; misses: u64; evictions: u64; reads: u64; writes: u64 }
+
+impl Pager {
+    // page is the bytes of a frame, and page_mut the bytes to change:
+    // the frame is then written back before it is given up.
+    func page(view self, i: usize) -> view[]u8 { return self.bytes.as_view()[i * page_size : (i + 1usize) * page_size] }
+    func page_mut(edit self, i: usize) -> edit[]u8 {
+        with f := self.frames.at(i) { f.dirty = true }
+        return self.bytes.as_edit()[i * page_size : (i + 1usize) * page_size]
+    }
+
+    // grow adds a frame, if there is memory for one.
+    func grow(edit self) -> Result[(), AllocErr] {
+        self.frames.try_reserve(self.frames.len() + 1usize)?
+        self.bytes.try_resize(self.bytes.len() + page_size, 0u8)?
+        self.frames.push(Frame { pno: 0u32, dirty: false, tick: 0u64 })
+        return Ok(())
+    }
+
+    func seek_to(edit self, pno: u32) -> Result[(), DbErr] {
+        at := iof(self.file.seek(io.SeekFrom.Start(u64(pno) * page_bytes)))?
+        return Ok(())
+    }
+
+    // write_back seals a frame with its checksum and writes it to its
+    // place. The first page a writer writes waits for the readers to go.
+    func write_back(edit self, i: usize) -> Result[(), DbErr] {
+        if !self.writer { return Err(ReadOnly) }
+        if !self.holding { iof(self.file.lock_range(data_from, 0u64, true))?; self.holding = true }
+        with p := self.page_mut(i) { sum := page_sum(p); store_le[u32](p, 4usize, sum) }
+        self.seek_to(self.frames.get(i).pno)?
+        iof(self.file.write_all(self.bytes.as_view()[i * page_size : (i + 1usize) * page_size]))?
+        with f := self.frames.at(i) { f.dirty = false }
+        self.writes = self.writes + 1u64
+        return Ok(())
+    }
+
+    // read_into fills a frame from the file and checks what it read.
+    func read_into(edit self, i: usize, pno: u32) -> Result[(), DbErr] {
+        self.seek_to(pno)?
+        var got: usize = 0usize
+        with p := self.bytes.as_edit()[i * page_size : (i + 1usize) * page_size] {
+            while got < page_size {
+                n := iof(self.file.read(p[got : page_size]))?
+                if n == 0usize { break }
+                got = got + n
+            }
+            if got < page_size || load_le[u32](p, 4usize) != page_sum(p) { return Err(Corrupt(pno)) }
+        }
+        self.reads = self.reads + 1u64
+        return Ok(())
+    }
+
+    // fetch returns the frame that holds a page, reading the page when
+    // load is set; when it is not, the caller fills the frame. The frame
+    // is good until the next fetch.
+    func fetch(edit self, pno: u32, load: bool) -> Result[usize, DbErr] {
+        self.tick = self.tick + 1u64
+        if usize(pno) < self.index.len() {
+            at := self.index.get(usize(pno))
+            if at != 0u32 {
+                self.hits = self.hits + 1u64
+                with f := self.frames.at(usize(at) - 1usize) { f.tick = self.tick }
+                return Ok(usize(at) - 1usize)
+            }
+        } else {
+            match self.index.try_resize(usize(pno) + 64usize, 0u32) {
+                Ok(u) => { }
+                Err(e) => { return Err(NoMemory) }
+            }
+        }
+        self.misses = self.misses + 1u64
+        // a new frame while the bound and the memory allow, else the
+        // least recently used one
+        var i: usize = self.frames.len()
+        var grown: bool = false
+        if i < self.bound {
+            match self.grow() {
+                Ok(u) => { grown = true }
+                Err(e) => { }
+            }
+        }
+        if !grown {
+            if i == 0usize { return Err(NoMemory) }
+            var least: u64 = self.tick
+            for c in 0usize..self.frames.len() {
+                if self.frames.get(c).tick < least { least = self.frames.get(c).tick; i = c }
+            }
+            was := self.frames.get(i).pno
+            if self.frames.get(i).dirty { self.write_back(i)? }
+            if was != 0u32 {
+                with s := self.index.at(usize(was)) { s = 0u32 }
+                self.evictions = self.evictions + 1u64
+            }
+            // should the read fail, the frame holds no page
+            with f := self.frames.at(i) { f.pno = 0u32; f.tick = 0u64 }
+        }
+        if load { self.read_into(i, pno)? }
+        with f := self.frames.at(i) { f.pno = pno; f.dirty = false; f.tick = self.tick }
+        with s := self.index.at(usize(pno)) { s = truncate[u32](i) + 1u32 }
+        return Ok(i)
+    }
+
+    // put_page replaces a page without reading what the file has of it.
+    func put_page(edit self, pno: u32, data: view[]u8) -> Result[(), DbErr] {
+        i := self.fetch(pno, false)?
+        copy_to(self.page_mut(i), 0usize, data)
+        return Ok(())
+    }
+}
+
+// ---- the tree ----
+
+// Up is what a split hands to the page above: the separator and the new
+// page to its right.
+struct Up { has: bool; right: u32; klen: usize; key: [64]u8 }
+func no_split() -> Up { return Up { has: false, right: 0u32, klen: 0usize, key: zero() } }
+
+// Walk is the state and the result of a check: the pages seen, the last
+// key met, the separator the next key may not be below, the last leaf
+// with the leaf its link names, and what was counted.
+struct Walk { seen: Vec[u8]; last: Vec[u8]; floor: Vec[u8]; any: bool; quiet: bool; leaf: u32; next: u32; leaves: u64; inners: u64; free: u64; keys: u64; depth: u32; problems: u64 }
+
+func new_walk(npages: u32, quiet: bool) -> Result[Walk, DbErr] {
+    w := Walk { seen: Vec[u8].new(), last: Vec[u8].new(), floor: Vec[u8].new(), any: false, quiet: quiet, leaf: 0u32, next: 0u32, leaves: 0u64, inners: 0u64, free: 0u64, keys: 0u64, depth: 0u32, problems: 0u64 }
+    match w.seen.try_resize(usize(npages), 0u8) {
+        Ok(u) => { return Ok(w) }
+        Err(e) => { return Err(NoMemory) }
+    }
+}
+
+func complain(w: edit[Walk], pno: u32, what: view[]u8) {
+    w.problems = w.problems + 1u64
+    if w.quiet { return }
+    if pno == 0u32 {
+        print_str("  the header ")
+    } else {
+        num("  page ", u64(pno))
+        print_str(" ")
+    }
+    say(what)
+}
+
+// Db is an open store: the cache, the mapping the header is read and
+// written through, the header as of now, whether it differs from the
+// file's, and what opening found.
+struct Db { pg: Pager; map: mem.Mapping; meta: Meta; changed: bool; stale: bool; recovered: bool }
+
+impl Db {
+    // alloc_page gives a page to fill: the first of the free list, or a
+    // new one at the end of the file.
+    func alloc_page(edit self) -> Result[u32, DbErr] {
+        pno := self.meta.free_head
+        if pno != 0u32 {
+            i := self.pg.fetch(pno, true)?
+            self.meta.free_head = link(self.pg.page(i))
+            self.meta.nfree = self.meta.nfree - 1u32
+            return Ok(pno)
+        }
+        self.meta.npages = self.meta.npages + 1u32
+        return Ok(self.meta.npages - 1u32)
+    }
+
+    func free_page(edit self, pno: u32) -> Result[(), DbErr] {
+        var p: [4096]u8 = zero()
+        init_page(p, kind_free)
+        set_link(p, self.meta.free_head)
+        self.pg.put_page(pno, p)?
+        self.meta.free_head = pno
+        self.meta.nfree = self.meta.nfree + 1u32
+        return Ok(())
+    }
+
+    // leaf_for is the leaf a key belongs in.
+    func leaf_for(edit self, key: view[]u8) -> Result[u32, DbErr] {
+        var pno: u32 = root
+        while true {
+            i := self.pg.fetch(pno, true)?
+            with p := self.pg.page(i) {
+                if kind(p) == kind_leaf { return Ok(pno) }
+                if kind(p) != kind_inner { return Err(Corrupt(pno)) }
+                pno = child_at(p, child_index(p, key))
+            }
+        }
+        return Ok(pno)
+    }
+
+    // get copies the value of a key into `into` and says whether the key
+    // is there.
+    func get(edit self, key: view[]u8, into: edit[Vec[u8]]) -> Result[bool, DbErr] {
+        pno := self.leaf_for(key)?
+        i := self.pg.fetch(pno, true)?
+        with p := self.pg.page(i) {
+            at := lower_bound(p, key)
+            if !holds(p, at, key) { return Ok(false) }
+            into.clear()
+            into.extend(val_at(p, at))
+        }
+        return Ok(true)
+    }
+
+    // add puts a cell into a page, in place of the cell of the same key
+    // if there is one (true then), splitting the page when it is full.
+    func add(edit self, pno: u32, key: view[]u8, val: view[]u8, up: edit[Up]) -> Result[bool, DbErr] {
+        i := self.pg.fetch(pno, true)?
+        need := 6usize + len(key) + len(val)
+        var replaced: bool = false
+        var at: usize = 0usize
+        var close_up: bool = false
+        with p := self.pg.page_mut(i) {
+            at = lower_bound(p, key)
+            if holds(p, at, key) { drop_cell(p, at); replaced = true }
+            if room(p) >= need { put_cell(p, at, key, val); return Ok(replaced) }
+            close_up = room(p) + dead(p) >= need
+        }
+        var l: [4096]u8 = zero()
+        if close_up {
+            // the room is there, in pieces
+            repack(self.pg.page(i), l)
+            put_cell(l, at, key, val)
+            self.pg.put_page(pno, l)?
+            return Ok(replaced)
+        }
+        var r: [4096]u8 = zero()
+        var leaf: bool = false
+        var next: u32 = 0u32
+        var m: usize = 0usize
+        with old := self.pg.page(i) {
+            m = split(old, l, r)
+            with sep := key_at(old, m) { up.klen = len(sep); copy_to(up.key, 0usize, sep) }
+            leaf = kind(old) == kind_leaf
+            next = link(old)
+            set_back(l, back(old))
+        }
+        up.has = true
+        up.right = self.alloc_page()?
+        if compare(key, up.key[0usize : up.klen]) < 0i32 {
+            put_cell(l, at, key, val)
+        } else if leaf {
+            put_cell(r, at - m, key, val)
+        } else {
+            put_cell(r, at - m - 1usize, key, val)
+        }
+        if leaf {
+            // the new leaf goes into the chain after the old one
+            set_link(l, up.right)
+            set_link(r, next)
+            set_back(r, pno)
+            if next != 0u32 { j := self.pg.fetch(next, true)?; set_back(self.pg.page_mut(j), up.right) }
+        }
+        self.pg.put_page(pno, l)?
+        self.pg.put_page(up.right, r)?
+        return Ok(replaced)
+    }
+
+    func insert(edit self, pno: u32, key: view[]u8, val: view[]u8, up: edit[Up]) -> Result[bool, DbErr] {
+        i := self.pg.fetch(pno, true)?
+        var child: u32 = 0u32
+        with p := self.pg.page(i) {
+            if kind(p) == kind_inner { child = child_at(p, child_index(p, key)) }
+        }
+        if child == 0u32 { return self.add(pno, key, val, up) }
+        var below: Up = no_split()
+        replaced := self.insert(child, key, val, below)?
+        if below.has {
+            var to: [4]u8 = zero()
+            store_le[u32](to, 0usize, below.right)
+            was := self.add(pno, below.key[0usize : below.klen], to, up)?
+        }
+        return Ok(replaced)
+    }
+
+    // put stores a value under a key, replacing what was there.
+    func put(edit self, key: view[]u8, val: view[]u8) -> Result[(), DbErr] {
+        if !self.pg.writer { return Err(ReadOnly) }
+        if len(key) == 0usize || len(key) > max_key || len(val) > max_val { return Err(TooLarge) }
+        self.changed = true
+        var up: Up = no_split()
+        replaced := self.insert(root, key, val, up)?
+        if !replaced { self.meta.count = self.meta.count + 1u64 }
+        if up.has {
+            // the root stays where it is: its left half moves to a new
+            // page, and the root becomes the parent of the two
+            i := self.pg.fetch(root, true)?
+            var l: [4096]u8 = zero()
+            copy_to(l, 0usize, self.pg.page(i))
+            left := self.alloc_page()?
+            if kind(l) == kind_leaf {
+                j := self.pg.fetch(up.right, true)?
+                set_back(self.pg.page_mut(j), left)
+            }
+            self.pg.put_page(left, l)?
+            var to: [4]u8 = zero()
+            store_le[u32](to, 0usize, up.right)
+            init_page(l, kind_inner)
+            set_link(l, left)
+            put_cell(l, 0usize, up.key[0usize : up.klen], to)
+            self.pg.put_page(root, l)?
+            self.meta.height = self.meta.height + 1u32
+        }
+        return Ok(())
+    }
+
+    // remove takes a key out of the tree under a page and says whether
+    // it was there. gone is set when the page lost its last entry or
+    // child and was freed, so that its parent forgets it.
+    func remove(edit self, pno: u32, key: view[]u8, gone: edit[bool]) -> Result[bool, DbErr] {
+        i := self.pg.fetch(pno, true)?
+        var n: usize = 0usize
+        var child: u32 = 0u32
+        with p := self.pg.page(i) {
+            if kind(p) == kind_inner {
+                n = child_index(p, key)
+                child = child_at(p, n)
+            } else {
+                n = lower_bound(p, key)
+                if !holds(p, n, key) { return Ok(false) }
+            }
+        }
+        if child == 0u32 {
+            var before: u32 = 0u32
+            var after: u32 = 0u32
+            with p := self.pg.page_mut(i) {
+                drop_cell(p, n)
+                if count(p) > 0usize || pno == root { return Ok(true) }
+                before = back(p)
+                after = link(p)
+            }
+            // an empty leaf leaves the chain and its parent
+            if before != 0u32 {
+                j := self.pg.fetch(before, true)?
+                set_link(self.pg.page_mut(j), after)
+            }
+            if after != 0u32 { j := self.pg.fetch(after, true)?; set_back(self.pg.page_mut(j), before) }
+            self.free_page(pno)?
+            gone = true
+            return Ok(true)
+        }
+        var emptied: bool = false
+        found := self.remove(child, key, emptied)?
+        if !emptied { return Ok(found) }
+        // the frame may have gone to another page meanwhile
+        k := self.pg.fetch(pno, true)?
+        var orphan: bool = false
+        with p := self.pg.page_mut(k) {
+            if n > 0usize {
+                drop_cell(p, n - 1usize)
+            } else if count(p) > 0usize {
+                first := child_at(p, 1usize)
+                set_link(p, first)
+                drop_cell(p, 0usize)
+            } else {
+                orphan = true
+            }
+        }
+        if orphan && pno == root {
+            var p: [4096]u8 = zero()
+            init_page(p, kind_leaf)
+            self.pg.put_page(root, p)?
+            self.meta.height = 1u32
+        } else if orphan {
+            self.free_page(pno)?
+            gone = true
+        }
+        return Ok(found)
+    }
+
+    // del removes a key and says whether it was there.
+    func del(edit self, key: view[]u8) -> Result[bool, DbErr] {
+        if !self.pg.writer { return Err(ReadOnly) }
+        var gone: bool = false
+        if !self.remove(root, key, gone)? { return Ok(false) }
+        self.changed = true
+        self.meta.count = self.meta.count - 1u64
+        return Ok(true)
+    }
+
+    // scan calls each for the entries from the key `from` up to, not
+    // including, the key `to`, in order, and returns how many there
+    // were. An empty `to` is no limit.
+    func scan(edit self, from: view[]u8, to: view[]u8, each: closure(view[]u8, view[]u8)) -> Result[u64, DbErr] {
+        var pno: u32 = self.leaf_for(from)?
+        var n: u64 = 0u64
+        var first: bool = true
+        while pno != 0u32 {
+            i := self.pg.fetch(pno, true)?
+            with p := self.pg.page(i) {
+                var at: usize = 0usize
+                if first { at = lower_bound(p, from) }
+                first = false
+                while at < count(p) {
+                    if len(to) > 0usize && compare(key_at(p, at), to) >= 0i32 { return Ok(n) }
+                    each(key_at(p, at), val_at(p, at))
+                    n = n + 1u64
+                    at = at + 1usize
+                }
+                pno = link(p)
+            }
+        }
+        return Ok(n)
+    }
+
+    // walk checks the tree under a page, leaves from left to right.
+    func walk(edit self, pno: u32, depth: u32, w: edit[Walk]) {
+        if pno < root || usize(pno) >= w.seen.len() {
+            complain(w, pno, "is named by the tree and is not a page of the file")
+            return
+        }
+        if w.seen.get(usize(pno)) != 0u8 { complain(w, pno, "is reached twice"); return }
+        with s := w.seen.at(usize(pno)) { s = 1u8 }
+        var n: usize = 0usize
+        var inner: bool = false
+        match self.pg.fetch(pno, true) {
+            Ok(i) => {
+                with p := self.pg.page(i) {
+                    n = count(p)
+                    if kind(p) == kind_leaf {
+                        if back(p) != w.leaf || (w.leaf != 0u32 && w.next != pno) { complain(w, pno, "is not linked to the leaf before it") }
+                        w.leaf = pno
+                        w.next = link(p)
+                        if w.depth == 0u32 { w.depth = depth }
+                        if w.depth != depth { complain(w, pno, "is a leaf at another depth than the first") }
+                        for j in 0usize..n {
+                            if w.any && compare(key_at(p, j), w.last.as_view()) <= 0i32 { complain(w, pno, "holds a key that is not above the key before it") }
+                            if compare(key_at(p, j), w.floor.as_view()) < 0i32 { complain(w, pno, "holds a key below its separator") }
+                            w.last.clear()
+                            w.last.extend(key_at(p, j))
+                            w.any = true
+                        }
+                        w.leaves = w.leaves + 1u64
+                        w.keys = w.keys + u64(n)
+                    } else if kind(p) == kind_inner {
+                        inner = true
+                        w.inners = w.inners + 1u64
+                    } else {
+                        complain(w, pno, "is in the tree and is neither a leaf nor an interior page")
+                    }
+                }
+            }
+            Err(e) => { complain(w, pno, "fails its checksum") }
+        }
+        if !inner { return }
+        for c in 0usize..n + 1usize {
+            var child: u32 = 0u32
+            match self.pg.fetch(pno, true) {
+                Ok(i) => {
+                    with p := self.pg.page(i) {
+                        child = child_at(p, c)
+                        if c > 0usize {
+                            // the keys so far are below the separator,
+                            // and the keys to come are not
+                            with sep := key_at(p, c - 1usize) {
+                                if (w.any && compare(w.last.as_view(), sep) >= 0i32) || (c > 1usize && compare(w.floor.as_view(), sep) >= 0i32) { complain(w, pno, "holds a separator that is not above what is before it") }
+                                w.floor.clear()
+                                w.floor.extend(sep)
+                            }
+                        }
+                    }
+                }
+                Err(e) => { return }
+            }
+            self.walk(child, depth + 1u32, w)
+        }
+    }
+
+    // check walks the tree and the free list and compares what it finds
+    // with the header. Unless quiet, it prints each thing that is wrong.
+    func check(edit self, quiet: bool) -> Result[Walk, DbErr] {
+        w := new_walk(self.meta.npages, quiet)?
+        if self.stale { complain(w, 0u32, "has a damaged copy: a writer will repair it") }
+        self.walk(root, 1u32, w)
+        if w.next != 0u32 { complain(w, w.leaf, "is the last leaf and links to another") }
+        var at: u32 = self.meta.free_head
+        while at != 0u32 {
+            if at < root || usize(at) >= w.seen.len() || w.seen.get(usize(at)) != 0u8 {
+                complain(w, at, "is on the free list and is in use, or is no page")
+                break
+            }
+            with s := w.seen.at(usize(at)) { s = 1u8 }
+            var next: u32 = 0u32
+            match self.pg.fetch(at, true) {
+                Ok(i) => {
+                    with p := self.pg.page(i) {
+                        if kind(p) != kind_free { complain(w, at, "is on the free list and is not a free page") }
+                        next = link(p)
+                    }
+                }
+                Err(e) => { complain(w, at, "fails its checksum") }
+            }
+            w.free = w.free + 1u64
+            at = next
+        }
+        if w.keys != self.meta.count { complain(w, 0u32, "counts other entries than the leaves hold") }
+        if w.depth != self.meta.height { complain(w, 0u32, "has another height than the tree") }
+        if w.free != u64(self.meta.nfree) { complain(w, 0u32, "counts other free pages than the list holds") }
+        if w.leaves + w.inners + w.free + 2u64 != u64(self.meta.npages) { complain(w, 0u32, "counts pages that are neither in the tree nor free") }
+        return Ok(w)
+    }
+
+    // recover makes a header for the tree the file holds: it is what a
+    // writer does when one copy of the header is damaged, for the other
+    // may be older than the pages.
+    func recover(edit self) -> Result[(), DbErr] {
+        size := iof(self.pg.file.metadata())?.size
+        self.meta.npages = truncate[u32](size / page_bytes)
+        w := new_walk(self.meta.npages, true)?
+        self.walk(root, 1u32, w)
+        if w.problems != 0u64 || w.next != 0u32 { return Err(Damaged) }
+        self.meta.count = w.keys
+        self.meta.height = w.depth
+        self.meta.free_head = 0u32
+        self.meta.nfree = 0u32
+        var pno: u32 = self.meta.npages
+        while pno > root + 1u32 {
+            pno = pno - 1u32
+            if w.seen.get(usize(pno)) == 0u8 { self.free_page(pno)? }
+        }
+        // two commits: one for each copy of the header
+        self.changed = true
+        self.commit()?
+        self.changed = true
+        self.commit()?
+        self.stale = false
+        self.recovered = true
+        return Ok(())
+    }
+
+    // commit makes the changes last: the pages, a sync, then the header
+    // in the slot of the older copy, and a sync of that. While a reader
+    // has the store open it waits, or is Busy with nothing written.
+    func commit(edit self) -> Result[(), DbErr] {
+        if !self.changed && !self.pg.holding { return Ok(()) }
+        if !self.pg.holding {
+            if !acquire(self.pg.file, data_from, 0u64, true, self.pg.wait)? { return Err(Busy) }
+            self.pg.holding = true
+        }
+        for i in 0usize..self.pg.frames.len() {
+            if self.pg.frames.get(i).dirty { self.pg.write_back(i)? }
+        }
+        iof(self.pg.file.sync())?
+        self.meta.seq = self.meta.seq + 1u64
+        at := usize(self.meta.seq % 2u64) * page_size
+        with b := self.map.bytes_mut() { write_slot(b[at : at + slot_bytes], self.meta) }
+        iof(self.map.sync())?
+        iof(self.pg.file.unlock_range(data_from, 0u64))?
+        self.pg.holding = false
+        self.changed = false
+        return Ok(())
+    }
+}
+
+// format writes the two headers and an empty root into a new file.
+func format(file: edit[io.File], wait: bool) -> Result[(), DbErr] {
+    if !acquire(file, data_from, 0u64, true, wait)? { return Err(Busy) }
+    var m: Meta = Meta { seq: 0u64, count: 0u64, npages: 3u32, free_head: 0u32, nfree: 0u32, height: 1u32 }
+    var p: [4096]u8 = zero()
+    write_slot(p[0usize : slot_bytes], m)
+    iof(file.write_all(p))?
+    m.seq = 1u64
+    write_slot(p[0usize : slot_bytes], m)
+    iof(file.write_all(p))?
+    init_page(p, kind_leaf)
+    store_le[u32](p, 4usize, page_sum(p))
+    iof(file.write_all(p))?
+    iof(file.sync())?
+    return iof(file.unlock_range(data_from, 0u64))
+}
+
+// open opens the store at path with a cache of at most bound frames: as
+// the one writer, creating the file when it is not there, or as a
+// reader. With wait it waits for the locks; without, it is Locked when
+// there is a writer already and Busy while one is writing pages. The
+// header to go by is that of the later commit.
+func open(path: view[]u8, writer: bool, bound: usize, wait: bool) -> Result[Db, DbErr] {
+    o := io.options()
+    o.read = true
+    o.write = writer
+    o.create = writer
+    file := iof(io.open(path, o))?
+    if writer {
+        if !acquire(file, 0u64, 1u64, true, wait)? { return Err(Locked) }
+        if iof(file.metadata())?.size == 0u64 { format(file, wait)? }
+    } else if !acquire(file, data_from, 0u64, false, wait)? {
+        return Err(Busy)
+    }
+    map := iof(mem.map_file(file, writer))?
+    if map.len() < 3usize * page_size { return Err(BadHeader) }
+    var a: Meta
+    var b: Meta
+    var a_whole: bool = false
+    var b_whole: bool = false
+    with bytes := map.bytes() {
+        a_whole = read_slot(bytes[0usize : slot_bytes], out a)
+        b_whole = read_slot(bytes[page_size : page_size + slot_bytes], out b)
+    }
+    if !a_whole && !b_whole { return Err(BadHeader) }
+    if !a_whole || (b_whole && b.seq > a.seq) { a = b }
+    pg := Pager { file: file, bytes: Vec[u8].new(), frames: Vec[Frame].new(), index: Vec[u32].new(), bound: bound, tick: 0u64, writer: writer, wait: wait, holding: false, hits: 0u64, misses: 0u64, evictions: 0u64, reads: 0u64, writes: 0u64 }
+    db := Db { pg: pg, map: map, meta: a, changed: false, stale: !a_whole || !b_whole, recovered: false }
+    if writer && db.stale { db.recover()? }
+    return Ok(db)
+}
+
+// ---- the program ----
+
+func say(s: view[]u8) { print_str(s); println() }
+func num(label: view[]u8, n: u64) { print_str(label); print_u64(n) }
+
+func why(e: view[DbErr]) -> str.String {
+    match e {
+        Io(x) => {
+            match io.kind(x) {
+                NotFound => { return str.String.from("there is no such file") }
+                _ => { return str.String.from("the file could not be read or written") }
+            }
+        }
+        Corrupt(pno) => {
+            s := str.String.from("page ")
+            s.push_u64(u64(pno))
+            s.push_str(" fails its checksum")
+            return s
+        }
+        NoMemory => { return str.String.from("out of memory") }
+        Locked => { return str.String.from("refused: the store has a writer") }
+        Busy => { return str.String.from("refused: the pages are in use by another open of the store") }
+        TooLarge => { return str.String.from("a key is 1 to 64 bytes and a value at most 512") }
+        BadHeader => { return str.String.from("this is not a store, or both copies of its header are damaged") }
+        ReadOnly => { return str.String.from("the store is open for reading") }
+        Damaged => { return str.String.from("the tree is damaged") }
+    }
+}
+func say_err(e: view[DbErr]) { say(why(e).as_view()) }
+
+// report prints what a check found and returns whether all is well.
+func report(db: edit[Db]) -> Result[bool, DbErr] {
+    w := db.check(false)?
+    num("check: ", w.keys)
+    num(" entries in ", w.leaves)
+    num(" leaves under ", w.inners)
+    num(" interior pages, ", w.free)
+    num(" free pages, ", w.problems)
+    say(" problems")
+    return Ok(w.problems == 0u64)
+}
+
+func stats(db: view[Db]) {
+    num("entries ", db.meta.count)
+    num(", height ", u64(db.meta.height))
+    num(", pages ", u64(db.meta.npages))
+    num(", free ", u64(db.meta.nfree))
+    num(", commit ", db.meta.seq)
+    println()
+    num("cache: ", u64(db.pg.frames.len()))
+    num(" frames, ", db.pg.hits)
+    num(" hits, ", db.pg.misses)
+    num(" misses, ", db.pg.evictions)
+    num(" evictions, ", db.pg.reads)
+    num(" pages read, ", db.pg.writes)
+    say(" written")
+}
+
+func usage() -> i32 {
+    eprint_str("usage: kdb FILE put KEY VALUE | get KEY | del KEY | scan [FROM [TO]] | check | stats\n")
+    return 2i32
+}
+
+func command(path: view[]u8, verb: view[]u8, rest: view[]Vec[u8]) -> Result[i32, DbErr] {
+    if str.equal(verb, "put") && len(rest) == 2usize {
+        db := open(path, true, 64usize, true)?
+        db.put(rest[0usize].as_view(), rest[1usize].as_view())?
+        db.commit()?
+        return Ok(0i32)
+    }
+    if str.equal(verb, "del") && len(rest) == 1usize {
+        db := open(path, true, 64usize, true)?
+        found := db.del(rest[0usize].as_view())?
+        db.commit()?
+        if found { return Ok(0i32) }
+        return Ok(1i32)
+    }
+    if str.equal(verb, "get") && len(rest) == 1usize {
+        db := open(path, false, 64usize, true)?
+        value := Vec[u8].new()
+        if !db.get(rest[0usize].as_view(), value)? { return Ok(1i32) }
+        say(value.as_view())
+        return Ok(0i32)
+    }
+    if str.equal(verb, "scan") && len(rest) <= 2usize {
+        db := open(path, false, 64usize, true)?
+        from := Vec[u8].new()
+        to := Vec[u8].new()
+        if len(rest) > 0usize { from.extend(rest[0usize].as_view()) }
+        if len(rest) > 1usize { to.extend(rest[1usize].as_view()) }
+        n := db.scan(from.as_view(), to.as_view(), |k, v| {
+            print_str(k)
+            print_str("\t")
+            say(v)
+        })?
+        return Ok(0i32)
+    }
+    if str.equal(verb, "check") && len(rest) == 0usize {
+        db := open(path, false, 64usize, true)?
+        if report(db)? { return Ok(0i32) }
+        return Ok(1i32)
+    }
+    if str.equal(verb, "stats") && len(rest) == 0usize {
+        db := open(path, false, 64usize, true)?
+        w := db.check(true)?
+        stats(db)
+        return Ok(0i32)
+    }
+    return Ok(usage())
+}
+
+// ---- the demonstration ----
+
+func key_of(i: u64) -> str.String {
+    k := str.String.from("station-")
+    k.push_padded(i, 5usize, 48u8)
+    k.push_str("/observations/temperature/hourly/quality-checked")
+    return k
+}
+
+// value_of is the value of key i in its v-th version: a number and a
+// run of dots, 300 to 511 bytes.
+func value_of(i: u64, v: u8) -> str.String {
+    s := str.String.from("reading ")
+    s.push_u64(i * 37u64 + u64(v))
+    s.push(32u8)
+    pad(s, "................................................................", 300usize + usize((i * 7u64 + u64(v) * 31u64) % 212u64))
+    return s
+}
+func pad(s: edit[str.String], dots: view[]u8, total: usize) {
+    while s.len() + len(dots) <= total { s.push_str(dots) }
+    s.push_str(dots[0usize : total - s.len()])
+}
+
+// verify compares the store with the model, which has the version of
+// each key's value, 0 for a key that is not there: every entry a scan
+// meets, and every eighth key by a lookup of its own. It returns how
+// many are not as the model has them.
+func verify(db: edit[Db], model: view[]u8) -> Result[u64, DbErr] {
+    var wrong: u64 = 0u64
+    var there: u64 = 0u64
+    for i in 0usize..len(model) {
+        if model[i] != 0u8 { there = there + 1u64 }
+    }
+    met := db.scan("station-", "station.", |k, v| {
+        var i: usize = 0usize
+        for d in 8usize..13usize { i = i * 10usize + usize(k[d] - 48u8) }
+        if i >= len(model) || model[i] == 0u8 || compare(v, value_of(u64(i), model[i]).as_view()) != 0i32 { wrong = wrong + 1u64 }
+    })?
+    if met != there { wrong = wrong + 1u64 }
+    got := Vec[u8].new()
+    var i: usize = 0usize
+    while i < len(model) {
+        if db.get(key_of(u64(i)).as_view(), got)? != (model[i] != 0u8) { wrong = wrong + 1u64 }
+        i = i + 8usize
+    }
+    return Ok(wrong)
+}
+
+func show(db: edit[Db], key: view[]u8) {
+    got := Vec[u8].new()
+    print_str(key)
+    match db.get(key, got) {
+        Ok(there) => {
+            if there {
+                print_str(" = ")
+                with g := got.as_view() {
+                    if len(g) > 16usize { print_str(g[0usize : 16usize]) } else { print_str(g) }
+                }
+                num(" (", u64(got.len()))
+                say(" bytes)")
+            } else {
+                say(" is not there")
+            }
+        }
+        Err(e) => { print_str(": "); say_err(e) }
+    }
+}
+
+// tried says how an open or a commit went.
+func tried[T](what: view[]u8, r: own Result[T, DbErr]) {
+    print_str(what)
+    match move r {
+        Ok(v) => say(": done")
+        Err(e) => { print_str(": "); say_err(e) }
+    }
+}
+
+// poke changes one byte of a file and returns what it was.
+func poke(path: view[]u8, at: u64, b: u8) -> Result[u8, DbErr] {
+    o := io.options()
+    o.read = true
+    o.write = true
+    f := iof(io.open(path, o))?
+    var one: [1]u8 = zero()
+    a := iof(f.seek(io.SeekFrom.Start(at)))?
+    n := iof(f.read(one))?
+    was := one[0usize]
+    one[0usize] = b
+    c := iof(f.seek(io.SeekFrom.Start(at)))?
+    iof(f.write_all(one))?
+    iof(f.close())?
+    return Ok(was)
+}
+
+func demo() -> Result[(), DbErr] {
+    dir := iof(io.make_temp_dir("kdb"))?
+    done := demo_in(dir.as_view())
+    removed := iof(io.remove_dir_all(dir.as_view()))
+    done?
+    return removed
+}
+
+func demo_in(dir: view[]u8) -> Result[(), DbErr] {
+    path := io.join(dir, "demo.kdb")
+    model := Vec[u8].new()
+    model.resize(400usize, 0u8)
+    order := Vec[u64].new()
+    for i in 0u64..400u64 { order.push(i) }
+    rng := rand.Rng.seeded(2026u64)
+    rng.shuffle(order.as_edit())
+
+    say("-- a new store: 400 keys in a shuffled order, through 24 frames")
+    db := open(path.as_view(), true, 24usize, false)?
+    for n in 0usize..order.len() {
+        i := order.get(n)
+        db.put(key_of(i).as_view(), value_of(i, 1u8).as_view())?
+        with m := model.at(usize(i)) { m = 1u8 }
+        if n % 100usize == 99usize { db.commit()? }
+    }
+    stats(db)
+    ok := report(db)?
+
+    say("-- lookups")
+    show(db, key_of(0u64).as_view())
+    show(db, key_of(234u64).as_view())
+    show(db, key_of(399u64).as_view())
+    show(db, "station-00400")
+    show(db, "a")
+
+    say("-- scans along the leaves")
+    n := db.scan("station-00198", "station-00203", |k, v| {
+        print_str("  ")
+        print_str(k)
+        num(" ", u64(len(v)))
+        println()
+    })?
+    num("from station-00198 to station-00203: ", n)
+    println()
+    var unordered: u64 = 0u64
+    before := Vec[u8].new()
+    all := db.scan("", "", |k, v| {
+        if compare(before.as_view(), k) >= 0i32 { unordered = unordered + 1u64 }
+        before.clear()
+        before.extend(k)
+    })?
+    num("all: ", all)
+    num(" entries, ", unordered)
+    say(" out of order")
+    num("from station-00390 on: ", db.scan("station-00390", "", |k, v| { })?)
+    num(", past the last key: ", db.scan("t", "", |k, v| { })?)
+    println()
+
+    say("-- deletes: a run of 120 keys, and every fifth of the rest")
+    for i in 0u64..400u64 {
+        if (i >= 140u64 && i < 260u64) || i % 5u64 == 0u64 {
+            found := db.del(key_of(i).as_view())?
+            with m := model.at(usize(i)) { m = 0u8 }
+        }
+    }
+    print_str("a key that is gone can be deleted again: ")
+    print_bool(db.del(key_of(140u64).as_view())?)
+    println()
+    stats(db)
+    ok = report(db)?
+
+    say("-- longer values for 60 keys, and 40 of the deleted keys again")
+    for k in 300u64..360u64 {
+        if model.get(usize(k)) != 0u8 {
+            db.put(key_of(k).as_view(), value_of(k, 2u8).as_view())?
+            with m := model.at(usize(k)) { m = 2u8 }
+        }
+    }
+    for i in 160u64..200u64 {
+        db.put(key_of(i).as_view(), value_of(i, 3u8).as_view())?
+        with m := model.at(usize(i)) { m = 3u8 }
+    }
+    db.commit()?
+    stats(db)
+    drop(db)
+
+    say("-- opened again, for reading, through 8 frames")
+    reader := open(path.as_view(), false, 8usize, false)?
+    num("wrong against the model: ", verify(reader, model.as_view())?)
+    println()
+    ok = report(reader)?
+    stats(reader)
+    tried("a reader's put", reader.put("k", "v"))
+    drop(reader)
+
+    say("-- a header torn after its pages were written")
+    // one more commit, and then its header is damaged: the copy that is
+    // left is one commit older than the pages
+    db = open(path.as_view(), true, 24usize, false)?
+    db.put("zebra", "striped")?
+    for i in 260u64..290u64 {
+        found := db.del(key_of(i).as_view())?
+        with m := model.at(usize(i)) { m = 0u8 }
+    }
+    db.commit()?
+    newest := db.meta.seq % 2u64
+    drop(db)
+    was := poke(path.as_view(), newest * page_bytes + 16u64, 255u8)?
+    reader = open(path.as_view(), false, 24usize, false)?
+    ok = report(reader)?
+    drop(reader)
+    db = open(path.as_view(), true, 24usize, false)?
+    print_str("a writer opened it and repaired the header: ")
+    print_bool(db.recovered)
+    println()
+    stats(db)
+    ok = report(db)?
+    show(db, "zebra")
+    num("wrong against the model: ", verify(db, model.as_view())?)
+    println()
+    leaf := db.leaf_for(key_of(42u64).as_view())?
+    drop(db)
+
+    say("-- a page with one byte changed, and changed back")
+    was = poke(path.as_view(), u64(leaf) * page_bytes + 4000u64, 7u8)?
+    reader = open(path.as_view(), false, 24usize, false)?
+    show(reader, key_of(42u64).as_view())
+    ok = report(reader)?
+    drop(reader)
+    was = poke(path.as_view(), u64(leaf) * page_bytes + 4000u64, was)?
+
+    say("-- two opens of one store")
+    db = open(path.as_view(), true, 24usize, false)?
+    tried("a second writer", open(path.as_view(), true, 24usize, false))
+    reader = open(path.as_view(), false, 24usize, false)?
+    say("a reader beside the idle writer: done")
+    db.put("yak", "shaggy")?
+    tried("the writer's commit beside the reader", db.commit())
+    show(reader, "yak")
+    drop(reader)
+    tried("the same commit with the reader gone", db.commit())
+    reader = open(path.as_view(), false, 24usize, false)?
+    show(reader, "yak")
+    drop(reader)
+    // through three frames the writer has to write pages back before it
+    // commits, and from the first of them on no reader is let in
+    db.pg.bound = 3usize
+    for i in 0u64..10u64 { db.put(key_of(i * 40u64).as_view(), value_of(i * 40u64, 4u8).as_view())? }
+    tried("a reader beside a writer that is writing pages", open(path.as_view(), false, 24usize, false))
+    db.commit()?
+    tried("a reader after the commit", open(path.as_view(), false, 24usize, false))
+
+    say("-- every key deleted, and one put")
+    db.pg.bound = 24usize
+    keys := Vec[Vec[u8]].new()
+    total := db.scan("", "", |k, v| {
+        key := Vec[u8].new()
+        key.extend(k)
+        keys.push(key)
+    })?
+    for i in 0usize..keys.len() { found := db.del(keys.get(i).as_view())? }
+    ok = report(db)?
+    db.put("one", "more")?
+    db.commit()?
+    stats(db)
+    return Ok(())
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() < 2usize {
+        match demo() {
+            Ok(u) => { return 0i32 }
+            Err(e) => {
+                print_str("the demonstration failed: ")
+                say_err(e)
+                return 1i32
+            }
+        }
+    }
+    if args.len() < 3usize { return usage() }
+    var status: i32 = 1i32
+    with all := args.as_view() {
+        match command(all[1usize].as_view(), all[2usize].as_view(), all[3usize : len(all)]) {
+            Ok(code) => { status = code }
+            Err(e) => { eprint_str("kdb: "); eprint_str(why(e).as_view()); eprint_str("\n") }
+        }
+    }
+    return status
+}

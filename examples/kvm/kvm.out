@@ -1,0 +1,168 @@
+-- recursion
+fib 0..10: [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55]
+fib(13) = 233
+-- a sieve
+17 primes up to 60
+[2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59]
+-- strings, numbers and what is true
+a stack machine in kern is 23 bytes
+nrek ni enihcam kcats a
+true true true false false
+7 / 2 = 3   7.0 / 2 = 3.5   1.0 / 3 = 0.3333333333333333   -7 % 3 = -1
+0.1 + 0.2 = 0.30000000000000004   2.0 * 3 = 6.0   1.0 / 0 = Infinity
+the largest number + 1 = -9223372036854775808
+3037000500 squared = -9223372036709301616
+45 5.0 1.5! -17
+nil 0 true <built-in function> <function>
+-- closures and functions as values
+counters: 3 4 1 5
+[11, 12, 13]
+[2, 5, 10, 17]
+10.0
+-- a sort that takes its order as a function
+unsorted:   [26, 53, 77, 88, 7, 13, 38, 21, 32, 51, 9, 14]
+ascending:  [7, 9, 13, 14, 21, 26, 32, 38, 51, 53, 77, 88]
+descending: [88, 77, 53, 51, 38, 32, 26, 21, 14, 13, 9, 7]
+["apple", "banana", "fig", "pear"]
+["fig", "pear", "apple", "banana"]
+-- garbage, a ring included
+["item 0", "item 50", "item 100", "item 150"] [1, [1, [1, [1, [...]]]]]
+heap: 403 objects made, 7 collections, 397 freed, 6 live at the end
+-- a program and its instructions
+    | fn sum_to(n) {
+    |     let total = 0
+    |     let i = 1
+    |     while i <= n && total >= 0 {
+    |         total = total + i
+    |         i = i + 1
+    |     }
+    |     return total
+    | }
+    | let scale = 2.5
+    | print("sum:", sum_to(10) * scale)
+== sum_to (parameters 1, captured 0) ==
+0000    2 const         0    ; 0
+0001    3 const         1    ; 1
+0002    4 get_local     2
+0003    | get_local     0
+0004    | compare       <=
+0005    | and_jump      -> 0009
+0006    | get_local     1
+0007    | const         0    ; 0
+0008    | compare       >=
+0009    | jump_if_false -> 0019
+0010    5 get_local     1
+0011    | get_local     2
+0012    | arith         +
+0013    | set_local     1
+0014    6 get_local     2
+0015    | const         1    ; 1
+0016    | arith         +
+0017    | set_local     2
+0018    4 loop          -> 0002
+0019    8 get_local     1
+0020    | return
+0021    1 nil
+0022    | return
+== main (parameters 0, captured 0) ==
+0000    1 closure       0    ; sum_to
+0001    | def_global    7    ; sum_to
+0002   10 const         2    ; 2.5
+0003    | def_global    8    ; scale
+0004   11 get_global    0    ; print
+0005    | const         3    ; "sum:"
+0006    | get_global    7    ; sum_to
+0007    | const         4    ; 10
+0008    | call          1
+0009    | get_global    8    ; scale
+0010    | arith         *
+0011    | call          2
+0012    | pop
+0013   12 nil
+0014    | return
+sum: 137.5
+-- mistakes the lexer finds
+    | let s = "never closed
+    | let t = 3 $ 4 @ 5
+    | let big = 99999999999999999999
+    | let x = 1.5.2
+    line 1:9: this string is not closed before the line ends
+    line 2:11: this character means nothing here: $
+    line 2:15: this character means nothing here: @
+    line 3:11: this whole number is too large
+    line 4:12: this character means nothing here: .
+-- mistakes the parser finds, one a line
+    | let x = (1 + ) * 2
+    | let = 5
+    | if x > 2 print(x)
+    | let y = [1, 2
+    | while y { y = y - }
+    | x + 1 = 3
+    | fn f(a, 7) { return a }
+    | print("reached the end"
+    line 1:14: expected an expression, found ')'
+    line 2:5: expected a name after 'let', found '='
+    line 3:10: expected '{', found 'print'
+    line 5:1: expected ']' after the elements, found 'while'
+    line 5:19: expected an expression, found '}'
+    line 6:7: only a name or an element can be assigned to
+    line 7:9: expected the name of a parameter, found 7
+    line 9:1: expected ')' after the arguments, found the end of the program
+-- mistakes the compiler finds
+    | fn f(a) {
+    |     let a = 1
+    |     let g = fn() { a = 2 }
+    |     return missing(a) + g
+    | }
+    | return f
+    line 2:5: 'a' is already a variable of this block
+    line 3:22: 'a' belongs to the function around this one, which has only a copy of it to assign to
+    line 6:1: 'return' outside a function
+    line 4:12: nothing defines 'missing'
+-- mistakes found as the program runs
+    | print("before")
+    | print(1 + "one")
+before
+    line 2: error in main: '+' cannot take a whole number and a string
+    | fn half(n) { return 10 / (n - n) }
+    | print(half(3))
+    line 1: error in half: division by zero
+    | print(7 % 2.0)
+    line 1: error in main: '%' needs two whole numbers
+    | let a = [1, 2, 3]
+    | print(a[2])
+    | print(a[3])
+3
+    line 3: error in main: index 3 is outside the 3 elements there are
+    | let a = [1, 2, 3]
+    | a[-1] = 0
+    line 2: error in main: index -1 is outside the 3 elements there are
+    | print("abc"["b"])
+    line 1: error in main: an index is a whole number, not a string
+    | fn down(n) { return down(n + 1) + 1 }
+    | print(down(0))
+    line 1: error in down: the stack overflowed: calls are more than 64 deep
+    | let f = 3
+    | f(1)
+    line 2: error in main: only a function can be called, not a whole number
+    | fn two(a, b) { return a }
+    | two(1)
+    line 2: error in main: two takes 2 arguments, not 1
+    | print(len(1, 2))
+    line 1: error in main: len takes 1 argument, not 2
+    | print(-true)
+    line 1: error in main: '-' cannot take a boolean
+    | print([1] < [2])
+    line 1: error in main: '<' cannot take an array and an array
+    | print(late)
+    | let late = 1
+    line 1: error in main: 'late' is used before the line that defines it has run
+    | pop([])
+    line 1: error in main: pop from an empty array
+    | print(int(1.0 / 0))
+    line 1: error in main: int: the float is not in the range of a whole number
+    | print(int("12x"))
+    line 1: error in main: int: the string is not a whole number
+    | let s = "abc"
+    | s[0] = "x"
+    line 2: error in main: only an element of an array can be assigned, not one of a string

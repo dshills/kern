@@ -1,0 +1,1569 @@
+//! phase: 6
+//! expect: output kpass
+// kpass: a pre-forking server. One parent accepts connections and passes
+// each accepted connection's descriptor to one of several workers over a
+// Unix-domain stream; the worker serves it and reports back.
+//
+//     kpass serve ADDR [WORKERS]     ADDR is host:port, or a path (a
+//                                    Unix-domain listener); 3 workers
+//     kpass status PATH              ask a running server for its counts
+//
+// A connection speaks lines: `echo TEXT`, `upper TEXT`, `sum N...`,
+// `whoami` (the user and group at the other end of a Unix-domain
+// connection, from the system's record), `worker` (who serves it),
+// `idle MS` (this connection's idle limit) and `quit`.
+//
+// How it is built:
+//   - A worker is this program started again with a hidden argument
+//     (`--worker`). Sockets are not inherited, so the worker connects to a
+//     Unix-domain listener the parent holds at a temporary path and says
+//     which worker it is; the parent checks that against the system's
+//     record of the peer's process. That stream is the control channel.
+//   - The control channel carries frames of nine bytes: a kind and two
+//     numbers. A connection is handed over as a frame with the socket
+//     attached (UnixStream.send_with); the worker reads exactly one frame
+//     a call, because a receive keeps one descriptor only, asks the
+//     system what the Descriptor is and adopts it as a TCP or a
+//     Unix-domain stream. It answers with a frame when it has the
+//     connection, one when the connection has ended, and one when it has
+//     drained. The parent keeps its own descriptor of a connection until
+//     the first of these: on macOS a socket that is in flight with no
+//     descriptor left anywhere can arrive already at its end.
+//   - The parent is one loop on a net.Poller: the listener, every control
+//     channel, a UnixDatagram that answers status queries, and the
+//     signals. A connection goes to the worker with the fewest in flight.
+//     A worker that dies (the end of its control channel, or Child among
+//     the signals) is replaced and what it had in flight is written off.
+//   - Interrupt or Terminate stops the accepting and tells the workers to
+//     drain; a time.Deadline bounds the wait, and what is still running
+//     then is stopped. A worker closes a connection that has been idle
+//     for its limit, by a Deadline of its own.
+//
+// With no arguments the program runs a demonstration. There the workers
+// are threads, each joined to the parent by a UnixStream.pair(): the
+// interpreter runs a source file and has no executable to start again.
+// Everything else is the same code, the descriptor passing included.
+// `kpass selftest`, in a built program, is the demonstration with
+// processes, and writes the same lines. Both servers there allow one more
+// command, `crash`, which ends the worker as a fault would.
+module kpass
+import "std/io"
+import "std/net"
+import "std/process"
+import "std/signal"
+import "std/str"
+import "std/time"
+
+// ---- frames on the control channel ----
+
+const frame_len: usize = 9usize
+const f_conn: u8 = 67u8   // parent to worker: a connection, serial a, attached
+const f_drain: u8 = 68u8  // parent to worker: finish what is open, then end
+const f_hello: u8 = 72u8  // worker to parent: worker a, incarnation b
+const f_taken: u8 = 84u8  // worker to parent: connection a has arrived
+const f_done: u8 = 70u8   // worker to parent: connection a ended after b lines
+const f_gone: u8 = 71u8   // worker to parent: drained
+
+func put_frame(into: edit[]u8, kind: u8, a: u32, b: u32) {
+    into[0usize] = kind
+    store_be[u32](into, 1usize, a)
+    store_be[u32](into, 5usize, b)
+}
+
+func send_frame(ctl: edit[net.UnixStream], kind: u8, a: u32, b: u32) -> Result[(), io.IoErr] {
+    var f: [9]u8 = zero()
+    put_frame(f, kind, a, b)
+    return ctl.write_all(f)
+}
+
+// send_conn sends a connection: the descriptor travels with the frame's
+// first byte, and what the system did not take of the frame follows.
+func send_conn[S: net.Source](ctl: edit[net.UnixStream], serial: u32, conn: view[S]) -> Result[(), io.IoErr] {
+    var f: [9]u8 = zero()
+    put_frame(f, f_conn, serial, 0u32)
+    n := ctl.send_with(f, conn)?
+    if n < frame_len { ctl.write_all(f[n : frame_len])? }
+    return Ok(())
+}
+
+// ---- a connection, in the worker and in the demonstration's clients ----
+
+union Stream { Tcp(net.TcpStream); Unix(net.UnixStream) }
+
+func send_stream(ctl: edit[net.UnixStream], serial: u32, conn: view[Stream]) -> Result[(), io.IoErr] {
+    match conn {
+        Tcp(t) => { return send_conn(ctl, serial, t) }
+        Unix(u) => { return send_conn(ctl, serial, u) }
+    }
+}
+
+// read_some waits at most d: None when nothing arrived, 0 at the end.
+func read_some(s: edit[Stream], buf: edit[]u8, d: time.Duration) -> Result[Option[usize], io.IoErr] {
+    match s {
+        Tcp(t) => { return t.read_timeout(buf, d) }
+        Unix(u) => { return u.read_timeout(buf, d) }
+    }
+}
+
+func write_text(s: edit[Stream], data: view[]u8) -> Result[(), io.IoErr] {
+    match s {
+        Tcp(t) => { return t.write_all(data) }
+        Unix(u) => { return u.write_all(data) }
+    }
+}
+
+func watch_stream(p: edit[net.Poller], s: view[Stream], token: u64) -> Result[(), io.IoErr] {
+    match s {
+        Tcp(t) => { return p.watch(t, token, true, false) }
+        Unix(u) => { return p.watch(u, token, true, false) }
+    }
+}
+
+// adopt makes a received descriptor the stream it is.
+func adopt(d: own net.Descriptor) -> Result[Stream, io.IoErr] {
+    match d.kind()? {
+        TcpStream => { return Ok(Tcp(d.into_tcp_stream()?)) }
+        UnixStream => { return Ok(Unix(d.into_unix_stream()?)) }
+        _ => {
+            drop(d)
+            return Err(io.error_of(io.ErrKind.InvalidInput))
+        }
+    }
+}
+
+// ---- the line protocol ----
+
+// Options are what a worker is started with.
+struct Options { slot: u32; incarnation: u32; idle_ms: u64; allow_crash: bool }
+
+struct Conn { stream: Stream; serial: u32; lines: io.LineBuf; served: u32; idle: time.Duration; until: time.Deadline; open: bool }
+
+const stay: u8 = 0u8
+const quit: u8 = 1u8
+const crash: u8 = 2u8
+const max_line: usize = 4096usize
+
+// word_end is where the word that starts at from ends.
+func word_end(s: view[]u8, from: usize) -> usize {
+    var i: usize = from
+    while i < len(s) && s[i] != 32u8 { i = i + 1usize }
+    return i
+}
+
+// sum adds the numbers of rest, or says why it cannot.
+func sum(rest: view[]u8, reply: edit[str.String]) {
+    var total: u64 = 0u64
+    var at: usize = 0usize
+    var count: usize = 0usize
+    while at < len(rest) {
+        if rest[at] == 32u8 {
+            at = at + 1usize
+        } else {
+            end := word_end(rest, at)
+            match str.parse_u64(rest[at : end]) {
+                Some(v) => {
+                    match checked_add(total, v) {
+                        Some(t) => { total = t }
+                        None => {
+                            reply.push_str("ERR sum overflows")
+                            return
+                        }
+                    }
+                }
+                None => {
+                    reply.push_str("ERR sum takes whole numbers")
+                    return
+                }
+            }
+            count = count + 1usize
+            at = end
+        }
+    }
+    if count == 0usize {
+        reply.push_str("ERR sum takes whole numbers")
+    } else {
+        reply.push_u64(total)
+    }
+}
+
+// who_text is a peer's user and group as the reply to whoami.
+func who_text(cred: net.Credentials, reply: edit[str.String]) {
+    reply.push_str("user ")
+    reply.push_u64(u64(cred.user))
+    reply.push_str(" group ")
+    reply.push_u64(u64(cred.group))
+}
+
+// execute runs one line for a connection and writes the reply, without
+// its newline; the result says what becomes of the connection.
+func execute(cmd: view[]u8, rest: view[]u8, c: edit[Conn], opts: Options, reply: edit[str.String]) -> u8 {
+    if str.equal(cmd, "echo") {
+        reply.push_str(rest)
+    } else if str.equal(cmd, "upper") {
+        for b in rest {
+            if b >= 97u8 && b <= 122u8 { reply.push(b - 32u8) } else { reply.push(b) }
+        }
+    } else if str.equal(cmd, "sum") {
+        sum(rest, reply)
+    } else if str.equal(cmd, "whoami") {
+        match c.stream {
+            Unix(u) => {
+                match u.peer_credentials() {
+                    Ok(cred) => who_text(cred, reply)
+                    Err(e) => reply.push_str("ERR the system does not say")
+                }
+            }
+            Tcp(t) => reply.push_str("ERR whoami needs a Unix-domain connection")
+        }
+    } else if str.equal(cmd, "worker") {
+        reply.push_str("worker ")
+        reply.push_u64(u64(opts.slot))
+        reply.push_str(" incarnation ")
+        reply.push_u64(u64(opts.incarnation))
+    } else if str.equal(cmd, "idle") {
+        match str.parse_u64(rest) {
+            Some(ms) => {
+                if ms == 0u64 || ms > 86400000u64 {
+                    reply.push_str("ERR idle takes 1 to 86400000 milliseconds")
+                } else {
+                    c.idle = time.millis(ms)
+                    reply.push_str("idle limit ")
+                    reply.push_u64(ms)
+                    reply.push_str(" ms")
+                }
+            }
+            None => reply.push_str("ERR idle takes 1 to 86400000 milliseconds")
+        }
+    } else if str.equal(cmd, "quit") {
+        reply.push_str("bye")
+        return quit
+    } else if str.equal(cmd, "crash") && opts.allow_crash {
+        return crash
+    } else {
+        reply.push_str("ERR unknown command")
+    }
+    return stay
+}
+
+// run_line splits a line into its command and the rest.
+func run_line(line: view[]u8, c: edit[Conn], opts: Options, reply: edit[str.String]) -> u8 {
+    b := str.trim(line)
+    sp := word_end(line[b.lo : b.hi], 0usize) + b.lo
+    var rest: usize = sp
+    if rest < b.hi { rest = rest + 1usize }
+    return execute(line[b.lo : sp], line[rest : b.hi], c, opts, reply)
+}
+
+// ---- a worker ----
+
+// Worker is a worker's state. inbox[0 : have] is the part of a frame that
+// has arrived, and arrived the descriptor that came with its first byte.
+struct Worker { opts: Options; ctl: net.UnixStream; poller: net.Poller; conns: Vec[Option[Conn]]; live: usize; inbox: [9]u8; have: usize; arrived: Option[net.Descriptor]; draining: bool; parent_gone: bool }
+
+// The control channel is watched under token 0, a connection under the
+// number of its slot plus one.
+
+// take_conn gives a connection that has arrived a slot and a watch. One
+// that cannot be adopted is reported as ended.
+func take_conn(w: edit[Worker], serial: u32, d: own net.Descriptor) -> Result[(), io.IoErr] {
+    match adopt(d) {
+        Ok(s) => {
+            var at: usize = w.conns.len()
+            for i in 0usize..w.conns.len() {
+                if at == w.conns.len() && is_free(w.conns.get(i)) { at = i }
+            }
+            watch_stream(w.poller, s, u64(at) + 1u64)?
+            idle := time.millis(w.opts.idle_ms)
+            c := Conn { stream: s, serial: serial, lines: io.LineBuf.new(), served: 0u32, idle: idle, until: time.after(idle), open: true }
+            if at == w.conns.len() {
+                w.conns.push(Some(c))
+            } else {
+                with slot := w.conns.at(at) { slot = Some(c) }
+            }
+            w.live = w.live + 1usize
+        }
+        Err(e) => { send_frame(w.ctl, f_done, serial, 0u32)? }
+    }
+    return Ok(())
+}
+
+func is_free(slot: view[Option[Conn]]) -> bool {
+    match slot {
+        Some(c) => { return false }
+        None => { return true }
+    }
+}
+
+// control reads what has arrived of one frame, never past its end: a
+// receive keeps the first descriptor that comes with its bytes and closes
+// the others, so two frames must not be read by one call.
+func control(w: edit[Worker]) -> Result[(), io.IoErr] {
+    var part: [9]u8 = zero()
+    need := frame_len - w.have
+    var n: usize = 0usize
+    match w.ctl.recv_with_timeout(part[0usize : need], time.millis(0u64))? {
+        Some(r) => {
+            match move r {
+                Bytes(k) => { n = k }
+                WithDescriptor(k, d) => {
+                    n = k
+                    w.arrived = Some(d)
+                }
+            }
+        }
+        None => { return Ok(()) }
+    }
+    if n == 0usize {
+        w.parent_gone = true
+        return Ok(())
+    }
+    for i in 0usize..n { w.inbox[w.have + i] = part[i] }
+    w.have = w.have + n
+    if w.have < frame_len { return Ok(()) }
+    w.have = 0usize
+    kind := w.inbox[0usize]
+    serial := load_be[u32](w.inbox, 1usize)
+    if kind == f_drain { w.draining = true }
+    if kind == f_conn {
+        send_frame(w.ctl, f_taken, serial, 0u32)?
+        match replace(w.arrived, None) {
+            Some(d) => { take_conn(w, serial, d)? }
+            None => { send_frame(w.ctl, f_done, serial, 0u32)? }
+        }
+    }
+    return Ok(())
+}
+
+// serve reads what a connection has ready and runs every whole line of
+// it; true means the worker is to crash. A reply is written with a write
+// that waits: replies are short, and a client that does not read holds
+// its worker, not the server.
+func serve(c: edit[Conn], opts: Options) -> bool {
+    var buf: [1024]u8 = zero()
+    match read_some(c.stream, buf, time.millis(0u64)) {
+        Ok(got) => {
+            match got {
+                Some(n) => {
+                    if n == 0usize { c.open = false }
+                    c.lines.feed(buf[0usize : n])
+                }
+                None => { return false }
+            }
+        }
+        Err(e) => { c.open = false }
+    }
+    line := Vec[u8].new()
+    reply := str.String.new()
+    while c.open && c.lines.next_line(line) {
+        next := run_line(line.as_view(), c, opts, reply)
+        if next == crash { return true }
+        reply.push(10u8)
+        match write_text(c.stream, reply.as_view()) {
+            Ok(u) => { c.served = c.served + 1u32 }
+            Err(e) => { c.open = false }
+        }
+        if next == quit { c.open = false }
+        line.clear()
+        reply.clear()
+    }
+    if c.open && c.lines.pending() > max_line {
+        said := write_text(c.stream, "ERR line too long\n")
+        c.open = false
+    }
+    c.until = time.after(c.idle)
+    return false
+}
+
+// settle closes a connection that has ended or been idle for its limit,
+// and tells the parent.
+func settle(w: edit[Worker], at: usize) -> Result[(), io.IoErr] {
+    var ended: bool = false
+    var serial: u32 = 0u32
+    var served: u32 = 0u32
+    with slot := w.conns.at(at) {
+        match slot {
+            Some(c) => {
+                if c.open && c.until.expired() {
+                    said := write_text(c.stream, "idle: closing\n")
+                    c.open = false
+                }
+                ended = !c.open
+                serial = c.serial
+                served = c.served
+            }
+            None => { }
+        }
+        if ended { slot = None }
+    }
+    if ended {
+        w.live = w.live - 1usize
+        send_frame(w.ctl, f_done, serial, served)?
+    }
+    return Ok(())
+}
+
+// work is a worker's whole life. It returns 0 when it has drained, 1 when
+// the parent is gone (the end of the control channel, or an error on it)
+// and 3 when a connection made it crash.
+func work(ctl: own net.UnixStream, opts: Options) -> u8 {
+    match work_loop(ctl, opts) {
+        Ok(code) => { return code }
+        Err(e) => { return 1u8 }
+    }
+}
+
+func work_loop(ctl: own net.UnixStream, opts: Options) -> Result[u8, io.IoErr] {
+    p := net.Poller.new()?
+    p.watch(ctl, 0u64, true, false)?
+    var w: Worker = Worker { opts: opts, ctl: ctl, poller: p, conns: Vec[Option[Conn]].new(), live: 0usize, inbox: zero(), have: 0usize, arrived: None, draining: false, parent_gone: false }
+    events := Vec[net.Ready].new()
+    while true {
+        // the wait ends at the first idle limit, when there is one
+        var bounded: bool = false
+        var least: u64 = 0u64
+        for slot in w.conns.as_view() {
+            match slot {
+                Some(c) => {
+                    left := c.until.remaining().as_nanos()
+                    if !bounded || left < least { least = left }
+                    bounded = true
+                }
+                None => { }
+            }
+        }
+        var n: usize = 0usize
+        if bounded {
+            n = w.poller.wait_timeout(events, time.nanos(least))?
+        } else {
+            n = w.poller.wait(events)?
+        }
+        for k in 0usize..n {
+            e := events.get(k)
+            if e.token == 0u64 {
+                control(w)?
+                if w.parent_gone { return Ok(1u8) }
+            } else {
+                var crashing: bool = false
+                with slot := w.conns.at(usize(e.token - 1u64)) {
+                    match slot {
+                        Some(c) => { crashing = serve(c, opts) }
+                        None => { }
+                    }
+                }
+                if crashing { return Ok(3u8) }
+            }
+        }
+        for i in 0usize..w.conns.len() { settle(w, i)? }
+        if w.draining && w.live == 0usize {
+            send_frame(w.ctl, f_gone, 0u32, 0u32)?
+            return Ok(0u8)
+        }
+    }
+    return Ok(0u8)
+}
+
+// worker_main is the program started as a worker: it ignores Interrupt,
+// which a terminal sends to the parent and to it alike, so that the
+// parent decides when it ends.
+func worker_main(args: view[Vec[Vec[u8]]]) -> i32 {
+    if args.len() != 7usize { return 2i32 }
+    signal.ignore(signal.Signal.Interrupt)
+    var nums: [4]u64 = zero()
+    for i in 0usize..4usize {
+        match str.parse_u64(args.get(3usize + i).as_view()) {
+            Some(v) => { nums[i] = v }
+            None => { return 2i32 }
+        }
+    }
+    opts := Options { slot: truncate[u32](nums[0usize]), incarnation: truncate[u32](nums[1usize]), idle_ms: nums[2usize], allow_crash: nums[3usize] != 0u64 }
+    match net.UnixStream.connect(args.get(2usize).as_view()) {
+        Ok(ctl) => {
+            match send_frame(ctl, f_hello, opts.slot, opts.incarnation) {
+                Ok(u) => { return i32(work(ctl, opts)) }
+                Err(e) => { return 1i32 }
+            }
+        }
+        Err(e) => { return 1i32 }
+    }
+}
+
+// ---- the parent ----
+
+// Config is how a server runs. An empty program means workers that are
+// threads; live means the log is written as it happens.
+struct Config { workers: usize; grace: time.Duration; idle_ms: u64; allow_crash: bool; program: Vec[u8]; live: bool }
+
+// Slot is the parent's side of a worker: its control channel, the process
+// or the thread behind it, and its counts. inbox holds the part of a
+// frame that has arrived, and held the connections sent that the worker
+// has not said it has, oldest first.
+struct Slot { ctl: Option[net.UnixStream]; child: Option[process.Child]; thread: Option[Thread[u8]]; incarnation: u32; active: u32; conns: u64; lines: u64; inbox: Vec[u8]; held: Vec[Stream]; alive: bool; drained: bool }
+
+struct Server { cfg: Config; poller: net.Poller; slots: Vec[Slot]; dir: Vec[u8]; path: Vec[u8]; door: Option[net.UnixListener]; accepted: u64; completed: u64; lost: u64; replaced: u64; serial: u32; draining: bool; log: Vec[Vec[u8]] }
+
+// The tokens of the parent's Poller; a control channel is watched under
+// the number of its worker plus first_worker.
+const t_tcp: u64 = 0u64
+const t_unix: u64 = 1u64
+const t_signals: u64 = 2u64
+const t_status: u64 = 3u64
+const first_worker: u64 = 4u64
+
+func note(srv: edit[Server], text: view[]u8) {
+    if srv.cfg.live {
+        print_str("kpass: ")
+        print_str(text)
+        println()
+        flushed := io.flush_stdout()
+    } else {
+        line := Vec[u8].new()
+        line.extend(text)
+        srv.log.push(line)
+    }
+}
+
+// Started is a worker that runs: its control channel, and the process or
+// the thread. It is a union of one variant so that a match takes the
+// three out of it.
+union Started { Running(net.UnixStream, Option[process.Child], Option[Thread[u8]]) }
+
+// greeted reads a new worker's first frame and checks it: the worker and
+// the incarnation asked for, from the process just started, by the
+// system's record of the peer (0 where the system does not say).
+func greeted(s: edit[net.UnixStream], pid: u32, opts: Options) -> bool {
+    var f: [9]u8 = zero()
+    var have: usize = 0usize
+    limit := time.after(time.seconds(5u64))
+    while have < frame_len {
+        match s.read_timeout(f[have : frame_len], limit.remaining()) {
+            Ok(got) => {
+                match got {
+                    Some(n) => {
+                        if n == 0usize { return false }
+                        have = have + n
+                    }
+                    None => { return false }
+                }
+            }
+            Err(e) => { return false }
+        }
+    }
+    if f[0usize] != f_hello || load_be[u32](f, 1usize) != opts.slot || load_be[u32](f, 5usize) != opts.incarnation { return false }
+    match s.peer_credentials() {
+        Ok(cred) => { return cred.process == 0u32 || cred.process == pid }
+        Err(e) => { return false }
+    }
+}
+
+// start_process starts this program again as a worker and waits for it
+// to connect and say who it is. The loop does nothing else meanwhile,
+// which is a few milliseconds a worker.
+func start_process(program: view[]u8, path: view[]u8, door: edit[net.UnixListener], opts: Options) -> Result[Started, io.IoErr] {
+    cmd := process.Command.new(program)
+    cmd.arg("--worker")
+    cmd.arg(path)
+    var nums: [4]u64 = zero()
+    nums[0usize] = u64(opts.slot)
+    nums[1usize] = u64(opts.incarnation)
+    nums[2usize] = opts.idle_ms
+    if opts.allow_crash { nums[3usize] = 1u64 }
+    for v in nums {
+        text := str.String.new()
+        text.push_u64(v)
+        cmd.arg(text.as_view())
+    }
+    cmd.stdin(process.Stdio.Null)
+    child := cmd.spawn()?
+    limit := time.after(time.seconds(5u64))
+    while !limit.expired() {
+        match door.accept_timeout(limit.remaining()) {
+            Ok(got) => {
+                match move got {
+                    Some(s) => {
+                        // a stream that does not greet rightly is not the worker
+                        if greeted(s, child.id(), opts) { return Ok(Running(s, Some(child), None)) }
+                        drop(s)
+                    }
+                    None => { }
+                }
+            }
+            Err(e) => { break }
+        }
+    }
+    sent := child.kill()
+    gone := child.wait_timeout(time.seconds(5u64))
+    return Err(io.error_of(io.ErrKind.TimedOut))
+}
+
+func start_thread(opts: Options) -> Result[Started, io.IoErr] {
+    match net.UnixStream.pair()? {
+        Ends(mine, theirs) => {
+            match thread.spawn(work, theirs, opts) {
+                Ok(t) => { return Ok(Running(mine, None, Some(t))) }
+                Err(e) => {
+                    drop(mine)
+                    return Err(io.error_of(io.ErrKind.OutOfMemory))
+                }
+            }
+        }
+    }
+}
+
+// start_worker starts the next incarnation of a worker.
+func start_worker(srv: edit[Server], i: usize) -> Result[(), io.IoErr] {
+    opts := Options { slot: truncate[u32](i), incarnation: srv.slots.get(i).incarnation + 1u32, idle_ms: srv.cfg.idle_ms, allow_crash: srv.cfg.allow_crash }
+    var made: Result[Started, io.IoErr] = Err(io.error_of(io.ErrKind.Other))
+    match srv.door {
+        Some(door) => { made = start_process(srv.cfg.program.as_view(), srv.path.as_view(), door, opts) }
+        None => { made = start_thread(opts) }
+    }
+    st := made?
+    match move st {
+        Running(ctl, child, thr) => {
+            srv.poller.watch(ctl, first_worker + u64(i), true, false)?
+            with slot := srv.slots.at(i) {
+                slot = Slot { ctl: Some(ctl), child: child, thread: thr, incarnation: opts.incarnation, active: 0u32, conns: 0u64, lines: 0u64, inbox: Vec[u8].new(), held: Vec[Stream].new(), alive: true, drained: false }
+            }
+        }
+    }
+    return Ok(())
+}
+
+func push_count(msg: edit[str.String], n: u64, one: view[]u8, many: view[]u8) {
+    msg.push_u64(n)
+    if n == 1u64 { msg.push_str(one) } else { msg.push_str(many) }
+}
+
+// retire is the end of a worker, however the parent learnt of it: its
+// control channel is closed, the process or the thread behind it waited
+// for (and stopped first, when stop is set), what it had in flight
+// written off, and, unless the server is draining, a new one started.
+func retire(srv: edit[Server], i: usize, stop: bool) {
+    var gone: bool = false
+    var drained: bool = false
+    var inflight: u64 = 0u64
+    var child: Option[process.Child] = None
+    var thr: Option[Thread[u8]] = None
+    with slot := srv.slots.at(i) {
+        if slot.alive {
+            gone = true
+            slot.alive = false
+            drained = slot.drained
+            inflight = u64(slot.active)
+            slot.active = 0u32
+            // closing the channel ends its watch, and ends a worker that
+            // is a thread: it reads the end of the channel and returns
+            slot.ctl = None
+            slot.held.clear()
+            child = replace(slot.child, None)
+            thr = replace(slot.thread, None)
+        }
+    }
+    if !gone { return }
+    match move child {
+        Some(c) => {
+            if stop { sent := c.kill() }
+            var ended: bool = false
+            match c.wait_timeout(time.seconds(5u64)) {
+                Ok(st) => {
+                    match st {
+                        Some(status) => { ended = true }
+                        None => { }
+                    }
+                }
+                Err(e) => { }
+            }
+            if !ended {
+                sent := c.kill()
+                last := c.wait_timeout(time.seconds(5u64))
+            }
+        }
+        None => { }
+    }
+    match move thr {
+        Some(t) => { code := t.join() }
+        None => { }
+    }
+    srv.lost = srv.lost + inflight
+    if drained { return }
+    msg := str.String.new()
+    msg.push_str("worker ")
+    msg.push_u64(u64(i))
+    if stop {
+        msg.push_str(" was stopped at the deadline with ")
+    } else {
+        msg.push_str(" died with ")
+    }
+    push_count(msg, inflight, " connection in flight", " connections in flight")
+    if !srv.draining {
+        match start_worker(srv, i) {
+            Ok(u) => {
+                srv.replaced = srv.replaced + 1u64
+                msg.push_str("; replaced")
+            }
+            Err(e) => msg.push_str("; it could not be replaced")
+        }
+    }
+    note(srv, msg.as_view())
+}
+
+// pick is the live worker with the fewest connections in flight, the
+// first of equals.
+func pick(srv: view[Server]) -> Option[usize] {
+    var best: Option[usize] = None
+    var least: u32 = 0u32
+    var i: usize = 0usize
+    for s in srv.slots.as_view() {
+        if s.alive && !s.drained {
+            match best {
+                Some(b) => {
+                    if s.active < least {
+                        best = Some(i)
+                        least = s.active
+                    }
+                }
+                None => {
+                    best = Some(i)
+                    least = s.active
+                }
+            }
+        }
+        i = i + 1usize
+    }
+    return best
+}
+
+// offer sends a connection to a worker: false when the worker cannot be
+// written to.
+func offer(srv: edit[Server], i: usize, serial: u32, conn: view[Stream]) -> bool {
+    with slot := srv.slots.at(i) {
+        match slot.ctl {
+            Some(ctl) => {
+                match send_stream(ctl, serial, conn) {
+                    Ok(u) => { return true }
+                    Err(e) => { return false }
+                }
+            }
+            None => { return false }
+        }
+    }
+}
+
+// hand_over passes one accepted connection to a worker and keeps it until
+// the worker has it. A worker that cannot be written to is dead, and the
+// next is tried.
+func hand_over(srv: edit[Server], conn: own Stream) {
+    srv.accepted = srv.accepted + 1u64
+    srv.serial = wrapping_add(srv.serial, 1u32)
+    var chosen: Option[usize] = None
+    for attempt in 0usize..4usize {
+        match pick(srv) {
+            Some(i) => {
+                if offer(srv, i, srv.serial, conn) {
+                    chosen = Some(i)
+                    break
+                }
+                retire(srv, i, false)
+            }
+            None => { break }
+        }
+    }
+    match chosen {
+        Some(i) => {
+            with slot := srv.slots.at(i) {
+                slot.active = slot.active + 1u32
+                slot.held.push(conn)
+            }
+        }
+        None => {
+            drop(conn)
+            srv.lost = srv.lost + 1u64
+            note(srv, "a connection was dropped: no worker would take it")
+        }
+    }
+}
+
+// hear reads what a worker has sent and takes whole frames out of it;
+// the end of the channel is the end of the worker.
+func hear(srv: edit[Server], i: usize) {
+    var buf: [256]u8 = zero()
+    var ended: bool = false
+    var finished: u64 = 0u64
+    with slot := srv.slots.at(i) {
+        if !slot.alive { return }
+        match slot.ctl {
+            Some(ctl) => {
+                match ctl.read_timeout(buf, time.millis(0u64)) {
+                    Ok(got) => {
+                        match got {
+                            Some(n) => {
+                                ended = n == 0usize
+                                slot.inbox.extend(buf[0usize : n])
+                            }
+                            None => { }
+                        }
+                    }
+                    Err(e) => { ended = true }
+                }
+            }
+            None => { }
+        }
+        var at: usize = 0usize
+        with b := slot.inbox.as_view() {
+            while at + frame_len <= len(b) {
+                if b[at] == f_done {
+                    finished = finished + 1u64
+                    if slot.active > 0u32 { slot.active = slot.active - 1u32 }
+                    slot.conns = slot.conns + 1u64
+                    slot.lines = slot.lines + u64(load_be[u32](b, at + 5usize))
+                }
+                if b[at] == f_taken && slot.held.len() > 0usize { slot.held.remove_prefix(1usize) }
+                if b[at] == f_gone { slot.drained = true }
+                at = at + frame_len
+            }
+        }
+        slot.inbox.remove_prefix(at)
+    }
+    srv.completed = srv.completed + finished
+    if ended { retire(srv, i, false) }
+}
+
+// status_text is the reply to a status query: the server's counts on one
+// line, then a line a worker.
+func status_text(srv: view[Server]) -> str.String {
+    t := str.String.new()
+    var active: u64 = 0u64
+    for s in srv.slots.as_view() { active = active + u64(s.active) }
+    t.push_str("workers ")
+    t.push_u64(u64(srv.slots.len()))
+    t.push_str(" active ")
+    t.push_u64(active)
+    t.push_str(" accepted ")
+    t.push_u64(srv.accepted)
+    t.push_str(" completed ")
+    t.push_u64(srv.completed)
+    t.push_str(" lost ")
+    t.push_u64(srv.lost)
+    t.push_str(" replaced ")
+    t.push_u64(srv.replaced)
+    if srv.draining { t.push_str(" draining 1") } else { t.push_str(" draining 0") }
+    var i: u64 = 0u64
+    for s in srv.slots.as_view() {
+        t.push_str("\nworker ")
+        t.push_u64(i)
+        t.push_str(" incarnation ")
+        t.push_u64(u64(s.incarnation))
+        t.push_str(" active ")
+        t.push_u64(u64(s.active))
+        t.push_str(" served ")
+        t.push_u64(s.conns)
+        t.push_str(" lines ")
+        t.push_u64(s.lines)
+        i = i + 1u64
+    }
+    return t
+}
+
+// Doors are what a server listens on: either listener or both, and the
+// socket for status queries.
+struct Doors { tcp: Option[net.TcpListener]; unix: Option[net.UnixListener]; status: Option[net.UnixDatagram] }
+
+// accept_all takes every connection that waits and hands each over.
+func accept_all(srv: edit[Server], doors: edit[Doors], token: u64) {
+    while true {
+        var conn: Option[Stream] = None
+        if token == t_tcp {
+            match doors.tcp {
+                Some(l) => {
+                    match l.accept_timeout(time.millis(0u64)) {
+                        Ok(got) => {
+                            match move got {
+                                Some(s) => { conn = Some(Tcp(s)) }
+                                None => { }
+                            }
+                        }
+                        Err(e) => { }
+                    }
+                }
+                None => { }
+            }
+        } else {
+            match doors.unix {
+                Some(l) => {
+                    match l.accept_timeout(time.millis(0u64)) {
+                        Ok(got) => {
+                            match move got {
+                                Some(s) => { conn = Some(Unix(s)) }
+                                None => { }
+                            }
+                        }
+                        Err(e) => { }
+                    }
+                }
+                None => { }
+            }
+        }
+        match move conn {
+            Some(c) => hand_over(srv, c)
+            None => { return }
+        }
+    }
+}
+
+// answer replies to one status query, to the path it came from.
+func answer(srv: view[Server], doors: edit[Doors]) {
+    var buf: [64]u8 = zero()
+    match doors.status {
+        Some(sock) => {
+            match sock.recv_from_timeout(buf, time.millis(0u64)) {
+                Ok(got) => {
+                    match got {
+                        Some(m) => {
+                            if m.from.len() > 0usize && str.equal(buf[0usize : m.len], "status") {
+                                sent := sock.send_to(status_text(srv).as_view(), m.from.as_view())
+                            }
+                        }
+                        None => { }
+                    }
+                }
+                Err(e) => { }
+            }
+        }
+        None => { }
+    }
+}
+
+// begin_drain stops the accepting and tells every worker to finish.
+func begin_drain(srv: edit[Server], doors: edit[Doors]) {
+    srv.draining = true
+    doors.tcp = None
+    doors.unix = None
+    var inflight: u64 = 0u64
+    for i in 0usize..srv.slots.len() {
+        var failed: bool = false
+        with slot := srv.slots.at(i) {
+            inflight = inflight + u64(slot.active)
+            match slot.ctl {
+                Some(ctl) => {
+                    match send_frame(ctl, f_drain, 0u32, 0u32) {
+                        Ok(u) => { }
+                        Err(e) => { failed = true }
+                    }
+                }
+                None => { }
+            }
+        }
+        if failed { retire(srv, i, false) }
+    }
+    msg := str.String.new()
+    msg.push_str("draining: ")
+    push_count(msg, inflight, " connection in flight", " connections in flight")
+    note(srv, msg.as_view())
+}
+
+func living(srv: view[Server]) -> usize {
+    var n: usize = 0usize
+    for s in srv.slots.as_view() {
+        if s.alive { n = n + 1usize }
+    }
+    return n
+}
+
+// run_loop is the parent's loop: it returns when the server was told to
+// stop and every worker has ended, by itself or at the deadline.
+func run_loop(srv: edit[Server], doors: edit[Doors], sigs: edit[signal.Signals]) -> Result[(), io.IoErr] {
+    match doors.tcp {
+        Some(l) => { srv.poller.watch(l, t_tcp, true, false)? }
+        None => { }
+    }
+    match doors.unix {
+        Some(l) => { srv.poller.watch(l, t_unix, true, false)? }
+        None => { }
+    }
+    match doors.status {
+        Some(s) => { srv.poller.watch(s, t_status, true, false)? }
+        None => { }
+    }
+    srv.poller.watch(sigs, t_signals, true, false)?
+    for i in 0usize..srv.cfg.workers { start_worker(srv, i)? }
+    started := str.String.new()
+    push_count(started, u64(srv.cfg.workers), " worker started", " workers started")
+    note(srv, started.as_view())
+    events := Vec[net.Ready].new()
+    var deadline: time.Deadline = time.after(time.nanos(0u64))
+    while !srv.draining || living(srv) > 0usize {
+        var n: usize = 0usize
+        if srv.draining {
+            if deadline.expired() {
+                for i in 0usize..srv.slots.len() { retire(srv, i, true) }
+                return Ok(())
+            }
+            n = srv.poller.wait_timeout(events, deadline.remaining())?
+        } else {
+            n = srv.poller.wait(events)?
+        }
+        for k in 0usize..n {
+            e := events.get(k)
+            if e.token == t_signals {
+                var stop: bool = false
+                var child: bool = false
+                while true {
+                    match sigs.try_next() {
+                        Some(which) => {
+                            match which {
+                                Child => { child = true }
+                                _ => { stop = true }
+                            }
+                        }
+                        None => { break }
+                    }
+                }
+                if child { reap(srv) }
+                if stop && !srv.draining {
+                    begin_drain(srv, doors)
+                    deadline = time.after(srv.cfg.grace)
+                }
+            } else if e.token == t_status {
+                answer(srv, doors)
+            } else if e.token < first_worker {
+                if !srv.draining { accept_all(srv, doors, e.token) }
+            } else {
+                hear(srv, usize(e.token - first_worker))
+            }
+        }
+    }
+    note(srv, "every worker drained before the deadline")
+    return Ok(())
+}
+
+// reap asks every worker that is a process whether it has ended: Child
+// says that one has, not which.
+func reap(srv: edit[Server]) {
+    for i in 0usize..srv.slots.len() {
+        var ended: bool = false
+        with slot := srv.slots.at(i) {
+            match slot.child {
+                Some(c) => {
+                    match c.try_wait() {
+                        Ok(st) => {
+                            match st {
+                                Some(status) => { ended = true }
+                                None => { }
+                            }
+                        }
+                        Err(e) => { }
+                    }
+                }
+                None => { }
+            }
+        }
+        // what the worker sent before it ended is read first
+        if ended {
+            hear(srv, i)
+            retire(srv, i, false)
+        }
+    }
+}
+
+func empty_slot() -> Slot { return Slot { ctl: None, child: None, thread: None, incarnation: 0u32, active: 0u32, conns: 0u64, lines: 0u64, inbox: Vec[u8].new(), held: Vec[Stream].new(), alive: false, drained: false } }
+
+// serve_on runs a server on what it is given until it is told to stop,
+// and returns its log (empty when the log was written as it happened).
+func serve_on(cfg: own Config, doors: own Doors) -> Result[Vec[Vec[u8]], io.IoErr] {
+    var srv: Server = Server { cfg: cfg, poller: net.Poller.new()?, slots: Vec[Slot].new(), dir: Vec[u8].new(), path: Vec[u8].new(), door: None, accepted: 0u64, completed: 0u64, lost: 0u64, replaced: 0u64, serial: 0u32, draining: false, log: Vec[Vec[u8]].new() }
+    for i in 0usize..srv.cfg.workers { srv.slots.push(empty_slot()) }
+    sigs := signal.catch(signal.Signal.Interrupt)
+    sigs.add(signal.Signal.Terminate)
+    var made: Result[(), io.IoErr] = Ok(())
+    if srv.cfg.program.len() > 0usize {
+        // workers that are processes come in by a listener of their own
+        sigs.add(signal.Signal.Child)
+        made = open_door(srv)
+    }
+    var ran: Result[(), io.IoErr] = Ok(())
+    match made {
+        Ok(u) => { ran = run_loop(srv, doors, sigs) }
+        Err(e) => { ran = Err(e) }
+    }
+    // whatever still runs after a failure is stopped
+    srv.draining = true
+    for i in 0usize..srv.slots.len() { retire(srv, i, true) }
+    unwatched := srv.poller.unwatch(sigs)
+    srv.door = None
+    if srv.dir.len() > 0usize { removed := io.remove_dir_all(srv.dir.as_view()) }
+    ran?
+    return Ok(replace(srv.log, Vec[Vec[u8]].new()))
+}
+
+func open_door(srv: edit[Server]) -> Result[(), io.IoErr] {
+    srv.dir = io.make_temp_dir("kpass")?
+    srv.path = io.join(srv.dir.as_view(), "workers")
+    srv.door = Some(net.UnixListener.bind(srv.path.as_view())?)
+    return Ok(())
+}
+
+// ---- status queries ----
+
+// Query is a socket to ask a server with: a datagram socket bound to a
+// path of its own, where the reply is sent.
+struct Query { sock: net.UnixDatagram; dir: Vec[u8]; server: Vec[u8] }
+
+func open_query(server: view[]u8) -> Result[Query, io.IoErr] {
+    dir := io.make_temp_dir("kpass")?
+    mine := io.join(dir.as_view(), "query")
+    match net.UnixDatagram.bind(mine.as_view()) {
+        Ok(sock) => {
+            to := Vec[u8].new()
+            to.extend(server)
+            return Ok(Query { sock: sock, dir: dir, server: to })
+        }
+        Err(e) => {
+            removed := io.remove_dir_all(dir.as_view())
+            return Err(e)
+        }
+    }
+}
+
+func close_query(q: own Query) {
+    removed := io.remove_dir_all(q.dir.as_view())
+}
+
+// ask_status is the server's reply, waited for at most d.
+func ask_status(q: edit[Query], d: time.Duration) -> Result[Vec[u8], io.IoErr] {
+    sent := q.sock.send_to("status", q.server.as_view())?
+    reply := Vec[u8].new()
+    reply.resize(2048usize, 0u8)
+    var n: usize = 0usize
+    with b := reply.as_edit() {
+        match q.sock.recv_from_timeout(b, d)? {
+            Some(m) => { n = m.len }
+            None => { return Err(io.error_of(io.ErrKind.TimedOut)) }
+        }
+    }
+    reply.resize(n, 0u8)
+    return Ok(reply)
+}
+
+// first_line is where the first line of text ends.
+func first_line(text: view[]u8) -> usize {
+    var i: usize = 0usize
+    while i < len(text) && text[i] != 10u8 { i = i + 1usize }
+    return i
+}
+
+// field is the number after a name in a status line.
+func field(line: view[]u8, name: view[]u8) -> Option[u64] {
+    match str.find(line, name) {
+        Some(at) => {
+            from := at + len(name) + 1usize
+            if from > len(line) { return None }
+            return str.parse_u64(line[from : word_end(line, from)])
+        }
+        None => { return None }
+    }
+}
+
+// ---- the demonstration ----
+
+func say(s: view[]u8) { print_str(s); println() }
+func yes(what: view[]u8, ok: bool) {
+    print_str(what)
+    if ok { say(": yes") } else { say(": NO") }
+}
+
+// Client is the other end of a connection.
+struct Client { stream: Stream; lines: io.LineBuf }
+
+func tcp_client(at: net.SocketAddr) -> Result[Client, io.IoErr] {
+    return Ok(Client { stream: Tcp(net.TcpStream.connect(at)?), lines: io.LineBuf.new() })
+}
+func unix_client(path: view[]u8) -> Result[Client, io.IoErr] {
+    return Ok(Client { stream: Unix(net.UnixStream.connect(path)?), lines: io.LineBuf.new() })
+}
+
+// hear_line reads one line of reply into line: false at the end of the
+// connection (a connection its worker's death reset has ended too).
+func hear_line(c: edit[Client], line: edit[Vec[u8]]) -> Result[bool, io.IoErr] {
+    line.clear()
+    var buf: [512]u8 = zero()
+    while !c.lines.next_line(line) {
+        match read_some(c.stream, buf, time.seconds(20u64)) {
+            Ok(got) => {
+                match got {
+                    Some(n) => {
+                        if n == 0usize { return Ok(false) }
+                        c.lines.feed(buf[0usize : n])
+                    }
+                    None => { return Err(io.error_of(io.ErrKind.TimedOut)) }
+                }
+            }
+            Err(e) => {
+                match io.kind(e) {
+                    ConnectionReset => { return Ok(false) }
+                    _ => { return Err(e) }
+                }
+            }
+        }
+    }
+    return Ok(true)
+}
+
+func tell(c: edit[Client], line: view[]u8) -> Result[(), io.IoErr] {
+    write_text(c.stream, line)?
+    return write_text(c.stream, "\n")
+}
+
+// ask sends a line and shows it with its reply.
+func ask(c: edit[Client], who: view[]u8, line: view[]u8) -> Result[(), io.IoErr] {
+    tell(c, line)?
+    reply := Vec[u8].new()
+    heard := hear_line(c, reply)?
+    print_str(who)
+    print_str("> ")
+    say(line)
+    print_str(who)
+    print_str("< ")
+    if heard { say(reply.as_view()) } else { say("(the connection is closed)") }
+    return Ok(())
+}
+
+// closed is whether the connection has ended with nothing more to read.
+func closed(c: edit[Client]) -> Result[bool, io.IoErr] {
+    line := Vec[u8].new()
+    heard := hear_line(c, line)?
+    return Ok(!heard)
+}
+
+// settled asks the server until a count is what the demonstration
+// expects: the parent learns of a connection's end a moment after the
+// client does.
+func settled(q: edit[Query], name: view[]u8, want: u64) -> Result[(), io.IoErr] {
+    limit := time.after(time.seconds(20u64))
+    while !limit.expired() {
+        text := ask_status(q, time.seconds(20u64))?
+        var is: bool = false
+        with t := text.as_view() {
+            match field(t[0usize : first_line(t)], name) {
+                Some(v) => { is = v == want }
+                None => { }
+            }
+        }
+        if is { return Ok(()) }
+        time.sleep(time.millis(1u64))
+    }
+    return Err(io.error_of(io.ErrKind.TimedOut))
+}
+
+func show_status(q: edit[Query]) -> Result[(), io.IoErr] {
+    text := ask_status(q, time.seconds(20u64))?
+    print_str("status: ")
+    with t := text.as_view() { say(t[0usize : first_line(t)]) }
+    return Ok(())
+}
+
+// demo_server is a server's thread: 0 with its log, or 1.
+struct Ran { log: Vec[Vec[u8]]; failed: bool }
+func demo_server(cfg: own Config, doors: own Doors) -> Ran {
+    match serve_on(cfg, doors) {
+        Ok(log) => { return Ran { log: log, failed: false } }
+        Err(e) => { return Ran { log: Vec[Vec[u8]].new(), failed: true } }
+    }
+}
+
+func show_log(ran: view[Ran]) {
+    say("the server's log:")
+    for l in ran.log.as_view() {
+        print_str("  ")
+        say(l.as_view())
+    }
+    if ran.failed { say("  the server failed") }
+}
+
+func demo_config(workers: usize, grace_ms: u64, program: view[]u8) -> Config {
+    p := Vec[u8].new()
+    p.extend(program)
+    return Config { workers: workers, grace: time.millis(grace_ms), idle_ms: 30000u64, allow_crash: true, program: p, live: false }
+}
+
+// first_server shows the protocol, the dispatch, the idle limit, a worker
+// that dies and a shutdown every worker finishes in time.
+func first_server(dir: view[]u8, program: view[]u8) -> Result[(), io.IoErr] {
+    tcp := net.TcpListener.bind(net.loopback_v4(0u16))?
+    at := tcp.local_addr()?
+    upath := io.join(dir, "listen")
+    spath := io.join(dir, "status")
+    doors := Doors { tcp: Some(tcp), unix: Some(net.UnixListener.bind(upath.as_view())?), status: Some(net.UnixDatagram.bind(spath.as_view())?) }
+    q := open_query(spath.as_view())?
+    match thread.spawn(demo_server, demo_config(3usize, 20000u64, program), doors) {
+        Ok(t) => {
+            talked := converse(q, at, upath.as_view())
+            // a conversation that failed still ends the server
+            match talked {
+                Ok(u) => { }
+                Err(e) => signal.raise(signal.Signal.Terminate)
+            }
+            ran := t.join()
+            close_query(q)
+            talked?
+            show_log(ran)
+        }
+        Err(e) => {
+            close_query(q)
+            say("no thread for the server")
+        }
+    }
+    return Ok(())
+}
+
+func converse(q: edit[Query], at: net.SocketAddr, upath: view[]u8) -> Result[(), io.IoErr] {
+    say("-- three workers behind one loop")
+    show_status(q)?
+
+    say("-- a TCP client")
+    t := tcp_client(at)?
+    ask(t, "t", "echo hello, worker")?
+    ask(t, "t", "upper kern passes descriptors")?
+    ask(t, "t", "sum 1 2 3 40")?
+    ask(t, "t", "sum 1 two")?
+    ask(t, "t", "sum 18446744073709551615 1")?
+    ask(t, "t", "whoami")?
+    ask(t, "t", "frobnicate")?
+    ask(t, "t", "quit")?
+    yes("then the worker closes the connection", closed(t)?)
+
+    say("-- a Unix-domain client")
+    u := unix_client(upath)?
+    tell(u, "whoami")?
+    said := Vec[u8].new()
+    heard := hear_line(u, said)?
+    mine := str.String.new()
+    match u.stream {
+        Unix(s) => who_text(s.peer_credentials()?, mine)
+        Tcp(s) => { }
+    }
+    yes("whoami is the user and group the client sees at its own peer", heard && mine.equals(said.as_view()))
+    ask(u, "u", "quit")?
+    settled(q, "completed", 2u64)?
+
+    say("-- four connections, each to the worker with the fewest")
+    a := tcp_client(at)?
+    ask(a, "a", "worker")?
+    b := unix_client(upath)?
+    ask(b, "b", "worker")?
+    c := tcp_client(at)?
+    ask(c, "c", "worker")?
+    d := unix_client(upath)?
+    ask(d, "d", "worker")?
+    say("-- b quits, and the next connection goes where it was")
+    ask(b, "b", "quit")?
+    settled(q, "active", 3u64)?
+    e := tcp_client(at)?
+    ask(e, "e", "worker")?
+
+    say("-- e sets an idle limit and says nothing more")
+    ask(e, "e", "idle 25")?
+    line := Vec[u8].new()
+    told := hear_line(e, line)?
+    print_str("e< ")
+    say(line.as_view())
+    yes("then the worker closes the connection", told && closed(e)?)
+    settled(q, "active", 3u64)?
+
+    say("-- d makes its worker crash; a is served by the same worker")
+    tell(d, "crash")?
+    yes("d's connection is closed", closed(d)?)
+    yes("a's connection is closed", closed(a)?)
+    settled(q, "replaced", 1u64)?
+    show_status(q)?
+    f := tcp_client(at)?
+    ask(f, "f", "worker")?
+
+    say("-- Terminate: nothing new is accepted, what is open is served")
+    signal.raise(signal.Signal.Terminate)
+    settled(q, "draining", 1u64)?
+    var refused: bool = false
+    match net.TcpStream.connect(at) {
+        Ok(s) => { }
+        Err(err) => {
+            match io.kind(err) {
+                ConnectionRefused => { refused = true }
+                _ => { }
+            }
+        }
+    }
+    yes("a new connection is refused", refused)
+    ask(c, "c", "echo still served")?
+    ask(c, "c", "quit")?
+    ask(f, "f", "sum 20 22")?
+    ask(f, "f", "quit")?
+    return Ok(())
+}
+
+// second_server has one worker, a deadline of 100 ms and a client that
+// never finishes.
+func second_server(dir: view[]u8, program: view[]u8) -> Result[(), io.IoErr] {
+    say("-- a second server: one worker, and a client that stays past the deadline")
+    upath := io.join(dir, "listen2")
+    spath := io.join(dir, "status2")
+    doors := Doors { tcp: None, unix: Some(net.UnixListener.bind(upath.as_view())?), status: Some(net.UnixDatagram.bind(spath.as_view())?) }
+    q := open_query(spath.as_view())?
+    match thread.spawn(demo_server, demo_config(1usize, 100u64, program), doors) {
+        Ok(t) => {
+            talked := linger(q, upath.as_view())
+            match talked {
+                Ok(u) => { }
+                Err(e) => signal.raise(signal.Signal.Terminate)
+            }
+            ran := t.join()
+            close_query(q)
+            talked?
+            show_log(ran)
+        }
+        Err(e) => {
+            close_query(q)
+            say("no thread for the server")
+        }
+    }
+    return Ok(())
+}
+
+func linger(q: edit[Query], upath: view[]u8) -> Result[(), io.IoErr] {
+    g := unix_client(upath)?
+    ask(g, "g", "echo here to stay")?
+    signal.raise(signal.Signal.Terminate)
+    yes("the connection is closed when the deadline has passed", closed(g)?)
+    return Ok(())
+}
+
+// fds counts the process's open descriptors; 0 when the system will not
+// list them.
+func fds() -> usize {
+    with ls := io.list_dir("/dev/fd") {
+        match ls {
+            Ok(names) => { return names.len() }
+            Err(e) => { return 0usize }
+        }
+    }
+}
+
+// warm_up makes and destroys one of what the servers use, so that what a
+// first use opens for good (the signals' own pipe is one) is counted
+// before the demonstration and after it alike.
+func warm_up() -> Result[(), io.IoErr] {
+    sigs := signal.catch(signal.Signal.Terminate)
+    p := net.Poller.new()?
+    match net.UnixStream.pair()? {
+        Ends(x, y) => { p.watch(x, 0u64, true, false)? }
+    }
+    l := net.TcpListener.bind(net.loopback_v4(0u16))?
+    c := net.TcpStream.connect(l.local_addr()?)?
+    return Ok(())
+}
+
+func demo(program: view[]u8) -> Result[(), io.IoErr] {
+    warm_up()?
+    before := fds()
+    dir := io.make_temp_dir("kpass")?
+    var done: Result[(), io.IoErr] = first_server(dir.as_view(), program)
+    match done {
+        Ok(u) => { done = second_server(dir.as_view(), program) }
+        Err(e) => { }
+    }
+    removed := io.remove_dir_all(dir.as_view())
+    done?
+    say("-- afterwards")
+    yes("as many descriptors are open as before the servers", before > 0usize && fds() == before)
+    return removed
+}
+
+// ---- the program ----
+
+func serve_at(program: view[]u8, address: view[]u8, workers: usize) -> Result[(), io.IoErr] {
+    p := Vec[u8].new()
+    // the interpreter's program is a source file, which cannot be started
+    if !str.ends_with(program, ".kern") { p.extend(program) }
+    cfg := Config { workers: workers, grace: time.seconds(10u64), idle_ms: 30000u64, allow_crash: false, program: p, live: true }
+    var doors: Doors = Doors { tcp: None, unix: None, status: None }
+    spath := Vec[u8].new()
+    var is_path: bool = false
+    match net.parse_addr(address) {
+        Some(a) => {
+            l := net.TcpListener.bind(a)?
+            // the status socket of a TCP server is named by its port
+            match process.env("TMPDIR") {
+                Some(tmp) => spath.extend(tmp.as_view())
+                None => spath.extend("/tmp")
+            }
+            name := str.String.from("kpass-")
+            name.push_u64(u64(l.local_addr()?.port))
+            name.push_str(".status")
+            spath = io.join(spath.as_view(), name.as_view())
+            print_str("kpass: listening on ")
+            say(net.format_addr(l.local_addr()?).as_view())
+            doors.tcp = Some(l)
+        }
+        None => {
+            is_path = true
+            doors.unix = Some(net.UnixListener.bind(address)?)
+            spath.extend(address)
+            spath.extend(".status")
+            print_str("kpass: listening on ")
+            say(address)
+        }
+    }
+    doors.status = Some(net.UnixDatagram.bind(spath.as_view())?)
+    print_str("kpass: status at ")
+    say(spath.as_view())
+    flushed := io.flush_stdout()
+    ran := serve_on(cfg, doors)
+    // the paths of the sockets are the program's to remove
+    removed := io.remove_file(spath.as_view())
+    if is_path { gone := io.remove_file(address) }
+    log := ran?
+    return Ok(())
+}
+
+func query_status(path: view[]u8) -> Result[(), io.IoErr] {
+    q := open_query(path)?
+    asked := ask_status(q, time.seconds(2u64))
+    close_query(q)
+    text := asked?
+    say(text.as_view())
+    return Ok(())
+}
+
+func main() -> i32 {
+    args := io.args()
+    if args.len() >= 2usize && str.equal(args.get(1usize).as_view(), "--worker") { return worker_main(args) }
+    var done: Result[(), io.IoErr] = Ok(())
+    if args.len() < 2usize {
+        done = demo("")
+    } else if args.len() == 2usize && str.equal(args.get(1usize).as_view(), "selftest") {
+        done = demo(args.get(0usize).as_view())
+    } else if args.len() == 3usize && str.equal(args.get(1usize).as_view(), "status") {
+        done = query_status(args.get(2usize).as_view())
+    } else if (args.len() == 3usize || args.len() == 4usize) && str.equal(args.get(1usize).as_view(), "serve") {
+        var workers: usize = 3usize
+        if args.len() == 4usize {
+            match str.parse_u64(args.get(3usize).as_view()) {
+                Some(n) => { workers = usize(n) }
+                None => { workers = 0usize }
+            }
+        }
+        if workers == 0usize || workers > 64usize {
+            eprint_str("kpass: WORKERS is 1 to 64\n")
+            return 2i32
+        }
+        done = serve_at(args.get(0usize).as_view(), args.get(2usize).as_view(), workers)
+    } else {
+        eprint_str("usage: kpass serve ADDR [WORKERS]\n       kpass status PATH\n")
+        return 2i32
+    }
+    match done {
+        Ok(u) => { return 0i32 }
+        Err(e) => {
+            eprint_str("kpass: failed (an address that cannot be bound, a server that does not answer, or a worker that cannot be started)\n")
+            return 1i32
+        }
+    }
+}
