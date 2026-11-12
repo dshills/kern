@@ -1,0 +1,42 @@
+Alpha beta gamma delta
+1 2 3 4 5
+
+   leAding blanks and   several   between  
+	TAbs	separate	these	
+3.14 -2.5e3 +7 0x1A 1e3 .5 5. 010
+nAme:alice:age:30:city:Paris
+nAme:bob:age:25:city:Berlin
+nAme:carol:age:35:city:Rome
+The quick brown fox jumps over the lAzy dog.
+the the THE The tHe
+A,b,,d,
+,leAding,comma
+100 Apples
+20 peArs
+3 plums
+  
+foo=bAr; baz=qux; n=42
+Aaa bbb aaa ccc bbb aaa
+pAth/to/some/file.txt
+x*y+z? (A|b) [c] {d} ^e$ \f
+10 20 30
+40 50 60
+70 80 90
+UPPER lower MiXeD 123Abc abc123
+eéè ÿ€ high bytes
+0 00 0.0 -0 +0 0e0
+one;two;three
+lAst line has no punctuation
+-5 -4.5 4.5 5
+1e300 1e-300 123456789012345678 0.1
+tAb	here
+dup
+dup
+dup
+uniq
+end
+1 heLo
+0 heLo
+baa
+baa!
+>baa!

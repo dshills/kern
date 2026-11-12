@@ -1,0 +1,1 @@
+BEGIN { print index("foobar", "o"), index("foobar", "bar"), index("foobar", "z"), index("foobar", ""), index("", "a"), index("", ""), index("abc", "abcd"), index("aaa", "aa"), index(12345, 34), index("a.b", "."), index("ab", "b") }

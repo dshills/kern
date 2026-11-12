@@ -1,0 +1,1 @@
+BEGIN { a[1] = "one"; a["1"] = "uno"; a[01] = "x"; a[1.0] = "y"; a[0.1 + 0.2] = "z"; a[1e0] = "w"; print length(a), a[1], a["0.3"]; a[1e6] = "m"; print ("1000000" in a), (1e6 in a), ("1e6" in a); a[-0] = "neg"; print a[0]; a[2 ^ 53] = "big"; print ("9007199254740992" in a) }

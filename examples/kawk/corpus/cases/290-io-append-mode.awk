@@ -1,0 +1,1 @@
+BEGIN { print "one" > "f"; close("f"); print "two" >> "f"; close("f"); print "three" >> "f"; close("f"); while ((getline l < "f") > 0) print l; print "x" > "f"; close("f"); n = 0; while ((getline l < "f") > 0) n++; print n }

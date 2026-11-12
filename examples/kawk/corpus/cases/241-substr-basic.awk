@@ -1,0 +1,1 @@
+BEGIN { s = "hello world"; print substr(s, 1, 5), substr(s, 7), substr(s, 0), substr(s, -1), substr(s, 5, 0) "|", substr(s, 12) "|", substr(s, 11), substr(s, 3, 100), substr(s, 100) "|", substr(s, 0, 2), substr(s, -1, 3), substr(s, 2, -1) "|" }

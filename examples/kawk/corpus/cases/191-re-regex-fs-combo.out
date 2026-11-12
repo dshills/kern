@@ -1,0 +1,37 @@
+1:alpha beta gamma delta|alpha beta gamma delta
+6:|
+0:|
+1:   leading blanks and   several   between  |   leading blanks and   several   between  
+1:	Tabs	separate	these	|	Tabs	separate	these	
+14:|
+2:name:alice:age:|:city:Paris
+2:name:bob:age:|:city:Berlin
+2:name:carol:age:|:city:Rome
+1:The quick brown fox jumps over the lazy dog.|The quick brown fox jumps over the lazy dog.
+1:the the THE The tHe|the the THE The tHe
+1:a,b,,d,|a,b,,d,
+1:,leading,comma|,leading,comma
+2:| apples
+2:| pears
+2:| plums
+1:  |  
+2:foo=bar; baz=qux; n=|
+1:aaa bbb aaa ccc bbb aaa|aaa bbb aaa ccc bbb aaa
+1:path/to/some/file.txt|path/to/some/file.txt
+1:x*y+z? (a|b) [c] {d} ^e$ \f|x*y+z? (a|b) [c] {d} ^e$ \f
+4:|
+4:|
+4:|
+3:UPPER lower MiXeD |
+1:eéè ÿ€ high bytes|eéè ÿ€ high bytes
+9:|
+1:one;two;three|one;two;three
+1:last line has no punctuation|last line has no punctuation
+7:-|
+8:|
+1:tab	here|tab	here
+1:dup|dup
+1:dup|dup
+1:dup|dup
+1:uniq|uniq
+1:end|end

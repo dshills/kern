@@ -1,0 +1,9 @@
+1: [para one line one
+line two] 6
+<para><one><line><one><line><two>
+2: [para two] 2
+<para><two>
+3: [para three
+more
+most] 4
+<para><three><more><most>

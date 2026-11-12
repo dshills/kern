@@ -1,0 +1,1 @@
+/\*/ { print "star:", NR } /\+/ { print "plus:", NR } /\?/ { print "q:", NR } /\(.*\)/ { print "parens:", NR } /\[.\]/ { print "brackets:", NR } /\{.\}/ { print "braces:", NR } /\\/ { print "backslash:", NR } /\^.\$/ { print "anchors:", NR }

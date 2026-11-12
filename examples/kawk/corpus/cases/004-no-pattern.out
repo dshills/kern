@@ -1,0 +1,37 @@
+1: alpha beta gamma delta
+2: 1 2 3 4 5
+3: 
+4:    leading blanks and   several   between  
+5: 	Tabs	separate	these	
+6: 3.14 -2.5e3 +7 0x1A 1e3 .5 5. 010
+7: name:alice:age:30:city:Paris
+8: name:bob:age:25:city:Berlin
+9: name:carol:age:35:city:Rome
+10: The quick brown fox jumps over the lazy dog.
+11: the the THE The tHe
+12: a,b,,d,
+13: ,leading,comma
+14: 100 apples
+15: 20 pears
+16: 3 plums
+17:   
+18: foo=bar; baz=qux; n=42
+19: aaa bbb aaa ccc bbb aaa
+20: path/to/some/file.txt
+21: x*y+z? (a|b) [c] {d} ^e$ \f
+22: 10 20 30
+23: 40 50 60
+24: 70 80 90
+25: UPPER lower MiXeD 123abc abc123
+26: eéè ÿ€ high bytes
+27: 0 00 0.0 -0 +0 0e0
+28: one;two;three
+29: last line has no punctuation
+30: -5 -4.5 4.5 5
+31: 1e300 1e-300 123456789012345678 0.1
+32: tab	here
+33: dup
+34: dup
+35: dup
+36: uniq
+37: end

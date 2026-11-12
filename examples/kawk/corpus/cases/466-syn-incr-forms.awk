@@ -1,0 +1,1 @@
+BEGIN { x = 1; y = x++ + ++x; print x, y; z = x-- - --x; print x, z; a = 5; b = a++ * 2; print a, b; c = - -a; print c; d = a - -1; print d; e = a++ + 1; print e, a; print x++ " " x; print ++x "" x++ }

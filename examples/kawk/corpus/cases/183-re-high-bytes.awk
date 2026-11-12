@@ -1,0 +1,1 @@
+/\351/ { print "e9:", NR } /[\200-\377]/ { h++ } /[^\001-\177]/ { g++ } END { print h, g; s = "caf\303\251"; print gsub(/\303\251/, "e", s), s, length(s); print "\377" ~ /./, match("a\377b", /[^a-z]/) }

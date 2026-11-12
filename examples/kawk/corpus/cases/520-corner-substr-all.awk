@@ -1,0 +1,1 @@
+BEGIN { s = "hello"; for (i = -1; i <= 7; i++) printf "[%s]", substr(s, i); print ""; for (i = -1; i <= 7; i++) printf "[%s]", substr(s, i, 2); print ""; for (n = -1; n <= 6; n++) printf "[%s]", substr(s, 2, n); print "" }

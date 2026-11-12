@@ -1,0 +1,1 @@
+BEGIN { print "10\n20\n30" > "f"; close("f"); getline a[1] < "f"; getline a[2] < "f"; getline $3 < "f"; print a[1] + a[2], $0, NF; close("f"); i = 0; while ((getline arr[i++] < "f") > 0) ; print i, arr[0], arr[2] }

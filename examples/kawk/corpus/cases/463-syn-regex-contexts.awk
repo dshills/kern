@@ -1,0 +1,1 @@
+BEGIN { $0 = "a/b c"; n = split($0, p, /\//); print n; if (/a/ && /b/) print "ab"; x = !/z/; print x; print /a/ ? "y" : "n"; print (/c$/) + 1; print 4 / 2 / 1; print 4 /2/ 1; y = 8; y /= 2 / 1; print y }

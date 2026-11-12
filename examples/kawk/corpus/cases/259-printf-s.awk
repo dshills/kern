@@ -1,0 +1,1 @@
+BEGIN { printf "%s|%10s|%-10s|%.3s|%10.3s|%-10.3s|%.0s|%s|%s\n", "abc", "abc", "abc", "abcdef", "abcdef", "abcdef", "abc", 42, 3.14159; printf "%s %s %s\n", 1e6, 0.1 + 0.2, 1e300; printf "%5s|%-5s|%05s|\n", "abcdefg", "abcdefg", "ab" }

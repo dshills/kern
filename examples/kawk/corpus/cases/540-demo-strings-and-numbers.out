@@ -1,0 +1,12 @@
+10     9      greater less as strings, unequal as numbers
+abc    abd    less    less as strings, equal as numbers
+1e2    100    equal   not less as strings, equal as numbers
+0x10   16     equal   less as strings, equal as numbers
+3.0    3      equal   not less as strings, equal as numbers
++5     5.0    equal   less as strings, equal as numbers
+ten    10     greater not less as strings, unequal as numbers
+0 1 1 0 1
+1 1 0 1 |
+1 1 1 0 0 1 1
+1 1 1
+0 1 1 1 5 15

@@ -1,0 +1,1 @@
+function rot(s, k,  i, c, p, r) { for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); p = index("abcdefghijklmnopqrstuvwxyz", c); r = r (p ? substr("abcdefghijklmnopqrstuvwxyz", (p - 1 + k) % 26 + 1, 1) : c) }; return r } NR < 6 { e = rot(tolower($0), 13); print e; if (rot(e, 13) != tolower($0)) print "mismatch" }

@@ -1,0 +1,1 @@
+BEGIN { x = 3.0; y = "3.0"; print length(x), length(y), index(x, "."), index(y, "."), substr(x, 1), substr(y, 1), x "" == y, x == y, x == y + 0; z = 0.1 + 0.2; print length(z), z == 0.3, z "" == "0.3" }

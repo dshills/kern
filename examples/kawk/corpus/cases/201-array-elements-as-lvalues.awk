@@ -1,0 +1,1 @@
+BEGIN { a[1] = 5; a[1] += 2; a[1] *= 3; print a[1]; a[2]++; a[2]++; print a[2]; a[3] = a[3] "x"; a[3] = a[3] "y"; print a[3]; b[a[1]] = "nested"; print b[21]; a[a[2]] = "self"; print a[2]; i = 5; c[i++] = i; print c[5], i; d[i] = i++; print d[6] "|" d[7] "|" i }

@@ -1,0 +1,1 @@
+BEGIN { for (i = 32; i < 127; i++) { c = sprintf("%c", i); if (c ~ /[a-fA-F0-9]/) h = h c; if (c ~ /[^ -~]/) bad = bad c; if (c ~ /[!-\/]/) p = p c; if (c ~ /[x-z0-2X]/) q = q c }; print h; print "[" bad "]"; print p; print q }

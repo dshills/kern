@@ -1,0 +1,15 @@
+1 2 3 4 5
+
+a,b,,d,
+3 plums
+  
+foo=bar; baz=qux; n=42
+aaa bbb aaa ccc bbb aaa
+10 20 30
+40 50 60
+70 80 90
+-5 -4.5 4.5 5
+dup
+dup
+dup
+uniq

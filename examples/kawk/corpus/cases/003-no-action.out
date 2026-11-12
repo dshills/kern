@@ -1,0 +1,12 @@
+
+3.14 -2.5e3 +7 0x1A 1e3 .5 5. 010
+name:carol:age:35:city:Rome
+a,b,,d,
+20 pears
+foo=bar; baz=qux; n=42
+x*y+z? (a|b) [c] {d} ^e$ \f
+70 80 90
+0 00 0.0 -0 +0 0e0
+-5 -4.5 4.5 5
+dup
+uniq

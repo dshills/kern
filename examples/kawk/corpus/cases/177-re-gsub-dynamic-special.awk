@@ -1,0 +1,1 @@
+BEGIN { s = "a.b*c+d"; gsub(".", "x", s); print s; s = "a.b*c+d"; gsub("\\.", "x", s); print s; s = "a.b*c+d"; gsub("[.*+]", "", s); print s; s = "a+b"; gsub("[+]", "-", s); print s; s = "a|b"; gsub("\\|", "/", s); print s }

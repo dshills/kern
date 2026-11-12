@@ -1,0 +1,1 @@
+function rev(s,  r, i) { for (i = length(s); i; i--) r = r substr(s, i, 1); return r } { for (i = 1; i <= NF; i++) if (length($i) > 2 && $i == rev($i)) print $i, "is a palindrome" } END { print rev("stressed") }

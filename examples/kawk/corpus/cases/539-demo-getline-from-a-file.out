@@ -1,0 +1,9 @@
+5 lines read back, squares sum to 55
+getline < file sets $0: row 1 1, NF 3, NR 0
+then: row 2 4 / row 3 9
+6 lines now
+a missing file gives -1
+record 1: one
+after getline: two, NR 2
+getline var: four, $0 still three, NR 4
+at the end getline gives 0, NR 5

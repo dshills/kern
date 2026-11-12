@@ -1,0 +1,1 @@
+BEGIN { s = "aaa"; gsub(/^a/, "x", s); print s; s = "aaa"; gsub(/a$/, "x", s); print s; s = "abab"; gsub(/^ab/, "-", s); print s; s = "a\na"; gsub(/^a/, "x", s); print s; s = "aXbXc"; print gsub(/X|^a|c$/, "_", s), s }

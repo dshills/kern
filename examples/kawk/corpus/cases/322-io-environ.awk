@@ -1,0 +1,1 @@
+BEGIN { print ENVIRON["KAWK_TEST"], ENVIRON["LC_ALL"], length(ENVIRON["HOME"]) > 0, ("NO_SUCH_VAR_XYZ" in ENVIRON), ENVIRON["NO_SUCH_VAR_XYZ"] "|"; n = 0; for (k in ENVIRON) n++; print n > 3; ENVIRON["NEW"] = 1; print ENVIRON["NEW"] }

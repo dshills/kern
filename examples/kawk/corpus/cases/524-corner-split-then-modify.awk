@@ -1,0 +1,1 @@
+BEGIN { n = split("c b a", w); t = w[1]; w[1] = w[3]; w[3] = t; s = ""; for (i = 1; i <= n; i++) s = s w[i]; print s; n = split(s, ch, ""); print n, ch[n] ch[1]; delete w[2]; print length(w), (2 in w) }

@@ -1,0 +1,8 @@
+-v
+a=1
+-v
+b=two words
+-vc=41
+-v
+d=\t
+--

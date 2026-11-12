@@ -1,0 +1,37 @@
+alpha  gamma delta
+1  3 4 5
+ 
+leading  and several between
+Tabs  these
+3.14  +7 0x1A 1e3 .5 5. 010
+name:alice:age:30:city:Paris 
+name:bob:age:25:city:Berlin 
+name:carol:age:35:city:Rome 
+The  brown fox jumps over the lazy dog.
+the  THE The tHe
+a,b,,d, 
+,leading,comma 
+100 
+20 
+3 
+ 
+foo=bar;  n=42
+aaa  aaa ccc bbb aaa
+path/to/some/file.txt 
+x*y+z?  [c] {d} ^e$ \f
+10  30
+40  60
+70  90
+UPPER  MiXeD 123abc abc123
+eéè  high bytes
+0  0.0 -0 +0 0e0
+one;two;three 
+last  has no punctuation
+-5  4.5 5
+1e300  123456789012345678 0.1
+tab 
+dup 
+dup 
+dup 
+uniq 
+end 

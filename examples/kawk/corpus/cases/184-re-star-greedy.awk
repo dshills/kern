@@ -1,0 +1,1 @@
+BEGIN { s = "<a><b><c>"; t = s; sub(/<.*>/, "X", t); print t; t = s; sub(/<[^>]*>/, "X", t); print t; t = s; gsub(/<[^>]*>/, "X", t); print t; print match(s, /<.*>/), RLENGTH; print match("aXbXc", /X.*X/), RLENGTH; print match("abcabc", /b.*/), RLENGTH }

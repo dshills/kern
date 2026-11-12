@@ -1,0 +1,37 @@
+delta gamma beta alpha 
+5 4 3 2 1 
+
+between several and blanks leading 
+these separate Tabs 
+010 5. .5 1e3 0x1A +7 -2.5e3 3.14 
+name:alice:age:30:city:Paris 
+name:bob:age:25:city:Berlin 
+name:carol:age:35:city:Rome 
+dog. lazy the over jumps fox brown quick The 
+tHe The THE the the 
+a,b,,d, 
+,leading,comma 
+apples 100 
+pears 20 
+plums 3 
+
+n=42 baz=qux; foo=bar; 
+aaa bbb ccc aaa bbb aaa 
+path/to/some/file.txt 
+\f ^e$ {d} [c] (a|b) x*y+z? 
+30 20 10 
+60 50 40 
+90 80 70 
+abc123 123abc MiXeD lower UPPER 
+bytes high ÿ€ eéè 
+0e0 +0 -0 0.0 00 0 
+one;two;three 
+punctuation no has line last 
+5 4.5 -4.5 -5 
+0.1 123456789012345678 1e-300 1e300 
+here tab 
+dup 
+dup 
+dup 
+uniq 
+end 

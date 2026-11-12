@@ -1,0 +1,1 @@
+function f(x) { order = order x; return x } BEGIN { v = f(1) + f(2) * f(3); print v, order; order = ""; w = f("a") f("b") f("c"); print w, order; order = ""; print f(1), f(2), f(3); print order; order = ""; a[f(1)] = f(2); print order }

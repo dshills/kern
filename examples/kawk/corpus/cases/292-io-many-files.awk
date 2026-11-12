@@ -1,0 +1,1 @@
+BEGIN { for (i = 0; i < 40; i++) { f = "out" i; print "content", i > f }; for (i = 0; i < 40; i++) close("out" i); s = 0; for (i = 0; i < 40; i++) { getline l < ("out" i); split(l, p); s += p[2] }; print s }

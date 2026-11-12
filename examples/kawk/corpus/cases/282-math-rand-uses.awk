@@ -1,0 +1,1 @@
+BEGIN { srand(1); for (i = 0; i < 10; i++) d[int(rand() * 6) + 1]++; for (i = 1; i <= 6; i++) printf "%d ", d[i]; print ""; srand(99); n = split("a b c d e f g h", w); for (i = n; i > 1; i--) { j = int(rand() * i) + 1; t = w[i]; w[i] = w[j]; w[j] = t }; for (i = 1; i <= n; i++) printf "%s", w[i]; print "" }

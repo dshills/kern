@@ -1,0 +1,1 @@
+function commas(n,  s) { s = sprintf("%d", n); while (s ~ /[0-9][0-9][0-9][0-9]/) sub(/[0-9][0-9][0-9]($|,)/, ",&", s); return s } BEGIN { print commas(1234567), commas(999), commas(1000), commas(123456789012), commas(0) }

@@ -1,0 +1,1 @@
+BEGIN { s = "abcdefgh"; print substr(s, 1.5, 2), substr(s, 1.9, 2.9), substr(s, 2.5), substr(s, 0.9, 1), substr(s, "3", "2"), substr(s, "x", 2), substr(s, 1e9) "|", substr(s, 2, 1e9), substr(s, -1e9, 1e9), substr(s, 3, 1e30), substr(s, 1e30, 1) "|" }

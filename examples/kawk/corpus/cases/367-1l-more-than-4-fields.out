@@ -1,0 +1,10 @@
+1 2 3 4 5
+   leading blanks and   several   between  
+3.14 -2.5e3 +7 0x1A 1e3 .5 5. 010
+The quick brown fox jumps over the lazy dog.
+the the THE The tHe
+aaa bbb aaa ccc bbb aaa
+x*y+z? (a|b) [c] {d} ^e$ \f
+UPPER lower MiXeD 123abc abc123
+0 00 0.0 -0 +0 0e0
+last line has no punctuation

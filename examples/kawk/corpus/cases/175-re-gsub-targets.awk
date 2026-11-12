@@ -1,0 +1,2 @@
+BEGIN { a["k"] = "banana"; gsub(/a/, "o", a["k"]); print a["k"]; $0 = "one two three"; gsub(/e/, "E", $2); print; print NF; gsub(/o/, "0"); print; n = gsub(/t/, "T", $3); print n, $0
+  x = 12345; gsub(/3/, "x", x); print x; $0 = "a b c"; sub(/b/, "x y", $2); print NF, $0; $0 = $0; print NF; sub(/ /, ""); print NF, $0; gsub(/a/, "b", und); print "[" und "]"; gsub(/^/, "b", und2); print "[" und2 "]" }

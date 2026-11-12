@@ -1,0 +1,1 @@
+{ n = split($0, pairs, /; */); for (i = 1; i <= n; i++) if (split(pairs[i], kv, "=") == 2) { cfg[kv[1]] = kv[2]; order[++c] = kv[1] } } END { for (i = 1; i <= c; i++) printf "%s => [%s]\n", order[i], cfg[order[i]] }

@@ -1,0 +1,1 @@
+function leap(y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 } function days(y, m) { return m == 2 ? 28 + leap(y) : (m == 4 || m == 6 || m == 9 || m == 11) ? 30 : 31 } function doy(y, m, d,  i, n) { for (i = 1; i < m; i++) n += days(y, i); return n + d } BEGIN { print doy(2024, 3, 1), doy(2023, 3, 1), doy(2000, 12, 31), doy(1900, 12, 31), leap(2100) }

@@ -1,0 +1,1 @@
+BEGIN { n = split("a b c d e f g h i j k l m n o p q r s t u v w x y z", L); for (k in L) printf "%s%s ", k, L[k]; print ""; for (r = 0; r < 3; r++) { for (i = 1; i <= 150; i++) big[r "-" i] = 1 }; c = 0; for (k in big) if (c++ < 30) printf "%s ", k; print "" }

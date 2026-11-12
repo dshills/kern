@@ -1,0 +1,1 @@
+BEGIN { s = sprintf("%d-%s-%5.2f", 42, "x", 3.14159); print s, length(s); print sprintf("%%"), sprintf("no args"), sprintf("%s"), sprintf("%c%c%c", 72, 105, 33); x = sprintf("%05d", 42) + 0; print x; print sprintf("%s %s", "a", "b") sprintf("|%3d|", 7) }

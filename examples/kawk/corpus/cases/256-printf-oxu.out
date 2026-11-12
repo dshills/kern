@@ -1,0 +1,3 @@
+100 ff FF 42|010 0xff 0XFF|   10|ff   |000FF|00ff|0x00ff|0 0
+0 0 0 ffffffffffffffff 3000000000
+deadbeef BEEF

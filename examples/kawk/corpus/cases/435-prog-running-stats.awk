@@ -1,0 +1,1 @@
+$1 == $1 + 0 { n++; s += $1; ss += $1 * $1; if (n == 1 || $1 < mn) mn = $1; if (n == 1 || $1 > mx) mx = $1 } END { m = s / n; printf "n=%d mean=%.4f sd=%.4f min=%g max=%g\n", n, m, sqrt(ss / n - m * m), mn, mx }

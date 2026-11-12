@@ -1,0 +1,1 @@
+BEGIN { width = 30 } { for (i = 1; i <= NF; i++) { if (length(line) + length($i) + 1 > width && line != "") { print line; line = "" }; line = line (line == "" ? "" : " ") $i } } END { if (line != "") print line }

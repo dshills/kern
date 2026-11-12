@@ -1,0 +1,1 @@
+function a() { return } function b() { return 1 } function c() { return (2) } function d() { return 1 + 2 } function e() { return "s" "t" } function f(x) { if (x) return "yes"; return "no" } BEGIN { print a() "|" b(), c(), d(), e(), f(1), f(0) }

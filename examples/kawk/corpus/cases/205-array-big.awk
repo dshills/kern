@@ -1,0 +1,1 @@
+BEGIN { for (i = 0; i < 20000; i++) a["key" i] = i; s = 0; for (i = 0; i < 20000; i += 7) s += a["key" i]; print length(a), s; for (i = 0; i < 20000; i += 2) delete a["key" i]; print length(a), ("key1" in a), ("key2" in a); n = 0; for (k in a) n += a[k] % 2; print n }

@@ -1,0 +1,1 @@
+BEGIN { n = 3; for (i = 1; i <= n; i++) for (j = 1; j <= n; j++) { A[i, j] = i + j; B[i, j] = i * j - 1 }; for (i = 1; i <= n; i++) { for (j = 1; j <= n; j++) { s = 0; for (k = 1; k <= n; k++) s += A[i, k] * B[k, j]; printf "%5d", s }; print "" } }

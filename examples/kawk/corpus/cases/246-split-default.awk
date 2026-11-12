@@ -1,0 +1,1 @@
+BEGIN { n = split("  the quick\tbrown\nfox  ", w); print n; for (i = 1; i <= n; i++) printf "[%s]", w[i]; print ""; n = split("", w); print n, length(w); n = split("   ", w); print n; n = split("one", w); print n, w[1] }

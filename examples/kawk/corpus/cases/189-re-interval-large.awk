@@ -1,0 +1,1 @@
+BEGIN { s = ""; for (i = 0; i < 50; i++) s = s "ab"; print s ~ /^(ab){50}$/, s ~ /^(ab){51}$/, s ~ /^(ab){10,60}$/, s ~ /^[ab]{100}$/, s ~ /^[ab]{99}$/, s ~ /^a{0}(ab){49,}$/, match(s, /(ab){3}/), RLENGTH, match(s, /(ab){3,}/), RLENGTH }

@@ -1,0 +1,1 @@
+BEGIN { n = split("a ab abb abbb b aab ac", w, " "); for (i = 1; i <= n; i++) printf "%s:%d%d%d%d%d ", w[i], w[i] ~ /^ab*$/, w[i] ~ /^ab+$/, w[i] ~ /^ab?$/, w[i] ~ /^a*b$/, w[i] ~ /^(ab)+$/; print "" }

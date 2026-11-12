@@ -1,0 +1,1 @@
+function max(a, b) { return a > b ? a : b } function min(a, b) { return a < b ? a : b } BEGIN { print max(3, 7), max("abc", "abd"), min(10, 9), min("10", "9"), max(-1, -2) } { m = max(m, NF) } END { print m }

@@ -1,0 +1,1 @@
+BEGIN { s = ""; for (i = 0; i < 3000; i++) s = s "a"; print s ~ /(a*)*b/, s ~ /(a|aa)+$/, s ~ /^(a+)+$/, match(s, /(a*)*$/), RLENGTH; t = s "b"; print t ~ /(a*)*b/, t ~ /^(a|a?)+b$/; print s ~ /(x+x+)+y/, (s "c") ~ /^(a+)+b/ }

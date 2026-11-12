@@ -1,0 +1,25 @@
+1 0 0 0 0
+[]
+<>
+2 0 3 0 3
+[   ]
+<>
+3 0 2 0 2
+[		]
+<>
+4 9 37 2 2
+[no newline at end, bytes ÿş€ and a Ã©]
+<no>
+5 1 17 17 17
+[:starts:and:ends:]
+<:starts:and:ends:>
+6 3 10006 5000 5000
+7 1 6 6 6
+[,a,,b,]
+<,a,,b,>
+8 3 18 4 5
+[  lead and trail  ]
+<lead>
+9 3 20 4 7
+[last without newline]
+<last>

@@ -1,0 +1,1 @@
+BEGIN { index1 = 1; inx = 2; iff = 3; fora = 4; printx = 5; nextone = 6; getlines = 7; BEGINX = 8; ENDX = 9; delete_ = 10; func_ = 11; in1 = 12; _x = 13; x_1y = 14; print index1 + inx + iff + fora + printx + nextone + getlines + BEGINX + ENDX + delete_ + func_ + in1 + _x + x_1y }

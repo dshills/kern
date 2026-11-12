@@ -1,0 +1,1 @@
+BEGIN { for (i = 1; i <= 5; i++) print "line", i > "data.txt"; close("data.txt"); while ((getline l < "data.txt") > 0) { n++; last = l }; print n, last; close("data.txt"); getline first < "data.txt"; print first }

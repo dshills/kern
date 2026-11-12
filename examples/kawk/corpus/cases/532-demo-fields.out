@@ -1,0 +1,14 @@
+1: 3 fields, first [alpha] last [gamma]
+2: 3 fields, first [leading] last [trailing]
+leading CHANGED trailing
+3
+3: 3 fields, first [one] last [three]
+one two three   sixth
+one two
+2
+4: 0 fields, first [] last []
+empty record: NF is 0 and $1 is []
+5: 1 fields, first [last-one] last [last-one]
+a-b-c
+bc
+5 records

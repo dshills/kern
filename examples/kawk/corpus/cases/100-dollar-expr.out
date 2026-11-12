@@ -1,0 +1,75 @@
+alpha beta delta gamma
+0 4
+1 2 5 3
+5 5
+1 2 3 1 2 3 4 4
+   
+0 0
+leading blanks between and
+0 5
+Tabs separate these these
+0 3
+3.14 -2.5e3 010 +7
+10 8
+name:alice:age:30:city:Paris  name:alice:age:30:city:Paris name:alice:age:30:city:Paris
+0 1
+name:bob:age:25:city:Berlin  name:bob:age:25:city:Berlin name:bob:age:25:city:Berlin
+0 1
+name:carol:age:35:city:Rome  name:carol:age:35:city:Rome name:carol:age:35:city:Rome
+0 1
+The quick dog. brown
+0 9
+the the tHe THE
+0 5
+a,b,,d,  a,b,,d, a,b,,d,
+0 1
+,leading,comma  ,leading,comma ,leading,comma
+0 1
+100 apples apples 100
+0 2
+20 pears pears 20
+0 2
+3 plums plums 3
+0 2
+     
+0 0
+foo=bar; baz=qux; n=42 n=42
+0 3
+aaa bbb aaa aaa
+0 6
+path/to/some/file.txt  path/to/some/file.txt path/to/some/file.txt
+0 1
+x*y+z? (a|b) \f [c]
+0 6
+10 20 30 30
+30 3
+40 50 60 60
+60 3
+70 80 90 90
+90 3
+UPPER lower abc123 MiXeD
+0 5
+eéè ÿ€ bytes high
+0 4
+0 00 0e0 0.0
+0 6
+one;two;three  one;two;three one;two;three
+0 1
+last line punctuation has
+0 5
+-5 -4.5 5 4.5
+5 4
+1e300 1e-300 0.1 123456789012345678
+0.1 4
+tab here here tab
+0 2
+dup  dup dup
+0 1
+dup  dup dup
+0 1
+dup  dup dup
+0 1
+uniq  uniq uniq
+0 1
+end  end end
+0 1

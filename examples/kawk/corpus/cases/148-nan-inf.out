@@ -1,0 +1,4 @@
+inf -inf nan
+1 0 0 1 1
+9223372036854775807 -9223372036854775808 inf -inf nan|  inf|inf   |   inf
+inf nan

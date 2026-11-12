@@ -1,0 +1,1 @@
+BEGIN { print srand(42); a = rand(); print srand(42); b = rand(); print (a == b), a; print srand(7), srand(7.9), srand("11x"), srand(-3), srand(0), srand(1e10), srand(2147483653); print rand(), rand(); srand(123456789); print int(rand() * 1000), int(rand() * 1000), int(rand() * 1000) }

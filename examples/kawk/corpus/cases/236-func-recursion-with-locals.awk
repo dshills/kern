@@ -1,0 +1,1 @@
+function hanoi(n, from, to, via,   moves) { if (n == 0) return 0; moves = hanoi(n - 1, from, via, to); moves++; moves += hanoi(n - 1, via, to, from); return moves } BEGIN { print hanoi(10, "A", "C", "B") }

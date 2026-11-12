@@ -1,0 +1,1 @@
+BEGIN { print int(3.7), int(-3.7), int(0.5), int(-0.5), int("42abc"), int("abc"), int(""), int(1e15 + 0.5), int(2 ^ 53), int(-2 ^ 63), int(1e300), int(3), int("3.9e2"), int(" 12 ") } { s += int($1) } END { print s }

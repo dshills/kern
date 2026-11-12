@@ -1,0 +1,1 @@
+BEGIN { inf = 1e300 * 1e300; nan = inf - inf; print inf, -inf, nan; print (nan == nan), (nan < 1), (nan > 1), (inf > 1e308), (-inf < inf); printf "%d %d %f %e %g|%5.1f|%-6g|%06g\n", inf, -inf, inf, -inf, nan, inf, inf, inf; print int(inf), int(nan) }

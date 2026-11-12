@@ -1,0 +1,18 @@
+1: alpha beta gamma delta
+2:    leading blanks and   several   between  
+3: 	Tabs	separate	these	
+4: name:alice:age:30:city:Paris
+5: name:bob:age:25:city:Berlin
+6: name:carol:age:35:city:Rome
+7: The quick brown fox jumps over the lazy dog.
+8: a,b,,d,
+9: ,leading,comma
+10: 100 apples
+11: 20 pears
+12: foo=bar; baz=qux; n=42
+13: aaa bbb aaa ccc bbb aaa
+14: path/to/some/file.txt
+15: x*y+z? (a|b) [c] {d} ^e$ \f
+16: UPPER lower MiXeD 123abc abc123
+17: last line has no punctuation
+18: tab	here

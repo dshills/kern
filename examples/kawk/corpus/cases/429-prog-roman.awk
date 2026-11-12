@@ -1,0 +1,1 @@
+function roman(n,  r, i) { split("1000 900 500 400 100 90 50 40 10 9 5 4 1", v, " "); split("M CM D CD C XC L XL X IX V IV I", s, " "); for (i = 1; i <= 13; i++) while (n >= v[i]) { r = r s[i]; n -= v[i] }; return r } BEGIN { print roman(1987), roman(2024), roman(4), roman(3999), roman(14) }

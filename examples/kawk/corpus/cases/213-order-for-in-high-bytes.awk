@@ -1,0 +1,1 @@
+BEGIN { a["\351t\351"]; a["\377"]; a["abc"]; a["\200\201"]; a["z"]; for (i = 0; i < 120; i++) a["\300" i]; for (k in a) n = n length(k); print n; m = 0; for (k in a) if (m++ < 12) printf "%d ", length(k); print "" }

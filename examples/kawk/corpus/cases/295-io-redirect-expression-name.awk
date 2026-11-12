@@ -1,0 +1,1 @@
+BEGIN { base = "file"; print "a" > base ".txt"; print "b" > (base "2"); n = 3; print "c" > base n; close(base ".txt"); close(base "2"); close(base n); getline x < (base ".txt"); getline y < (base "2"); getline z < (base n); print x y z }

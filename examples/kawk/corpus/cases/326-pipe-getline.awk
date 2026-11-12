@@ -1,0 +1,1 @@
+BEGIN { while (("echo one; echo two; echo three" | getline line) > 0) print "got:", line; close("echo one; echo two; echo three"); "echo again" | getline; print $0, NF; "printf 'a b c'" | getline x; print x; print NR }
