@@ -1,0 +1,25 @@
+//! phase: 6
+//! expect: output move_same_offset
+// Two files of one module with `move x` and `drop(x)` at the same byte
+// offsets and of the same name. The checker and the lowering found the
+// moved variable by scanning the program's identifiers for the
+// expression's position and name, which the two files share: the other
+// file's variable was taken, by the map's order, and the program the
+// checker accepted failed with an internal error in most runs.
+module main
+func pass_a(x: own Vec[u64]) -> Vec[u64] {
+    y := move x
+    return y
+}
+func done_a(x: own Vec[u64]) { drop(x) }
+func main() -> i32 {
+    v := Vec[u64].new()
+    v.push(7u64)
+    w := pass_a(move v)
+    u := pass_b(move w)
+    print_u64(u.get(0usize)); println()
+    done_a(move u)
+    t := Vec[u64].new()
+    done_b(move t)
+    return 0i32
+}

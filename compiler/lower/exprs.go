@@ -168,7 +168,7 @@ func (fl *fnLower) expr(e ast.Expr, want resolve.Type) operand {
 	case *ast.Try:
 		return fl.try(x)
 	case *ast.Move:
-		sym := fl.symAt(x.Pos, x.Name)
+		sym := fl.consumed(x)
 		if sym == nil {
 			fl.fail(x.Pos, "move of unknown %s", x.Name)
 		}
@@ -219,7 +219,7 @@ func (fl *fnLower) expr(e ast.Expr, want resolve.Type) operand {
 		}
 		return operand{val: v, owned: true}
 	case *ast.Drop:
-		sym := fl.symAt(x.Pos, x.Name)
+		sym := fl.consumed(x)
 		if sym != nil {
 			loc := fl.local(sym)
 			fl.emitDrop(ir.Place{Local: loc}, loc.Type, x.Pos)
@@ -307,11 +307,14 @@ func (fl *fnLower) defaultValue(t resolve.Type, pos ast.Pos) *ir.Value {
 	return nil
 }
 
-func (fl *fnLower) symAt(pos ast.Pos, name string) *resolve.Symbol {
-	for id, sym := range fl.l.info.Idents {
-		if id.Pos == pos && id.Name == name {
-			return sym
-		}
+// consumed returns the variable a `move x` or `drop(x)` expression names,
+// through the identifier the resolver made for it. (It was found by
+// scanning every identifier of the program for the expression's position
+// and name, which two files of one module can share: the lowering then
+// took whichever the map's order gave, and failed on the other file's.)
+func (fl *fnLower) consumed(x ast.Expr) *resolve.Symbol {
+	if id := fl.l.info.Consumed[x]; id != nil {
+		return fl.l.info.Idents[id]
 	}
 	return nil
 }

@@ -295,14 +295,7 @@ func (f *fn) expr(st *flow, e ast.Expr) *result {
 		}
 		return &result{t: t, owned: true}
 	case *ast.Move:
-		id := &ast.Ident{Pos: x.Pos, Name: x.Name}
-		var sym *resolve.Symbol
-		for k, v := range f.c.info.Idents {
-			if k.Pos == x.Pos && k.Name == x.Name {
-				sym = v
-			}
-		}
-		_ = id
+		sym := f.consumed(x)
 		if sym == nil {
 			return &result{t: t}
 		}
@@ -341,13 +334,7 @@ func (f *fn) expr(st *flow, e ast.Expr) *result {
 		}
 		return &result{t: t, owned: true}
 	case *ast.Drop:
-		var sym *resolve.Symbol
-		for k, v := range f.c.info.Idents {
-			if k.Pos == x.Pos && k.Name == x.Name {
-				sym = v
-			}
-		}
-		if sym != nil {
+		if sym := f.consumed(x); sym != nil {
 			r := &result{pl: place{root: sym, perm: ast.ConvEdit}, t: sym.Type}
 			f.checkReadable(st, sym, x.Pos, nil)
 			f.consumePlace(st, r, x.Pos)
@@ -600,6 +587,18 @@ func (f *fn) spawnCall(st *flow, x *ast.CallExpr, info *resolve.CallInfo) *resul
 		}
 	}
 	return &result{t: t, owned: true}
+}
+
+// consumed returns the variable a `move x` or `drop(x)` expression names,
+// through the identifier the resolver made for it. (It was found by
+// scanning every identifier of the program for the expression's position
+// and name, which two files of one module can share: the variable of the
+// other file was then the one counted as moved.)
+func (f *fn) consumed(x ast.Expr) *resolve.Symbol {
+	if id := f.c.info.Consumed[x]; id != nil {
+		return f.c.info.Idents[id]
+	}
+	return nil
 }
 
 // underlyingRoot follows access bindings to the variable they derive from.
