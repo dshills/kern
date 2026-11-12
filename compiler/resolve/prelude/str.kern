@@ -256,13 +256,40 @@ func json_number(s: view[]u8) -> bool {
     return i == n
 }
 
-// equal reports whether a and b hold the same bytes.
+// equal reports whether a and b hold the same bytes. The first byte is
+// compared before anything else, which settles most unequal pairs at the
+// cost of a byte loop's first step. The rest is compared eight bytes at a
+// time through load_le: whole words from the front, then the last eight
+// bytes, which overlap what was compared when the length is not a multiple
+// of eight. A view of four to seven bytes is compared the same way by its
+// first and last four, a shorter one by its bytes. No read here is
+// bounds-checked: the loop's `i + 8usize <= n` and each `t + K <= n`,
+// which follow from the lines before them, are the guards that prove the
+// reads in range (docs/bounds-checks.md), and `i < t` is what lets a
+// native build drop the overflow check of `i + 8`.
 func equal(a: view[]u8, b: view[]u8) -> bool {
-    if len(a) != len(b) { return false }
-    i := 0usize
-    while i < len(a) {
-        if a[i] != b[i] { return false }
-        i = i + 1usize
+    n := len(a)
+    if n != len(b) { return false }
+    if n < 1usize { return true }
+    if a[0usize] != b[0usize] { return false }
+    if n >= 8usize {
+        t := n - 8usize
+        i := 0usize
+        while i < t && i + 8usize <= n {
+            if load_le[u64](a, i) != load_le[u64](b, i) { return false }
+            i = i + 8usize
+        }
+        return t + 8usize <= n && load_le[u64](a, t) == load_le[u64](b, t)
+    }
+    if n >= 4usize {
+        if load_le[u32](a, 0usize) != load_le[u32](b, 0usize) { return false }
+        if n == 4usize { return true }
+        t := n - 4usize
+        return t + 4usize <= n && load_le[u32](a, t) == load_le[u32](b, t)
+    }
+    if n >= 2usize {
+        if a[1usize] != b[1usize] { return false }
+        return n < 3usize || a[2usize] == b[2usize]
     }
     return true
 }
@@ -280,36 +307,77 @@ func hash(s: view[]u8) -> u64 {
 
 // starts_with reports whether s begins with prefix.
 func starts_with(s: view[]u8, prefix: view[]u8) -> bool {
-    if len(prefix) > len(s) { return false }
-    i := 0usize
-    while i < len(prefix) {
-        if s[i] != prefix[i] { return false }
-        i = i + 1usize
-    }
-    return true
+    n := len(prefix)
+    return n <= len(s) && equal(s[0usize:n], prefix)
 }
 
-// ends_with reports whether s ends with suffix.
+// ends_with reports whether s ends with suffix (`from <= len(s)` always
+// holds: it is the guard that proves the slice).
 func ends_with(s: view[]u8, suffix: view[]u8) -> bool {
     if len(suffix) > len(s) { return false }
     from := len(s) - len(suffix)
-    i := 0usize
-    while i < len(suffix) {
-        if s[from + i] != suffix[i] { return false }
-        i = i + 1usize
-    }
-    return true
+    return from <= len(s) && equal(s[from:len(s)], suffix)
 }
 
-// find returns the index of the first occurrence of needle in s.
-func find(s: view[]u8, needle: view[]u8) -> Option[usize] {
-    if len(needle) > len(s) { return None }
+// find_byte returns the index of the first byte of s equal to b. It reads
+// eight bytes at a time: a word xored with b in every byte has a zero byte
+// where s holds b, and `(w - 0x01..01) & ~w & 0x80..80` has the high bit
+// set in the lowest zero byte of w and in no byte below it (a borrow can
+// set it only in a byte above a zero one), so the lowest set bit names the
+// first match whatever the other bytes hold. The last eight bytes are read
+// as one word that overlaps bytes already found not to match, and a view
+// under eight bytes is read a byte at a time. The guards are those of
+// equal.
+func find_byte(s: view[]u8, b: u8) -> Option[usize] {
+    n := len(s)
+    if n >= 8usize {
+        ones := 72340172838076673u64
+        highs := 9259542123273814144u64
+        pat := wrapping_mul(u64(b), ones)
+        t := n - 8usize
+        i := 0usize
+        while i < t && i + 8usize <= n {
+            w := load_le[u64](s, i) ^ pat
+            z := wrapping_sub(w, ones) & (w ^ 18446744073709551615u64) & highs
+            if z != 0u64 { return Some(i + usize(count_trailing_zeros(z) >> 3u32)) }
+            i = i + 8usize
+        }
+        if t + 8usize <= n {
+            w := load_le[u64](s, t) ^ pat
+            z := wrapping_sub(w, ones) & (w ^ 18446744073709551615u64) & highs
+            if z != 0u64 { return Some(t + usize(count_trailing_zeros(z) >> 3u32)) }
+        }
+        return None
+    }
     i := 0usize
-    last := len(s) - len(needle)
-    while i <= last {
-        j := 0usize
-        while j < len(needle) && s[i + j] == needle[j] { j = j + 1usize }
-        if j == len(needle) { return Some(i) }
+    while i < n && s[i] != b { i = i + 1usize }
+    if i < n { return Some(i) }
+    return None
+}
+
+// find returns the index of the first occurrence of needle in s: 0 for an
+// empty needle, None for one longer than s. It looks for the needle's
+// first byte with find_byte and compares with equal at each place found.
+func find(s: view[]u8, needle: view[]u8) -> Option[usize] {
+    m := len(needle)
+    if m > len(s) { return None }
+    if m < 1usize { return Some(0usize) }
+    first := needle[0usize]
+    if m == 1usize { return find_byte(s, first) }
+    i := 0usize
+    while i < len(s) {
+        if s[i] != first {
+            match find_byte(s[i + 1usize:len(s)], first) {
+                Some(k) => i = i + 1usize + k
+                None => return None
+            }
+        }
+        // the first byte is at i: an occurrence there ends at e, and when
+        // that is past the end so is every later one (`i > e` never holds:
+        // with the other test it is the guard that proves the slice)
+        e := i + m
+        if e > len(s) || i > e { return None }
+        if equal(s[i:e], needle) { return Some(i) }
         i = i + 1usize
     }
     return None

@@ -1,0 +1,383 @@
+//! phase: 6
+//! expect: output str_word_scan
+// std/str compares and searches eight bytes at a time (equal, starts_with,
+// ends_with, find_byte, find). Each is checked here against a loop that
+// reads one byte at a time, on views of every length from 0 to 41 at every
+// offset from 0 to 7 of a larger buffer, with the difference or the match
+// at every position, and with bytes of every value: the word test for a
+// zero byte is exact only for the lowest one, so the bytes beside the one
+// looked for are those that could mislead it (one bit away, 128 away, the
+// complement, a zero below a one). A section prints its cases and how many
+// disagreed, which is 0.
+module t
+import "std/str"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+// ---- the byte loops the library's results must equal ----
+
+func ref_equal(a: view[]u8, b: view[]u8) -> bool {
+    if len(a) != len(b) { return false }
+    for i in 0usize..len(a) {
+        if a[i] != b[i] { return false }
+    }
+    return true
+}
+
+func ref_starts_with(s: view[]u8, prefix: view[]u8) -> bool {
+    if len(prefix) > len(s) { return false }
+    for i in 0usize..len(prefix) {
+        if s[i] != prefix[i] { return false }
+    }
+    return true
+}
+
+func ref_ends_with(s: view[]u8, suffix: view[]u8) -> bool {
+    if len(suffix) > len(s) { return false }
+    from := len(s) - len(suffix)
+    for i in 0usize..len(suffix) {
+        if s[from + i] != suffix[i] { return false }
+    }
+    return true
+}
+
+func ref_find_byte(s: view[]u8, b: u8) -> Option[usize] {
+    for i in 0usize..len(s) {
+        if s[i] == b { return Some(i) }
+    }
+    return None
+}
+
+func ref_find(s: view[]u8, needle: view[]u8) -> Option[usize] {
+    if len(needle) > len(s) { return None }
+    i := 0usize
+    last := len(s) - len(needle)
+    while i <= last {
+        j := 0usize
+        while j < len(needle) && s[i + j] == needle[j] { j = j + 1usize }
+        if j == len(needle) { return Some(i) }
+        i = i + 1usize
+    }
+    return None
+}
+
+// ---- the harness ----
+
+struct Tally { cases: u64; bad: u64 }
+
+func report(name: view[]u8, t: Tally) {
+    print_str(name)
+    print_str(": ")
+    print_u64(t.cases)
+    print_str(" cases, ")
+    print_u64(t.bad)
+    say(" disagree")
+}
+
+func code(o: Option[usize]) -> u64 {
+    match o {
+        Some(i) => return u64(i) + 1u64
+        None => return 0u64
+    }
+}
+
+func both(t: edit[Tally], got: bool, want: bool) {
+    t.cases = t.cases + 1u64
+    if got != want { t.bad = t.bad + 1u64 }
+}
+
+func both_at(t: edit[Tally], got: Option[usize], want: Option[usize]) {
+    t.cases = t.cases + 1u64
+    if code(got) != code(want) { t.bad = t.bad + 1u64 }
+}
+
+struct Rng { x: u64 }
+
+func next(r: edit[Rng]) -> u64 {
+    x := r.x
+    x = x ^ wrapping_shl(x, 13u32)
+    x = x ^ (x >> 7u32)
+    x = x ^ wrapping_shl(x, 17u32)
+    r.x = x
+    return x
+}
+
+// pick is one of the eight bytes around v that the word test could take
+// for it or be thrown by.
+func pick(r: edit[Rng], v: u8) -> u8 {
+    k := next(r) % 8u64
+    if k == 0u64 { return v ^ 1u8 }
+    if k == 1u64 { return v ^ 128u8 }
+    if k == 2u64 { return v ^ 255u8 }
+    if k == 3u64 { return wrapping_add(v, 1u8) }
+    if k == 4u64 { return wrapping_sub(v, 1u8) }
+    if k == 5u64 { return 0u8 }
+    if k == 6u64 { return 1u8 }
+    return 128u8
+}
+
+const MAXLEN: usize = 41usize
+
+// ---- equal ----
+
+// equal_all compares a[oa:oa+n] with b[ob:ob+n] for every n, every pair of
+// offsets, equal and with one byte changed at every position, by one bit,
+// by the high bit and by all bits; then views of two lengths.
+func equal_all(a: edit[]u8, b: edit[]u8) -> Tally {
+    t := Tally { cases: 0u64, bad: 0u64 }
+    for n in 0usize..MAXLEN + 1usize {
+        for oa in 0usize..8usize {
+            for ob in 0usize..8usize {
+                for i in 0usize..n { b[ob + i] = a[oa + i] }
+                both(t, str.equal(a[oa:oa + n], b[ob:ob + n]), ref_equal(a[oa:oa + n], b[ob:ob + n]))
+                // one position a pair of offsets, every position over the pairs
+                if n > 0usize {
+                    p := (oa * 8usize + ob) % n
+                    keep := b[ob + p]
+                    b[ob + p] = keep ^ 1u8
+                    both(t, str.equal(a[oa:oa + n], b[ob:ob + n]), false)
+                    b[ob + p] = keep ^ 128u8
+                    both(t, str.equal(a[oa:oa + n], b[ob:ob + n]), false)
+                    b[ob + p] = keep
+                }
+            }
+            // every position at this offset, against the same bytes moved
+            ob := (oa * 5usize + 3usize) % 8usize
+            for i in 0usize..n { b[ob + i] = a[oa + i] }
+            for p in 0usize..n {
+                keep := b[ob + p]
+                b[ob + p] = keep ^ 255u8
+                both(t, str.equal(a[oa:oa + n], b[ob:ob + n]), ref_equal(a[oa:oa + n], b[ob:ob + n]))
+                both(t, str.equal(b[ob:ob + n], a[oa:oa + n]), false)
+                b[ob + p] = keep
+            }
+            // two lengths: never equal, whatever the bytes
+            both(t, str.equal(a[oa:oa + n], b[ob:ob + n + 1usize]), false)
+            both(t, str.equal(a[oa:oa + n + 1usize], b[ob:ob + n]), false)
+        }
+    }
+    return t
+}
+
+// ---- starts_with and ends_with ----
+
+// affix_all checks every prefix and suffix length m of every length n,
+// true, with one byte changed at every position, and one byte too long.
+func affix_all(s: edit[]u8, x: edit[]u8) -> Tally {
+    t := Tally { cases: 0u64, bad: 0u64 }
+    for n in 0usize..MAXLEN + 1usize {
+        os := n % 8usize
+        for m in 0usize..n + 1usize {
+            ox := (n + m * 3usize) % 8usize
+            // the prefix
+            for i in 0usize..m { x[ox + i] = s[os + i] }
+            both(t, str.starts_with(s[os:os + n], x[ox:ox + m]), true)
+            for p in 0usize..m {
+                keep := x[ox + p]
+                x[ox + p] = keep ^ 128u8
+                both(t, str.starts_with(s[os:os + n], x[ox:ox + m]), ref_starts_with(s[os:os + n], x[ox:ox + m]))
+                x[ox + p] = keep
+            }
+            // the suffix
+            for i in 0usize..m { x[ox + i] = s[os + n - m + i] }
+            both(t, str.ends_with(s[os:os + n], x[ox:ox + m]), true)
+            for p in 0usize..m {
+                keep := x[ox + p]
+                x[ox + p] = keep ^ 1u8
+                both(t, str.ends_with(s[os:os + n], x[ox:ox + m]), ref_ends_with(s[os:os + n], x[ox:ox + m]))
+                x[ox + p] = keep
+            }
+        }
+        // longer than s
+        for i in 0usize..n + 1usize { x[i] = s[os + i] }
+        both(t, str.starts_with(s[os:os + n], x[0usize:n + 1usize]), false)
+        both(t, str.ends_with(s[os:os + n], x[0usize:n + 1usize]), false)
+    }
+    return t
+}
+
+// affix_random checks prefixes and suffixes drawn from two letters, where
+// most are true for some bytes and then false, at every offset.
+func affix_random(s: edit[]u8, x: edit[]u8, r: edit[Rng]) -> Tally {
+    t := Tally { cases: 0u64, bad: 0u64 }
+    for round in 0usize..2000usize {
+        os := usize(next(r) % 8u64)
+        ox := usize(next(r) % 8u64)
+        n := usize(next(r) % u64(MAXLEN + 1usize))
+        m := usize(next(r) % u64(MAXLEN + 1usize))
+        for i in 0usize..n { s[os + i] = 97u8 + truncate[u8](next(r) % 2u64) }
+        for i in 0usize..m { x[ox + i] = 97u8 + truncate[u8](next(r) % 2u64) }
+        both(t, str.starts_with(s[os:os + n], x[ox:ox + m]), ref_starts_with(s[os:os + n], x[ox:ox + m]))
+        both(t, str.ends_with(s[os:os + n], x[ox:ox + m]), ref_ends_with(s[os:os + n], x[ox:ox + m]))
+        both(t, str.equal(s[os:os + n], x[ox:ox + m]), ref_equal(s[os:os + n], x[ox:ox + m]))
+    }
+    return t
+}
+
+// ---- find_byte ----
+
+// byte_positions looks for v in views of every length at every offset,
+// filled with a byte one bit from v, with v at every position and absent,
+// and with a second v after the first.
+func byte_positions(s: edit[]u8, v: u8) -> Tally {
+    t := Tally { cases: 0u64, bad: 0u64 }
+    for off in 0usize..8usize {
+        for n in 0usize..MAXLEN + 1usize {
+            for i in 0usize..n { s[off + i] = v ^ 1u8 }
+            both_at(t, str.find_byte(s[off:off + n], v), None)
+            for p in 0usize..n {
+                s[off + p] = v
+                both_at(t, str.find_byte(s[off:off + n], v), Some(p))
+                if p + 1usize < n {
+                    last := off + n - 1usize
+                    s[last] = v
+                    both_at(t, str.find_byte(s[off:off + n], v), Some(p))
+                    s[last] = v ^ 1u8
+                }
+                s[off + p] = v ^ 1u8
+            }
+        }
+    }
+    return t
+}
+
+// byte_values looks for every byte value among each kind of neighbour, in
+// a view under eight bytes, one of two words, and one whose last word
+// overlaps, with the value absent, first, in the middle and last.
+func byte_values(s: edit[]u8) -> Tally {
+    t := Tally { cases: 0u64, bad: 0u64 }
+    lens := [7usize, 16usize, 23usize]
+    for vv in 0usize..256usize {
+        v := truncate[u8](vv)
+        fills := [v ^ 1u8, v ^ 128u8, v ^ 255u8, wrapping_add(v, 1u8), wrapping_sub(v, 1u8), v ^ 129u8]
+        for f in 0usize..6usize {
+            for k in 0usize..3usize {
+                n := lens[k]
+                off := (vv + f + k) % 8usize
+                for i in 0usize..n { s[off + i] = fills[f] }
+                both_at(t, str.find_byte(s[off:off + n], v), ref_find_byte(s[off:off + n], v))
+                both_at(t, str.find_byte(s[off:off + n], fills[f]), Some(0usize))
+                spots := [0usize, n / 2usize, n - 1usize]
+                for q in 0usize..3usize {
+                    s[off + spots[q]] = v
+                    both_at(t, str.find_byte(s[off:off + n], v), Some(spots[q]))
+                    s[off + spots[q]] = fills[f]
+                }
+            }
+        }
+    }
+    return t
+}
+
+// byte_random looks for a value in bytes drawn from those around it, the
+// zero below a one among them.
+func byte_random(s: edit[]u8, r: edit[Rng]) -> Tally {
+    t := Tally { cases: 0u64, bad: 0u64 }
+    for round in 0usize..4000usize {
+        v := truncate[u8](next(r))
+        off := usize(next(r) % 8u64)
+        n := usize(next(r) % u64(MAXLEN + 1usize))
+        for i in 0usize..n { s[off + i] = pick(r, v) }
+        if n > 0usize && next(r) % 3u64 != 0u64 { s[off + usize(next(r) % u64(n))] = v }
+        both_at(t, str.find_byte(s[off:off + n], v), ref_find_byte(s[off:off + n], v))
+        both_at(t, str.find_byte(s[off:off + n], 0u8), ref_find_byte(s[off:off + n], 0u8))
+        both_at(t, str.find_byte(s[off:off + n], 1u8), ref_find_byte(s[off:off + n], 1u8))
+        both_at(t, str.find_byte(s[off:off + n], 128u8), ref_find_byte(s[off:off + n], 128u8))
+    }
+    return t
+}
+
+// ---- find ----
+
+// find_placed puts a needle of every length at every position of a view
+// of every length, in bytes that repeat the needle's first byte, so that
+// many places begin like it; and looks for a needle that is not there.
+func find_placed(s: edit[]u8, x: edit[]u8) -> Tally {
+    t := Tally { cases: 0u64, bad: 0u64 }
+    for n in 0usize..MAXLEN + 1usize {
+        off := n % 8usize
+        ox := (n * 3usize + 1usize) % 8usize
+        for m in 0usize..n + 2usize {
+            // the needle: 200, then 201, 202, ... (200 again every 11th)
+            for i in 0usize..m { x[ox + i] = 200u8 + truncate[u8](i % 11usize) }
+            for i in 0usize..n { s[off + i] = 200u8 }
+            both_at(t, str.find(s[off:off + n], x[ox:ox + m]), ref_find(s[off:off + n], x[ox:ox + m]))
+            if m <= n {
+                step := 1usize
+                if n > 24usize { step = 3usize }
+                p := 0usize
+                while p + m <= n {
+                    for i in 0usize..n { s[off + i] = 200u8 }
+                    for i in 0usize..m { s[off + p + i] = x[ox + i] }
+                    both_at(t, str.find(s[off:off + n], x[ox:ox + m]), ref_find(s[off:off + n], x[ox:ox + m]))
+                    p = p + step
+                }
+            }
+        }
+    }
+    return t
+}
+
+// find_random looks for needles cut from the text and for the same with a
+// byte changed, in text of two letters and in text of the bytes 0, 1, 128,
+// 129 and 255.
+func find_random(s: edit[]u8, x: edit[]u8, r: edit[Rng]) -> Tally {
+    t := Tally { cases: 0u64, bad: 0u64 }
+    hard := [0u8, 1u8, 128u8, 129u8, 255u8]
+    for round in 0usize..3000usize {
+        off := usize(next(r) % 8u64)
+        ox := usize(next(r) % 8u64)
+        n := usize(next(r) % u64(MAXLEN + 1usize))
+        for i in 0usize..n {
+            if round % 2usize == 0usize {
+                s[off + i] = 97u8 + truncate[u8](next(r) % 2u64)
+            } else {
+                s[off + i] = hard[usize(next(r) % 5u64)]
+            }
+        }
+        m := usize(next(r) % 12u64)
+        if round % 7usize == 0usize { m = usize(next(r) % u64(MAXLEN + 1usize)) }
+        if m > n {
+            for i in 0usize..m { x[ox + i] = 97u8 }
+        } else {
+            from := usize(next(r) % u64(n - m + 1usize))
+            for i in 0usize..m { x[ox + i] = s[off + from + i] }
+            if m > 0usize && next(r) % 3u64 == 0u64 {
+                q := ox + usize(next(r) % u64(m))
+                x[q] = x[q] ^ 1u8
+            }
+        }
+        both_at(t, str.find(s[off:off + n], x[ox:ox + m]), ref_find(s[off:off + n], x[ox:ox + m]))
+    }
+    return t
+}
+
+func main() {
+    var a: [64]u8 = zero()
+    var b: [64]u8 = zero()
+    r := Rng { x: 88172645463325252u64 }
+    // every byte value is in a and next to its neighbours
+    for i in 0usize..64usize { a[i] = truncate[u8](next(r) >> 24u32) }
+    report("equal", equal_all(a, b))
+    for i in 0usize..64usize { a[i] = truncate[u8](i * 37usize + 11usize) }
+    report("starts_with, ends_with", affix_all(a, b))
+    report("starts_with, ends_with, equal, two letters", affix_random(a, b, r))
+    vals := [0u8, 1u8, 10u8, 127u8, 128u8, 129u8, 254u8, 255u8]
+    for k in 0usize..8usize {
+        print_u64(u64(vals[k]))
+        print_str(" ")
+        report("find_byte, every position", byte_positions(a, vals[k]))
+    }
+    report("find_byte, every value", byte_values(a))
+    report("find_byte, neighbours", byte_random(a, r))
+    report("find, every position", find_placed(a, b))
+    report("find, cut from the text", find_random(a, b, r))
+    // the constant results
+    var none: [0]u8 = zero()
+    both_ok := str.equal(none, none) && str.starts_with(none, none) && str.ends_with(none, none)
+    if both_ok && code(str.find(none, none)) == 1u64 && code(str.find_byte(none, 0u8)) == 0u64 && code(str.find("abc", "")) == 1u64 && code(str.find("ab", "abc")) == 0u64 {
+        say("empty views: ok")
+    } else {
+        say("empty views: wrong")
+    }
+}

@@ -1,0 +1,218 @@
+//! phase: 6
+//! expect: output io_line_scan
+// BufReader.read_line and LineBuf look for the newline with str.find_byte,
+// eight bytes at a time. The lines they give are checked here against a
+// loop that reads one byte at a time: a text whose lines have every length
+// from 0 to 41, of bytes that are one bit from a newline, 128 from it, a
+// carriage return, 0 and 255, ended by "\n" or "\r\n" and the last by
+// nothing, read through buffers and in pieces of many sizes, so that the
+// newline falls at every place of a word and of a buffer.
+module t
+import "std/io"
+
+func say(s: view[]u8) { print_str(s); println() }
+
+// Mem is a Reader over bytes in memory that hands out at most step bytes
+// a call.
+struct Mem nocopy { data: Vec[u8]; pos: usize; step: usize }
+func mem(data: view[]u8, step: usize) -> Mem {
+    v := Vec[u8].new()
+    v.extend(data)
+    return Mem { data: v, pos: 0usize, step: step }
+}
+impl io.Reader for Mem {
+    func read(edit self, buf: edit[]u8) -> Result[usize, io.IoErr] {
+        var n: usize = self.data.len() - self.pos
+        if n > self.step { n = self.step }
+        if n > len(buf) { n = len(buf) }
+        with d := self.data.as_view() {
+            for i in 0usize..n { buf[i] = d[self.pos + i] }
+        }
+        self.pos = self.pos + n
+        return Ok(n)
+    }
+}
+
+struct Rng { x: u64 }
+func next(r: edit[Rng]) -> u64 {
+    x := r.x
+    x = x ^ wrapping_shl(x, 13u32)
+    x = x ^ (x >> 7u32)
+    x = x ^ wrapping_shl(x, 17u32)
+    r.x = x
+    return x
+}
+
+// make writes the text: for each length 0 to 41, twice, a line of bytes
+// that are not a newline, and its terminator.
+func make(text: edit[Vec[u8]], r: edit[Rng]) {
+    near := [11u8, 138u8, 13u8, 0u8, 255u8, 8u8, 26u8, 9u8, 97u8, 1u8, 128u8]
+    for round in 0usize..2usize {
+        for n in 0usize..42usize {
+            for i in 0usize..n { text.push(near[usize(next(r) % 11u64)]) }
+            if (n + round) % 3usize == 0usize { text.push(13u8) }
+            if round == 0usize || n < 41usize { text.push(10u8) }
+        }
+    }
+}
+
+// ref_lines splits text a byte at a time: a line ends at "\n", a "\r"
+// just before it belongs to the terminator, and what follows the last
+// "\n" is a line when it is not empty.
+func ref_lines(text: view[]u8, lines: edit[Vec[Vec[u8]]]) {
+    cur := Vec[u8].new()
+    held := false
+    for b in text {
+        if b == 10u8 {
+            if cur.len() > 0usize {
+                var cr: bool = false
+                with last := cur.get(cur.len() - 1usize) { cr = last == 13u8 }
+                if cr { gone := cur.pop() }
+            }
+            lines.push(cur.clone())
+            cur.clear()
+            held = false
+        } else {
+            cur.push(b)
+            held = true
+        }
+    }
+    if held { lines.push(cur.clone()) }
+}
+
+// differ counts 1 when line k of want is not got.
+func differ(want: view[Vec[Vec[u8]]], k: usize, got: view[Vec[u8]]) -> u64 {
+    if k >= want.len() { return 1u64 }
+    var same: bool = false
+    with w := want.get(k) { same = same_bytes(w.as_view(), got.as_view()) }
+    if same { return 0u64 }
+    return 1u64
+}
+
+func same_bytes(a: view[]u8, b: view[]u8) -> bool {
+    if len(a) != len(b) { return false }
+    for i in 0usize..len(a) {
+        if a[i] != b[i] { return false }
+    }
+    return true
+}
+
+// through_buf reads the text by lines through a BufReader of cap bytes
+// over a reader that gives step bytes a call, and counts what differs.
+func through_buf(text: view[]u8, want: view[Vec[Vec[u8]]], step: usize, cap: usize) -> Result[u64, io.IoErr] {
+    r := io.BufReader[Mem].with_capacity(mem(text, step), cap)
+    line := Vec[u8].new()
+    bad := 0u64
+    k := 0usize
+    while true {
+        line.clear()
+        if !r.read_line(line)? { break }
+        bad = bad + differ(want, k, line)
+        k = k + 1usize
+    }
+    if k != want.len() { bad = bad + 1u64 }
+    return Ok(bad)
+}
+
+// through_linebuf reads the text by lines through a LineBuf's read_line.
+func through_linebuf(text: view[]u8, want: view[Vec[Vec[u8]]], step: usize) -> Result[u64, io.IoErr] {
+    m := mem(text, step)
+    lb := io.LineBuf.new()
+    line := Vec[u8].new()
+    bad := 0u64
+    k := 0usize
+    while true {
+        line.clear()
+        if !lb.read_line(m, line)? { break }
+        bad = bad + differ(want, k, line)
+        k = k + 1usize
+    }
+    if k != want.len() { bad = bad + 1u64 }
+    return Ok(bad)
+}
+
+// fed feeds a LineBuf the text in pieces of piece bytes, taking every
+// whole line after each, and the rest at the end.
+func fed(text: view[]u8, want: view[Vec[Vec[u8]]], piece: usize) -> u64 {
+    lb := io.LineBuf.new()
+    line := Vec[u8].new()
+    bad := 0u64
+    k := 0usize
+    at := 0usize
+    while at < len(text) {
+        var to: usize = at + piece
+        if to > len(text) { to = len(text) }
+        lb.feed(text[at:to])
+        at = to
+        while true {
+            line.clear()
+            if !lb.next_line(line) { break }
+            bad = bad + differ(want, k, line)
+            k = k + 1usize
+        }
+    }
+    line.clear()
+    if lb.take_rest(line) {
+        bad = bad + differ(want, k, line)
+        k = k + 1usize
+    }
+    if k != want.len() { bad = bad + 1u64 }
+    return bad
+}
+
+func count(label: view[]u8, runs: u64, bad: u64) {
+    print_str(label)
+    print_str(": ")
+    print_u64(runs)
+    print_str(" readings, ")
+    print_u64(bad)
+    say(" lines differ")
+}
+
+func all() -> Result[(), io.IoErr] {
+    r := Rng { x: 2463534242u64 }
+    text := Vec[u8].new()
+    make(text, r)
+    want := Vec[Vec[u8]].new()
+    ref_lines(text.as_view(), want)
+    print_str("text: ")
+    print_u64(u64(text.len()))
+    print_str(" bytes, ")
+    print_u64(u64(want.len()))
+    say(" lines")
+    caps := [1usize, 2usize, 3usize, 5usize, 7usize, 8usize, 9usize, 15usize, 16usize, 17usize, 23usize, 64usize, 8192usize]
+    steps := [1usize, 3usize, 8usize, 13usize, 4096usize]
+    var bad: u64 = 0u64
+    var runs: u64 = 0u64
+    for c in 0usize..13usize {
+        for s in 0usize..5usize {
+            bad = bad + through_buf(text.as_view(), want, steps[s], caps[c])?
+            runs = runs + 1u64
+        }
+    }
+    count("BufReader.read_line", runs, bad)
+    bad = 0u64
+    runs = 0u64
+    for step in 1usize..41usize {
+        bad = bad + through_linebuf(text.as_view(), want, step)?
+        runs = runs + 1u64
+    }
+    bad = bad + through_linebuf(text.as_view(), want, 4096usize)?
+    count("LineBuf.read_line", runs + 1u64, bad)
+    bad = 0u64
+    runs = 0u64
+    for piece in 1usize..41usize {
+        bad = bad + fed(text.as_view(), want, piece)
+        runs = runs + 1u64
+    }
+    bad = bad + fed(text.as_view(), want, 100000usize)
+    count("LineBuf.feed and next_line", runs + 1u64, bad)
+    return Ok(())
+}
+
+func main() {
+    match all() {
+        Ok(u) => { }
+        Err(e) => say("a read failed")
+    }
+}

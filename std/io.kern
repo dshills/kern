@@ -5,6 +5,7 @@
 // functions after them are the library's interface.
 module io
 import "std/time"
+import "std/str"
 
 // IoErr is why an operation failed.
 union IoErr { NotFound; Permission; Exists; Other(code: i32) }
@@ -968,9 +969,12 @@ impl[R: Reader] BufReader[R] {
             n := self.fill()?
             if n == 0usize { return Ok(any) }
             any = true
-            var i: usize = self.pos
+            var i: usize = self.end
             with b := self.buf.as_view() {
-                while i < self.end && b[i] != 10u8 { i = i + 1usize }
+                match str.find_byte(b[self.pos : self.end], 10u8) {
+                    Some(k) => { i = self.pos + k }
+                    None => { }
+                }
                 line.extend(b[self.pos : i])
             }
             if i < self.end {
@@ -1175,7 +1179,10 @@ impl LineBuf {
         var i: usize = self.scanned
         var found: bool = false
         with b := self.buf.as_view() {
-            while i < n && b[i] != 10u8 { i = i + 1usize }
+            match str.find_byte(b[i : n], 10u8) {
+                Some(k) => { i = i + k }
+                None => { i = n }
+            }
             if i < n {
                 var end: usize = i
                 if end > self.start && b[end - 1usize] == 13u8 { end = end - 1usize }

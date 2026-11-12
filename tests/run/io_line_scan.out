@@ -1,0 +1,4 @@
+text: 1833 bytes, 84 lines
+BufReader.read_line: 65 readings, 0 lines differ
+LineBuf.read_line: 41 readings, 0 lines differ
+LineBuf.feed and next_line: 41 readings, 0 lines differ

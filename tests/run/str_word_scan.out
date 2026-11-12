@@ -1,0 +1,16 @@
+equal: 22384 cases, 0 disagree
+starts_with, ends_with: 26572 cases, 0 disagree
+starts_with, ends_with, equal, two letters: 6000 cases, 0 disagree
+0 find_byte, every position: 13784 cases, 0 disagree
+1 find_byte, every position: 13784 cases, 0 disagree
+10 find_byte, every position: 13784 cases, 0 disagree
+127 find_byte, every position: 13784 cases, 0 disagree
+128 find_byte, every position: 13784 cases, 0 disagree
+129 find_byte, every position: 13784 cases, 0 disagree
+254 find_byte, every position: 13784 cases, 0 disagree
+255 find_byte, every position: 13784 cases, 0 disagree
+find_byte, every value: 23040 cases, 0 disagree
+find_byte, neighbours: 16000 cases, 0 disagree
+find, every position: 7506 cases, 0 disagree
+find, cut from the text: 3000 cases, 0 disagree
+empty views: ok
