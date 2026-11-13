@@ -1,6 +1,6 @@
 # Standard library: regular expressions (`std/regex`)
 
-**Version:** 0.17 (2026-11-12). **Review status.** speccritic
+**Version:** 0.18 (2026-11-13). **Review status.** speccritic
 (gpt-6.1-sol) round 1 on 0.1: INVALID, two critical findings, both
 resolved here: a repeated group keeps the span of its last passage even
 when an enclosing group's last iteration does not contain it, so the
@@ -26,7 +26,11 @@ and one warning: T9 gives its input and programs in full. Round 5 on
 0.5: VALID_WITH_GAPS, no critical finding; two warnings resolved in
 0.6: a `Scratch`'s memory bound is that of the largest pattern it has
 served (R18), and a backslash ending the pattern is `BadEscape` before
-any open construct is reported (R5). 0.17, after the first CI run of the fixtures: T5's text is 20,000
+any open construct is reported (R5). 0.18, at the owner's word: groups
+nest 202 deep, not 200 (R4), so that `kawk` takes every pattern its own
+reader took, which is 201 as written and one more that its rewriting
+may add (R21), and the corpus has a case that nests so deep (R22).
+0.17, after the first CI run of the fixtures: T5's text is 20,000
 bytes, not 200,000. 0.16, when phases 4 to 6 were implemented: an anchor holds where the
 pattern places it (glossary); R18 says what one call is and that a
 whole `replace_all` can be quadratic; T5's hook check covers
@@ -263,8 +267,11 @@ it. A `max_insts` of 0 refuses every pattern. Whatever `max_insts` is,
 a pattern of 2^32 − 1 bytes or more, or of that size or more, is
 `TooLarge`.
 
-**R4. Nesting.** Groups nested more than 200 deep are refused: `TooDeep`,
-with `at` the index of the `(` that is the 201st open at once.
+**R4. Nesting.** Groups nested more than 202 deep are refused: `TooDeep`,
+with `at` the index of the `(` that is the 203rd open at once. (The
+number is what R21 needs to hold without an exception: `kawk`'s own
+reader took groups written 201 deep, and its rewriting adds one group
+at most around any of them.)
 
 **R5. Errors.** `at` is an index into the pattern, and the first error
 met reading left to right is the one returned. When the pattern ends
@@ -469,15 +476,20 @@ differently (among them: a bracket expression with no member matching the
 empty string; `\x` with no digit as the byte 0; octal escapes; a `{` kept
 literal where awk keeps it; `split`'s and `FS`'s own rules) stays in
 `kawk`, as a translation of the awk pattern before it is compiled or as
-code around the calls. `kawk.out` is unchanged. One limit of the
-module's becomes `kawk`'s: groups that the rewriting cannot remove nest
-200 deep at most (R4), where `kawk`'s own reader took 201 and refused
-202; the system awk takes both, so `kawk` already differed from it
-there, and no case of the corpus nests so deep.
+code around the calls. `kawk.out` is unchanged. `kawk` takes groups
+written 201 deep and refuses 202, as its own reader did (the system awk
+takes both, so `kawk` already differed from it there). The rewriting
+puts one group of its own around a piece whose count is above the
+module's 1000 when another operator follows, and never one such group
+inside another (two would make a pattern larger than `kawk` takes), so
+what it passes nests 202 deep at most, which is R4's limit: no pattern
+`kawk` took is refused by the module. One case of the corpus nests 201
+deep as written, with and without that added group.
 
 **R22. The corpus.** The comparison programs written with `kawk` (548 at
-commit 146f4df, and the seven added on 2026-11-12 for bracket and `\x`
-edge cases) are kept under `examples/kawk/corpus/`, each with its input,
+commit 146f4df, the seven added on 2026-11-12 for bracket and `\x`
+edge cases, and one on 2026-11-13 for groups nested 201 deep) are kept
+under `examples/kawk/corpus/`, each with its input,
 its arguments, and the standard output and exit status `/usr/bin/awk`
 (version 20200816) gave, recorded once. A Go test builds `kawk` natively
 at release and runs every case, comparing output and status byte for
@@ -511,8 +523,8 @@ host that has that awk.
 R5's table at least two patterns, with the expected kind and `at`; every
 form of §2 accepted; the escapes of R7 inside and outside brackets; the
 classes of R8 against all 256 bytes; `{` and `}` as ordinary bytes;
-`max_insts` at the exact size of a pattern and one below it (R3); 200
-and 201 nested groups (R4).
+`max_insts` at the exact size of a pattern and one below it (R3); 202
+and 203 nested groups (R4).
 
 **T2. Matching (`tests/run/regex_match.kern`).** A table of at least 150
 (pattern, options, text, from, expected span) rows covering R6 to R11:

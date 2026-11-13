@@ -1,6 +1,7 @@
 # Standard library: regular expressions (`std/regex`)
 
-**Date:** 2026-11-12. **Spec:** `specs/std-regex/SPEC.md` v0.16.
+**Date:** 2026-11-12, with the nesting limit as changed on 2026-11-13.
+**Spec:** `specs/std-regex/SPEC.md` v0.18.
 **Plan:** `specs/std-regex/PLAN.md`, seven phases. **Hosts:** macOS 27.2
 on arm64, Ubuntu 24.04 on arm64 in the `kern-linux-check` container, and
 the three systems of the project's CI. **Reference:** `docs/regex.md`.
@@ -101,11 +102,18 @@ pass in its non-empty mode.
 
 ## For the owner
 
-- **`kawk` takes the module's nesting limit.** Groups the rewriting cannot
-  remove nest 200 deep, where `kawk`'s own reader took 201 and refused
-  202; the system awk takes both. No corpus case is so deep. R21 was
-  written to allow no such difference; it now records this one. Raising
-  R4's limit would remove it.
+- **The nesting limit: settled on 2026-11-13.** As built, the module took
+  groups 200 deep, so groups `kawk`'s rewriting cannot remove nested 200
+  deep where `kawk`'s own reader took 201 and refused 202 (the system awk
+  takes both). The owner had R4's limit raised so that `kawk` keeps its
+  201. The limit is 202 (spec 0.18), not 201: the rewriting puts one
+  group of its own around a piece whose count is above 1000 when another
+  operator follows, so `(a{1001}+|b)` inside 200 more groups reaches the
+  module 202 deep, and `kawk`'s own reader took it. `kawk` still refuses
+  202 as written, itself. Corpus case 556 nests 201 deep both ways, which
+  makes the corpus 556 cases (529 unmarked), and the differential above,
+  run again on its fixed sets and three of its generated ones, finds no
+  difference in acceptance (the two it found were these).
 - **A malformed dynamic pattern** (`"x" ~ "("`) now ends `kawk` with status
   2, as the system awk does; the old `kawk` printed its message and then
   trapped.

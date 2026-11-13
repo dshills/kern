@@ -171,7 +171,7 @@ const no_limit: u32 = 4294967295u32
 // max_count is the greatest count an interval may have, max_depth how
 // deep groups may nest.
 const max_count: u32 = 1000u32
-const max_depth: u32 = 200u32
+const max_depth: u32 = 202u32
 // index_limit: a program's instructions and a pattern's nodes are numbered
 // in 32 bits, so a pattern as long as this, or of this size, is too large
 // whatever max_insts says.

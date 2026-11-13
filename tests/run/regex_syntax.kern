@@ -5,7 +5,7 @@
 // table with the kind and the index it reports, and the first error of
 // several; the escapes, a backslash before each of the 256 bytes outside a
 // bracket expression and inside one; a pattern's size, compiled with
-// max_insts at that size and one below; groups nested 200 and 201 deep; a
+// max_insts at that size and one below; groups nested 202 and 203 deep; a
 // pattern whose bytes are overwritten and destroyed after the call; the
 // three plain structs copied by assignment; the cases R5 and R8 settle
 // for a hyphen where a member begins, a class form and an interval with
@@ -554,12 +554,12 @@ func main() -> i32 {
     pat_with("((((((a{1000}){1000}){1000}){1000}){1000}){1000}){1000}", o)
 
     say("-- nesting")
-    deep("200 nested groups", "", 200usize, "a", 200usize, "")
-    deep("201 nested groups", "", 201usize, "a", 201usize, "")
-    deep("x and 201 open parentheses", "x", 201usize, "", 0usize, "")
-    deep("200 open parentheses", "", 200usize, "", 0usize, "")
-    deep("200 nested groups and one beside them", "", 200usize, "a", 200usize, "(b)")
-    deep("200 nested groups around [(]", "", 200usize, "[(]", 200usize, "")
+    deep("202 nested groups", "", 202usize, "a", 202usize, "")
+    deep("203 nested groups", "", 203usize, "a", 203usize, "")
+    deep("x and 203 open parentheses", "x", 203usize, "", 0usize, "")
+    deep("202 open parentheses", "", 202usize, "", 0usize, "")
+    deep("202 nested groups and one beside them", "", 202usize, "a", 202usize, "(b)")
+    deep("202 nested groups around [(]", "", 202usize, "[(]", 202usize, "")
 
     say("-- the pattern is not kept")
     with r := kept() { outcome(r) }

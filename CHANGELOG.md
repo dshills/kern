@@ -233,9 +233,8 @@ Five more examples, written to find flaws, and what they found.
   it is compiled (`lang/awkre.kern`). On three programs over 200,000
   lines it retires 0.93 to 1.00 of what it did. A malformed dynamic
   pattern (`"x" ~ "("`) ends it with status 2, as awk does, where it
-  trapped; groups that cannot be removed nest 200 deep, where it took
-  201.
-- `examples/kawk/corpus` holds the 555 programs `kawk` was compared with
+  trapped.
+- `examples/kawk/corpus` holds the 556 programs `kawk` was compared with
   the system awk on, with what awk printed and returned for each;
   `TestKawkCorpus` runs them all without an awk on the host (27 that
   start commands or read `ENVIRON` run on macOS only).

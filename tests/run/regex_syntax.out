@@ -259,12 +259,12 @@ ignore_case newline /a.[^b]/ size 4: ok 0, one below: TooLarge at 6
 max_insts 0 /a/ => TooLarge at 1
 max_insts 18446744073709551615 /((((((a{1000}){1000}){1000}){1000}){1000}){1000}){1000}/ => TooLarge at 55
 -- nesting
-200 nested groups => ok 200
-201 nested groups => TooDeep at 200
-x and 201 open parentheses => TooDeep at 201
-200 open parentheses => UnclosedGroup at 199
-200 nested groups and one beside them => ok 201
-200 nested groups around [(] => ok 200
+202 nested groups => ok 202
+203 nested groups => TooDeep at 202
+x and 203 open parentheses => TooDeep at 203
+202 open parentheses => UnclosedGroup at 201
+202 nested groups and one beside them => ok 203
+202 nested groups around [(] => ok 202
 -- the pattern is not kept
 ok 3
 -- copies

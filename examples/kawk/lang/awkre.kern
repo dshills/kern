@@ -31,10 +31,13 @@
 //     that a pattern of ordinary bytes in parentheses is still searched
 //     for as a string.
 //
-// What the rewriting does not reach, because the library has no way to
-// say it: groups may be written 201 deep here, and the library takes 200.
-// So a pattern whose groups nest 201 deep is refused when every one of
-// them has to keep its parentheses (the system awk takes it).
+// Groups may be written 201 deep here (the system awk takes deeper
+// ones). The rewriting adds a group of its own in one place, around a
+// piece with a count above the library's when an operator follows
+// (Rewriter.times), and never one of those inside another: each makes
+// the pattern's weight 1001 times its piece's or more, and two would
+// pass max_program. So what is written here nests 202 deep at most,
+// which the library takes.
 //
 // The searches kawk makes that are not the library's own are here too: a
 // match that is not empty (awk_find_nonempty), which fields and records
@@ -565,8 +568,7 @@ func awk_rewrite(text: view[]u8, dst: edit[Vec[u8]]) -> Result[u64, regex.Compil
 }
 
 // awk_compile compiles an AWK regular expression. An error's `at` is an
-// offset into `text` when the pattern is refused here, and into the
-// rewritten pattern in the one case the library refuses it (TooDeep).
+// offset into `text`: the rewriting refuses what the library would.
 func awk_compile(text: view[]u8) -> Result[regex.Regex, regex.CompileErr] {
     pat := Vec[u8].new()
     awk_rewrite(text, pat)?

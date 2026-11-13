@@ -88,7 +88,7 @@ being the index of the offending byte:
 | `BadEscape` | a backslash with no meaning here |
 | `Unsupported` | a backreference, `[.x.]`, `[=x=]` |
 | `BadInterval`, `NothingToRepeat` | counts out of order or above 1000; an operator with nothing before it |
-| `TooDeep` | groups nested more than 200 deep |
+| `TooDeep` | groups nested more than 202 deep |
 | `TooLarge` | a pattern larger than `Options.max_insts` allows (100000 by default) |
 
 ## The functions

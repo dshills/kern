@@ -204,8 +204,8 @@ what `compile` alone shows: two patterns or more per row of R5's table,
 each with its kind and `at`; every form of §2 accepted, with its
 `groups()`; R7's escapes accepted in both places and each refused
 escape refused; `max_insts` at a pattern's exact size and one below,
-for five patterns whose size the fixture states from R3's rule; 200 and
-201 nested groups; a pattern compiled from a `Vec[u8]` that is then
+for five patterns whose size the fixture states from R3's rule; 202 and
+203 nested groups; a pattern compiled from a `Vec[u8]` that is then
 overwritten and destroyed, the `Regex` still reporting its `groups()`
 (R1: the pattern is not kept; its matching is checked in phase 3); and
 `Options`, `CompileErr` and `Span` copied by assignment with a field of
